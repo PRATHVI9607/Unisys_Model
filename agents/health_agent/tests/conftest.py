@@ -4,7 +4,6 @@ import pytest
 import json
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
-from kubernetes_asyncio import client
 import aioredis
 
 
@@ -51,19 +50,19 @@ def mock_k8s_deployment():
 @pytest.fixture
 def mock_core_api():
     """Create a mock Kubernetes Core API."""
-    return AsyncMock(spec=client.CoreV1Api)
+    return AsyncMock()
 
 
 @pytest.fixture
 def mock_apps_api():
     """Create a mock Kubernetes Apps API."""
-    return AsyncMock(spec=client.AppsV1Api)
+    return AsyncMock()
 
 
 @pytest.fixture
 def mock_custom_api():
     """Create a mock Kubernetes Custom API."""
-    return AsyncMock(spec=client.CustomObjectsApi)
+    return AsyncMock()
 
 
 @pytest.fixture

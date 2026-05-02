@@ -8,17 +8,26 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import aioredis
-import kubernetes_asyncio
-from kubernetes_asyncio import client, watch
-from kubernetes_asyncio.config import load_incluster_config, load_config
 from pydantic import BaseModel, Field
 
+# Kubernetes client imports - conditionally imported for testing
 try:
-    from .config import load_config as load_agent_config
+    from kubernetes import client as k8s_client
+    from kubernetes import watch as k8s_watch
+    from kubernetes.config import load_incluster_config, load_config
+except ImportError:
+    # Mock for testing environments
+    k8s_client = None
+    k8s_watch = None
+    load_incluster_config = None
+    load_config = None
+
+try:
+    from .config import HealthAgentConfig
     from .exceptions import K8sAPIError, RedisError, DitSecError, DitSecTimeoutError
     from .spec_differ import SpecDiffer
 except ImportError:
-    from config import load_config as load_agent_config
+    from config import HealthAgentConfig
     from exceptions import K8sAPIError, RedisError, DitSecError, DitSecTimeoutError
     from spec_differ import SpecDiffer
 

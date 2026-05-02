@@ -1,0 +1,44 @@
+version: '3.9'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  health-agent:
+    build:
+      context: ../..
+      dockerfile: agents/health_agent/Dockerfile
+    environment:
+      - NAMESPACE=demo
+      - IN_CLUSTER=false
+      - REDIS_URL=redis://redis:6379
+      - DIT_SEC_URL=http://localhost:8000
+      - PROMETHEUS_URL=http://localhost:9090
+      - LOG_LEVEL=INFO
+      - TRAINING_DATASET_PATH=/app/training/dit-merged-complete.csv
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./training:/app/training:ro
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import asyncio; print('Health Agent running')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  redis_data:

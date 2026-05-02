@@ -4,11 +4,11 @@ import pytest
 import json
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
-
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from agent import HealthAgent, HealthAssessment, SeverityLevel
 

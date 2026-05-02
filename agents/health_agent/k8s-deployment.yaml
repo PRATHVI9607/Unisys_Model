@@ -1,0 +1,185 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubeheal
+  labels:
+    name: kubeheal
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: health-agent-config
+  namespace: kubeheal
+data:
+  log_level: "INFO"
+  cooldown_period: "300"
+  baseline_max_age_days: "30"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: health-agent
+  namespace: kubeheal
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: health-agent
+rules:
+  # Read deployments
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  # Read deployment status
+  - apiGroups: ["apps"]
+    resources: ["deployments/status"]
+    verbs: ["get"]
+  # Read pods
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Read config maps (for baseline storage)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  # Read namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  # Read events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: health-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: health-agent
+subjects:
+  - kind: ServiceAccount
+    name: health-agent
+    namespace: kubeheal
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: health-agent
+  namespace: kubeheal
+  labels:
+    app: health-agent
+spec:
+  selector:
+    app: health-agent
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: health-agent
+  namespace: kubeheal
+  labels:
+    app: health-agent
+    version: v3.0
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: health-agent
+  template:
+    metadata:
+      labels:
+        app: health-agent
+        version: v3.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: health-agent
+      containers:
+        - name: health-agent
+          image: health-agent:v3.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: IN_CLUSTER
+              value: "true"
+            - name: REDIS_URL
+              value: "redis://redis-master:6379"
+            - name: DIT_SEC_URL
+              value: "http://dit-sec-server:8000"
+            - name: PROMETHEUS_URL
+              value: "http://prometheus:9090"
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: health-agent-config
+                  key: log_level
+            - name: COOLDOWN_PERIOD
+              valueFrom:
+                configMapKeyRef:
+                  name: health-agent-config
+                  key: cooldown_period
+            - name: BASELINE_MAX_AGE_DAYS
+              valueFrom:
+                configMapKeyRef:
+                  name: health-agent-config
+                  key: baseline_max_age_days
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /app/.cache
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
