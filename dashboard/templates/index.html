@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KubeHeal Dashboard</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #e6edf3;
+            min-height: 100vh;
+        }
+        .header {
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .logo h1 {
+            font-size: 24px;
+            font-weight: 700;
+            color: #58a6ff;
+        }
+        .logo span {
+            font-size: 12px;
+            color: #8b949e;
+            background: #21262d;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #238636;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .stat-card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
+        }
+        .stat-card h3 {
+            font-size: 14px;
+            color: #8b949e;
+            margin-bottom: 8px;
+        }
+        .stat-card .value {
+            font-size: 32px;
+            font-weight: 700;
+        }
+        .stat-card .value.green { color: #238636; }
+        .stat-card .value.yellow { color: #d29922; }
+        .stat-card .value.blue { color: #58a6ff; }
+        .stat-card .value.red { color: #f85149; }
+        .stat-card .unit {
+            font-size: 14px;
+            color: #8b949e;
+            margin-left: 4px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 24px;
+        }
+        .panel {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .panel-header {
+            background: #21262d;
+            padding: 12px 16px;
+            border-bottom: 1px solid #30363d;
+            font-weight: 600;
+        }
+        .panel-content {
+            padding: 16px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid #30363d;
+        }
+        th {
+            color: #8b949e;
+            font-weight: 500;
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+        .risk-score {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        .risk-high {
+            background: rgba(248, 81, 73, 0.2);
+            color: #f85149;
+        }
+        .risk-medium {
+            background: rgba(210, 153, 34, 0.2);
+            color: #d29922;
+        }
+        .risk-low {
+            background: rgba(35, 134, 54, 0.2);
+            color: #238636;
+        }
+        .action-pending {
+            color: #8b949e;
+        }
+        .action-auto_kill, .action-auto_patch {
+            color: #f85149;
+        }
+        .action-human_approval {
+            color: #d29922;
+        }
+        .events-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .event-item {
+            padding: 12px;
+            border-bottom: 1px solid #30363d;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .event-item:last-child {
+            border-bottom: none;
+        }
+        .event-type {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .event-health {
+            background: rgba(88, 166, 255, 0.2);
+            color: #58a6ff;
+        }
+        .event-security {
+            background: rgba(248, 81, 73, 0.2);
+            color: #f85149;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="logo">
+            <h1>KubeHeal</h1>
+            <span>v3.0</span>
+        </div>
+        <div class="status-badge">
+            <div class="status-dot"></div>
+            <span>System Healthy</span>
+        </div>
+    </div>
+    <div class="container">
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>Total Incidents</h3>
+                <div class="value blue" id="total-incidents">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>Auto-Resolved</h3>
+                <div class="value green" id="auto-resolved">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>Avg MTTR</h3>
+                <div class="value yellow" id="avg-mttr">0<span class="unit">s</span></div>
+            </div>
+            <div class="stat-card">
+                <h3>Avg Kill Time</h3>
+                <div class="value red" id="avg-kill-time">0<span class="unit">ms</span></div>
+            </div>
+        </div>
+        <div class="grid">
+            <div class="panel">
+                <div class="panel-header">Recent Incidents</div>
+                <div class="panel-content">
+                    <div class="events-list" id="events-list">
+                        <div style="color: #8b949e; text-align: center; padding: 20px;">
+                            No incidents yet
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">Agent Status</div>
+                <div class="panel-content">
+                    <table>
+                        <tr>
+                            <td>Health Agent</td>
+                            <td><span class="risk-low">● Running</span></td>
+                        </tr>
+                        <tr>
+                            <td>Security Agent</td>
+                            <td><span class="risk-low">● Running</span></td>
+                        </tr>
+                        <tr>
+                            <td>Fusion Agent</td>
+                            <td><span class="risk-low">● Running</span></td>
+                        </tr>
+                        <tr>
+                            <td>DIT-Sec Model</td>
+                            <td><span class="risk-low">● Running</span></td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+        const socket = io();
+        
+        socket.on('connect', () => {
+            console.log('Connected to dashboard');
+        });
+        
+        socket.on('health_event', (event) => {
+            addEvent(event);
+            updateStats();
+        });
+        
+        socket.on('security_event', (event) => {
+            addEvent(event);
+            updateStats();
+        });
+        
+        socket.on('risk_update', (data) => {
+            console.log('Risk update:', data);
+        });
+        
+        socket.on('action_taken', (data) => {
+            console.log('Action taken:', data);
+            updateStats();
+        });
+        
+        function addEvent(event) {
+            const list = document.getElementById('events-list');
+            const empty = list.querySelector('div');
+            if (empty && empty.textContent === 'No incidents yet') {
+                empty.remove();
+            }
+            
+            const typeClass = event.type === 'security' ? 'event-security' : 'event-health';
+            const riskClass = event.risk_score >= 0.85 ? 'risk-high' : 
+                           event.risk_score >= 0.65 ? 'risk-medium' : 'risk-low';
+            
+            const item = document.createElement('div');
+            item.className = 'event-item';
+            item.innerHTML = `
+                <div>
+                    <span class="event-type ${typeClass}">${event.type}</span>
+                    <span style="margin-left: 8px;">${event.target?.name || event.target?.pod || 'unknown'}</span>
+                </div>
+                <span class="risk-score ${riskClass}">${event.risk_score.toFixed(2)}</span>
+            `;
+            
+            list.insertBefore(item, list.firstChild);
+        }
+        
+        function updateStats() {
+            fetch('/api/stats')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('total-incidents').textContent = data.total_incidents;
+                    document.getElementById('auto-resolved').textContent = data.auto_resolved;
+                    document.getElementById('avg-mttr').textContent = data.avg_mttr_seconds;
+                    document.getElementById('avg-kill-time').textContent = data.avg_kill_time_ms;
+                });
+        }
+        
+        updateStats();
+        setInterval(updateStats, 5000);
+    </script>
+</body>
+</html>

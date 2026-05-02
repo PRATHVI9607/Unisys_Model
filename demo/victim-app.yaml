@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  labels:
+    kubeheal.io/watch: "true"
+    kubeheal.io/namespace-tier: "dev"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: victim-data
+  namespace: demo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: standard
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victim-app
+  namespace: demo
+  annotations:
+    kubeheal.io/baseline-sha: "abc123def456"
+    kubeheal.io/baseline-date: "2025-01-01T00:00:00Z"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: victim
+  template:
+    metadata:
+      labels:
+        app: victim
+      annotations:
+        kubeheal.io/baseline-sha: "abc123def456"
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.21
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          env:
+            - name: APP_NAME
+              value: "victim-app"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 3
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: victim-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victim-app
+  namespace: demo
+spec:
+  ports:
+    - port: 80
+      targetPort: 80
+  selector:
+    app: victim
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: victim-app
+  namespace: demo
+spec:
+  rules:
+    - host: victim.demo.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: victim-app
+                port:
+                  number: 80

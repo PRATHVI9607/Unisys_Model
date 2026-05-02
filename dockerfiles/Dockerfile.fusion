@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    kubernetes-asyncio==0.29.0 \
+    aioredis==2.0.1 \
+    pydantic==2.6.0 \
+    numpy
+
+COPY agents/ /app/agents/
+
+ENV REDIS_URL=redis://redis-master:6379
+ENV NAMESPACE=kubeheal
+ENV LOG_LEVEL=INFO
+ENV MAX_AUTO_KILL_PER_NS_PER_HOUR=3
+ENV MAX_AUTO_PATCH_PER_DEP_PER_HOUR=10
+ENV CI_WIDTH_THRESHOLD=0.15
+
+EXPOSE 8081
+
+CMD ["python", "-m", "agents.fusion_agent.agent"]

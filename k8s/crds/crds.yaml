@@ -1,0 +1,122 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: driftevents.kubeheal.io
+spec:
+  group: kubeheal.io
+  names:
+    kind: DriftEvent
+    listKind: DriftEventList
+    plural: driftevents
+    singular: driftevent
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                namespace:
+                  type: string
+                name:
+                  type: string
+                kind:
+                  type: string
+                generation:
+                  type: integer
+                observed_generation:
+                  type: integer
+                risk_score:
+                  type: number
+                severity:
+                  type: string
+                blast_radius:
+                  type: string
+                baseline_sha:
+                  type: string
+                old_spec:
+                  type: object
+                new_spec:
+                  type: object
+                patch_proposal:
+                  type: object
+                explainability:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              properties:
+                state:
+                  type: string
+                action_taken:
+                  type: string
+                mttr_seconds:
+                  type: integer
+                timestamp:
+                  type: string
+                  format: date-time
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: securityincidents.kubeheal.io
+spec:
+  group: kubeheal.io
+  names:
+    kind: SecurityIncident
+    listKind: SecurityIncidentList
+    plural: securityincidents
+    singular: securityincident
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                namespace:
+                  type: string
+                pod:
+                  type: string
+                node:
+                  type: string
+                risk_score:
+                  type: number
+                label:
+                  type: string
+                pid:
+                  type: integer
+                entropy:
+                  type: number
+                early_signals:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                file_count:
+                  type: integer
+                process_tree:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              properties:
+                state:
+                  type: string
+                action_taken:
+                  type: string
+                kill_time_ms:
+                  type: integer
+                recover_time_s:
+                  type: integer
+                timestamp:
+                  type: string
+                  format: date-time

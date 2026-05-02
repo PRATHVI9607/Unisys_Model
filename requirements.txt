@@ -1,0 +1,20 @@
+# KubeHeal Requirements
+# Main requirements file
+
+# All components requirements
+
+## Model Server
+-f models/requirements.txt
+
+## Agents
+-f agents/health_agent/requirements.txt
+-f agents/security_agent/requirements.txt
+-f agents/fusion_agent/requirements.txt
+
+## Dashboard
+-f dashboard/requirements.txt
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0

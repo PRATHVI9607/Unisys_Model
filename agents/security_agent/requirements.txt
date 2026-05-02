@@ -1,0 +1,16 @@
+# Security Agent Requirements
+
+# Kubernetes
+kubernetes-asyncio==0.29.0
+
+# Redis
+aioredis==2.0.1
+
+# API
+pydantic==2.6.0
+
+# HTTP Client
+aiohttp==3.9.0
+
+# Utilities
+numpy>=1.26.0

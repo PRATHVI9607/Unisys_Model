@@ -1,0 +1,4 @@
+# Agents
+__pycache__/
+*.pyc
+*.pyo

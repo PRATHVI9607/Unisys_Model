@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: security-agent
+  namespace: kubeheal
+spec:
+  selector:
+    matchLabels:
+      app: security-agent
+  template:
+    metadata:
+      labels:
+        app: security-agent
+    spec:
+      serviceAccountName: kubeheal
+      hostPID: true
+      hostNetwork: true
+      containers:
+        - name: agent
+          image: kubeheal/security-agent:v3
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: REDIS_URL
+              value: redis://redis-master:6379
+            - name: DIT_SEC_URL
+              value: http://dit-sec-server:8000
+            - name: FALCO_GRPC_ADDR
+              value: "127.0.0.1:5060"
+            - name: ENTROPY_THRESHOLD
+              value: "7.2"
+            - name: MMAP_ENTROPY_THRESHOLD
+              value: "7.0"
+            - name: NAMESPACE
+              value: kubeheal
+            - name: LOG_LEVEL
+              value: "INFO"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          volumeMounts:
+            - name: proc
+              mountPath: /proc
+              readOnly: true
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+      nodeSelector:
+        kubernetes.io/arch: amd64
