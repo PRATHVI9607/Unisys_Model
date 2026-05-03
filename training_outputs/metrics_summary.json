@@ -1,0 +1,39 @@
+{
+  "test_accuracy": 0.9418181818181818,
+  "test_precision": 0.9685691699604745,
+  "test_recall": 0.9418181818181818,
+  "test_f1": 0.9489306861720654,
+  "test_roc_auc": 0.9974118526084819,
+  "per_class_metrics": {
+    "Benign_Or_Subtle": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 136
+    },
+    "Harmful_Critical_Outage": {
+      "precision": 0.9130434782608695,
+      "recall": 0.6,
+      "f1": 0.7241379310344828,
+      "support": 35
+    },
+    "Harmful_Multi_Vector": {
+      "precision": 0.8,
+      "recall": 1.0,
+      "f1": 0.8888888888888888,
+      "support": 8
+    },
+    "Harmful_Performance_Degradation": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 91
+    },
+    "Harmful_Security_Breach": {
+      "precision": 0.2,
+      "recall": 0.6,
+      "f1": 0.3,
+      "support": 5
+    }
+  }
+}

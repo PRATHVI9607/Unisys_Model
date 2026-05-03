@@ -1,0 +1,7 @@
+{
+  "0": "Benign_Or_Subtle",
+  "1": "Harmful_Critical_Outage",
+  "2": "Harmful_Multi_Vector",
+  "3": "Harmful_Performance_Degradation",
+  "4": "Harmful_Security_Breach"
+}

@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
+import numpy as np
 
 import aioredis
 from pydantic import BaseModel, Field
@@ -33,6 +35,24 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Try to load trained DIT-Sec v3.0 model for inference
+_DITSEC_MODEL = None
+try:
+    # Look for inference module in parent directory structure
+    import sys
+
+    project_root = Path(__file__).parent.parent.parent
+    models_path = project_root / "models" / "dit_sec_v3"
+    if models_path.exists():
+        sys.path.insert(0, str(models_path))
+        from inference import DITSecInference
+
+        _DITSEC_MODEL = DITSecInference(device="cpu")
+        logger.info("✓ Loaded DIT-Sec v3.0 trained model for inference")
+except Exception as e:
+    logger.warning(f"Could not load trained DIT-Sec model: {e}")
+    _DITSEC_MODEL = None
 
 
 class SeverityLevel(str, Enum):
@@ -347,7 +367,274 @@ class HealthAgent:
         )
 
     def _local_assessment(self, new_spec: Dict, telemetry: Dict) -> Dict:
-        """Local assessment fallback."""
+        """
+        Local assessment with DIT-Sec v3.0 trained model.
+
+        Falls back to simple heuristics if model not loaded.
+        """
+        # If trained model is available, use it
+        if _DITSEC_MODEL is not None:
+            try:
+                return self._model_based_assessment(new_spec, telemetry)
+            except Exception as e:
+                logger.warning(f"Model assessment failed, using fallback: {e}")
+
+        # Fallback to simple heuristics
+        return self._heuristic_assessment(new_spec, telemetry)
+
+    def _model_based_assessment(self, new_spec: Dict, telemetry: Dict) -> Dict:
+        """
+        Assessment using DIT-Sec v3.0 trained model.
+
+        Extracts 32D feature vector (12D YAML + 14D telemetry + 6D drift)
+        and runs inference on trained model.
+        """
+        try:
+            # Extract YAML features (12D)
+            yaml_features = self._extract_yaml_features(new_spec)
+
+            # Extract telemetry features (14D)
+            telemetry_features = self._extract_telemetry_features(telemetry)
+
+            # Extract drift semantics (6D)
+            drift_features = self._extract_drift_features(new_spec, telemetry)
+
+            # Stack into single feature vector (1, 32)
+            yaml_arr = np.array(yaml_features, dtype=np.float32).reshape(1, 12)
+            telem_arr = np.array(telemetry_features, dtype=np.float32).reshape(1, 14)
+            drift_arr = np.array(drift_features, dtype=np.float32).reshape(1, 6)
+
+            # Run inference
+            result = _DITSEC_MODEL.predict(
+                yaml_arr, telem_arr, drift_arr, return_probabilities=True
+            )
+
+            # Map model class to risk score
+            class_name = result["class_name"]
+            class_confidence = result["class_confidence"]
+
+            # Map DIT-Sec classes to risk scores
+            class_to_risk = {
+                "Benign_Or_Subtle": 0.1,
+                "Harmful_Performance_Degradation": 0.6,
+                "Harmful_Security_Breach": 0.9,
+                "Harmful_Multi_Vector": 0.85,
+                "Harmful_Critical_Outage": 0.95,
+            }
+
+            base_risk = class_to_risk.get(class_name, 0.5)
+            # Adjust risk by confidence
+            risk_score = base_risk * class_confidence
+
+            return {
+                "risk_score": float(risk_score),
+                "patch_proposal": None,  # Model doesn't generate patches
+                "explainability": {
+                    "model": "DIT-Sec v3.0",
+                    "class": class_name,
+                    "confidence": float(class_confidence),
+                    "severity_level": result.get("severity_name", "unknown"),
+                    "class_probabilities": result.get("class_probabilities", {}),
+                },
+                "confidence_interval": (
+                    max(0, risk_score - 0.1),
+                    min(1, risk_score + 0.1),
+                ),
+            }
+        except Exception as e:
+            logger.error(f"Model-based assessment failed: {e}")
+            raise
+
+    def _extract_yaml_features(self, spec: Dict) -> List[float]:
+        """
+        Extract 12D YAML configuration features.
+
+        Features:
+        1. CPU limit normalized
+        2. Memory limit normalized
+        3. Replica count normalized
+        4. Image pull policy (0/1)
+        5. Security context presence (0/1)
+        6. Service account presence (0/1)
+        7. Resource requests presence (0/1)
+        8. Volume mounts count normalized
+        9. Env vars count normalized
+        10. Labels count normalized
+        11. Annotations count normalized
+        12. Init containers count normalized
+        """
+        features = []
+        containers = spec.get("template", {}).get("spec", {}).get("containers", [])
+
+        if not containers:
+            return [0.0] * 12
+
+        container = containers[0]  # Use first container
+        resources = container.get("resources", {})
+        limits = resources.get("limits", {})
+
+        # 1. CPU limit (normalize to 0-1, assume 0-4000 millicores)
+        cpu_limit = limits.get("cpu", "0")
+        if isinstance(cpu_limit, str) and cpu_limit.endswith("m"):
+            cpu_millicores = int(cpu_limit.rstrip("m"))
+        else:
+            cpu_millicores = int(cpu_limit) * 1000 if cpu_limit else 0
+        features.append(min(cpu_millicores / 4000.0, 1.0))
+
+        # 2. Memory limit (normalize to 0-1, assume 0-4Gi)
+        mem_limit = limits.get("memory", "0")
+        if isinstance(mem_limit, str) and mem_limit.endswith("Mi"):
+            mem_mi = int(mem_limit.rstrip("Mi"))
+        elif isinstance(mem_limit, str) and mem_limit.endswith("Gi"):
+            mem_mi = int(mem_limit.rstrip("Gi")) * 1024
+        else:
+            mem_mi = int(mem_limit) if mem_limit else 0
+        features.append(min(mem_mi / 4096.0, 1.0))
+
+        # 3. Replica count (normalize to 0-1, assume 0-100 replicas)
+        replicas = spec.get("replicas", 1)
+        features.append(min(replicas / 100.0, 1.0))
+
+        # 4. Image pull policy (0=IfNotPresent, 1=Always)
+        pull_policy = container.get("imagePullPolicy", "IfNotPresent")
+        features.append(1.0 if pull_policy == "Always" else 0.0)
+
+        # 5. Security context presence
+        sec_context = spec.get("template", {}).get("spec", {}).get("securityContext")
+        features.append(1.0 if sec_context else 0.0)
+
+        # 6. Service account presence
+        sa_name = spec.get("template", {}).get("spec", {}).get("serviceAccountName")
+        features.append(1.0 if sa_name else 0.0)
+
+        # 7. Resource requests presence
+        requests = resources.get("requests", {})
+        features.append(1.0 if requests else 0.0)
+
+        # 8. Volume mounts count (normalize to 0-1)
+        vol_mounts = container.get("volumeMounts", [])
+        features.append(min(len(vol_mounts) / 10.0, 1.0))
+
+        # 9. Environment variables count (normalize to 0-1)
+        env_vars = container.get("env", [])
+        features.append(min(len(env_vars) / 30.0, 1.0))
+
+        # 10. Labels count (normalize to 0-1)
+        labels = spec.get("template", {}).get("metadata", {}).get("labels", {})
+        features.append(min(len(labels) / 20.0, 1.0))
+
+        # 11. Annotations count (normalize to 0-1)
+        annotations = (
+            spec.get("template", {}).get("metadata", {}).get("annotations", {})
+        )
+        features.append(min(len(annotations) / 20.0, 1.0))
+
+        # 12. Init containers count (normalize to 0-1)
+        init_containers = (
+            spec.get("template", {}).get("spec", {}).get("initContainers", [])
+        )
+        features.append(min(len(init_containers) / 5.0, 1.0))
+
+        return features
+
+    def _extract_telemetry_features(self, telemetry: Dict) -> List[float]:
+        """
+        Extract 14D telemetry features from Prometheus metrics.
+
+        Features (normalized to -2 to +2 range):
+        1-7. CPU usage, memory usage, disk I/O, network I/O, request rate,
+             error rate, latency
+        8-14. Same as above but as 1-hour averages
+        """
+        features = [0.0] * 14
+
+        # Try to extract from telemetry dict
+        # This is a placeholder - actual implementation depends on telemetry format
+        if isinstance(telemetry, dict):
+            # Current metrics (1-7)
+            features[0] = min(telemetry.get("cpu_usage", 0) / 50.0, 2.0)  # CPU %
+            features[1] = min(telemetry.get("memory_usage", 0) / 80.0, 2.0)  # Mem %
+            features[2] = min(telemetry.get("disk_io", 0) / 100.0, 2.0)  # Disk I/O MB/s
+            features[3] = min(
+                telemetry.get("network_io", 0) / 100.0, 2.0
+            )  # Network Mbps
+            features[4] = min(
+                telemetry.get("request_rate", 0) / 1000.0, 2.0
+            )  # Requests/s
+            features[5] = min(telemetry.get("error_rate", 0) / 50.0, 2.0)  # Errors/s
+            features[6] = min(
+                telemetry.get("latency_ms", 0) / 1000.0, 2.0
+            )  # Latency ms
+
+            # 1-hour averages (8-14)
+            features[7:] = features[0:7]  # Use same for simplicity
+
+        return features
+
+    def _extract_drift_features(self, new_spec: Dict, telemetry: Dict) -> List[float]:
+        """
+        Extract 6D drift semantics features.
+
+        Features:
+        1. Change magnitude (0-1)
+        2. Breaking change presence (0-1)
+        3. Resource change (0-1)
+        4. Config change (0-1)
+        5. Security change (0-1)
+        6. Performance impact potential (0-1)
+        """
+        features = []
+
+        # 1. Change magnitude (count of top-level keys changed)
+        change_magnitude = 0.0  # Assume new deployment
+        features.append(min(change_magnitude / 10.0, 1.0))
+
+        # 2. Breaking change presence (heuristic: security context or image changes)
+        has_breaking = 0.0
+        if "securityContext" in str(new_spec):
+            has_breaking = 1.0
+        features.append(has_breaking)
+
+        # 3. Resource change (presence of resource limits/requests)
+        containers = new_spec.get("template", {}).get("spec", {}).get("containers", [])
+        has_resource_change = (
+            1.0 if any(c.get("resources") for c in containers) else 0.0
+        )
+        features.append(has_resource_change)
+
+        # 4. Config change (env vars or volume changes)
+        has_config_change = (
+            1.0
+            if any(c.get("env") or c.get("volumeMounts") for c in containers)
+            else 0.0
+        )
+        features.append(has_config_change)
+
+        # 5. Security change (security context or rbac)
+        has_security_change = (
+            1.0
+            if any(
+                "security" in str(c).lower() or "rbac" in str(new_spec).lower()
+                for c in containers
+            )
+            else 0.0
+        )
+        features.append(has_security_change)
+
+        # 6. Performance impact potential (resource limits reduction)
+        has_perf_impact = 0.0
+        for container in containers:
+            cpu_limit = container.get("resources", {}).get("limits", {}).get("cpu", "")
+            if isinstance(cpu_limit, str) and cpu_limit.endswith("m"):
+                cpu_millicores = int(cpu_limit.rstrip("m"))
+                if cpu_millicores < 200:  # Low CPU limit
+                    has_perf_impact = 1.0
+        features.append(has_perf_impact)
+
+        return features
+
+    def _heuristic_assessment(self, new_spec: Dict, telemetry: Dict) -> Dict:
+        """Fallback heuristic assessment (original implementation)."""
         risk_score = 0.0
         patch_proposal = None
         explainability = {}
