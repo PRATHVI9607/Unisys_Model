@@ -1,0 +1,42 @@
+#!/usr/bin/env bpftrace 
+// File: kernel/epbf_probes.bt 
+// Hook write(), rename2(), unlink() syscalls for ransomware detection 
+ 
+BEGIN { 
+  printf("[eBPF] Ransomware kernel probes started. PID=%d\n", pid); 
+} 
+ 
+// Track write() calls per process 
+tracepoint:syscalls:sys_enter_write { 
+  @writes[pid, comm] = count(); 
+  @bytes_written[pid] = sum(args->count); 
+} 
+ 
+// Track rename() calls — ransomware renames after encryption 
+tracepoint:syscalls:sys_enter_renameat2 { 
+  $old = str(args->oldname); 
+  $new = str(args->newname); 
+  printf("RENAME|%d|%s|%s|%s\n", pid, comm, $old, $new); 
+  @renames[pid] = count(); 
+} 
+ 
+// Track unlink() calls — ransomware deletes originals 
+tracepoint:syscalls:sys_enter_unlinkat { 
+  printf("DELETE|%d|%s|%s\n", pid, comm, str(args->pathname)); 
+  @deletes[pid] = count(); 
+} 
+ 
+// Track open() for file access patterns 
+tracepoint:syscalls:sys_enter_openat { 
+  @opens[pid, comm] = count(); 
+} 
+ 
+// Print aggregated stats every 5 seconds 
+interval:s:5 { 
+  printf("--- STATS WINDOW ---\n"); 
+  print(@writes); 
+  print(@renames); 
+  print(@deletes); 
+  clear(@writes); clear(@renames); clear(@deletes); 
+  clear(@opens); clear(@bytes_written); 
+}

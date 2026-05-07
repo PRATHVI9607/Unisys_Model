@@ -32,8 +32,14 @@ class YAMLGATEncoder(nn.Module):
         self.edge_type_embeddings = nn.Embedding(8, node_dim)
         
         self.convs = nn.ModuleList([
-            GATConv(node_dim, hidden_dim // heads, heads=heads, dropout=dropout, concat=True)
-            for _ in range(num_layers)
+        GATConv(
+        node_dim if i == 0 else hidden_dim,
+        hidden_dim // heads,
+        heads=heads,
+        dropout=dropout,
+        concat=True
+        )
+        for i in range(num_layers)
         ])
         
         self.layer_norms = nn.ModuleList([
@@ -180,7 +186,7 @@ class PrometheusMambaEncoder(nn.Module):
         except ImportError:
             self.use_mamba = False
             self.lstm = nn.LSTM(
-                input_dim,
+                hidden_dim,
                 hidden_dim,
                 num_layers=2,
                 batch_first=True,
@@ -339,13 +345,9 @@ class EntropyConv1DEncoder(nn.Module):
         self.conv2 = nn.Conv1d(hidden_channels, hidden_channels * 2, kernel_size=3, padding=1)
         self.conv3 = nn.Conv1d(hidden_channels * 2, hidden_channels * 2, kernel_size=3, padding=1)
         
-        self.se = nn.Sequential(
-            nn.AdaptiveAvgPool1d(1),
-            nn.Linear(hidden_channels * 2, hidden_channels // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_channels // 2, hidden_channels * 2),
-            nn.Sigmoid()
-        )
+        self.se_pool = nn.AdaptiveAvgPool1d(1)
+        self.se_fc1  = nn.Linear(hidden_channels * 2, hidden_channels // 2)
+        self.se_fc2  = nn.Linear(hidden_channels // 2, hidden_channels * 2)
         
         self.pool = nn.AdaptiveMaxPool1d(1)
         
@@ -376,8 +378,10 @@ class EntropyConv1DEncoder(nn.Module):
         
         x = torch.relu(self.conv2(x))
         
-        se_weight = self.se(x)
-        x = x * se_weight
+        se = self.se_pool(x).squeeze(-1)
+        se = torch.relu(self.se_fc1(se))
+        se = torch.sigmoid(self.se_fc2(se))
+        x  = x * se.unsqueeze(-1)
         
         x = self.pool(x).squeeze(-1)
         
@@ -404,8 +408,9 @@ class MultiHeadCrossAttentionFusion(nn.Module):
         self.fusion_dim = fusion_dim
         self.num_heads = num_heads
         
+        self.slot_dim = fusion_dim // 4
         self.projections = nn.ModuleDict({
-            name: nn.Linear(dim, fusion_dim // 4)
+            name: nn.Linear(dim, self.slot_dim)
             for name, dim in embedding_dims.items()
         })
         
@@ -438,30 +443,32 @@ class MultiHeadCrossAttentionFusion(nn.Module):
         Returns:
             fused: [fusion_dim] tensor
         """
+        device = next(iter(embeddings.values())).device
+
         projected = []
-        for name, proj in self.projections.items():
-            if name in embeddings:
+        for name in ["yaml", "metrics", "events", "entropy"]:
+            if name in embeddings and name in self.projections:
                 emb = embeddings[name]
-                if emb.dim() == 1:
+                if emb.dim() > 1:
+                    emb = emb.squeeze()
+                if emb.dim() == 0:
                     emb = emb.unsqueeze(0)
-                p = proj(emb)
-                projected.append(p)
-        
-        if len(projected) < 4:
-            while len(projected) < 4:
-                dummy = torch.zeros_like(projected[0]) if projected else torch.zeros((1, self.fusion_dim // 4))
-                projected.append(dummy)
-        
-        stacked = torch.stack(projected, dim=1)
-        
-        fused, _ = self.cross_attention(stacked, stacked, stacked)
-        
-        fused = fused.mean(dim=1).squeeze(1)
-        
-        fused = self.fusion_norm(fused + stacked.mean(dim=1).squeeze(1))
-        
+                p = self.projections[name](emb)   # [slot_dim]
+            else:
+                p = torch.zeros(self.slot_dim, device=device)
+            projected.append(p)
+
+        # [4, slot_dim] -> [1, 1, fusion_dim=192]
+        stacked  = torch.stack(projected, dim=0)         # [4, 48]
+        fused_in = stacked.view(1, 1, self.fusion_dim)   # [1, 1, 192]
+
+        fused, _ = self.cross_attention(fused_in, fused_in, fused_in)  # [1, 1, 192]
+        fused    = fused.squeeze(0).squeeze(0)           # [192]
+        residual = fused_in.squeeze(0).squeeze(0)        # [192]
+
+        fused = self.fusion_norm(fused + residual)
         fused = self.ffn(fused)
-        
+
         return fused
 
 

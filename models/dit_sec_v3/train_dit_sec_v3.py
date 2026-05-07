@@ -325,7 +325,7 @@ def train_epoch(
         
         labels = batch["label"]
         label_idx = torch.tensor(
-            [["benign", "health-critical", "ransomware-critical", "sec-medium", "perf-risk"].index(l)
+            [["benign", "health-critical", "ransomware-critical", "sec-medium", "perf-risk"].index(l)]
             for l in labels
         ).to(device)
         
@@ -377,7 +377,7 @@ def validate(
     with torch.no_grad():
         for batch in dataloader:
             outputs = []
-            for i in range(len(batch.get("label", [])):
+            for i in range(len(batch.get("label", []))):
                 try:
                     result = model(
                         old_spec=batch["old_spec"][i] if batch["old_spec"] else None,

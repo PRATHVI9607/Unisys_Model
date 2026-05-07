@@ -168,7 +168,7 @@ KubeHeal uses **3 autonomous agents** coordinated through **Redis Streams**, pow
 
 ```bash
 # Run the installation script
-./scripts/install.sh
+aaaza
 
 # Or manually:
 kubectl create namespace kubeheal
