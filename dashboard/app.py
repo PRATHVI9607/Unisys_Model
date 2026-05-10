@@ -249,11 +249,11 @@ class KubeHealDashboard:
 
     def run(self, host: str = "0.0.0.0", port: int = 5000) -> None:
         logger.info(f"Starting KubeHeal Dashboard on {host}:{port}")
+        self.connect_redis()
+        self.start_event_listeners()
         self.socketio.run(self.app, host=host, port=port, debug=True)
 
 
 if __name__ == "__main__":
     dashboard = KubeHealDashboard()
-    dashboard.connect_redis()
-    dashboard.start_event_listeners()
     dashboard.run()

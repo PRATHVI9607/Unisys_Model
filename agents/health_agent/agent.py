@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from enum import Enum
 
-import aioredis
+import redis.asyncio as aioredis
 import kubernetes_asyncio
 from kubernetes_asyncio import client, watch
 from kubernetes_asyncio.config import load_incluster_config, load_config

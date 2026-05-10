@@ -4,7 +4,7 @@
 kubernetes-asyncio==0.29.0
 
 # Redis
-aioredis==2.0.1
+redis>=5.0.0
 
 # API
 pydantic==2.6.0

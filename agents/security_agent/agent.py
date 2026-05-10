@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 
-import aioredis
+import redis.asyncio as aioredis
 import kubernetes_asyncio
 from kubernetes_asyncio import client, config
 from pydantic import BaseModel, Field
