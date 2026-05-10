@@ -209,9 +209,9 @@ class SecurityAgent:
         logger.info("Starting Security Agent...")
         
         try:
-            await config.load_incluster_config()
+            config.load_incluster_config()
         except config.ConfigException:
-            await config.load_config()
+            config.load_config()
         
         self.core_api = client.CoreV1Api()
         self.networking_api = client.NetworkingV1Api()

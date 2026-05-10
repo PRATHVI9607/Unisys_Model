@@ -73,9 +73,9 @@ class HealthAgent:
         logger.info("Starting Health Agent...")
         
         try:
-            await load_incluster_config()
+            load_incluster_config()
         except kubernetes_asyncio.config.ConfigException:
-            await load_config()
+            load_config()
         
         self.core_api = client.CoreV1Api()
         self.apps_api = client.AppsV1Api()

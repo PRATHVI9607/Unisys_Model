@@ -74,9 +74,9 @@ class FusionAgent:
         logger.info("Starting Fusion Agent...")
         
         try:
-            await config.load_incluster_config()
+            config.load_incluster_config()
         except config.ConfigException:
-            await config.load_config()
+            config.load_config()
         
         self.core_api = client.CoreV1Api()
         self.apps_api = client.AppsV1Api()
