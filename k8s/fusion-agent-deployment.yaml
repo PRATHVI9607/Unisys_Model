@@ -19,7 +19,7 @@ metadata:
   name: fusion-agent
   namespace: kubeheal
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: fusion-agent
