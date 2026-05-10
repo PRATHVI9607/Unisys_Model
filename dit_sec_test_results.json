@@ -1,0 +1,609 @@
+{
+  "summary": {
+    "total": 15,
+    "correct": 5,
+    "accuracy": 0.3333333333333333
+  },
+  "results": [
+    {
+      "scenario_id": "cpu_limit_tiny",
+      "scenario_name": "cpu_limit_tiny (pre)",
+      "expected": "Benign_Or_Subtle",
+      "predicted": "Benign_Or_Subtle",
+      "confidence": 0.6969394683837891,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.6969394683837891,
+        "Harmful_Performance_Degradation": 0.04043243080377579,
+        "Harmful_Security_Breach": 0.12000848352909088,
+        "Harmful_Multi_Vector": 0.11702987551689148,
+        "Harmful_Critical_Outage": 0.025589721277356148
+      },
+      "severity_level": "low",
+      "risk_score": 0.06969394683837891,
+      "severity": "low",
+      "repair_action": "monitor",
+      "repair_description": "No action needed - benign change detected",
+      "remediation": "Continue monitoring",
+      "confidence_interval": [
+        0.039387893676757824,
+        0.1
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Benign_Or_Subtle",
+        "confidence": 0.6969394683837891,
+        "raw_confidence": 0.6969394683837891,
+        "threshold_used": 0.5,
+        "severity_level": "low",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.6969394683837891,
+          "Harmful_Performance_Degradation": 0.04043243080377579,
+          "Harmful_Security_Breach": 0.12000848352909088,
+          "Harmful_Multi_Vector": 0.11702987551689148,
+          "Harmful_Critical_Outage": 0.025589721277356148
+        },
+        "risk_score_base": 0.1
+      }
+    },
+    {
+      "scenario_id": "cpu_limit_tiny",
+      "scenario_name": "cpu_limit_tiny (transition)",
+      "expected": "Benign_Or_Subtle",
+      "predicted": "Benign_Or_Subtle",
+      "confidence": 0.7072516679763794,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.7072516679763794,
+        "Harmful_Performance_Degradation": 0.04071780666708946,
+        "Harmful_Security_Breach": 0.10870745778083801,
+        "Harmful_Multi_Vector": 0.11752820760011673,
+        "Harmful_Critical_Outage": 0.025794891640543938
+      },
+      "severity_level": "low",
+      "risk_score": 0.07072516679763795,
+      "severity": "low",
+      "repair_action": "monitor",
+      "repair_description": "No action needed - benign change detected",
+      "remediation": "Continue monitoring",
+      "confidence_interval": [
+        0.04145033359527589,
+        0.1
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Benign_Or_Subtle",
+        "confidence": 0.7072516679763794,
+        "raw_confidence": 0.7072516679763794,
+        "threshold_used": 0.5,
+        "severity_level": "low",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.7072516679763794,
+          "Harmful_Performance_Degradation": 0.04071780666708946,
+          "Harmful_Security_Breach": 0.10870745778083801,
+          "Harmful_Multi_Vector": 0.11752820760011673,
+          "Harmful_Critical_Outage": 0.025794891640543938
+        },
+        "risk_score_base": 0.1
+      }
+    },
+    {
+      "scenario_id": "cpu_limit_tiny",
+      "scenario_name": "cpu_limit_tiny (steady)",
+      "expected": "Benign_Or_Subtle",
+      "predicted": "Benign_Or_Subtle",
+      "confidence": 0.6823358535766602,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.6823358535766602,
+        "Harmful_Performance_Degradation": 0.044265761971473694,
+        "Harmful_Security_Breach": 0.12125705182552338,
+        "Harmful_Multi_Vector": 0.12524361908435822,
+        "Harmful_Critical_Outage": 0.026897653937339783
+      },
+      "severity_level": "low",
+      "risk_score": 0.06823358535766602,
+      "severity": "low",
+      "repair_action": "monitor",
+      "repair_description": "No action needed - benign change detected",
+      "remediation": "Continue monitoring",
+      "confidence_interval": [
+        0.03646717071533204,
+        0.1
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Benign_Or_Subtle",
+        "confidence": 0.6823358535766602,
+        "raw_confidence": 0.6823358535766602,
+        "threshold_used": 0.5,
+        "severity_level": "low",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.6823358535766602,
+          "Harmful_Performance_Degradation": 0.044265761971473694,
+          "Harmful_Security_Breach": 0.12125705182552338,
+          "Harmful_Multi_Vector": 0.12524361908435822,
+          "Harmful_Critical_Outage": 0.026897653937339783
+        },
+        "risk_score_base": 0.1
+      }
+    },
+    {
+      "scenario_id": "privileged_mode",
+      "scenario_name": "privileged_mode (steady)",
+      "expected": "Harmful_Security_Breach",
+      "predicted": "Harmful_Performance_Degradation",
+      "confidence": 0.44426819682121277,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.056130871176719666,
+        "Harmful_Performance_Degradation": 0.44426819682121277,
+        "Harmful_Security_Breach": 0.2236727774143219,
+        "Harmful_Multi_Vector": 0.05048569664359093,
+        "Harmful_Critical_Outage": 0.22544245421886444
+      },
+      "severity_level": "high",
+      "risk_score": 0.26656091809272764,
+      "severity": "high",
+      "repair_action": "scale",
+      "repair_description": "Performance degradation detected",
+      "remediation": "Increase resource limits or scale replicas",
+      "confidence_interval": [
+        0.21098773777484892,
+        0.32213409841060636
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Harmful_Performance_Degradation",
+        "confidence": 0.44426819682121277,
+        "raw_confidence": 0.44426819682121277,
+        "threshold_used": 0.2,
+        "severity_level": "high",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.056130871176719666,
+          "Harmful_Performance_Degradation": 0.44426819682121277,
+          "Harmful_Security_Breach": 0.2236727774143219,
+          "Harmful_Multi_Vector": 0.05048569664359093,
+          "Harmful_Critical_Outage": 0.22544245421886444
+        },
+        "risk_score_base": 0.6
+      }
+    },
+    {
+      "scenario_id": "privileged_mode",
+      "scenario_name": "privileged_mode (transition)",
+      "expected": "Harmful_Security_Breach",
+      "predicted": "Harmful_Security_Breach",
+      "confidence": 0.3824905455112457,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.06054053083062172,
+        "Harmful_Performance_Degradation": 0.3330817222595215,
+        "Harmful_Security_Breach": 0.3824905455112457,
+        "Harmful_Multi_Vector": 0.05149886757135391,
+        "Harmful_Critical_Outage": 0.17238834500312805
+      },
+      "severity_level": "high",
+      "risk_score": 0.3442414909601212,
+      "severity": "high",
+      "repair_action": "rollback",
+      "repair_description": "Security breach detected - potential compromise",
+      "remediation": "Rollback to previous known-good version immediately",
+      "confidence_interval": [
+        0.28249054551124575,
+        0.4059924364089966
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Harmful_Security_Breach",
+        "confidence": 0.3824905455112457,
+        "raw_confidence": 0.3824905455112457,
+        "threshold_used": 0.3,
+        "severity_level": "high",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.06054053083062172,
+          "Harmful_Performance_Degradation": 0.3330817222595215,
+          "Harmful_Security_Breach": 0.3824905455112457,
+          "Harmful_Multi_Vector": 0.05149886757135391,
+          "Harmful_Critical_Outage": 0.17238834500312805
+        },
+        "risk_score_base": 0.9
+      }
+    },
+    {
+      "scenario_id": "security_compromise",
+      "scenario_name": "security_compromise (transition)",
+      "expected": "Harmful_Security_Breach",
+      "predicted": "Harmful_Security_Breach",
+      "confidence": 0.4166490137577057,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.03945782780647278,
+        "Harmful_Performance_Degradation": 0.37133172154426575,
+        "Harmful_Security_Breach": 0.4166490137577057,
+        "Harmful_Multi_Vector": 0.047159258276224136,
+        "Harmful_Critical_Outage": 0.12540218234062195
+      },
+      "severity_level": "high",
+      "risk_score": 0.37498411238193513,
+      "severity": "high",
+      "repair_action": "rollback",
+      "repair_description": "Security breach detected - potential compromise",
+      "remediation": "Rollback to previous known-good version immediately",
+      "confidence_interval": [
+        0.3166490137577057,
+        0.43331921100616455
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Harmful_Security_Breach",
+        "confidence": 0.4166490137577057,
+        "raw_confidence": 0.4166490137577057,
+        "threshold_used": 0.3,
+        "severity_level": "high",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.03945782780647278,
+          "Harmful_Performance_Degradation": 0.37133172154426575,
+          "Harmful_Security_Breach": 0.4166490137577057,
+          "Harmful_Multi_Vector": 0.047159258276224136,
+          "Harmful_Critical_Outage": 0.12540218234062195
+        },
+        "risk_score_base": 0.9
+      }
+    },
+    {
+      "scenario_id": "replica_count_large",
+      "scenario_name": "replica_count_large (steady)",
+      "expected": "Harmful_Performance_Degradation",
+      "predicted": "Benign_Or_Subtle",
+      "confidence": 0.3599650263786316,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.3599650263786316,
+        "Harmful_Performance_Degradation": 0.16338416934013367,
+        "Harmful_Security_Breach": 0.16210655868053436,
+        "Harmful_Multi_Vector": 0.20815777778625488,
+        "Harmful_Critical_Outage": 0.10638643801212311
+      },
+      "severity_level": "low",
+      "risk_score": 0.03599650263786316,
+      "severity": "low",
+      "repair_action": "monitor",
+      "repair_description": "No action needed - benign change detected",
+      "remediation": "Continue monitoring",
+      "confidence_interval": [
+        0.0,
+        0.1
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Benign_Or_Subtle",
+        "confidence": 0.3599650263786316,
+        "raw_confidence": 0.3599650263786316,
+        "threshold_used": 0.5,
+        "severity_level": "low",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.3599650263786316,
+          "Harmful_Performance_Degradation": 0.16338416934013367,
+          "Harmful_Security_Breach": 0.16210655868053436,
+          "Harmful_Multi_Vector": 0.20815777778625488,
+          "Harmful_Critical_Outage": 0.10638643801212311
+        },
+        "risk_score_base": 0.1
+      }
+    },
+    {
+      "scenario_id": "cpu_limit_large",
+      "scenario_name": "cpu_limit_large (steady)",
+      "expected": "Harmful_Performance_Degradation",
+      "predicted": "Benign_Or_Subtle",
+      "confidence": 0.2964538335800171,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.2964538335800171,
+        "Harmful_Performance_Degradation": 0.20456990599632263,
+        "Harmful_Security_Breach": 0.14777670800685883,
+        "Harmful_Multi_Vector": 0.24579736590385437,
+        "Harmful_Critical_Outage": 0.10540219396352768
+      },
+      "severity_level": "low",
+      "risk_score": 0.02964538335800171,
+      "severity": "low",
+      "repair_action": "monitor",
+      "repair_description": "No action needed - benign change detected",
+      "remediation": "Continue monitoring",
+      "confidence_interval": [
+        0.0,
+        0.1
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Benign_Or_Subtle",
+        "confidence": 0.2964538335800171,
+        "raw_confidence": 0.2964538335800171,
+        "threshold_used": 0.5,
+        "severity_level": "low",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.2964538335800171,
+          "Harmful_Performance_Degradation": 0.20456990599632263,
+          "Harmful_Security_Breach": 0.14777670800685883,
+          "Harmful_Multi_Vector": 0.24579736590385437,
+          "Harmful_Critical_Outage": 0.10540219396352768
+        },
+        "risk_score_base": 0.1
+      }
+    },
+    {
+      "scenario_id": "cpu_limit_small",
+      "scenario_name": "cpu_limit_small (transition)",
+      "expected": "Harmful_Performance_Degradation",
+      "predicted": "Benign_Or_Subtle",
+      "confidence": 0.2656756043434143,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.2656756043434143,
+        "Harmful_Performance_Degradation": 0.22308200597763062,
+        "Harmful_Security_Breach": 0.16030986607074738,
+        "Harmful_Multi_Vector": 0.23433974385261536,
+        "Harmful_Critical_Outage": 0.11659274995326996
+      },
+      "severity_level": "low",
+      "risk_score": 0.02656756043434143,
+      "severity": "low",
+      "repair_action": "monitor",
+      "repair_description": "No action needed - benign change detected",
+      "remediation": "Continue monitoring",
+      "confidence_interval": [
+        0.0,
+        0.1
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Benign_Or_Subtle",
+        "confidence": 0.2656756043434143,
+        "raw_confidence": 0.2656756043434143,
+        "threshold_used": 0.5,
+        "severity_level": "low",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.2656756043434143,
+          "Harmful_Performance_Degradation": 0.22308200597763062,
+          "Harmful_Security_Breach": 0.16030986607074738,
+          "Harmful_Multi_Vector": 0.23433974385261536,
+          "Harmful_Critical_Outage": 0.11659274995326996
+        },
+        "risk_score_base": 0.1
+      }
+    },
+    {
+      "scenario_id": "probe_tampering",
+      "scenario_name": "probe_tampering (transition)",
+      "expected": "Harmful_Critical_Outage",
+      "predicted": "Harmful_Security_Breach",
+      "confidence": 0.38250333070755005,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.06054924055933952,
+        "Harmful_Performance_Degradation": 0.3330470323562622,
+        "Harmful_Security_Breach": 0.38250333070755005,
+        "Harmful_Multi_Vector": 0.051503658294677734,
+        "Harmful_Critical_Outage": 0.17239683866500854
+      },
+      "severity_level": "high",
+      "risk_score": 0.34425299763679507,
+      "severity": "high",
+      "repair_action": "rollback",
+      "repair_description": "Security breach detected - potential compromise",
+      "remediation": "Rollback to previous known-good version immediately",
+      "confidence_interval": [
+        0.28250333070755007,
+        0.40600266456604006
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Harmful_Security_Breach",
+        "confidence": 0.38250333070755005,
+        "raw_confidence": 0.38250333070755005,
+        "threshold_used": 0.3,
+        "severity_level": "high",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.06054924055933952,
+          "Harmful_Performance_Degradation": 0.3330470323562622,
+          "Harmful_Security_Breach": 0.38250333070755005,
+          "Harmful_Multi_Vector": 0.051503658294677734,
+          "Harmful_Critical_Outage": 0.17239683866500854
+        },
+        "risk_score_base": 0.9
+      }
+    },
+    {
+      "scenario_id": "volume_unmount",
+      "scenario_name": "volume_unmount (transition)",
+      "expected": "Harmful_Critical_Outage",
+      "predicted": "Harmful_Security_Breach",
+      "confidence": 0.3824905753135681,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.060540515929460526,
+        "Harmful_Performance_Degradation": 0.3330817222595215,
+        "Harmful_Security_Breach": 0.3824905753135681,
+        "Harmful_Multi_Vector": 0.05149887129664421,
+        "Harmful_Critical_Outage": 0.17238833010196686
+      },
+      "severity_level": "high",
+      "risk_score": 0.3442415177822113,
+      "severity": "high",
+      "repair_action": "rollback",
+      "repair_description": "Security breach detected - potential compromise",
+      "remediation": "Rollback to previous known-good version immediately",
+      "confidence_interval": [
+        0.2824905753135681,
+        0.4059924602508545
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Harmful_Security_Breach",
+        "confidence": 0.3824905753135681,
+        "raw_confidence": 0.3824905753135681,
+        "threshold_used": 0.3,
+        "severity_level": "high",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.060540515929460526,
+          "Harmful_Performance_Degradation": 0.3330817222595215,
+          "Harmful_Security_Breach": 0.3824905753135681,
+          "Harmful_Multi_Vector": 0.05149887129664421,
+          "Harmful_Critical_Outage": 0.17238833010196686
+        },
+        "risk_score_base": 0.9
+      }
+    },
+    {
+      "scenario_id": "volume_unmount",
+      "scenario_name": "volume_unmount (steady)",
+      "expected": "Harmful_Critical_Outage",
+      "predicted": "Harmful_Performance_Degradation",
+      "confidence": 0.44426819682121277,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.056130871176719666,
+        "Harmful_Performance_Degradation": 0.44426819682121277,
+        "Harmful_Security_Breach": 0.2236727774143219,
+        "Harmful_Multi_Vector": 0.05048568174242973,
+        "Harmful_Critical_Outage": 0.22544245421886444
+      },
+      "severity_level": "high",
+      "risk_score": 0.26656091809272764,
+      "severity": "high",
+      "repair_action": "scale",
+      "repair_description": "Performance degradation detected",
+      "remediation": "Increase resource limits or scale replicas",
+      "confidence_interval": [
+        0.21098773777484892,
+        0.32213409841060636
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Harmful_Performance_Degradation",
+        "confidence": 0.44426819682121277,
+        "raw_confidence": 0.44426819682121277,
+        "threshold_used": 0.2,
+        "severity_level": "high",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.056130871176719666,
+          "Harmful_Performance_Degradation": 0.44426819682121277,
+          "Harmful_Security_Breach": 0.2236727774143219,
+          "Harmful_Multi_Vector": 0.05048568174242973,
+          "Harmful_Critical_Outage": 0.22544245421886444
+        },
+        "risk_score_base": 0.6
+      }
+    },
+    {
+      "scenario_id": "config_tampering",
+      "scenario_name": "config_tampering (steady)",
+      "expected": "Harmful_Multi_Vector",
+      "predicted": "Harmful_Security_Breach",
+      "confidence": 0.7798330783843994,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.04537546634674072,
+        "Harmful_Performance_Degradation": 0.0666406974196434,
+        "Harmful_Security_Breach": 0.7798330783843994,
+        "Harmful_Multi_Vector": 0.031291913241147995,
+        "Harmful_Critical_Outage": 0.07685882598161697
+      },
+      "severity_level": "high",
+      "risk_score": 0.7018497705459595,
+      "severity": "high",
+      "repair_action": "rollback",
+      "repair_description": "Security breach detected - potential compromise",
+      "remediation": "Rollback to previous known-good version immediately",
+      "confidence_interval": [
+        0.6798330783843994,
+        0.7238664627075196
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Harmful_Security_Breach",
+        "confidence": 0.7798330783843994,
+        "raw_confidence": 0.7798330783843994,
+        "threshold_used": 0.3,
+        "severity_level": "high",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.04537546634674072,
+          "Harmful_Performance_Degradation": 0.0666406974196434,
+          "Harmful_Security_Breach": 0.7798330783843994,
+          "Harmful_Multi_Vector": 0.031291913241147995,
+          "Harmful_Critical_Outage": 0.07685882598161697
+        },
+        "risk_score_base": 0.9
+      }
+    },
+    {
+      "scenario_id": "resource_exhaustion",
+      "scenario_name": "resource_exhaustion (transition)",
+      "expected": "Harmful_Multi_Vector",
+      "predicted": "Harmful_Security_Breach",
+      "confidence": 0.8793268203735352,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.02705765701830387,
+        "Harmful_Performance_Degradation": 0.042676642537117004,
+        "Harmful_Security_Breach": 0.8793268203735352,
+        "Harmful_Multi_Vector": 0.01949501968920231,
+        "Harmful_Critical_Outage": 0.03144381567835808
+      },
+      "severity_level": "high",
+      "risk_score": 0.7913941383361817,
+      "severity": "high",
+      "repair_action": "rollback",
+      "repair_description": "Security breach detected - potential compromise",
+      "remediation": "Rollback to previous known-good version immediately",
+      "confidence_interval": [
+        0.7793268203735352,
+        0.8034614562988281
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Harmful_Security_Breach",
+        "confidence": 0.8793268203735352,
+        "raw_confidence": 0.8793268203735352,
+        "threshold_used": 0.3,
+        "severity_level": "high",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.02705765701830387,
+          "Harmful_Performance_Degradation": 0.042676642537117004,
+          "Harmful_Security_Breach": 0.8793268203735352,
+          "Harmful_Multi_Vector": 0.01949501968920231,
+          "Harmful_Critical_Outage": 0.03144381567835808
+        },
+        "risk_score_base": 0.9
+      }
+    },
+    {
+      "scenario_id": "resource_exhaustion",
+      "scenario_name": "resource_exhaustion (steady)",
+      "expected": "Harmful_Multi_Vector",
+      "predicted": "Harmful_Security_Breach",
+      "confidence": 0.7569330930709839,
+      "class_probabilities": {
+        "Benign_Or_Subtle": 0.04374316334724426,
+        "Harmful_Performance_Degradation": 0.09372173994779587,
+        "Harmful_Security_Breach": 0.7569330930709839,
+        "Harmful_Multi_Vector": 0.03367966040968895,
+        "Harmful_Critical_Outage": 0.07192238420248032
+      },
+      "severity_level": "high",
+      "risk_score": 0.6812397837638855,
+      "severity": "medium",
+      "repair_action": "rollback",
+      "repair_description": "Security breach detected - potential compromise",
+      "remediation": "Rollback to previous known-good version immediately",
+      "confidence_interval": [
+        0.6569330930709839,
+        0.7055464744567871
+      ],
+      "explainability": {
+        "model": "DIT-Sec v3.0",
+        "class": "Harmful_Security_Breach",
+        "confidence": 0.7569330930709839,
+        "raw_confidence": 0.7569330930709839,
+        "threshold_used": 0.3,
+        "severity_level": "high",
+        "class_probabilities": {
+          "Benign_Or_Subtle": 0.04374316334724426,
+          "Harmful_Performance_Degradation": 0.09372173994779587,
+          "Harmful_Security_Breach": 0.7569330930709839,
+          "Harmful_Multi_Vector": 0.03367966040968895,
+          "Harmful_Critical_Outage": 0.07192238420248032
+        },
+        "risk_score_base": 0.9
+      }
+    }
+  ]
+}

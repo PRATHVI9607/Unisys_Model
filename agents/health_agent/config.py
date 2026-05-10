@@ -84,6 +84,11 @@ class HealthAgentConfig(BaseModel):
         default=None, description="Path to training dataset (CSV or JSON)"
     )
 
+    @property
+    def training_dataset_path(self) -> Optional[str]:
+        """Alias for dataset_path for backward compatibility."""
+        return self.dataset_path
+
     @validator("log_level")
     def validate_log_level(cls, v):
         valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")

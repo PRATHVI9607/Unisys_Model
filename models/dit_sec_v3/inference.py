@@ -203,6 +203,76 @@ class DITSecInference:
         2: "High",
     }
 
+    # Severity level as discrete integer (1-3, not 0-2)
+    SEVERITY_LEVELS = {
+        0: 1,  # Low → 1
+        1: 2,  # Medium → 2
+        2: 3,  # High → 3
+    }
+
+    # Feature names mapping (32D: 12 YAML + 14 telemetry + 6 drift)
+    FEATURE_NAMES = [
+        # YAML features (0-11, 12D)
+        "node_count",
+        "depth",
+        "containers",
+        "volumes",
+        "env_vars",
+        "init_containers",
+        "persistent_volumes",
+        "resource_limits",
+        "security_contexts",
+        "container_change",
+        "volume_change",
+        "has_structure",
+        # Telemetry features (12-25, 14D)
+        "request_rate",
+        "latency_p99",
+        "cpu_usage_cores",
+        "memory_working_set_bytes",
+        "error_rate_5xx",
+        "cpu_limit",
+        "memory_limit",
+        "cpu_ratio",
+        "memory_ratio",
+        "error_ratio",
+        "critical_flag",
+        "latency_magnitude",
+        "cpu_magnitude",
+        "memory_magnitude",
+        # Drift semantics (26-31, 6D)
+        "drift_type",
+        "magnitude_level",
+        "num_drifts",
+        "severity",
+        "phase",
+        "is_rolling",
+    ]
+
+    # Recommended repairs mapping by class and feature importance
+    REPAIR_ACTIONS = {
+        0: [],  # Benign_Or_Subtle: no repairs
+        1: [
+            "cpu_scaling",
+            "memory_scaling",
+            "latency_tuning",
+            "load_balancing",
+        ],  # Performance
+        2: [
+            "security_patch",
+            "secret_rotation",
+            "rbac_tighten",
+            "network_isolate",
+        ],  # Security
+        3: [
+            "comprehensive_audit",
+            "rollback",
+            "network_isolate",
+            "security_patch",
+        ],  # Multi-Vector
+        4: ["emergency_scale", "failover", "backup_restore", "circuit_break"],  # Outage
+    }
+
     def __init__(
         self,
         checkpoint_path: Optional[str] = None,
@@ -243,12 +313,215 @@ class DITSecInference:
         model.to(self.device)
         return model
 
+    def _extract_attention_weights(
+        self,
+        yaml_features: torch.Tensor,
+        telemetry_features: torch.Tensor,
+        drift_features: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Extract attention weights from multi-head attention layer.
+
+        Args:
+            yaml_features: (batch_size, 12)
+            telemetry_features: (batch_size, 14)
+            drift_features: (batch_size, 6)
+
+        Returns:
+            (input_attention_weights, attention_map)
+            - input_attention_weights: (batch_size, 32) - importance score for each input feature
+            - attention_map: (batch_size, 3, 3) - cross-attention between modalities
+        """
+        batch_size = yaml_features.size(0)
+
+        # Encode each stream (same as forward pass)
+        yaml_encoded = self.model.yaml_encoder(yaml_features)  # (batch, 128)
+        telemetry_encoded = self.model.telemetry_encoder(
+            telemetry_features
+        )  # (batch, 128)
+        drift_encoded = self.model.drift_encoder(drift_features)  # (batch, 64)
+
+        # Stack into sequence for attention
+        yaml_seq = yaml_encoded.unsqueeze(1)  # (batch, 1, 128)
+        telemetry_seq = telemetry_encoded.unsqueeze(1)  # (batch, 1, 128)
+        drift_padded = torch.cat(
+            [
+                drift_encoded,
+                torch.zeros(
+                    batch_size, self.model.hidden_dim - drift_encoded.size(1)
+                ).to(drift_encoded.device),
+            ],
+            dim=1,
+        ).unsqueeze(1)  # (batch, 1, 128)
+
+        query_seq = torch.cat(
+            [yaml_seq, telemetry_seq, drift_padded], dim=1
+        )  # (batch, 3, 128)
+
+        # Get attention weights from multi-head attention
+        # Note: we need to access the attention mechanism with output_attentions=True
+        # For now, compute attention weights via manual computation
+        attn_out, attn_weights = self.model.attention(query_seq, query_seq, query_seq)
+        # attn_weights shape: (batch_size, num_heads=4, seq_len=3, seq_len=3)
+
+        # Average across attention heads
+        attn_map = attn_weights.mean(dim=1)  # (batch, 3, 3)
+
+        # Compute feature-level importance by backpropagating attention
+        # Simplified: use the gradient of output w.r.t. inputs
+        # For now, use a heuristic: combine input magnitude + attention flow
+        yaml_importance = yaml_features.abs().mean(dim=0)  # (12,)
+        telemetry_importance = telemetry_features.abs().mean(dim=0)  # (14,)
+        drift_importance = drift_features.abs().mean(dim=0)  # (6,)
+
+        # Combine: (batch_size, 32)
+        input_attention_weights = torch.cat(
+            [
+                yaml_importance.unsqueeze(0).expand(batch_size, -1),
+                telemetry_importance.unsqueeze(0).expand(batch_size, -1),
+                drift_importance.unsqueeze(0).expand(batch_size, -1),
+            ],
+            dim=1,
+        )
+
+        return input_attention_weights, attn_map
+
+    def _get_root_cause_attention(
+        self,
+        input_weights: np.ndarray,
+        confidence: float,
+        top_k: int = 3,
+    ) -> List[str]:
+        """
+        Extract top-k most important features as root cause candidates.
+
+        Args:
+            input_weights: (32,) array of feature importance scores
+            confidence: model confidence score
+            top_k: number of top features to return
+
+        Returns:
+            List of feature names sorted by importance
+        """
+        # Normalize weights
+        input_weights = np.abs(input_weights)
+        if input_weights.sum() > 0:
+            input_weights = input_weights / input_weights.sum()
+
+        # Get top-k indices
+        top_indices = np.argsort(input_weights)[-top_k:][::-1]
+
+        # Map to feature names
+        root_causes = [
+            self.FEATURE_NAMES[i] for i in top_indices if input_weights[i] > 0.01
+        ]
+
+        return root_causes[:top_k]
+
+    def _get_recommended_repairs(
+        self,
+        class_id: int,
+        root_cause_attention: List[str],
+        confidence: float,
+    ) -> List[str]:
+        """
+        Generate recommended repair actions based on class and root causes.
+
+        Args:
+            class_id: predicted class ID (0-4)
+            root_cause_attention: list of root cause features
+            confidence: model confidence score
+
+        Returns:
+            List of recommended repair actions
+        """
+        base_repairs = self.REPAIR_ACTIONS.get(class_id, [])
+
+        # Prioritize repairs based on root causes
+        prioritized_repairs = []
+
+        for root_cause in root_cause_attention:
+            if "cpu" in root_cause.lower():
+                if "cpu_scaling" in base_repairs:
+                    prioritized_repairs.append("cpu_scaling")
+            elif "memory" in root_cause.lower():
+                if "memory_scaling" in base_repairs:
+                    prioritized_repairs.append("memory_scaling")
+            elif "latency" in root_cause.lower():
+                if "latency_tuning" in base_repairs:
+                    prioritized_repairs.append("latency_tuning")
+            elif "security" in root_cause.lower() or "env_vars" in root_cause:
+                if "security_patch" in base_repairs:
+                    prioritized_repairs.append("security_patch")
+                if "secret_rotation" in base_repairs:
+                    prioritized_repairs.append("secret_rotation")
+
+        # Add remaining base repairs
+        for repair in base_repairs:
+            if repair not in prioritized_repairs:
+                prioritized_repairs.append(repair)
+
+        # Limit to reasonable number
+        return prioritized_repairs[:4]
+
+    def _build_diagnostics(
+        self,
+        class_id: int,
+        class_confidence: float,
+        severity_id: int,
+        input_features: np.ndarray,
+        input_attention_weights: np.ndarray,
+    ) -> Dict:
+        """
+        Build full diagnostics object matching PRD specification.
+
+        Returns:
+            {
+                "predicted_impact": str,
+                "severity_level": int (1-3),
+                "confidence": float (0-1),
+                "root_cause_attention": List[str],
+                "recommended_repairs": List[str],
+            }
+        """
+        # 1. predicted_impact: class name
+        predicted_impact = self.CLASS_NAMES[class_id]
+
+        # 2. severity_level: discrete integer 1-3
+        severity_level = self.SEVERITY_LEVELS[severity_id]
+
+        # 3. confidence: class confidence
+        confidence = float(class_confidence)
+
+        # 4. root_cause_attention: top features by importance
+        root_cause_attention = self._get_root_cause_attention(
+            input_attention_weights,
+            confidence,
+            top_k=3,
+        )
+
+        # 5. recommended_repairs: array of specific actions
+        recommended_repairs = self._get_recommended_repairs(
+            class_id,
+            root_cause_attention,
+            confidence,
+        )
+
+        return {
+            "predicted_impact": predicted_impact,
+            "severity_level": severity_level,
+            "confidence": confidence,
+            "root_cause_attention": root_cause_attention,
+            "recommended_repairs": recommended_repairs,
+        }
+
     def predict(
         self,
         yaml_features: np.ndarray,
         telemetry_features: np.ndarray,
         drift_features: np.ndarray,
         return_probabilities: bool = True,
+        return_diagnostics: bool = True,
     ) -> Dict:
         """
         Run inference on features.
@@ -258,17 +531,28 @@ class DITSecInference:
             telemetry_features: (batch_size, 14) or (14,)
             drift_features: (batch_size, 6) or (6,)
             return_probabilities: if True, return softmax probabilities
+            return_diagnostics: if True, return structured diagnostics (PRD-compliant)
 
         Returns:
-            {
-                "class_id": int or (batch_size,) array,
-                "class_name": str or (batch_size,) array,
-                "class_confidence": float or (batch_size,) array,
-                "class_probabilities": dict or list of dicts,
-                "severity_id": int or (batch_size,) array,
-                "severity_name": str or (batch_size,) array,
-                "severity_confidence": float or (batch_size,) array,
+            Single sample: {
+                "class_id": int,
+                "class_name": str,
+                "class_confidence": float,
+                "severity_id": int,
+                "severity_name": str,
+                "severity_confidence": float,
+                "class_probabilities": dict (optional),
+                "severity_probabilities": dict (optional),
+                "diagnostics": {  # if return_diagnostics=True
+                    "predicted_impact": str,
+                    "severity_level": int (1-3),
+                    "confidence": float (0-1),
+                    "root_cause_attention": List[str],
+                    "recommended_repairs": List[str],
+                }
             }
+
+            Batch: arrays of above for each sample
         """
         # Ensure batch dimension
         yaml_features = np.atleast_2d(yaml_features)
@@ -283,6 +567,13 @@ class DITSecInference:
         # Run inference
         with torch.no_grad():
             class_logits, severity_logits = self.model(yaml_t, telemetry_t, drift_t)
+
+            # Extract attention weights for diagnostics
+            if return_diagnostics:
+                input_attention_weights, _ = self._extract_attention_weights(
+                    yaml_t, telemetry_t, drift_t
+                )
+                input_attention_weights_np = input_attention_weights.cpu().numpy()
 
         class_probs = torch.softmax(class_logits, dim=1)
         severity_probs = torch.softmax(severity_logits, dim=1)
@@ -316,6 +607,15 @@ class DITSecInference:
                     self.SEVERITY_NAMES[i]: float(severity_probs[0, i])
                     for i in range(len(self.SEVERITY_NAMES))
                 }
+
+            if return_diagnostics:
+                result["diagnostics"] = self._build_diagnostics(
+                    class_id=int(class_preds[0]),
+                    class_confidence=float(class_confs[0]),
+                    severity_id=int(severity_preds[0]),
+                    input_features=yaml_features[0],
+                    input_attention_weights=input_attention_weights_np[0],
+                )
         else:
             # Batch
             result = {
@@ -342,6 +642,18 @@ class DITSecInference:
                         self.SEVERITY_NAMES[i]: float(severity_probs[j, i])
                         for i in range(len(self.SEVERITY_NAMES))
                     }
+                    for j in range(batch_size)
+                ]
+
+            if return_diagnostics:
+                result["diagnostics"] = [
+                    self._build_diagnostics(
+                        class_id=int(class_preds[j]),
+                        class_confidence=float(class_confs[j]),
+                        severity_id=int(severity_preds[j]),
+                        input_features=yaml_features[j],
+                        input_attention_weights=input_attention_weights_np[j],
+                    )
                     for j in range(batch_size)
                 ]
 

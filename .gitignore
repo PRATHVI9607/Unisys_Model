@@ -1,1 +1,57 @@
-*.pyc __pycache__ .pytest_cache .venv venv *.egg-info .git
+# Python
+*.pyc
+__pycache__/
+*.egg-info/
+.eggs/
+*.egg
+.pytest_cache/
+*.so
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env.venv/
+virtualenv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# PyTorch / ML artifacts
+*.pth
+*.pt
+*.onnx
+*.onnx.pb
+checkpoint*/
+training_outputs/
+logs/
+wandb/
+
+# Data files
+*.csv
+*.jsonl
+*.json (but keep config JSONs)
+*.pkl
+*.pickle
+
+# Environment
+.env
+.env.local
+
+# Temporary / Build
+build/
+dist/
+*.tar.gz
+*.zip
+
+# Git
+.git/

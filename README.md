@@ -145,6 +145,164 @@ KubeHeal uses **3 autonomous agents** coordinated through **Redis Streams**, pow
 
 ---
 
+## DIT-Sec Model Output Format
+
+### Inference Output Structure
+
+The DIT-Sec v3.0 inference interface returns predictions in a structured format that includes both raw predictions and PRD-compliant diagnostics:
+
+```python
+{
+    # Raw model predictions
+    "class_id": 1,                          # Integer 0-4
+    "class_name": "Harmful_Performance_Degradation",
+    "class_confidence": 0.94,               # Float 0.0-1.0
+    "class_probabilities": {                # All 5 classes
+        "Benign_Or_Subtle": 0.02,
+        "Harmful_Performance_Degradation": 0.94,
+        "Harmful_Security_Breach": 0.01,
+        "Harmful_Multi_Vector": 0.02,
+        "Harmful_Critical_Outage": 0.01,
+    },
+    
+    # Severity predictions
+    "severity_id": 1,                       # Integer 0-2 (model output)
+    "severity_name": "medium",              # String for display
+    "severity_confidence": 0.87,            # Float 0.0-1.0
+    "severity_probabilities": {             # All 3 severity levels
+        "Low": 0.09,
+        "Medium": 0.87,
+        "High": 0.04,
+    },
+    
+    # PRD-compliant diagnostics
+    "diagnostics": {
+        "predicted_impact": "Harmful_Performance_Degradation",
+        "severity_level": 2,                # Discrete integer 1-3 (NOT 0-2)
+        "confidence": 0.94,                 # Float 0.0-1.0
+        "root_cause_attention": [           # Array of feature names
+            "cpu_usage_cores",
+            "cpu_limit",
+            "latency_magnitude"
+        ],
+        "recommended_repairs": [            # Array of specific repair actions
+            "cpu_scaling",
+            "memory_scaling"
+        ]
+    }
+}
+```
+
+### Diagnostics Fields Explained
+
+**1. predicted_impact** (string)
+- The predicted class name from the 5 classes
+- Examples: `"Benign_Or_Subtle"`, `"Harmful_Performance_Degradation"`, `"Harmful_Security_Breach"`, `"Harmful_Multi_Vector"`, `"Harmful_Critical_Outage"`
+
+**2. severity_level** (integer: 1-3)
+- Discrete severity level, NOT continuous
+- `1` = Low severity (benign changes, minor impact)
+- `2` = Medium severity (notable impact)  
+- `3` = High severity (critical issue)
+- Always guaranteed to be exactly {1, 2, or 3}
+
+**3. confidence** (float: 0.0-1.0)
+- Model confidence in the prediction
+- Same as `class_confidence` for the top predicted class
+- Derived from softmax probability
+
+**4. root_cause_attention** (array of strings)
+- Top 3 most important input features for this prediction
+- Feature names mapped from 32-dimensional input space:
+  - YAML features: `node_count`, `depth`, `containers`, `volumes`, `env_vars`, `init_containers`, `persistent_volumes`, `resource_limits`, `security_contexts`, `container_change`, `volume_change`, `has_structure`
+  - Telemetry features: `request_rate`, `latency_p99`, `cpu_usage_cores`, `memory_working_set_bytes`, `error_rate_5xx`, `cpu_limit`, `memory_limit`, `cpu_ratio`, `memory_ratio`, `error_ratio`, `critical_flag`, `latency_magnitude`, `cpu_magnitude`, `memory_magnitude`
+  - Drift semantics: `drift_type`, `magnitude_level`, `num_drifts`, `severity`, `phase`, `is_rolling`
+- Extracted using multi-head attention weights from the model's fusion layer
+- Provides explainability: "this prediction was driven by these features"
+
+**5. recommended_repairs** (array of strings)
+- Specific repair actions recommended based on class and root causes
+- Per-class repair templates:
+  - Benign_Or_Subtle → `[]` (no repairs)
+  - Harmful_Performance_Degradation → `[cpu_scaling, memory_scaling, latency_tuning, load_balancing]`
+  - Harmful_Security_Breach → `[security_patch, secret_rotation, rbac_tighten, network_isolate]`
+  - Harmful_Multi_Vector → `[comprehensive_audit, rollback, network_isolate, security_patch]`
+  - Harmful_Critical_Outage → `[emergency_scale, failover, backup_restore, circuit_break]`
+- Top 4 most relevant repairs selected and returned
+
+### Using the Inference API
+
+```python
+from models.dit_sec_v3.inference import DITSecInference
+import numpy as np
+
+# Load model
+inferencer = DITSecInference()
+
+# Prepare features (batch_size=1)
+yaml_features = np.random.randn(1, 12)      # YAML diffs
+telemetry_features = np.random.randn(1, 14) # Prometheus metrics
+drift_features = np.random.randn(1, 6)      # Drift semantics
+
+# Run inference with diagnostics
+result = inferencer.predict(
+    yaml_features,
+    telemetry_features, 
+    drift_features,
+    return_probabilities=True,   # Include all class probabilities
+    return_diagnostics=True      # Include PRD-compliant diagnostics
+)
+
+# Access diagnostics
+diag = result["diagnostics"]
+print(f"Impact: {diag['predicted_impact']}")
+print(f"Severity: {diag['severity_level']}")
+print(f"Root causes: {diag['root_cause_attention']}")
+print(f"Recommended: {diag['recommended_repairs']}")
+```
+
+### Batch Inference
+
+For batch predictions (multiple samples):
+
+```python
+# Prepare batch features
+yaml_batch = np.random.randn(32, 12)
+telem_batch = np.random.randn(32, 14)
+drift_batch = np.random.randn(32, 6)
+
+result = inferencer.predict(yaml_batch, telem_batch, drift_batch, return_diagnostics=True)
+
+# Diagnostics is now a list (one per sample)
+for i, diag in enumerate(result["diagnostics"]):
+    print(f"Sample {i}: {diag['predicted_impact']} (severity {diag['severity_level']})")
+```
+
+### Integration with Health Agent
+
+The diagnostics are automatically included in HealthAgent responses:
+
+```python
+# Health Agent includes diagnostics in assessment
+assessment = {
+    "risk_score": 0.79,
+    "severity": "medium",
+    "explainability": {
+        "root_cause_attention": [...],
+        "recommended_repairs": [...],
+    },
+    "diagnostics": {  # Full PRD-compliant diagnostics
+        "predicted_impact": "...",
+        "severity_level": 2,
+        "confidence": 0.94,
+        "root_cause_attention": [...],
+        "recommended_repairs": [...]
+    }
+}
+```
+
+---
+
 ## Components
 
 | Component | Type | Description |

@@ -1,0 +1,53 @@
+# Multi-stage build for Health Agent with embedded DIT-Sec checkpoint
+
+# Stage 1: Build dependencies
+FROM python:3.10-slim AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy dependency files only (cached when only app code changes)
+COPY pyproject.toml uv.lock* ./
+
+# Install dependencies
+RUN pip install --no-cache-dir uv && \
+    uv export --no-hashes --format requirements-txt > requirements.txt && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy application code (changes here won't reinstall packages)
+COPY agents/health_agent/ ./agents/health_agent/
+COPY models/dit_sec_v3/ ./models/dit_sec_v3/
+
+# Stage 2: Runtime
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install runtime deps only
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed site-packages from builder (bypasses pip install entirely)
+COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
+
+# Copy application code
+COPY --from=builder /build/agents/health_agent/ ./
+COPY --from=builder /build/models/dit_sec_v3/ ./models/dit_sec_v3/
+
+# Create non-root user
+RUN useradd -m -u 1000 healthagent && chown -R healthagent:healthagent /app
+USER healthagent
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python -c "import sys; sys.exit(0)" || exit 1
+
+# Set entrypoint
+ENTRYPOINT ["python", "main.py"]
+CMD []

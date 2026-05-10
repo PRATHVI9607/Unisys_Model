@@ -49,7 +49,6 @@ class HealthAgentService:
             # Create agent instance
             self.agent = HealthAgent(
                 namespace=self.config.namespace,
-                in_cluster=self.config.in_cluster,
                 redis_url=self.config.redis_url,
                 dit_sec_url=self.config.dit_sec_url,
                 prometheus_url=self.config.prometheus_url,
@@ -60,7 +59,7 @@ class HealthAgentService:
             )
 
             # Optionally load and process training dataset
-            if self.config.training_dataset_path:
+            if self.config.dataset_path:
                 await self._load_training_dataset()
 
         except Exception as e:
