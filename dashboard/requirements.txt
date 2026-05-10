@@ -4,10 +4,10 @@
 flask==3.0.0
 flask-socketio==5.3.0
 python-socketio==5.11.0
-eventlet==0.34.0
+eventlet>=0.40.0
 
 # Redis
-aioredis==2.0.1
+redis>=5.0.0
 
 # API
 pydantic==2.6.0

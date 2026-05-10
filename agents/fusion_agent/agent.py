@@ -59,7 +59,7 @@ class FusionAgent:
             "dev": 0.70
         }
         
-        self.redis: Optional[airedis.Redis] = None
+        self.redis: Optional[aioredis.Redis] = None
         self.core_api: Optional[client.CoreV1Api] = None
         self.apps_api: Optional[client.AppsV1Api] = None
         
@@ -81,10 +81,11 @@ class FusionAgent:
         self.core_api = client.CoreV1Api()
         self.apps_api = client.AppsV1Api()
         
-        self.redis = await aioredis.create_redis_pool(self.redis_url)
-        
+        self.redis = aioredis.from_url(self.redis_url)
+
         logger.info("Fusion Agent started successfully")
-        
+
+        self.running = True
         await self._consume_events()
     
     async def stop(self) -> None:
@@ -93,8 +94,7 @@ class FusionAgent:
         self.running = False
         
         if self.redis:
-            self.redis.close()
-            await self.redis.wait_closed()
+            await self.redis.aclose()
         
         logger.info("Fusion Agent stopped")
     
@@ -119,11 +119,11 @@ class FusionAgent:
                     if messages:
                         for stream, entries in messages:
                             for msg_id, fields in entries:
-                                last_ids[stream] = msg_id
-                                
-                                if stream == "kubeheal.health.events":
+                                last_ids[stream_name] = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+
+                                if stream_name == "kubeheal.health.events":
                                     await self._handle_health_event(msg_id, fields)
-                                elif stream == "kubeheal.security.events":
+                                elif stream_name == "kubeheal.security.events":
                                     await self._handle_security_event(msg_id, fields)
                 
                 await asyncio.sleep(0.1)
@@ -435,9 +435,9 @@ class FusionAgent:
         incident_record = {
             "incident_id": f"{event_type}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
             "type": event_type,
-            "target": event.get("target", {}),
-            "risk_score": event.get("risk_score", 0.0),
-            "adjusted_score": result.adjusted_score,
+            "target": json.dumps(event.get("target", {})),
+            "risk_score": str(event.get("risk_score", 0.0)),
+            "adjusted_score": str(result.adjusted_score),
             "action": result.action.value,
             "outcome": "pending",
             "timestamp": datetime.utcnow().isoformat()

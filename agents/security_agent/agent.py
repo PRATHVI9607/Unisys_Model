@@ -191,8 +191,9 @@ class SecurityAgent:
         self.mmap_entropy_threshold = mmap_entropy_threshold
         self.mmap_size_threshold = mmap_size_threshold
         
-        self.redis: Optional[airedis.Redis] = None
+        self.redis: Optional[aioredis.Redis] = None
         self.core_api: Optional[client.CoreV1Api] = None
+        self.networking_api: Optional[client.NetworkingV1Api] = None
         
         self.running = False
         
@@ -213,11 +214,13 @@ class SecurityAgent:
             await config.load_config()
         
         self.core_api = client.CoreV1Api()
-        
-        self.redis = await aioredis.create_redis_pool(self.redis_url)
-        
+        self.networking_api = client.NetworkingV1Api()
+
+        self.redis = aioredis.from_url(self.redis_url)
+
         logger.info("Security Agent started successfully")
-        
+
+        self.running = True
         asyncio.create_task(self._scan_pids_periodic())
         asyncio.create_task(self._handle_falco_events())
         asyncio.create_task(self._process_write_events())
@@ -228,8 +231,7 @@ class SecurityAgent:
         self.running = False
         
         if self.redis:
-            self.redis.close()
-            await self.redis.wait_closed()
+            await self.redis.aclose()
         
         logger.info("Security Agent stopped")
     
@@ -317,7 +319,8 @@ class SecurityAgent:
         """Direct kill without Fusion (fastest path for critical ransomware)."""
         logger.warning(f"DIRECT KILL: PID {pid}, risk={risk_score:.2f}")
         
-        namespace = early_signals.get("namespace", "default")
+        pid_info = await self._get_pid_info(pid)
+        namespace = pid_info.get("namespace", "default") if pid_info else "default"
         await self._apply_network_isolation(namespace)
         
         event_id = f"sec-direct-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{pid}"
@@ -364,8 +367,8 @@ class SecurityAgent:
         }
         
         try:
-            if self.core_api:
-                await self.core_api.create_namespaced_network_policy(
+            if self.networking_api:
+                await self.networking_api.create_namespaced_network_policy(
                     namespace, np_manifest
                 )
                 logger.info(f"NetworkPolicy applied to {namespace}")

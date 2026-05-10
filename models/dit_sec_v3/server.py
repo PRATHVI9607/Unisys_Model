@@ -111,7 +111,9 @@ async def score(request: ScoreRequest):
         
     except Exception as e:
         logger.error(f"Scoring error: {e}")
-        risk_score, label = _score_fallback(request)
+        fb = _score_fallback(request)
+        risk_score = fb["risk_score"]
+        label = fb["label"]
     
     return ScoreResponse(
         risk_score=risk_score,

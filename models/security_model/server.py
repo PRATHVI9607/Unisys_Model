@@ -39,6 +39,7 @@ async def startup():
     model_path = os.environ.get("MODEL_PATH", "/models/security_model.pt")
     
     try:
+        import torch
         from security_model import SecurityModel
         model = SecurityModel()
         if os.path.exists(model_path):

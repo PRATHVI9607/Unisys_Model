@@ -4,7 +4,7 @@ import logging
 import hashlib
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 import aioredis
@@ -34,7 +34,7 @@ class HealthAssessment(BaseModel):
     explainability: Optional[Dict[str, Any]] = None
     confidence_interval: Optional[Tuple[float, float]] = None
     blast_radius: str = "unknown"
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
 class HealthAgent:
@@ -57,10 +57,11 @@ class HealthAgent:
         self.cooldown_ttl = cooldown_ttl
         self.prometheus_url = prometheus_url
         
-        self.redis: Optional[airedis.Redis] = None
+        self.redis: Optional[aioredis.Redis] = None
         self.core_api: Optional[client.CoreV1Api] = None
         self.apps_api: Optional[client.AppsV1Api] = None
         self.custom_api: Optional[client.CustomObjectsApi] = None
+        self.networking_api: Optional[client.NetworkingV1Api] = None
         
         self.running = False
         self.watcher = None
@@ -80,8 +81,10 @@ class HealthAgent:
         self.apps_api = client.AppsV1Api()
         self.custom_api = client.CustomObjectsApi()
         
-        self.redis = await aioredis.create_redis_pool(self.redis_url)
-        
+        self.networking_api = client.NetworkingV1Api()
+
+        self.redis = aioredis.from_url(self.redis_url)
+
         logger.info("Health Agent started successfully")
         
         await self.watch_deployments()
@@ -95,8 +98,7 @@ class HealthAgent:
             self.watcher.stop()
         
         if self.redis:
-            self.redis.close()
-            await self.redis.wait_closed()
+            await self.redis.aclose()
         
         logger.info("Health Agent stopped")
     
@@ -152,6 +154,7 @@ class HealthAgent:
         
         old_spec = await self._get_previous_spec(namespace, name)
         new_spec = deployment.get("spec", {})
+        await self._save_spec(namespace, name, new_spec)
         
         await asyncio.sleep(15)
         
@@ -240,6 +243,11 @@ class HealthAgent:
         if spec:
             return json.loads(spec)
         return None
+
+    async def _save_spec(self, namespace: str, name: str, spec: Dict) -> None:
+        """Save current spec to cache for next comparison."""
+        key = f"kubeheal:spec:{namespace}:{name}"
+        await self.redis.set(key, json.dumps(spec))
     
     async def _query_blast_radius(self, namespace: str, deployment: Dict) -> str:
         """Query blast radius: Services + Ingresses."""
@@ -255,7 +263,7 @@ class HealthAgent:
                 if svc.spec.type == "LoadBalancer":
                     return "High"
             
-            ingresses = await self.core_api.list_namespaced_ingress(namespace)
+            ingresses = await self.networking_api.list_namespaced_ingress(namespace)
             
             for ing in ingresses.items:
                 if ing.spec.backend and ing.spec.backend.service:

@@ -39,6 +39,7 @@ async def startup():
     model_path = os.environ.get("MODEL_PATH", "/models/health_model.pt")
     
     try:
+        import torch
         from health_model import HealthModel
         model = HealthModel()
         if os.path.exists(model_path):
