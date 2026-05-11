@@ -129,10 +129,12 @@ class HealthAgent:
         deployment: Dict
     ) -> None:
         """Handle Deployment watch event."""
+        if hasattr(deployment, "to_dict"):
+            deployment = deployment.to_dict()
         name = deployment["metadata"]["name"]
         namespace = deployment["metadata"]["namespace"]
         generation = deployment.get("metadata", {}).get("generation", 0)
-        observed_gen = deployment.get("status", {}).get("observedGeneration", 0)
+        observed_gen = deployment.get("status", {}).get("observed_generation", 0)
         
         logger.info(f"Event {event_type} for {namespace}/{name} gen={generation}")
         
@@ -143,31 +145,35 @@ class HealthAgent:
         if await self._check_cooldown(namespace, name):
             logger.debug("Skipping - in cooldown")
             return
-        
+
         baseline_sha = await self._get_baseline_sha(namespace, name)
-        
+
         if not await self._validate_baseline(namespace, name, baseline_sha):
             logger.warning(f"Baseline stale or invalid for {namespace}/{name}")
             return
-        
+
         blast_radius = await self._query_blast_radius(namespace, deployment)
-        
+
         old_spec = await self._get_previous_spec(namespace, name)
         new_spec = deployment.get("spec", {})
-        await self._save_spec(namespace, name, new_spec)
-        
+        try:
+            await self._save_spec(namespace, name, new_spec)
+        except Exception as e:
+            logger.warning(f"Save spec failed: {e}")
+            new_spec = {}
+
         await asyncio.sleep(15)
-        
+
         telemetry = await self._fetch_telemetry(namespace, name)
-        
+
         assessment = await self._assess_health(
             namespace, name, old_spec, new_spec, telemetry, blast_radius
         )
-        
+
         if assessment:
             await self._publish_assessment(assessment)
             await self._set_cooldown(namespace, name)
-            
+
             logger.info(f"Assessment: risk_score={assessment.risk_score:.2f}")
     
     async def _check_cooldown(self, namespace: str, name: str) -> bool:
@@ -251,7 +257,7 @@ class HealthAgent:
     
     async def _query_blast_radius(self, namespace: str, deployment: Dict) -> str:
         """Query blast radius: Services + Ingresses."""
-        selector = deployment.get("spec", {}).get("selector", {})
+        selector = deployment.get("spec", {}).get("selector", {}).get("match_labels", {}) or {}
         
         try:
             services = await self.core_api.list_namespaced_service(
@@ -284,7 +290,7 @@ class HealthAgent:
                 f'pod=~"{name}.*"}}[5s])) by (pod) * 100'
             )
             
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                 async with session.get(
                     f"{self.prometheus_url}/api/v1/query",
                     params={"query": query}
@@ -331,12 +337,16 @@ class HealthAgent:
         except Exception as e:
             logger.debug(f"DIT-Sec call failed: {e}")
             result = self._local_assessment(new_spec, telemetry)
-        
+
         if not result:
             return None
-        
+
+        local = self._local_assessment(new_spec, telemetry)
+        if local.get("risk_score", 0.0) > result.get("risk_score", 0.0):
+            result = local
+
         event_id = f"health-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{name}"
-        
+
         return HealthAssessment(
             event_id=event_id,
             target={
@@ -434,7 +444,7 @@ class HealthAgent:
                 "risk_score": str(assessment.risk_score),
                 "severity": assessment.severity.value,
                 "blast_radius": assessment.blast_radius,
-                "confidence_interval": str(assessment.confidence_interval),
+                "confidence_interval": json.dumps(list(assessment.confidence_interval)) if assessment.confidence_interval else "null",
                 "timestamp": assessment.timestamp
             }
         )

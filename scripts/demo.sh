@@ -37,8 +37,10 @@ kubectl wait --for=condition=ready pod -l app=victim -n "$NAMESPACE" --timeout=6
     echo "WARNING: Victim pod not ready within 60s, continuing anyway..."
 }
 
-echo "Clearing incidents..."
+echo "Clearing incidents and cooldowns..."
 redis-cli DEL kubeheal.incidents 2>/dev/null || true
+kubectl exec -n kubeheal redis-master-0 -- redis-cli DEL "kubeheal:cooldown:${NAMESPACE}:victim-app" 2>/dev/null || true
+kubectl exec -n kubeheal redis-master-0 -- redis-cli DEL kubeheal.incidents 2>/dev/null || true
 
 echo ""
 echo "Ready for demo!"
@@ -55,9 +57,11 @@ echo ""
 echo "Injecting CPU drift (500m -> 50m)..."
 echo ""
 
+kubectl exec -n kubeheal redis-master-0 -- redis-cli DEL "kubeheal:cooldown:${NAMESPACE}:victim-app" 2>/dev/null || true
+
 if ! kubectl patch deployment victim-app -n "$NAMESPACE" \
-    --type=merge \
-    -p '{"spec":{"template":{"spec":{"containers":[{"name":"app","resources":{"limits":{"cpu":"50m"}}}]}}}}'; then
+    --type=strategic \
+    -p '{"spec":{"template":{"spec":{"containers":[{"name":"app","resources":{"requests":{"cpu":"10m"},"limits":{"cpu":"50m"}}}]}}}}'; then
     echo "ERROR: Could not patch deployment victim-app in namespace $NAMESPACE"
     exit 1
 fi
