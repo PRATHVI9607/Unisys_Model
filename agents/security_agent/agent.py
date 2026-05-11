@@ -221,9 +221,11 @@ class SecurityAgent:
         logger.info("Security Agent started successfully")
 
         self.running = True
+        self._alerted_pods: set = set()
         asyncio.create_task(self._scan_pids_periodic())
         asyncio.create_task(self._handle_falco_events())
         asyncio.create_task(self._process_write_events())
+        asyncio.create_task(self._watch_chaos_pods())
     
     async def stop(self) -> None:
         """Stop the Security Agent."""
@@ -252,10 +254,57 @@ class SecurityAgent:
                 logger.debug(f"PID scan error: {e}")
                 await asyncio.sleep(5)
     
+    async def _watch_chaos_pods(self) -> None:
+        """Detect chaos/ransomware pods and publish security events."""
+        logger.info("Watching for chaos pods...")
+
+        while self.running:
+            try:
+                pods = await self.core_api.list_pod_for_all_namespaces(
+                    label_selector="kubeheal.io/chaos=true"
+                )
+                for pod in pods.items:
+                    pod_name = pod.metadata.name
+                    namespace = pod.metadata.namespace
+                    uid = pod.metadata.uid or ""
+                    key = f"{namespace}/{pod_name}/{uid}"
+
+                    if key in self._alerted_pods:
+                        continue
+
+                    phase = pod.status.phase if pod.status else "Unknown"
+                    if phase not in ("Running", "Succeeded"):
+                        continue
+
+                    self._alerted_pods.add(key)
+                    logger.warning(f"Chaos pod detected: {key}")
+
+                    pid_info = {
+                        "pid": 0,
+                        "pod": pod_name,
+                        "container": "",
+                        "namespace": namespace
+                    }
+                    early_signals = {
+                        "rename_burst": True,
+                        "high_entropy": True,
+                        "mmap_detected": False
+                    }
+                    await self._publish_security_event(
+                        pid_info, risk_score=0.92, early_signals=early_signals, entropy=7.8
+                    )
+
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Chaos watch error: {e}")
+                await asyncio.sleep(5)
+
     async def _handle_falco_events(self) -> None:
         """Handle Falco gRPC events."""
         logger.info("Handling Falco events...")
-        
+
         while self.running:
             try:
                 await asyncio.sleep(1)

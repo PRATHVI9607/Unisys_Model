@@ -15,6 +15,7 @@ spec:
       serviceAccountName: kubeheal
       hostPID: true
       hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: agent
           image: kubeheal/security-agent:v3

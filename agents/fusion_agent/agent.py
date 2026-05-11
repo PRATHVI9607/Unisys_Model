@@ -26,7 +26,7 @@ class ActionType(str, Enum):
 
 class DecisionResult(BaseModel):
     action: ActionType
-    target: Dict[str, str]
+    target: Dict[str, Any]
     adjusted_score: float
     circuit_breaker_state: Optional[Dict[str, Any]] = None
     message: str = ""
@@ -98,15 +98,26 @@ class FusionAgent:
         
         logger.info("Fusion Agent stopped")
     
+    async def _load_stream_offsets(self) -> Dict[str, str]:
+        """Load last-processed stream IDs from Redis (persist across restarts)."""
+        streams = ["kubeheal.health.events", "kubeheal.security.events"]
+        offsets = {}
+        for s in streams:
+            stored = await self.redis.get(f"kubeheal:fusion:offset:{s}")
+            offsets[s] = stored.decode() if stored else "$"
+        return offsets
+
+    async def _save_stream_offset(self, stream: str, msg_id: str) -> None:
+        """Persist stream offset so restarts don't replay history."""
+        await self.redis.set(f"kubeheal:fusion:offset:{stream}", msg_id)
+
     async def _consume_events(self) -> None:
         """Consume events from Redis Streams."""
         logger.info("Consuming events from Redis Streams...")
-        
-        last_ids = {
-            "kubeheal.health.events": "0",
-            "kubeheal.security.events": "0"
-        }
-        
+
+        last_ids = await self._load_stream_offsets()
+        logger.info(f"Stream offsets: {last_ids}")
+
         while self.running:
             try:
                 for stream_name, last_id in last_ids.items():
@@ -115,22 +126,24 @@ class FusionAgent:
                         count=10,
                         block=1000
                     )
-                    
+
                     if messages:
                         for stream, entries in messages:
                             for msg_id, fields in entries:
-                                last_ids[stream_name] = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+                                decoded_id = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+                                last_ids[stream_name] = decoded_id
+                                await self._save_stream_offset(stream_name, decoded_id)
 
                                 if stream_name == "kubeheal.health.events":
                                     await self._handle_health_event(msg_id, fields)
                                 elif stream_name == "kubeheal.security.events":
                                     await self._handle_security_event(msg_id, fields)
-                
+
                 await asyncio.sleep(0.1)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.debug(f"Event consume error: {e}")
+                logger.error(f"Event consume error: {e}")
                 await asyncio.sleep(1)
     
     async def _handle_health_event(self, msg_id: str, fields: Dict) -> None:
@@ -142,7 +155,7 @@ class FusionAgent:
                 "risk_score": float(fields.get(b"risk_score", b"0")),
                 "severity": fields.get(b"severity", b"benign").decode(),
                 "blast_radius": fields.get(b"blast_radius", b"unknown").decode(),
-                "confidence_interval": json.loads(fields.get(b"confidence_interval", b"null")),
+                "confidence_interval": self._parse_ci_field(fields.get(b"confidence_interval", b"")),
                 "timestamp": fields.get(b"timestamp", b"").decode()
             }
             
@@ -150,7 +163,7 @@ class FusionAgent:
             
             await self.redis.xack("kubeheal.health.events", "fusion", msg_id)
         except Exception as e:
-            logger.debug(f"Health event error: {e}")
+            logger.error(f"Health event error: {e}")
     
     async def _handle_security_event(self, msg_id: str, fields: Dict) -> None:
         """Handle Security Event."""
@@ -168,7 +181,7 @@ class FusionAgent:
             
             await self.redis.xack("kubeheal.security.events", "fusion", msg_id)
         except Exception as e:
-            logger.debug(f"Security event error: {e}")
+            logger.error(f"Security event error: {e}")
     
     async def _process_decision(self, event: Dict, event_type: str) -> None:
         """Process decision for event."""
@@ -248,6 +261,19 @@ class FusionAgent:
         else:
             return "dev"
     
+    @staticmethod
+    def _parse_ci_field(raw: bytes) -> Optional[list]:
+        """Parse confidence_interval Redis field, tolerating Python repr."""
+        if not raw:
+            return None
+        s = raw.decode() if isinstance(raw, bytes) else raw
+        if s in ("None", "null", ""):
+            return None
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            return None
+
     def _parse_confidence_interval(self, ci: Any) -> Optional[float]:
         """Parse confidence interval to get width."""
         if not ci:
@@ -275,6 +301,7 @@ class FusionAgent:
         
         cb_key = f"kubeheal:cb:{namespace}"
         cb_count = await self.redis.incr(cb_key)
+        await self.redis.expire(cb_key, 3600, nx=True)
         
         if cb_count and cb_count <= self.max_auto_kill_per_ns_per_hour:
             return DecisionResult(
@@ -410,8 +437,11 @@ class FusionAgent:
                 grace_period_seconds=0
             )
             logger.info(f"Pod {namespace}/{pod_name} killed")
-        except Exception as e:
-            logger.error(f"Failed to kill pod: {e}")
+        except kubernetes_asyncio.client.exceptions.ApiException as e:
+            if e.status == 404:
+                logger.info(f"Pod {namespace}/{pod_name} already gone (404)")
+            else:
+                logger.error(f"Failed to kill pod: {e}")
     
     async def _execute_patch(self, target: Dict) -> None:
         """Execute auto-patch action."""

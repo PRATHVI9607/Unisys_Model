@@ -12,7 +12,7 @@ spec:
     - name: simulator
       image: kubeheal/ransomware-simulator:v3
       imagePullPolicy: IfNotPresent
-      command: ["/usr/bin/python3", "/app/ransomware-simulator.py"]
+      command: ["/usr/local/bin/python3", "/app/ransomware-simulator.py"]
       args:
         - "--data-dir=/data"
         - "--num-files=100"
