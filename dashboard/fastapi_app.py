@@ -23,6 +23,13 @@ class HealthAssessment(BaseModel):
     severity: str
     blast_radius: str
     timestamp: str
+    # Extra fields for detailed view (from stream, not in model definition)
+    model_used: Optional[str] = None
+    model_score: Optional[float] = None
+    heuristic_score: Optional[float] = None
+    inference_method: Optional[str] = None
+    explainability: Optional[Dict[str, Any]] = None
+    patch_proposal: Optional[Dict[str, Any]] = None
 
 
 class SecurityEvent(BaseModel):
@@ -149,14 +156,47 @@ class KubeHealDashboard:
                             risk_score = float(fields.get(b"risk_score", b"0"))
                             severity = fields.get(b"severity", b"benign").decode()
                             timestamp = fields.get(b"timestamp", b"").decode()
+                            blast_radius = fields.get(
+                                b"blast_radius", b"unknown"
+                            ).decode()
+
+                            # Parse model comparison fields
+                            model_used = fields.get(b"model_used", b"").decode() or None
+                            model_score = fields.get(b"model_score", b"")
+                            heuristic_score = fields.get(b"heuristic_score", b"")
+                            inference_method = (
+                                fields.get(b"inference_method", b"").decode() or None
+                            )
+                            explainability = fields.get(b"explainability", b"{}")
+                            patch_proposal = fields.get(b"patch_proposal", b"{}")
 
                             assessment = HealthAssessment(
                                 event_id=event_id,
                                 target=target,
                                 risk_score=risk_score,
                                 severity=severity,
-                                blast_radius="unknown",
+                                blast_radius=blast_radius,
                                 timestamp=timestamp,
+                            )
+
+                            # Store extra fields for detail lookup
+                            assessment.model_used = model_used
+                            assessment.model_score = (
+                                float(model_score) if model_score else None
+                            )
+                            assessment.heuristic_score = (
+                                float(heuristic_score) if heuristic_score else None
+                            )
+                            assessment.inference_method = inference_method
+                            assessment.explainability = (
+                                json.loads(explainability)
+                                if explainability and explainability != b"{}"
+                                else {}
+                            )
+                            assessment.patch_proposal = (
+                                json.loads(patch_proposal)
+                                if patch_proposal and patch_proposal != b"{}"
+                                else None
                             )
 
                             self.health_events.append(assessment)
@@ -629,15 +669,23 @@ async def get_event_details(event_id: str):
     # Fallback: try in-memory lists
     for event in reversed(dashboard.health_events):
         if event.event_id == event_id:
-            return EventDetails(
-                event_id=event.event_id,
-                target=event.target,
-                risk_score=event.risk_score,
-                severity=event.severity,
-                blast_radius=event.blast_radius,
-                timestamp=event.timestamp,
-                event_type="health",
-            )
+            # Include all fields including model comparison from stream
+            data = {
+                "event_id": event.event_id,
+                "target": event.target,
+                "risk_score": event.risk_score,
+                "severity": event.severity,
+                "blast_radius": event.blast_radius,
+                "timestamp": event.timestamp,
+                "event_type": "health",
+                "model_used": getattr(event, "model_used", None),
+                "model_score": getattr(event, "model_score", None),
+                "heuristic_score": getattr(event, "heuristic_score", None),
+                "inference_method": getattr(event, "inference_method", None),
+                "explainability": getattr(event, "explainability", None),
+                "patch_proposal": getattr(event, "patch_proposal", None),
+            }
+            return EventDetails(**data)
 
     for event in reversed(dashboard.security_events):
         if event.event_id == event_id:
