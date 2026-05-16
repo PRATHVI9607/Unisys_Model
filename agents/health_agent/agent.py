@@ -420,6 +420,10 @@ class HealthAgent:
             "confidence_interval": (risk_score - 0.05, risk_score + 0.05)
             if risk_score > 0
             else None,
+            "model_used": "heuristic",
+            "model_score": None,
+            "heuristic_score": risk_score,
+            "inference_method": "Heuristic fallback (local assessment)",
         }
 
     def _score_to_severity(self, score: float) -> SeverityLevel:
