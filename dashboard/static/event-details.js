@@ -39,43 +39,36 @@ class EventDetailsModal {
         this.dialog = document.createElement('div');
         this.dialog.className = 'modal-dialog';
         this.dialog.id = 'eventDetailsDialog';
-        this.dialog.innerHTML = `
-            <div class="modal-header">
-                <div class="modal-title">
-                    <span>Event Details</span>
-                    <span class="modal-event-id" id="modalEventId"></span>
-                </div>
-                <button class="modal-close" id="modalCloseBtn">&times;</button>
-            </div>
 
-            <div class="modal-tabs">
-                <button class="modal-tab-button active" data-tab="summary">Summary</button>
-                <button class="modal-tab-button" data-tab="analysis">Analysis</button>
-                <button class="modal-tab-button" data-tab="remediation">Remediation</button>
-            </div>
-
-            <div class="modal-content" id="modalContent">
-                <!-- Tab content will be populated here -->
-                <div class="tab-pane active" id="summaryTab"></div>
-                <div class="tab-pane" id="analysisTab"></div>
-                <div class="tab-pane" id="remediationTab"></div>
-            </div>
-        `;
+        // Store tab panes reference for later use
+        this._tabPanesCreated = false;
 
         document.body.appendChild(this.backdrop);
         document.body.appendChild(this.dialog);
     }
 
-    /**
+     /**
      * Attach event listeners to modal elements
+     * Uses event delegation to avoid duplicate listeners
      */
     attachEventListeners() {
-        // Close button
-        document.getElementById('modalCloseBtn').addEventListener('click', () => this.close());
+        // Only attach if not already attached
+        if (this._listenersAttached) return;
+        this._listenersAttached = true;
 
-        // Tab buttons
-        document.querySelectorAll('.modal-tab-button').forEach(btn => {
-            btn.addEventListener('click', (e) => this.switchTab(e.target.dataset.tab));
+        // Close button - delegate from dialog
+        this.dialog.addEventListener('click', (e) => {
+            if (e.target.id === 'modalCloseBtn' || e.target.closest('#modalCloseBtn')) {
+                this.close();
+            }
+        });
+
+        // Tab buttons - delegate from dialog
+        this.dialog.addEventListener('click', (e) => {
+            const btn = e.target.closest('.modal-tab-button');
+            if (btn) {
+                this.switchTab(btn.dataset.tab);
+            }
         });
 
         // Close on Escape key
@@ -86,12 +79,16 @@ class EventDetailsModal {
         });
     }
 
-    /**
-     * Open modal with event details
-     * @param {string} eventId - The event ID to display
-     */
+     /**
+      * Open modal with event details
+      * @param {string} eventId - The event ID to display
+      */
     async open(eventId) {
         this.currentEventId = eventId;
+        
+        // Render dialog content first (creates tab elements)
+        this.renderDialogContent();
+        
         this.backdrop.classList.add('active');
         this.dialog.classList.add('active');
 
@@ -116,27 +113,77 @@ class EventDetailsModal {
         }
     }
 
-    /**
-     * Close modal
-     */
+     /**
+      * Close modal
+      */
     close() {
         this.backdrop.classList.remove('active');
         this.dialog.classList.remove('active');
         this.currentEventId = null;
         this.currentEventType = null;
+        this._tabPanesCreated = false;
+        // Clear content to avoid stale elements on next open
+        this.dialog.innerHTML = '';
     }
 
     /**
-     * Show loading state in modal
+     * Render dialog content (called when modal opens)
      */
-    showLoading() {
-        const content = document.getElementById('modalContent');
-        content.innerHTML = `
-            <div class="modal-loading">
-                <div class="modal-spinner"></div>
-                <span>Loading event details...</span>
+    renderDialogContent() {
+        if (this._tabPanesCreated) return;
+
+        this.dialog.innerHTML = `
+            <div class="modal-header">
+                <div class="modal-title">
+                    <span>Event Details</span>
+                    <span class="modal-event-id" id="modalEventId"></span>
+                </div>
+                <button class="modal-close" id="modalCloseBtn">&times;</button>
+            </div>
+
+            <div class="modal-tabs">
+                <button class="modal-tab-button active" data-tab="summary">Summary</button>
+                <button class="modal-tab-button" data-tab="analysis">Analysis</button>
+                <button class="modal-tab-button" data-tab="remediation">Remediation</button>
+            </div>
+
+            <div class="modal-content" id="modalContent">
+                <div class="tab-pane active" id="summaryTab"></div>
+                <div class="tab-pane" id="analysisTab"></div>
+                <div class="tab-pane" id="remediationTab"></div>
             </div>
         `;
+
+        this._tabPanesCreated = true;
+        this.attachEventListeners();
+    }
+
+     /**
+      * Show loading state in modal
+      */
+    showLoading() {
+        const summaryTab = document.getElementById('summaryTab');
+        const analysisTab = document.getElementById('analysisTab');
+        const remediationTab = document.getElementById('remediationTab');
+        
+        if (summaryTab && analysisTab && remediationTab) {
+            summaryTab.innerHTML = `
+                <div class="modal-loading">
+                    <div class="modal-spinner"></div>
+                    <span>Loading event details...</span>
+                </div>
+            `;
+            analysisTab.innerHTML = '';
+            remediationTab.innerHTML = '';
+        } else {
+            const content = document.getElementById('modalContent');
+            content.innerHTML = `
+                <div class="modal-loading">
+                    <div class="modal-spinner"></div>
+                    <span>Loading event details...</span>
+                </div>
+            `;
+        }
         this.isLoading = true;
     }
 
@@ -145,14 +192,32 @@ class EventDetailsModal {
      * @param {string} message - Error message to display
      */
     showError(message) {
-        const content = document.getElementById('modalContent');
-        content.innerHTML = `
-            <div class="modal-error">
-                <div class="empty-section-icon">⚠️</div>
-                <p>${message}</p>
-            </div>
-        `;
+        const summaryTab = document.getElementById('summaryTab');
+        
+        if (summaryTab) {
+            summaryTab.innerHTML = `
+                <div class="modal-error">
+                    <div class="empty-section-icon">⚠️</div>
+                    <p>${message}</p>
+                </div>
+            `;
+        } else {
+            const content = document.getElementById('modalContent');
+            content.innerHTML = `
+                <div class="modal-error">
+                    <div class="empty-section-icon">⚠️</div>
+                    <p>${message}</p>
+                </div>
+            `;
+        }
         this.isLoading = false;
+    }
+
+    /**
+     * Check if tab elements exist
+     */
+    hasTabElements() {
+        return document.getElementById('summaryTab') !== null;
     }
 
     /**
