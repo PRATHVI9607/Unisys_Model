@@ -575,10 +575,9 @@ async def get_combined_events(limit: int = 20):
 
 @app.get("/api/events/{event_id}", response_model=EventDetails)
 async def get_event_details(event_id: str):
-    """Get detailed information for a specific event from Redis.
+    """Get detailed information for a specific event.
 
-    Retrieves complete event data including all fields like model comparison metrics,
-    patch proposals, explainability data, etc.
+    First checks in-memory event lists, then falls back to Redis hashes.
 
     Returns:
         EventDetails: Complete event information
@@ -589,6 +588,32 @@ async def get_event_details(event_id: str):
     if not dashboard:
         raise HTTPException(status_code=503, detail="Dashboard not initialized")
 
+    # First, try in-memory lists (from Redis stream listening)
+    for event in reversed(dashboard.health_events):
+        if event.event_id == event_id:
+            return EventDetails(
+                event_id=event.event_id,
+                target=event.target,
+                risk_score=event.risk_score,
+                severity=event.severity,
+                blast_radius=event.blast_radius,
+                timestamp=event.timestamp,
+                event_type="health",
+            )
+
+    for event in reversed(dashboard.security_events):
+        if event.event_id == event_id:
+            return EventDetails(
+                event_id=event.event_id,
+                target=event.target,
+                risk_score=event.risk_score,
+                label=event.label,
+                early_signals=event.early_signals,
+                timestamp=event.timestamp,
+                event_type="security",
+            )
+
+    # Fallback: try Redis hashes
     if not dashboard.redis:
         raise HTTPException(status_code=503, detail="Redis connection unavailable")
 
