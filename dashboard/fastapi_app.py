@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 class HealthAssessment(BaseModel):
     event_id: str
-    target: Dict[str, str]
+    target: Dict[str, Any]  # Values can be int or str
     risk_score: float
     severity: str
     blast_radius: str
@@ -27,7 +27,7 @@ class HealthAssessment(BaseModel):
 
 class SecurityEvent(BaseModel):
     event_id: str
-    target: Dict[str, str]
+    target: Dict[str, Any]  # PID can be int or str
     risk_score: float
     label: str
     early_signals: Dict[str, Any]
@@ -627,7 +627,7 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.get("/")
 async def root():
     """Serve the dashboard HTML."""
-    return FileResponse("dashboard/templates/index.html")
+    return FileResponse("templates/index.html")
 
 
 if __name__ == "__main__":
