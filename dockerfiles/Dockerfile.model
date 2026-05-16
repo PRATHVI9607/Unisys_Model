@@ -3,18 +3,19 @@ FROM python:3.11-slim
 WORKDIR /app
 
 RUN pip install --no-cache-dir \
-    torch==2.2.0 \
-    torch-geometric==2.5.0 \
-    onnxruntime==1.17.0 \
+    onnxruntime==1.19.2 \
+    "numpy<2" \
     fastapi==0.110.0 \
     uvicorn==0.27.0 \
     pydantic==2.6.0 \
     aioredis==2.0.1 \
-    numpy scipy networkx
+    aiohttp
 
 COPY models/ /models/
 
-ENV MODEL_PATH=/models/dit_sec_v3.onnx
+WORKDIR /models/dit_sec_v3
+
+ENV MODEL_PATH=/models/dit_sec_v3/models/dit_sec_v3_simple.onnx
 ENV REDIS_URL=redis://redis-master:6379
 ENV LOG_LEVEL=INFO
 

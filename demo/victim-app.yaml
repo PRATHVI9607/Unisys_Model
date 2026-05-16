@@ -24,6 +24,8 @@ kind: Deployment
 metadata:
   name: victim-app
   namespace: demo
+  labels:
+    kubeheal.io/watch: "true"
   annotations:
     kubeheal.io/baseline-sha: "abc123def456"
     kubeheal.io/baseline-date: "2025-01-01T00:00:00Z"

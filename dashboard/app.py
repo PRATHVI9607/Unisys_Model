@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Dict, List, Any, Optional
@@ -32,7 +33,9 @@ class KubeHealDashboard:
         self.app = Flask(__name__, template_folder="templates")
         self.app.config["SECRET_KEY"] = "kubeheal-secret"
 
-        self.socketio = SocketIO(self.app, cors_allowed_origins="*", async_mode="eventlet")
+        self.socketio = SocketIO(
+            self.app, cors_allowed_origins="*", async_mode="eventlet"
+        )
 
         self.incidents: List[Incident] = []
         self.risk_scores: Dict[str, float] = {}
@@ -47,7 +50,9 @@ class KubeHealDashboard:
 
         @self.app.route("/health")
         def health():
-            return jsonify({"status": "healthy", "timestamp": datetime.utcnow().isoformat()})
+            return jsonify(
+                {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+            )
 
         @self.app.route("/ready")
         def ready():
@@ -55,10 +60,12 @@ class KubeHealDashboard:
 
         @self.app.route("/api/incidents")
         def get_incidents():
-            return jsonify({
-                "incidents": [i.model_dump() for i in self.incidents],
-                "count": len(self.incidents)
-            })
+            return jsonify(
+                {
+                    "incidents": [i.model_dump() for i in self.incidents],
+                    "count": len(self.incidents),
+                }
+            )
 
         @self.app.route("/api/risk-scores")
         def get_risk_scores():
@@ -70,21 +77,29 @@ class KubeHealDashboard:
 
         @self.app.route("/api/stats")
         def get_stats():
-            return jsonify({
-                "total_incidents": len(self.incidents),
-                "auto_resolved": sum(1 for i in self.incidents if i.action.startswith("auto")),
-                "human_escalated": sum(1 for i in self.incidents if i.action == "human_approval"),
-                "false_positives": 0,
-                "avg_mttr_seconds": 80,
-                "avg_kill_time_ms": 8000
-            })
+            return jsonify(
+                {
+                    "total_incidents": len(self.incidents),
+                    "auto_resolved": sum(
+                        1 for i in self.incidents if i.action.startswith("auto")
+                    ),
+                    "human_escalated": sum(
+                        1 for i in self.incidents if i.action == "human_approval"
+                    ),
+                    "false_positives": 0,
+                    "avg_mttr_seconds": 80,
+                    "avg_kill_time_ms": 8000,
+                }
+            )
 
     def connect_redis(self) -> None:
         """Connect to Redis (sync client — eventlet handles concurrency)."""
         try:
-            self.redis_client = redis.from_url(self.redis_url, decode_responses=False)
+            self.redis_client = redis.from_url(
+                self.redis_url, decode_responses=False, socket_connect_timeout=5
+            )
             self.redis_client.ping()
-            logger.info("Connected to Redis")
+            logger.info(f"Connected to Redis at {self.redis_url}")
         except Exception as e:
             logger.warning(f"Redis not available: {e}. Running without Redis.")
             self.redis_client = None
@@ -106,14 +121,16 @@ class KubeHealDashboard:
             try:
                 if self.redis_client:
                     messages = self.redis_client.xread(
-                        {"kubeheal.health.events": last_id},
-                        count=5,
-                        block=1000
+                        {"kubeheal.health.events": last_id}, count=5, block=1000
                     )
                     if messages:
                         for stream, entries in messages:
                             for msg_id, fields in entries:
-                                last_id = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+                                last_id = (
+                                    msg_id.decode()
+                                    if isinstance(msg_id, bytes)
+                                    else msg_id
+                                )
                                 self._handle_health_event(fields)
             except Exception as e:
                 logger.debug(f"Health listener error: {e}")
@@ -125,14 +142,16 @@ class KubeHealDashboard:
             try:
                 if self.redis_client:
                     messages = self.redis_client.xread(
-                        {"kubeheal.security.events": last_id},
-                        count=5,
-                        block=1000
+                        {"kubeheal.security.events": last_id}, count=5, block=1000
                     )
                     if messages:
                         for stream, entries in messages:
                             for msg_id, fields in entries:
-                                last_id = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+                                last_id = (
+                                    msg_id.decode()
+                                    if isinstance(msg_id, bytes)
+                                    else msg_id
+                                )
                                 self._handle_security_event(fields)
             except Exception as e:
                 logger.debug(f"Security listener error: {e}")
@@ -144,14 +163,16 @@ class KubeHealDashboard:
             try:
                 if self.redis_client:
                     messages = self.redis_client.xread(
-                        {"kubeheal.actions": last_id},
-                        count=5,
-                        block=1000
+                        {"kubeheal.actions": last_id}, count=5, block=1000
                     )
                     if messages:
                         for stream, entries in messages:
                             for msg_id, fields in entries:
-                                last_id = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+                                last_id = (
+                                    msg_id.decode()
+                                    if isinstance(msg_id, bytes)
+                                    else msg_id
+                                )
                                 self._handle_action(fields)
             except Exception as e:
                 logger.debug(f"Action listener error: {e}")
@@ -165,7 +186,9 @@ class KubeHealDashboard:
                         key = f"kubeheal:status:{agent}"
                         status = self.redis_client.get(key)
                         if status:
-                            self.agent_status[agent] = status.decode() if isinstance(status, bytes) else status
+                            self.agent_status[agent] = (
+                                status.decode() if isinstance(status, bytes) else status
+                            )
                 time.sleep(5)
             except Exception as e:
                 logger.debug(f"Status poll error: {e}")
@@ -183,7 +206,7 @@ class KubeHealDashboard:
                 target=target,
                 risk_score=risk_score,
                 action="pending",
-                timestamp=datetime.utcnow().isoformat()
+                timestamp=datetime.utcnow().isoformat(),
             )
 
             self.incidents.append(incident)
@@ -192,7 +215,9 @@ class KubeHealDashboard:
             self.risk_scores[target_name] = risk_score
 
             self.socketio.emit("health_event", incident.model_dump())
-            self.socketio.emit("risk_update", {"target": target_name, "score": risk_score})
+            self.socketio.emit(
+                "risk_update", {"target": target_name, "score": risk_score}
+            )
 
             logger.info(f"Health event: {event_id}, risk={risk_score:.2f}")
         except Exception as e:
@@ -210,7 +235,7 @@ class KubeHealDashboard:
                 target=target,
                 risk_score=risk_score,
                 action="pending",
-                timestamp=datetime.utcnow().isoformat()
+                timestamp=datetime.utcnow().isoformat(),
             )
 
             self.incidents.append(incident)
@@ -219,7 +244,9 @@ class KubeHealDashboard:
             self.risk_scores[target_name] = risk_score
 
             self.socketio.emit("security_event", incident.model_dump())
-            self.socketio.emit("risk_update", {"target": target_name, "score": risk_score})
+            self.socketio.emit(
+                "risk_update", {"target": target_name, "score": risk_score}
+            )
 
             logger.info(f"Security event: {event_id}, risk={risk_score:.2f}")
         except Exception as e:
@@ -233,15 +260,21 @@ class KubeHealDashboard:
             target_name = target.get("name", target.get("pod", "unknown"))
 
             for incident in reversed(self.incidents):
-                if incident.target.get("name") == target_name or incident.target.get("pod") == target_name:
+                if (
+                    incident.target.get("name") == target_name
+                    or incident.target.get("pod") == target_name
+                ):
                     incident.action = action
                     break
 
-            self.socketio.emit("action_taken", {
-                "target": target_name,
-                "action": action,
-                "timestamp": datetime.utcnow().isoformat()
-            })
+            self.socketio.emit(
+                "action_taken",
+                {
+                    "target": target_name,
+                    "action": action,
+                    "timestamp": datetime.utcnow().isoformat(),
+                },
+            )
 
             logger.info(f"Action: {action} on {target_name}")
         except Exception as e:
@@ -255,5 +288,7 @@ class KubeHealDashboard:
 
 
 if __name__ == "__main__":
-    dashboard = KubeHealDashboard()
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    logger.info(f"Dashboard using REDIS_URL: {redis_url}")
+    dashboard = KubeHealDashboard(redis_url=redis_url)
     dashboard.run()

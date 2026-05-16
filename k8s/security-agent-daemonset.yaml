@@ -23,7 +23,7 @@ spec:
             privileged: true
           env:
             - name: REDIS_URL
-              value: redis://redis-master:6379
+              value: redis://redis:6379
             - name: DIT_SEC_URL
               value: http://dit-sec-server:8000
             - name: FALCO_GRPC_ADDR

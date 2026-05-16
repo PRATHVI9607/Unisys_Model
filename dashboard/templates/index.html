@@ -4,317 +4,587 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KubeHeal Dashboard</title>
-    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <link rel="stylesheet" href="/static/event-details.css">
     <style>
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #0d1117;
-            color: #e6edf3;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: #e2e8f0;
             min-height: 100vh;
+            padding: 20px;
         }
-        .header {
-            background: #161b22;
-            border-bottom: 1px solid #30363d;
-            padding: 16px 24px;
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(100, 116, 139, 0.2);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 24px;
             display: flex;
-            align-items: center;
             justify-content: space-between;
+            align-items: center;
         }
-        .logo {
+
+        .header-title {
             display: flex;
             align-items: center;
-            gap: 12px;
+            gap: 16px;
         }
-        .logo h1 {
-            font-size: 24px;
+
+        .header-title h1 {
+            font-size: 28px;
             font-weight: 700;
-            color: #58a6ff;
+            background: linear-gradient(135deg, #60a5fa, #3b82f6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
         }
-        .logo span {
-            font-size: 12px;
-            color: #8b949e;
-            background: #21262d;
-            padding: 4px 8px;
-            border-radius: 4px;
-        }
-        .status-badge {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .status-dot {
-            width: 10px;
-            height: 10px;
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
             border-radius: 50%;
-            background: #238636;
+            background: #10b981;
             animation: pulse 2s infinite;
         }
+
+        .status-indicator.disconnected {
+            background: #ef4444;
+            animation: none;
+        }
+
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 24px;
-        }
+
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 16px;
             margin-bottom: 24px;
         }
+
         .stat-card {
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 8px;
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(100, 116, 139, 0.2);
+            border-radius: 12px;
             padding: 20px;
+            transition: all 0.3s ease;
         }
-        .stat-card h3 {
-            font-size: 14px;
-            color: #8b949e;
+
+        .stat-card:hover {
+            border-color: rgba(100, 116, 139, 0.4);
+            background: rgba(15, 23, 42, 0.8);
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
             margin-bottom: 8px;
         }
-        .stat-card .value {
-            font-size: 32px;
+
+        .stat-value {
+            font-size: 28px;
             font-weight: 700;
+            color: #f1f5f9;
         }
-        .stat-card .value.green { color: #238636; }
-        .stat-card .value.yellow { color: #d29922; }
-        .stat-card .value.blue { color: #58a6ff; }
-        .stat-card .value.red { color: #f85149; }
-        .stat-card .unit {
-            font-size: 14px;
-            color: #8b949e;
-            margin-left: 4px;
+
+        .stat-value.high-risk {
+            color: #ef4444;
         }
-        .grid {
+
+        .events-section {
             display: grid;
-            grid-template-columns: 2fr 1fr;
+            grid-template-columns: 1fr 1fr;
             gap: 24px;
+            margin-bottom: 24px;
         }
-        .panel {
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 8px;
+
+        .events-panel {
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(100, 116, 139, 0.2);
+            border-radius: 12px;
             overflow: hidden;
         }
+
         .panel-header {
-            background: #21262d;
-            padding: 12px 16px;
-            border-bottom: 1px solid #30363d;
-            font-weight: 600;
-        }
-        .panel-content {
+            background: rgba(30, 41, 59, 0.8);
+            border-bottom: 1px solid rgba(100, 116, 139, 0.2);
             padding: 16px;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        th, td {
-            text-align: left;
-            padding: 12px;
-            border-bottom: 1px solid #30363d;
-        }
-        th {
-            color: #8b949e;
-            font-weight: 500;
-            font-size: 12px;
-            text-transform: uppercase;
-        }
-        .risk-score {
-            display: inline-block;
-            padding: 4px 8px;
-            border-radius: 4px;
             font-weight: 600;
+            color: #f1f5f9;
         }
-        .risk-high {
-            background: rgba(248, 81, 73, 0.2);
-            color: #f85149;
-        }
-        .risk-medium {
-            background: rgba(210, 153, 34, 0.2);
-            color: #d29922;
-        }
-        .risk-low {
-            background: rgba(35, 134, 54, 0.2);
-            color: #238636;
-        }
-        .action-pending {
-            color: #8b949e;
-        }
-        .action-auto_kill, .action-auto_patch {
-            color: #f85149;
-        }
-        .action-human_approval {
-            color: #d29922;
-        }
+
         .events-list {
             max-height: 400px;
             overflow-y: auto;
+            padding: 16px;
         }
+
         .event-item {
+            background: rgba(51, 65, 85, 0.3);
+            border-left: 3px solid #3b82f6;
             padding: 12px;
-            border-bottom: 1px solid #30363d;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-        .event-item:last-child {
-            border-bottom: none;
-        }
-        .event-type {
-            display: inline-block;
-            padding: 2px 8px;
+            margin-bottom: 12px;
             border-radius: 4px;
             font-size: 12px;
+            animation: slideIn 0.3s ease;
+        }
+
+        .event-item.security {
+            border-left-color: #ef4444;
+        }
+
+        .event-item.high-risk {
+            background: rgba(239, 68, 68, 0.1);
+            border-left-color: #dc2626;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        .event-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+        }
+
+        .event-id {
+            color: #60a5fa;
             font-weight: 500;
         }
-        .event-health {
-            background: rgba(88, 166, 255, 0.2);
-            color: #58a6ff;
+
+        .event-risk {
+            font-weight: 600;
         }
-        .event-security {
-            background: rgba(248, 81, 73, 0.2);
-            color: #f85149;
+
+        .event-risk.high {
+            color: #ef4444;
+        }
+
+        .event-risk.medium {
+            color: #f59e0b;
+        }
+
+        .event-risk.low {
+            color: #10b981;
+        }
+
+        .event-target {
+            color: #cbd5e1;
+            margin-top: 4px;
+        }
+
+        .event-time {
+            color: #64748b;
+            font-size: 10px;
+            margin-top: 4px;
+        }
+
+        .combined-events {
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(100, 116, 139, 0.2);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .combined-list {
+            max-height: 600px;
+            overflow-y: auto;
+        }
+
+        .combined-item {
+            border-bottom: 1px solid rgba(100, 116, 139, 0.1);
+            padding: 16px;
+            display: flex;
+            gap: 12px;
+            transition: background 0.2s;
+        }
+
+        .combined-item:hover {
+            background: rgba(30, 41, 59, 0.5);
+        }
+
+        .combined-badge {
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+
+        .combined-badge.health {
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+        }
+
+        .combined-badge.security {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+
+        .combined-content {
+            flex: 1;
+        }
+
+        .combined-target {
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+
+        .combined-details {
+            display: flex;
+            gap: 16px;
+            font-size: 12px;
+            color: #94a3b8;
+        }
+
+        .combined-score {
+            font-weight: 600;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #64748b;
+        }
+
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+            opacity: 0.5;
+        }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: rgba(51, 65, 85, 0.2);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(100, 116, 139, 0.4);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(100, 116, 139, 0.6);
+        }
+
+        @media (max-width: 1200px) {
+            .events-section {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .connection-status {
+            font-size: 12px;
+            color: #94a3b8;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #10b981;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.disconnected {
+            background: #ef4444;
+            animation: none;
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        <div class="logo">
-            <h1>KubeHeal</h1>
-            <span>v3.0</span>
-        </div>
-        <div class="status-badge">
-            <div class="status-dot"></div>
-            <span>System Healthy</span>
-        </div>
-    </div>
     <div class="container">
+        <header>
+            <div class="header-title">
+                <h1>🛡️ KubeHeal Dashboard</h1>
+                <div class="status-indicator" id="statusIndicator"></div>
+            </div>
+            <div class="connection-status">
+                <div class="status-dot" id="connectionDot"></div>
+                <span id="connectionText">Connecting...</span>
+            </div>
+        </header>
+
         <div class="stats-grid">
             <div class="stat-card">
-                <h3>Total Incidents</h3>
-                <div class="value blue" id="total-incidents">0</div>
+                <div class="stat-label">Health Events</div>
+                <div class="stat-value" id="healthEventCount">0</div>
             </div>
             <div class="stat-card">
-                <h3>Auto-Resolved</h3>
-                <div class="value green" id="auto-resolved">0</div>
+                <div class="stat-label">Security Events</div>
+                <div class="stat-value" id="securityEventCount">0</div>
             </div>
             <div class="stat-card">
-                <h3>Avg MTTR</h3>
-                <div class="value yellow" id="avg-mttr">0<span class="unit">s</span></div>
+                <div class="stat-label">High Risk (Health)</div>
+                <div class="stat-value high-risk" id="highRiskHealth">0</div>
             </div>
             <div class="stat-card">
-                <h3>Avg Kill Time</h3>
-                <div class="value red" id="avg-kill-time">0<span class="unit">ms</span></div>
+                <div class="stat-label">High Risk (Security)</div>
+                <div class="stat-value high-risk" id="highRiskSecurity">0</div>
             </div>
         </div>
-        <div class="grid">
-            <div class="panel">
-                <div class="panel-header">Recent Incidents</div>
-                <div class="panel-content">
-                    <div class="events-list" id="events-list">
-                        <div style="color: #8b949e; text-align: center; padding: 20px;">
-                            No incidents yet
-                        </div>
+
+        <div class="events-section">
+            <div class="events-panel">
+                <div class="panel-header">Health Assessments</div>
+                <div class="events-list" id="healthEvents">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📊</div>
+                        <p>No health events yet</p>
                     </div>
                 </div>
             </div>
-            <div class="panel">
-                <div class="panel-header">Agent Status</div>
-                <div class="panel-content">
-                    <table>
-                        <tr>
-                            <td>Health Agent</td>
-                            <td><span class="risk-low">● Running</span></td>
-                        </tr>
-                        <tr>
-                            <td>Security Agent</td>
-                            <td><span class="risk-low">● Running</span></td>
-                        </tr>
-                        <tr>
-                            <td>Fusion Agent</td>
-                            <td><span class="risk-low">● Running</span></td>
-                        </tr>
-                        <tr>
-                            <td>DIT-Sec Model</td>
-                            <td><span class="risk-low">● Running</span></td>
-                        </tr>
-                    </table>
+
+            <div class="events-panel">
+                <div class="panel-header">Security Events</div>
+                <div class="events-list" id="securityEvents">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🔒</div>
+                        <p>No security events yet</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="combined-events">
+            <div class="panel-header">All Events Timeline</div>
+            <div class="combined-list" id="combinedEvents">
+                <div class="empty-state">
+                    <div class="empty-state-icon">📈</div>
+                    <p>No events to display</p>
                 </div>
             </div>
         </div>
     </div>
+
     <script>
-        const socket = io();
-        
-        socket.on('connect', () => {
-            console.log('Connected to dashboard');
-        });
-        
-        socket.on('health_event', (event) => {
-            addEvent(event);
-            updateStats();
-        });
-        
-        socket.on('security_event', (event) => {
-            addEvent(event);
-            updateStats();
-        });
-        
-        socket.on('risk_update', (data) => {
-            console.log('Risk update:', data);
-        });
-        
-        socket.on('action_taken', (data) => {
-            console.log('Action taken:', data);
-            updateStats();
-        });
-        
-        function addEvent(event) {
-            const list = document.getElementById('events-list');
-            const empty = list.querySelector('div');
-            if (empty && empty.textContent === 'No incidents yet') {
-                empty.remove();
-            }
-            
-            const typeClass = event.type === 'security' ? 'event-security' : 'event-health';
-            const riskClass = event.risk_score >= 0.85 ? 'risk-high' : 
-                           event.risk_score >= 0.65 ? 'risk-medium' : 'risk-low';
-            
-            const item = document.createElement('div');
-            item.className = 'event-item';
-            item.innerHTML = `
-                <div>
-                    <span class="event-type ${typeClass}">${event.type}</span>
-                    <span style="margin-left: 8px;">${event.target?.name || event.target?.pod || 'unknown'}</span>
-                </div>
-                <span class="risk-score ${riskClass}">${event.risk_score.toFixed(2)}</span>
-            `;
-            
-            list.insertBefore(item, list.firstChild);
+        let ws = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 10;
+
+        function formatRiskScore(score) {
+            const percent = Math.round(score * 100);
+            return `${percent}%`;
         }
-        
-        function updateStats() {
-            fetch('/api/stats')
-                .then(r => r.json())
-                .then(data => {
-                    document.getElementById('total-incidents').textContent = data.total_incidents;
-                    document.getElementById('auto-resolved').textContent = data.auto_resolved;
-                    document.getElementById('avg-mttr').textContent = data.avg_mttr_seconds;
-                    document.getElementById('avg-kill-time').textContent = data.avg_kill_time_ms;
+
+        function getRiskClass(score) {
+            if (score > 0.7) return 'high';
+            if (score > 0.4) return 'medium';
+            return 'low';
+        }
+
+        function formatTime(isoString) {
+            try {
+                const date = new Date(isoString);
+                return date.toLocaleTimeString('en-US', { 
+                    hour: '2-digit', 
+                    minute: '2-digit',
+                    second: '2-digit'
                 });
+            } catch {
+                return 'Unknown';
+            }
         }
-        
-        updateStats();
-        setInterval(updateStats, 5000);
+
+        async function fetchStats() {
+            try {
+                const response = await fetch('/api/stats');
+                const stats = await response.json();
+                
+                document.getElementById('healthEventCount').textContent = stats.total_health_events;
+                document.getElementById('securityEventCount').textContent = stats.total_security_events;
+                document.getElementById('highRiskHealth').textContent = stats.high_risk_health_events;
+                document.getElementById('highRiskSecurity').textContent = stats.high_risk_security_events;
+            } catch (error) {
+                console.error('Error fetching stats:', error);
+            }
+        }
+
+        async function fetchEvents() {
+            try {
+                const [healthRes, securityRes, combinedRes] = await Promise.all([
+                    fetch('/api/health-events?limit=10'),
+                    fetch('/api/security-events?limit=10'),
+                    fetch('/api/combined-events?limit=20')
+                ]);
+
+                const health = await healthRes.json();
+                const security = await securityRes.json();
+                const combined = await combinedRes.json();
+
+                updateHealthEvents(health.events);
+                updateSecurityEvents(security.events);
+                updateCombinedEvents(combined.events);
+            } catch (error) {
+                console.error('Error fetching events:', error);
+            }
+        }
+
+        function updateHealthEvents(events) {
+            const container = document.getElementById('healthEvents');
+            if (events.length === 0) {
+                container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><p>No health events yet</p></div>';
+                return;
+            }
+
+            container.innerHTML = events.slice(-5).reverse().map(event => `
+                <div class="event-item ${event.risk_score > 0.7 ? 'high-risk' : ''}" style="cursor: pointer;" onclick="openEventDetails('${event.event_id}')">
+                    <div class="event-header">
+                        <span class="event-id">${event.event_id.substring(0, 20)}...</span>
+                        <span class="event-risk ${getRiskClass(event.risk_score)}">${formatRiskScore(event.risk_score)}</span>
+                    </div>
+                    <div class="event-target">${event.target.namespace}/${event.target.name}</div>
+                    <div class="event-time">${formatTime(event.timestamp)}</div>
+                </div>
+            `).join('');
+        }
+
+        function updateSecurityEvents(events) {
+            const container = document.getElementById('securityEvents');
+            if (events.length === 0) {
+                container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔒</div><p>No security events yet</p></div>';
+                return;
+            }
+
+            container.innerHTML = events.slice(-5).reverse().map(event => `
+                <div class="event-item security ${event.risk_score > 0.7 ? 'high-risk' : ''}" style="cursor: pointer;" onclick="openEventDetails('${event.event_id}')">
+                    <div class="event-header">
+                        <span class="event-id">${event.event_id.substring(0, 20)}...</span>
+                        <span class="event-risk ${getRiskClass(event.risk_score)}">${formatRiskScore(event.risk_score)}</span>
+                    </div>
+                    <div class="event-target">${event.target.namespace || 'N/A'}/${event.target.pod || event.target.name}</div>
+                    <div class="event-time">${formatTime(event.timestamp)}</div>
+                </div>
+            `).join('');
+        }
+
+        function updateCombinedEvents(events) {
+            const container = document.getElementById('combinedEvents');
+            if (events.length === 0) {
+                container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📈</div><p>No events to display</p></div>';
+                return;
+            }
+
+            container.innerHTML = events.slice(-20).map(event => {
+                const isHealth = event.type === 'health';
+                const badge = isHealth ? '📊' : '🔒';
+                const badgeClass = isHealth ? 'health' : 'security';
+                const label = isHealth ? 'Health' : 'Security';
+                
+                return `
+                    <div class="combined-item" style="cursor: pointer;" onclick="openEventDetails('${event.event_id}')">
+                        <div class="combined-badge ${badgeClass}">${badge}</div>
+                        <div class="combined-content">
+                            <div class="combined-target">${event.target.namespace || 'N/A'}/${event.target.name || event.target.pod}</div>
+                            <div class="combined-details">
+                                <span>${label}</span>
+                                <span class="combined-score ${getRiskClass(event.risk_score)}">Risk: ${formatRiskScore(event.risk_score)}</span>
+                                <span>${formatTime(event.timestamp)}</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                document.getElementById('connectionDot').classList.remove('disconnected');
+                document.getElementById('connectionText').textContent = 'Connected';
+                reconnectAttempts = 0;
+                fetchStats();
+                fetchEvents();
+            };
+
+            ws.onmessage = (event) => {
+                const message = JSON.parse(event.data);
+                console.log('Received:', message.type);
+
+                if (message.type === 'stats') {
+                    const stats = message.data;
+                    document.getElementById('healthEventCount').textContent = stats.total_health_events;
+                    document.getElementById('securityEventCount').textContent = stats.total_security_events;
+                    document.getElementById('highRiskHealth').textContent = stats.high_risk_health_events;
+                    document.getElementById('highRiskSecurity').textContent = stats.high_risk_security_events;
+                } else if (message.type === 'health_event' || message.type === 'security_event') {
+                    fetchEvents(); // Refresh events on new ones
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                document.getElementById('connectionDot').classList.add('disconnected');
+                document.getElementById('connectionText').textContent = 'Error';
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                document.getElementById('connectionDot').classList.add('disconnected');
+                document.getElementById('connectionText').textContent = 'Disconnected';
+
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+                    setTimeout(() => {
+                        reconnectAttempts++;
+                        connectWebSocket();
+                    }, delay);
+                }
+            };
+        }
+
+        // Initial load
+        fetchStats();
+        fetchEvents();
+
+        // Connect WebSocket
+        connectWebSocket();
+
+        // Periodic refresh
+        setInterval(fetchStats, 10000);
+        setInterval(fetchEvents, 15000);
     </script>
+    <script src="/static/event-details.js"></script>
 </body>
 </html>

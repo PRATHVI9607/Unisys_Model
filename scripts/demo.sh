@@ -55,9 +55,7 @@ echo ""
 echo "Injecting CPU drift (500m -> 50m)..."
 echo ""
 
-if ! kubectl patch deployment victim-app -n "$NAMESPACE" \
-    --type=merge \
-    -p '{"spec":{"template":{"spec":{"containers":[{"name":"app","resources":{"limits":{"cpu":"50m"}}}]}}}}'; then
+if ! kubectl set resources deployment victim-app -n "$NAMESPACE" --requests=cpu=25m --limits=cpu=50m --containers=app; then
     echo "ERROR: Could not patch deployment victim-app in namespace $NAMESPACE"
     exit 1
 fi

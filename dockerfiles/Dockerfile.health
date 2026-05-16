@@ -3,8 +3,8 @@ FROM python:3.11-slim
 WORKDIR /app
 
 RUN pip install --no-cache-dir \
-    kubernetes-asyncio==0.29.0 \
-    aioredis==2.0.1 \
+    kubernetes-asyncio==29.0.1 \
+    redis==5.0.0 \
     pydantic==2.6.0 \
     aiohttp==3.9.0 \
     prometheus-api-client \
@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir \
 
 COPY agents/ /app/agents/
 
-ENV REDIS_URL=redis://redis-master:6379
+ENV REDIS_URL=redis://redis:6379
 ENV DIT_SEC_URL=http://dit-sec-server:8000
 ENV PROMETHEUS_URL=http://prometheus:9090
 ENV NAMESPACE=kubeheal
