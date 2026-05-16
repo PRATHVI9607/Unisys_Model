@@ -434,6 +434,20 @@ class HealthAgent:
             return SeverityLevel.LOW
         return SeverityLevel.BENIGN
 
+    # Redis hash structure for each event (kubeheal:health:{event_id}):
+    # - event_id: str - unique event identifier
+    # - target: JSON - {namespace, name, kind}
+    # - risk_score: str - numeric 0.0-1.0
+    # - severity: str - "benign"|"low"|"medium"|"high"|"critical"
+    # - patch_proposal: JSON - proposed patches or empty string
+    # - explainability: JSON - model explanation or empty string
+    # - blast_radius: str - "High"|"Low"|"unknown"
+    # - timestamp: str - ISO8601 timestamp
+    # - model_used: str - "onnx_model"|"heuristic" or empty string
+    # - model_score: str - numeric 0.0-1.0 from ONNX model or empty string
+    # - heuristic_score: str - numeric 0.0-1.0 from heuristic or empty string
+    # - inference_method: str - "ONNX inference"|"Heuristic fallback..." or empty string
+
     async def _publish_assessment(self, assessment: HealthAssessment) -> None:
         """Publish HealthAssessment to Redis Stream."""
         key = f"kubeheal:health:{assessment.event_id}"
