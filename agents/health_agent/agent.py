@@ -11,7 +11,7 @@ from enum import Enum
 import redis.asyncio as aioredis
 import kubernetes_asyncio
 from kubernetes_asyncio import client, watch
-from kubernetes_asyncio.config import load_incluster_config
+from kubernetes_asyncio.config import load_incluster_config, config
 from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO)
@@ -90,11 +90,20 @@ class HealthAgent:
         logger.info(f"DIT-Sec URL configured as: {self.dit_sec_url}")
         logger.info(f"Prometheus URL configured as: {self.prometheus_url}")
 
+        # Try in-cluster config first, fall back to kubeconfig
         try:
             load_incluster_config()
+            logger.info("Loaded in-cluster Kubernetes config")
         except kubernetes_asyncio.config.ConfigException as e:
-            logger.error(f"Failed to load in-cluster config: {e}")
-            raise
+            logger.warning(
+                f"In-cluster config not available ({e}), trying kubeconfig..."
+            )
+            try:
+                config.load_kube_config()
+                logger.info("Loaded kubeconfig from ~/.kube/config")
+            except Exception as e2:
+                logger.error(f"Failed to load kubeconfig: {e2}")
+                raise
 
         self.core_api = client.CoreV1Api()
         self.apps_api = client.AppsV1Api()
