@@ -343,16 +343,22 @@ class HealthAgent:
                 "blast_radius": blast_radius,
             }
 
+            result = None
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.dit_sec_url}/score",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    if resp.status == 200:
-                        result = await resp.json()
-                    else:
-                        result = self._local_assessment(new_spec, telemetry)
+                try:
+                    async with session.post(
+                        f"{self.dit_sec_url}/score",
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as resp:
+                        if resp.status == 200:
+                            result = await resp.json()
+                        else:
+                            logger.warning(f"DIT-Sec returned status {resp.status}")
+                            result = self._local_assessment(new_spec, telemetry)
+                except asyncio.TimeoutError:
+                    logger.warning("DIT-Sec call timed out, using local assessment")
+                    result = self._local_assessment(new_spec, telemetry)
         except Exception as e:
             logger.debug(f"DIT-Sec call failed: {e}")
             result = self._local_assessment(new_spec, telemetry)
@@ -371,6 +377,10 @@ class HealthAgent:
             explainability=result.get("explainability"),
             confidence_interval=result.get("confidence_interval"),
             blast_radius=blast_radius,
+            model_used=result.get("model_used"),
+            model_score=result.get("model_score"),
+            heuristic_score=result.get("heuristic_score"),
+            inference_method=result.get("inference_method"),
         )
 
     def _local_assessment(self, new_spec: Dict, telemetry: Dict) -> Dict:
