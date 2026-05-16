@@ -438,35 +438,56 @@ class HealthAgent:
         """Publish HealthAssessment to Redis Stream."""
         key = f"kubeheal:health:{assessment.event_id}"
 
-        await self.redis.hset(
-            key,
-            mapping={
-                "event_id": assessment.event_id,
-                "target": json.dumps(assessment.target),
-                "risk_score": str(assessment.risk_score),
-                "severity": assessment.severity.value,
-                "patch_proposal": json.dumps(assessment.patch_proposal)
-                if assessment.patch_proposal
-                else "",
-                "explainability": json.dumps(assessment.explainability)
-                if assessment.explainability
-                else "",
-                "blast_radius": assessment.blast_radius,
-                "timestamp": assessment.timestamp,
-            },
-        )
+        # Build hash mapping with all fields
+        hash_mapping = {
+            "event_id": assessment.event_id,
+            "target": json.dumps(assessment.target),
+            "risk_score": str(assessment.risk_score),
+            "severity": assessment.severity.value,
+            "patch_proposal": json.dumps(assessment.patch_proposal)
+            if assessment.patch_proposal
+            else "",
+            "explainability": json.dumps(assessment.explainability)
+            if assessment.explainability
+            else "",
+            "blast_radius": assessment.blast_radius,
+            "timestamp": assessment.timestamp,
+            # Add new model comparison fields
+            "model_used": assessment.model_used or "",
+            "model_score": str(assessment.model_score)
+            if assessment.model_score is not None
+            else "",
+            "heuristic_score": str(assessment.heuristic_score)
+            if assessment.heuristic_score is not None
+            else "",
+            "inference_method": assessment.inference_method or "",
+        }
+
+        await self.redis.hset(key, mapping=hash_mapping)
+
+        # Build stream payload with new fields
+        stream_payload = {
+            "event_id": assessment.event_id,
+            "target": json.dumps(assessment.target),
+            "risk_score": str(assessment.risk_score),
+            "severity": assessment.severity.value,
+            "blast_radius": assessment.blast_radius,
+            "confidence_interval": str(assessment.confidence_interval),
+            "timestamp": assessment.timestamp,
+            # Add new model comparison fields
+            "model_used": assessment.model_used or "",
+            "model_score": str(assessment.model_score)
+            if assessment.model_score is not None
+            else "",
+            "heuristic_score": str(assessment.heuristic_score)
+            if assessment.heuristic_score is not None
+            else "",
+            "inference_method": assessment.inference_method or "",
+        }
 
         await self.redis.xadd(
             "kubeheal.health.events",
-            {
-                "event_id": assessment.event_id,
-                "target": json.dumps(assessment.target),
-                "risk_score": str(assessment.risk_score),
-                "severity": assessment.severity.value,
-                "blast_radius": assessment.blast_radius,
-                "confidence_interval": str(assessment.confidence_interval),
-                "timestamp": assessment.timestamp,
-            },
+            stream_payload,
         )
 
         logger.info(f"Published {assessment.event_id}")
