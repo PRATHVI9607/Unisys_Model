@@ -568,33 +568,98 @@ class EventDetailsModal {
         let html = '<div class="remediation-content">';
 
         // Health-specific remediation
-        if (isHealth && eventData.patch_proposal) {
-            html += `
-                <div class="remediation-box">
-                    <div class="remediation-title">🔧 Patch Proposal</div>
-                    <div class="patch-proposal">
-                        <pre class="remediation-text">${this.escapeHtml(this.formatJson(eventData.patch_proposal))}</pre>
+        if (isHealth) {
+            if (eventData.patch_proposal) {
+                html += `
+                    <div class="remediation-box">
+                        <div class="remediation-title">🔧 Patch Proposal</div>
+                        <div class="patch-proposal">
+                            <pre class="remediation-text">${this.escapeHtml(this.formatJson(eventData.patch_proposal))}</pre>
+                        </div>
                     </div>
-                </div>
-            `;
+                `;
+            }
+            
+            // Generate default remediation based on severity
+            const severity = eventData.severity || 'benign';
+            const riskScore = eventData.risk_score || 0;
+            
+            if (severity === 'critical' || riskScore > 0.85) {
+                html += `
+                    <div class="remediation-box high-risk">
+                        <div class="remediation-title">🚨 Immediate Action Required</div>
+                        <div class="remediation-text">
+                            <p><strong>Severity:</strong> ${this.escapeHtml(severity.toUpperCase())}</p>
+                            <p><strong>Risk Score:</strong> ${(riskScore * 100).toFixed(1)}%</p>
+                            <p><strong>Recommended Actions:</strong></p>
+                            <ul>
+                                <li>Restart affected pods immediately</li>
+                                <li>Check resource limits and allocations</li>
+                                <li>Review recent deployments for changes</li>
+                                <li>Scale up replicas if needed</li>
+                            </ul>
+                        </div>
+                    </div>
+                `;
+            } else if (severity === 'high' || riskScore > 0.7) {
+                html += `
+                    <div class="remediation-box">
+                        <div class="remediation-title">⚠️ Action Recommended</div>
+                        <div class="remediation-text">
+                            <p><strong>Severity:</strong> ${this.escapeHtml(severity.toUpperCase())}</p>
+                            <p><strong>Recommended Actions:</strong></p>
+                            <ul>
+                                <li>Monitor resource usage closely</li>
+                                <li>Prepare for potential restart</li>
+                                <li>Check application logs</li>
+                                <li>Consider scaling up if traffic related</li>
+                            </ul>
+                        </div>
+                    </div>
+                `;
+            } else if (severity === 'medium' || riskScore > 0.5) {
+                html += `
+                    <div class="remediation-box">
+                        <div class="remediation-title">👀 Monitor</div>
+                        <div class="remediation-text">
+                            <p><strong>Severity:</strong> ${this.escapeHtml(severity.toUpperCase())}</p>
+                            <p><strong>Recommended Actions:</strong></p>
+                            <ul>
+                                <li>Continue monitoring for changes</li>
+                                <li>Review blast radius impact</li>
+                                <li>Prepare but don't act unless escalating</li>
+                            </ul>
+                        </div>
+                    </div>
+                `;
+            }
         }
 
         // Security-specific remediation
         if (!isHealth) {
-            if (eventData.action) {
-                html += `
-                    <div class="remediation-box">
-                        <div class="remediation-title">✅ Recommended Action</div>
-                        <div class="remediation-text">${this.escapeHtml(eventData.action)}</div>
+            // Get action from event (may be in event_data or from pid_target context)
+            const action = eventData.action || 'direct_kill';
+            const pid = eventData.pid_target || 'unknown';
+            
+            html += `
+                <div class="remediation-box">
+                    <div class="remediation-title">🔒 Recommended Security Action</div>
+                    <div class="remediation-text">
+                        <p><strong>Action:</strong> ${this.escapeHtml(action)}</p>
+                        <p><strong>Target PID:</strong> ${this.escapeHtml(String(pid))}</p>
+                        ${eventData.risk_score > 0.7 ? '<p class="high-severity">⚠️ High-risk threat detected - immediate action recommended</p>' : ''}
                     </div>
-                `;
-            }
-
-            if (eventData.pid_target) {
+                </div>
+            `;
+            
+            if (eventData.entropy && eventData.entropy > 5.0) {
                 html += `
                     <div class="remediation-box">
-                        <div class="remediation-title">🎯 Target Process</div>
-                        <div class="remediation-text">${this.escapeHtml(eventData.pid_target)}</div>
+                        <div class="remediation-title">📊 High Entropy Alert</div>
+                        <div class="remediation-text">
+                            <p>File entropy (${eventData.entropy.toFixed(2)}) indicates potential encryption/ransomware activity.</p>
+                            <p><strong>Recommendation:</strong> Isolate affected process and preserve evidence.</p>
+                        </div>
                     </div>
                 `;
             }

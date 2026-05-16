@@ -32,6 +32,13 @@ class SecurityEvent(BaseModel):
     label: str
     early_signals: Dict[str, Any]
     timestamp: str
+    # Extra fields for detailed view (from stream, not in model definition)
+    model_used: Optional[str] = None
+    model_score: Optional[float] = None
+    heuristic_score: Optional[float] = None
+    inference_method: Optional[str] = None
+    entropy: Optional[float] = None
+    pid_target: Optional[str] = None
 
 
 class Incident(BaseModel):
@@ -202,6 +209,16 @@ class KubeHealDashboard:
                             )
                             timestamp = fields.get(b"timestamp", b"").decode()
 
+                            # Parse model comparison fields if present
+                            model_used = fields.get(b"model_used", b"").decode() or None
+                            model_score = fields.get(b"model_score", b"")
+                            heuristic_score = fields.get(b"heuristic_score", b"")
+                            inference_method = (
+                                fields.get(b"inference_method", b"").decode() or None
+                            )
+                            entropy = fields.get(b"entropy", b"")
+                            pid_target = fields.get(b"pid_target", b"").decode() or None
+
                             event = SecurityEvent(
                                 event_id=event_id,
                                 target=target,
@@ -210,6 +227,18 @@ class KubeHealDashboard:
                                 early_signals=early_signals,
                                 timestamp=timestamp,
                             )
+
+                            # Store extra fields in event for detail lookup
+                            event.model_used = model_used
+                            event.model_score = (
+                                float(model_score) if model_score else None
+                            )
+                            event.heuristic_score = (
+                                float(heuristic_score) if heuristic_score else None
+                            )
+                            event.inference_method = inference_method
+                            event.entropy = float(entropy) if entropy else None
+                            event.pid_target = pid_target
 
                             self.security_events.append(event)
                             if len(self.security_events) > 100:
@@ -577,7 +606,7 @@ async def get_combined_events(limit: int = 20):
 async def get_event_details(event_id: str):
     """Get detailed information for a specific event.
 
-    First checks in-memory event lists, then falls back to Redis hashes.
+    First tries Redis (has full enriched data), then falls back to in-memory lists.
 
     Returns:
         EventDetails: Complete event information
@@ -588,7 +617,16 @@ async def get_event_details(event_id: str):
     if not dashboard:
         raise HTTPException(status_code=503, detail="Dashboard not initialized")
 
-    # First, try in-memory lists (from Redis stream listening)
+    # First, try Redis hashes (has all enriched data including model comparison)
+    if dashboard.redis:
+        try:
+            event_data = await dashboard.get_event_details(event_id)
+            if event_data:
+                return EventDetails(**event_data)
+        except Exception as e:
+            logger.error(f"Error fetching from Redis for {event_id}: {e}")
+
+    # Fallback: try in-memory lists
     for event in reversed(dashboard.health_events):
         if event.event_id == event_id:
             return EventDetails(
@@ -603,33 +641,25 @@ async def get_event_details(event_id: str):
 
     for event in reversed(dashboard.security_events):
         if event.event_id == event_id:
-            return EventDetails(
-                event_id=event.event_id,
-                target=event.target,
-                risk_score=event.risk_score,
-                label=event.label,
-                early_signals=event.early_signals,
-                timestamp=event.timestamp,
-                event_type="security",
-            )
+            # Include extra fields that may have been set from stream data
+            data = {
+                "event_id": event.event_id,
+                "target": event.target,
+                "risk_score": event.risk_score,
+                "label": event.label,
+                "early_signals": event.early_signals,
+                "timestamp": event.timestamp,
+                "event_type": "security",
+                "model_used": getattr(event, "model_used", None),
+                "model_score": getattr(event, "model_score", None),
+                "heuristic_score": getattr(event, "heuristic_score", None),
+                "inference_method": getattr(event, "inference_method", None),
+                "entropy": getattr(event, "entropy", None),
+                "pid_target": getattr(event, "pid_target", None),
+            }
+            return EventDetails(**data)
 
-    # Fallback: try Redis hashes
-    if not dashboard.redis:
-        raise HTTPException(status_code=503, detail="Redis connection unavailable")
-
-    try:
-        event_data = await dashboard.get_event_details(event_id)
-
-        if not event_data:
-            raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
-
-        return EventDetails(**event_data)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching event {event_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
 
 
 @app.websocket("/ws")
