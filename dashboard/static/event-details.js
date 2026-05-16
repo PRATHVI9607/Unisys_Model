@@ -163,21 +163,9 @@ class EventDetailsModal {
       */
     showLoading() {
         const summaryTab = document.getElementById('summaryTab');
-        const analysisTab = document.getElementById('analysisTab');
-        const remediationTab = document.getElementById('remediationTab');
         
-        if (summaryTab && analysisTab && remediationTab) {
+        if (summaryTab) {
             summaryTab.innerHTML = `
-                <div class="modal-loading">
-                    <div class="modal-spinner"></div>
-                    <span>Loading event details...</span>
-                </div>
-            `;
-            analysisTab.innerHTML = '';
-            remediationTab.innerHTML = '';
-        } else {
-            const content = document.getElementById('modalContent');
-            content.innerHTML = `
                 <div class="modal-loading">
                     <div class="modal-spinner"></div>
                     <span>Loading event details...</span>
@@ -201,14 +189,6 @@ class EventDetailsModal {
                     <p>${message}</p>
                 </div>
             `;
-        } else {
-            const content = document.getElementById('modalContent');
-            content.innerHTML = `
-                <div class="modal-error">
-                    <div class="empty-section-icon">⚠️</div>
-                    <p>${message}</p>
-                </div>
-            `;
         }
         this.isLoading = false;
     }
@@ -225,17 +205,29 @@ class EventDetailsModal {
      * @param {Object} eventData - Complete event details from API
      */
     populateModal(eventData) {
-        document.getElementById('modalEventId').textContent = eventData.event_id;
+        const modalEventId = document.getElementById('modalEventId');
+        const summaryTab = document.getElementById('summaryTab');
+        const analysisTab = document.getElementById('analysisTab');
+        const remediationTab = document.getElementById('remediationTab');
+        
+        if (!modalEventId || !summaryTab) {
+            console.error('Modal elements not found');
+            return;
+        }
+
+        modalEventId.textContent = eventData.event_id;
 
         // Reset tab content
-        document.getElementById('summaryTab').innerHTML = '';
-        document.getElementById('analysisTab').innerHTML = '';
-        document.getElementById('remediationTab').innerHTML = '';
+        summaryTab.innerHTML = '';
+        if (analysisTab) analysisTab.innerHTML = '';
+        if (remediationTab) remediationTab.innerHTML = '';
 
         // Reset tab buttons
         document.querySelectorAll('.modal-tab-button').forEach(btn => {
             btn.classList.remove('active');
-            btn.dataset.tab === 'summary' && btn.classList.add('active');
+            if (btn.dataset.tab === 'summary') {
+                btn.classList.add('active');
+            }
         });
 
         // Populate tabs
@@ -636,7 +628,11 @@ class EventDetailsModal {
         document.querySelectorAll('.tab-pane').forEach(pane => {
             pane.classList.remove('active');
         });
-        document.getElementById(`${tabName}Tab`).classList.add('active');
+        
+        const tabPane = document.getElementById(`${tabName}Tab`);
+        if (tabPane) {
+            tabPane.classList.add('active');
+        }
     }
 
     /**
