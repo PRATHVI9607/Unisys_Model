@@ -6,7 +6,7 @@ RUN pip install --no-cache-dir \
     kubernetes-asyncio==29.0.1 \
     redis==5.0.0 \
     pydantic==2.6.0 \
-    numpy
+    "numpy<2"
 
 COPY agents/ /app/agents/
 

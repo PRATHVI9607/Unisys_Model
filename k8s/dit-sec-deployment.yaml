@@ -1,12 +1,4 @@
 apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: dit-sec-model
-  namespace: kubeheal
-binaryData:
-  dit_sec_v3_simple.onnx: CA0SCGt1YmVoZWFsOt4CCjMKCG9sZF9zcGVjCghuZXdfc3BlYxIIY29uY2F0ZWQiBkNvbmNhdCoLCgRheGlzGAGgAQIKTAoIY29uY2F0ZWQSCnJpc2tfc2NvcmUiBEdlbW0qDwoFYWxwaGEVAAAAP6ABASoOCgRiZXRhFQAAAACgAQEqDQoGdHJhbnNCGAGgAQISDmRpdF9zZWNfc2ltcGxlWhsKCG9sZF9zcGVjEg8KDQgBEgkKAggBCgMIgAFaGwoIbmV3X3NwZWMSDwoNCAESCQoCCAEKAwyAAVodCgdtZXRyaWNzEhIKEAgBEgwKAggBCgIIPAoCCA9aIAoOZW50cm9weV9zZXJpZXMSDooMCAESCAoCCAEKAggUYhgKCnJpc2tfc2NvcmUSCgoICAESBAoCCAFiEwoFbGFiZWwSCgoICAcSBAoCCAFiHwoNcHJvYmFiaWxpdGllcxIOCgwIARIICgIIAQoCCAVCAhAO
----
-apiVersion: v1
 kind: Service
 metadata:
   name: dit-sec-server
@@ -46,15 +38,11 @@ spec:
               name: http
           env:
             - name: MODEL_PATH
-              value: /models/dit_sec_v3/models/dit_sec_v3_simple.onnx
+              value: /models/dit_sec_v3/models/dit_sec_v3_trained.pt
             - name: REDIS_URL
-              value: redis://redis:6379
+              value: redis://redis-master:6379
             - name: LOG_LEVEL
               value: "INFO"
-          volumeMounts:
-            - name: model-volume
-              mountPath: /models/dit_sec_v3/models/dit_sec_v3_simple.onnx
-              subPath: dit_sec_v3_simple.onnx
           resources:
             requests:
               cpu: 500m
@@ -74,10 +62,6 @@ spec:
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 5
-      volumes:
-        - name: model-volume
-          configMap:
-            name: dit-sec-model
       nodeSelector:
         kubernetes.io/arch: amd64
 ---

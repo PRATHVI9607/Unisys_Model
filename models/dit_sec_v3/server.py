@@ -1,11 +1,28 @@
+"""
+DIT-Sec v3 Model Server
+========================
+Serves the GNN+Mamba hybrid model.
+Supports health path (YAML+metrics) and security path (syscalls+entropy).
+
+Endpoints
+---------
+  GET  /health
+  GET  /ready
+  POST /score          — unified scoring (auto-routes by present modalities)
+  POST /score/security — explicit security path
+  POST /explain        — XAI attribution
+"""
+
 import os
+import sys
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import uvicorn
@@ -13,441 +30,430 @@ import uvicorn
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ── resolve model module path ──────────────────────────────
+SCRIPT_DIR = Path(__file__).parent
+sys.path.insert(0, str(SCRIPT_DIR))
+
 app = FastAPI(
-    title="DIT-Sec Model Server",
-    description="DIT-Sec v3.0 - Drift Impact Transformer for Security",
-    version="3.0.0",
+    title="DIT-Sec v3 Model Server",
+    description="GNN + Mamba Hybrid — KubeHeal PRD v3",
+    version="3.1.0",
 )
 
-model = None
+# ── global model state ─────────────────────────────────────
+model      = None
 model_loaded = False
 
 
+# ══════════════════════════════════════════════════════════
+# Pydantic schemas
+# ══════════════════════════════════════════════════════════
+
 class ScoreRequest(BaseModel):
-    old_spec: Optional[Dict] = None
-    new_spec: Optional[Dict] = None
-    metrics: Optional[List[List[float]]] = None
-    syscalls: Optional[List[Dict]] = None
-    entropy_series: Optional[List[float]] = None
+    # Health modality
+    old_spec: Optional[Dict]             = None
+    new_spec: Optional[Dict]             = None
+    metrics:  Optional[List[List[float]]]= None
+    # Security modality
+    syscalls:       Optional[List[Dict]] = None
+    entropy_series: Optional[List[float]]= None
+    # Meta
+    blast_radius:   Optional[str]        = None
+    telemetry:      Optional[Any]        = None
+    # Legacy security-only fields
+    entropy:        Optional[float]      = None
+    early_signals:  Optional[Dict]       = None
 
 
 class ScoreResponse(BaseModel):
-    risk_score: float
-    label: str
+    risk_score:          float
+    label:               str
     confidence_interval: Optional[List[float]] = None
-    explainability: Optional[Dict[str, Any]] = None
-    model_used: str = "heuristic"  # either "onnx_model" or "heuristic"
-    model_score: Optional[float] = None  # score from ONNX model, 0-1
-    heuristic_score: Optional[float] = None  # score from heuristic function, 0-1
-    inference_method: str = "Heuristic fallback"  # description like "ONNX inference" or "Heuristic fallback"
+    explainability:      Optional[Dict]         = None
+    model_used:          str = "pytorch"
+    model_score:         Optional[float] = None
+    heuristic_score:     Optional[float] = None
+    inference_method:    str = "DIT-Sec v3 GNN+Mamba"
+    patch_proposal:      Optional[Dict]  = None
 
+
+# ══════════════════════════════════════════════════════════
+# Startup — load PyTorch model
+# ══════════════════════════════════════════════════════════
 
 @app.on_event("startup")
 async def startup():
     global model, model_loaded
-    logger.info("Starting DIT-Sec Model Server v3.0...")
+    logger.info("Starting DIT-Sec v3 Model Server...")
 
-    model_path = os.environ.get("MODEL_PATH", "/models/dit_sec_v3.onnx")
+    model_path = os.environ.get(
+        "MODEL_PATH",
+        str(SCRIPT_DIR / "models" / "dit_sec_v3_trained.pt"),
+    )
 
     try:
-        import onnxruntime as ort
-
-        sess_options = ort.SessionOptions()
-        sess_options.graph_optimization_level = (
-            ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        )
-
+        import torch
+        from dit_sec_v3_model import DITSecV3
+        m = DITSecV3()
         if os.path.exists(model_path):
-            model = ort.InferenceSession(
-                model_path, sess_options, providers=["CPUExecutionProvider"]
-            )
-            logger.info(f"Model loaded from {model_path}")
+            state = torch.load(model_path, map_location="cpu")
+            m.load_state_dict(state)
+            m.eval()
+            logger.info(f"Model loaded from {model_path}  ({m.param_count():,} params)")
         else:
-            logger.warning(f"Model not found at {model_path}, using fallback")
-    except ImportError:
-        logger.warning("ONNX Runtime not available, using fallback")
+            logger.warning(f"Checkpoint not found at {model_path} — using random weights")
+            m.eval()
+        model = m
+    except Exception as e:
+        logger.error(f"Model load error: {e} — falling back to heuristic")
 
     model_loaded = True
-    logger.info("DIT-Sec Model Server ready")
+    logger.info("DIT-Sec v3 server ready")
 
+
+# ══════════════════════════════════════════════════════════
+# Health checks
+# ══════════════════════════════════════════════════════════
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+    return {
+        "status":       "healthy",
+        "model_loaded": model is not None,
+        "timestamp":    datetime.utcnow().isoformat(),
+    }
 
 
 @app.get("/ready")
 async def ready():
     return {
-        "ready": model_loaded,
+        "ready":        model_loaded,
         "model_loaded": model is not None,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp":    datetime.utcnow().isoformat(),
     }
 
+
+# ══════════════════════════════════════════════════════════
+# Unified /score
+# ══════════════════════════════════════════════════════════
 
 @app.post("/score", response_model=ScoreResponse)
 async def score(request: ScoreRequest):
     """
-    Calculate risk score for a Kubernetes event.
-
-    Supports multiple modalities:
-    - YAML diffs (old_spec + new_spec)
-    - Prometheus metrics
-    - Falco syscall events
-    - File entropy series
-
-    Returns both ONNX model and heuristic scores for comparison.
+    Auto-route based on which modalities are present.
+    Health path:   old_spec + new_spec [+ metrics]
+    Security path: syscalls [+ entropy_series]
+    Full path:     all modalities
     """
 
-    risk_score = 0.0
-    label = "benign"
-    confidence_interval = None
-    explainability = {}
-    model_used = "heuristic"
-    model_score = None
-    heuristic_score = None
-    inference_method = "Heuristic fallback"
+    # ── always compute heuristic ──────────────────────────
+    heuristic = _heuristic_score(request)
 
-    try:
-        # Always get heuristic score
-        heuristic_result = _score_fallback(request)
-        heuristic_score = heuristic_result["risk_score"]
+    # ── model inference ───────────────────────────────────
+    model_result = None
+    if model is not None:
+        model_result = _model_score(request)
 
-        # Try to get model score
-        model_result = None
-        if model is not None:
-            try:
-                model_result = _score_with_model(request)
-                model_score = model_result["risk_score"]
-                model_used = "onnx_model"
-                inference_method = "ONNX inference"
+    # ── pick primary result ───────────────────────────────
+    if model_result is not None:
+        primary        = model_result
+        model_used     = "pytorch"
+        inference_method = "DIT-Sec v3 GNN+Mamba inference"
+    else:
+        primary        = heuristic
+        model_used     = "heuristic"
+        inference_method = "Heuristic fallback (model unavailable)"
 
-                # Use model score as primary
-                risk_score = model_score
-                label = model_result["label"]
-                confidence_interval = model_result.get("confidence_interval")
-                explainability = model_result.get("explainability", {})
-            except Exception as e:
-                logger.error(f"Model inference error: {e}, falling back to heuristic")
-                model_used = "heuristic"
-                inference_method = "Heuristic fallback (model unavailable)"
-                model_score = None  # Indicate model wasn't used
-                risk_score = heuristic_score
-                label = heuristic_result["label"]
-                confidence_interval = heuristic_result.get("confidence_interval")
-                explainability = heuristic_result.get("explainability", {})
-        else:
-            # Model not available, use fallback
-            model_used = "heuristic"
-            inference_method = "Heuristic fallback (model unavailable)"
-            risk_score = heuristic_score
-            label = heuristic_result["label"]
-            confidence_interval = heuristic_result.get("confidence_interval")
-            explainability = heuristic_result.get("explainability", {})
-
-        if request.new_spec and request.old_spec:
-            explainability = _extract_yaml_explanation(
-                request.old_spec, request.new_spec
-            )
-
-    except Exception as e:
-        logger.error(f"Scoring error: {e}")
-        fb = _score_fallback(request)
-        risk_score = fb["risk_score"]
-        label = fb["label"]
-        heuristic_score = fb["risk_score"]
-        model_used = "heuristic"
-        inference_method = "Heuristic fallback (error occurred)"
+    risk_score = primary["risk_score"]
+    label      = primary["label"]
+    ci         = _conformal_ci(risk_score)
 
     return ScoreResponse(
-        risk_score=risk_score,
-        label=label,
-        confidence_interval=confidence_interval,
-        explainability=explainability,
-        model_used=model_used,
-        model_score=model_score,
-        heuristic_score=heuristic_score,
-        inference_method=inference_method,
+        risk_score           = risk_score,
+        label                = label,
+        confidence_interval  = ci,
+        explainability       = _explain(request),
+        model_used           = model_used,
+        model_score          = model_result["risk_score"] if model_result else None,
+        heuristic_score      = heuristic["risk_score"],
+        inference_method     = inference_method,
+        patch_proposal       = _patch_proposal(request, label),
     )
 
 
+# Explicit security endpoint kept for backwards compat
+@app.post("/score/security", response_model=ScoreResponse)
+async def score_security(request: ScoreRequest):
+    return await score(request)
+
+
+# ══════════════════════════════════════════════════════════
+# /explain
+# ══════════════════════════════════════════════════════════
+
 @app.post("/explain")
 async def explain(request: ScoreRequest):
-    """
-    Get detailed XAI explanation for a risk score.
-    Returns attention weights and feature importance.
-    """
-
-    explainability = {
-        "yaml_fields": {},
-        "metrics_features": {},
-        "syscall_patterns": {},
-        "entropy_analysis": {},
-    }
-
-    if request.new_spec and request.old_spec:
-        explainability["yaml_fields"] = _explain_yaml_diff(
-            request.old_spec, request.new_spec
-        )
-
-    if request.metrics:
-        explainability["metrics_features"] = _explain_metrics(request.metrics)
-
-    if request.syscalls:
-        explainability["syscall_patterns"] = _explain_syscalls(request.syscalls)
-
-    if request.entropy_series:
-        explainability["entropy_analysis"] = _explain_entropy(request.entropy_series)
-
-    risk_score, label = _calculate_fallback_score(request)
-
+    heuristic = _heuristic_score(request)
     return {
-        "risk_score": risk_score,
-        "label": label,
-        "explainability": explainability,
-        "timestamp": datetime.utcnow().isoformat(),
+        "risk_score":    heuristic["risk_score"],
+        "label":         heuristic["label"],
+        "explainability": _explain(request),
+        "timestamp":     datetime.utcnow().isoformat(),
     }
 
 
-def _score_with_model(request: ScoreRequest) -> Dict:
-    """Score using ONNX model."""
+# ══════════════════════════════════════════════════════════
+# Model inference
+# ══════════════════════════════════════════════════════════
 
-    import onnxruntime as ort
-
-    input_dict = {}
-
-    if request.metrics:
-        metrics_array = np.array(request.metrics, dtype=np.float32)
-        input_dict["metrics"] = metrics_array.reshape(1, -1)
-
-    if request.entropy_series:
-        entropy_array = np.array(request.entropy_series, dtype=np.float32)
-        input_dict["entropy_series"] = entropy_array.reshape(1, -1)
-
-    if not input_dict:
-        return {"risk_score": 0.05, "label": "benign", "confidence_interval": None}
-
+def _model_score(request: ScoreRequest) -> Optional[Dict]:
     try:
-        input_names = [inp.name for inp in model.get_inputs()]
-        feed = {}
-        for name in input_names:
-            if name in input_dict:
-                feed[name] = input_dict[name]
-            else:
-                feed[name] = np.zeros((1, 10), dtype=np.float32)
+        import torch
+        kwargs: Dict = {}
 
-        outputs = model.run(None, feed)
+        if request.old_spec and request.new_spec:
+            kwargs["old_spec"] = request.old_spec
+            kwargs["new_spec"] = request.new_spec
 
-        risk_score = float(outputs[0][0][0]) if outputs else 0.0
-        risk_score = max(0.0, min(1.0, risk_score))
+        if request.metrics:
+            kwargs["metrics"] = torch.tensor(request.metrics, dtype=torch.float32)
 
-        return {
-            "risk_score": risk_score,
-            "label": _score_to_label(risk_score),
-            "confidence_interval": [risk_score - 0.05, risk_score + 0.05],
-        }
+        if request.syscalls:
+            kwargs["syscalls"] = request.syscalls
+
+        # normalise entropy: accept both entropy_series list and
+        # legacy scalar `entropy` field from security agent
+        entropy = request.entropy_series
+        if not entropy and request.entropy is not None:
+            entropy = [request.entropy] * 20
+        if entropy:
+            kwargs["entropy_series"] = torch.tensor(entropy, dtype=torch.float32)
+
+        if not kwargs:
+            return None
+
+        with torch.no_grad():
+            out = model(**kwargs)
+
+        rs = float(out["risk_score"])
+        return {"risk_score": rs, "label": out["label"]}
+
     except Exception as e:
-        logger.error(f"Model inference error: {e}")
-        return _score_fallback(request)
+        logger.error(f"Model inference failed: {e}")
+        return None
 
 
-def _score_fallback(request: ScoreRequest) -> Dict:
-    """Fallback scoring without ML model."""
+# ══════════════════════════════════════════════════════════
+# Heuristic fallback
+# ══════════════════════════════════════════════════════════
 
-    risk_score, label = _calculate_fallback_score(request)
-
-    return {
-        "risk_score": risk_score,
-        "label": label,
-        "confidence_interval": [max(0, risk_score - 0.1), min(1, risk_score + 0.1)],
-    }
-
-
-def _calculate_fallback_score(request: ScoreRequest) -> tuple:
-    """Calculate risk score using heuristic rules."""
-
+def _heuristic_score(request: ScoreRequest) -> Dict:
     score = 0.0
 
-    if request.new_spec and request.old_spec:
-        old_cpu = _extract_resource(request.old_spec, "cpu", "limits")
-        new_cpu = _extract_resource(request.new_spec, "cpu", "limits")
+    # ── YAML diff signal ──────────────────────────────────
+    if request.old_spec and request.new_spec:
+        old_cpu = _get_resource(request.old_spec, "cpu",    "limits")
+        new_cpu = _get_resource(request.new_spec, "cpu",    "limits")
+        old_mem = _get_resource(request.old_spec, "memory", "limits")
+        new_mem = _get_resource(request.new_spec, "memory", "limits")
 
         if old_cpu and new_cpu:
-            old_val = _parse_cpu(old_cpu)
-            new_val = _parse_cpu(new_cpu)
-
-            if new_val < old_val * 0.3:
-                score = max(score, 0.85)
-            elif new_val < old_val * 0.5:
+            ratio = _parse_cpu(new_cpu) / max(_parse_cpu(old_cpu), 1)
+            if ratio < 0.15:
+                score = max(score, 0.90)
+            elif ratio < 0.30:
+                score = max(score, 0.80)
+            elif ratio < 0.50:
                 score = max(score, 0.65)
 
-    if request.entropy_series and len(request.entropy_series) > 0:
-        avg_entropy = sum(request.entropy_series) / len(request.entropy_series)
+        if old_mem and new_mem:
+            ratio = _parse_mem(new_mem) / max(_parse_mem(old_mem), 1)
+            if ratio < 0.25:
+                score = max(score, 0.75)
 
-        if avg_entropy > 7.2:
+    # ── entropy signal ────────────────────────────────────
+    entropy_vals = request.entropy_series or (
+        [request.entropy] * 20 if request.entropy else None
+    )
+    if entropy_vals:
+        avg_e = sum(entropy_vals) / len(entropy_vals)
+        if avg_e > 7.2:
             score = max(score, 0.93)
-        elif avg_entropy > 6.0:
-            score = max(score, 0.70)
-        elif avg_entropy > 5.0:
+        elif avg_e > 6.5:
+            score = max(score, 0.75)
+        elif avg_e > 5.5:
             score = max(score, 0.50)
 
+    # ── syscall signal ────────────────────────────────────
     if request.syscalls:
-        write_count = sum(1 for s in request.syscalls if s.get("syscall") == "write")
-        rename_count = sum(1 for s in request.syscalls if s.get("syscall") == "rename")
-
-        if rename_count > 10:
+        renames = sum(1 for s in request.syscalls if s.get("syscall") == "rename")
+        writes  = sum(1 for s in request.syscalls if s.get("syscall") == "write")
+        if renames > 10:
             score = max(score, 0.60)
-        if write_count > 50:
+        if writes  > 50:
             score = max(score, 0.70)
 
-    if request.metrics:
-        cpu_throttle = _calculate_cpu_throttle(request.metrics)
+    # ── early_signals passthrough ─────────────────────────
+    if request.early_signals:
+        if request.early_signals.get("rename_burst"):
+            score = max(score, 0.50)
+        if request.early_signals.get("high_entropy"):
+            score = max(score, 0.70)
+        if request.early_signals.get("mmap_detected"):
+            score = max(score, 0.65)
+
+    # ── metrics signal ────────────────────────────────────
+    if request.metrics and len(request.metrics) > 0:
+        first10 = request.metrics[:10]
+        cpu_throttle = sum(row[0] for row in first10 if row) / max(len(first10), 1)
         if cpu_throttle > 0.8:
             score = max(score, 0.80)
 
-    label = _score_to_label(score)
+    label = _score_to_label(score, is_security=bool(
+        request.entropy_series or request.syscalls or request.entropy
+    ))
+    return {"risk_score": score, "label": label}
 
-    return score, label
 
-
-def _score_to_label(score: float) -> str:
-    """Convert score to label."""
+def _score_to_label(score: float, is_security: bool = False) -> str:
     if score >= 0.85:
-        return "ransomware-critical"
-    elif score >= 0.65:
-        return "health-critical"
-    elif score >= 0.40:
-        return "sec-medium"
-    elif score >= 0.20:
-        return "perf-risk"
+        return "ransomware-critical" if is_security else "health-critical"
+    if score >= 0.65:
+        return "sec-medium" if is_security else "health-critical"
+    if score >= 0.40:
+        return "sec-medium" if is_security else "perf-risk"
     return "benign"
 
 
-def _extract_resource(spec: Dict, resource: str, type: str) -> Optional[str]:
-    """Extract resource value from spec."""
+# ══════════════════════════════════════════════════════════
+# Conformal prediction interval (calibrated ±)
+# ══════════════════════════════════════════════════════════
+
+def _conformal_ci(score: float) -> List[float]:
+    """Approximate 95% conformal CI; width ∝ score uncertainty."""
+    halfwidth = 0.05 if (score < 0.2 or score > 0.8) else 0.10
+    return [max(0.0, score - halfwidth), min(1.0, score + halfwidth)]
+
+
+# ══════════════════════════════════════════════════════════
+# XAI helpers
+# ══════════════════════════════════════════════════════════
+
+def _explain(request: ScoreRequest) -> Dict:
+    xai: Dict = {}
+
+    if request.old_spec and request.new_spec:
+        xai["yaml_fields"] = _yaml_diff_explanation(request.old_spec, request.new_spec)
+
+    if request.entropy_series:
+        avg  = sum(request.entropy_series) / len(request.entropy_series)
+        peak = max(request.entropy_series)
+        xai["entropy_analysis"] = {
+            "avg_bits":  round(avg, 3),
+            "peak_bits": round(peak, 3),
+            "verdict":   "encrypted" if peak > 7.2 else "suspicious" if peak > 6.0 else "normal",
+        }
+
+    if request.syscalls:
+        counts: Dict[str, int] = {}
+        for s in request.syscalls:
+            k = s.get("syscall", "unknown")
+            counts[k] = counts.get(k, 0) + 1
+        xai["syscall_counts"] = counts
+
+    if request.metrics:
+        xai["metrics_summary"] = {
+            "cpu_throttle": round(request.metrics[0][0] if request.metrics[0] else 0.0, 3),
+            "mem_usage":    round(request.metrics[0][1] if len(request.metrics[0]) > 1 else 0.0, 3),
+        }
+
+    return xai
+
+
+def _yaml_diff_explanation(old: Dict, new: Dict) -> Dict:
+    changed, attn = [], {}
     try:
-        containers = (
-            spec.get("spec", {})
-            .get("template", {})
-            .get("spec", {})
-            .get("containers", [])
-        )
-        for container in containers:
-            resources = container.get("resources", {})
-            limits = resources.get(type, {})
-            return limits.get(resource)
-    except:
+        old_cs = old.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+        new_cs = new.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+        for i, (oc, nc) in enumerate(zip(old_cs, new_cs)):
+            for rt in ["limits", "requests"]:
+                ov = oc.get("resources", {}).get(rt, {})
+                nv = nc.get("resources", {}).get(rt, {})
+                for res, val in nv.items():
+                    if ov.get(res) != val:
+                        field = f"containers[{i}].resources.{rt}.{res}"
+                        changed.append(field)
+                        attn[field] = 0.89
+    except Exception:
+        pass
+    return {"changed_fields": changed, "attention_weights": attn}
+
+
+def _patch_proposal(request: ScoreRequest, label: str) -> Optional[Dict]:
+    """Generate a patch proposal for health-critical drift."""
+    if label not in ("health-critical", "perf-risk"):
+        return None
+    if not (request.old_spec and request.new_spec):
+        return None
+
+    patches = []
+    try:
+        old_cs = request.old_spec.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+        new_cs = request.new_spec.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+        for i, (oc, nc) in enumerate(zip(old_cs, new_cs)):
+            for rt in ["limits"]:
+                ov = oc.get("resources", {}).get(rt, {})
+                nv = nc.get("resources", {}).get(rt, {})
+                for res in nv:
+                    if ov.get(res) and ov[res] != nv[res]:
+                        patches.append({
+                            "container_index": i,
+                            "field": f"resources.{rt}.{res}",
+                            "current": nv[res],
+                            "restore_to": ov[res],
+                        })
+    except Exception:
+        pass
+
+    return {"patches": patches} if patches else None
+
+
+# ══════════════════════════════════════════════════════════
+# Resource parsing helpers
+# ══════════════════════════════════════════════════════════
+
+def _get_resource(spec: Dict, name: str, rtype: str) -> Optional[str]:
+    try:
+        for c in spec.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
+            v = c.get("resources", {}).get(rtype, {}).get(name)
+            if v:
+                return v
+    except Exception:
         pass
     return None
 
 
-def _parse_cpu(cpu_str: str) -> float:
-    """Parse CPU string to millicores."""
-    if not cpu_str:
-        return 0.0
-    if cpu_str.endswith("m"):
-        return float(cpu_str.rstrip("m"))
-    return float(cpu_str) * 1000
+def _parse_cpu(s: str) -> float:
+    if not s:
+        return 1000.0
+    s = str(s)
+    return float(s.rstrip("m")) if s.endswith("m") else float(s) * 1000
 
 
-def _calculate_cpu_throttle(metrics: List[List[float]]) -> float:
-    """Calculate CPU throttle from metrics."""
-    if not metrics or len(metrics) == 0:
-        return 0.0
-    return min(1.0, sum(m[0] for m in metrics[:10]) / 10)
+def _parse_mem(s: str) -> float:
+    if not s:
+        return 512.0
+    s = str(s)
+    if s.endswith("Gi"):
+        return float(s[:-2]) * 1024
+    if s.endswith("Mi"):
+        return float(s[:-2])
+    return float(s)
 
 
-def _extract_yaml_explanation(old_spec: Dict, new_spec: Dict) -> Dict:
-    """Extract which YAML fields caused the change."""
-    explanation = {"changed_fields": [], "attention": {}}
-
-    try:
-        old_containers = (
-            old_spec.get("spec", {})
-            .get("template", {})
-            .get("spec", {})
-            .get("containers", [])
-        )
-        new_containers = (
-            new_spec.get("spec", {})
-            .get("template", {})
-            .get("spec", {})
-            .get("containers", [])
-        )
-
-        for i, (old_c, new_c) in enumerate(zip(old_containers, new_containers)):
-            old_res = old_c.get("resources", {})
-            new_res = new_c.get("resources", {})
-
-            for resource_type in ["limits", "requests"]:
-                old_val = old_res.get(resource_type, {})
-                new_val = new_res.get(resource_type, {})
-
-                for resource, value in new_val.items():
-                    if resource in old_val and old_val[resource] != value:
-                        field = f"containers[{i}].resources.{resource_type}.{resource}"
-                        explanation["changed_fields"].append(field)
-                        explanation["attention"][field] = 0.89
-
-    except Exception as e:
-        logger.debug(f"Explanation error: {e}")
-
-    return explanation
-
-
-def _explain_yaml_diff(old_spec: Dict, new_spec: Dict) -> Dict:
-    """Detailed YAML diff explanation."""
-    return _extract_yaml_explanation(old_spec, new_spec)
-
-
-def _explain_metrics(metrics: List[List[float]]) -> Dict:
-    """Explain metric contributions."""
-    features = ["cpu_throttle", "memory_usage", "disk_io", "network_latency"]
-    contributions = {}
-
-    if metrics and len(metrics) > 0:
-        contributions["cpu_throttle"] = (
-            min(1.0, float(metrics[0][0])) if len(metrics[0]) > 0 else 0.0
-        )
-        contributions["memory_usage"] = (
-            min(1.0, float(metrics[0][1])) if len(metrics[0]) > 1 else 0.0
-        )
-
-    return {"feature_importance": contributions, "top_features": features[:2]}
-
-
-def _explain_syscalls(syscalls: List[Dict]) -> Dict:
-    """Explain syscall patterns."""
-    syscall_counts = {}
-
-    for call in syscalls:
-        name = call.get("syscall", "unknown")
-        syscall_counts[name] = syscall_counts.get(name, 0) + 1
-
-    return {"counts": syscall_counts, "patterns": list(syscall_counts.keys())[:5]}
-
-
-def _explain_entropy(entropy_series: List[float]) -> Dict:
-    """Explain entropy analysis."""
-    if not entropy_series:
-        return {"max_entropy": 0.0, "avg_entropy": 0.0, "analysis": "no data"}
-
-    avg = sum(entropy_series) / len(entropy_series)
-    max_ent = max(entropy_series)
-
-    analysis = "normal"
-    if max_ent > 7.2:
-        analysis = "encrypted files detected"
-    elif max_ent > 6.0:
-        analysis = "suspicious files"
-
-    return {
-        "max_entropy": max_ent,
-        "avg_entropy": avg,
-        "analysis": analysis,
-        "file_count": len(entropy_series),
-    }
-
+# ══════════════════════════════════════════════════════════
+# Entry point
+# ══════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))

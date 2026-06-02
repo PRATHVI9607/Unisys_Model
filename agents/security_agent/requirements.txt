@@ -1,7 +1,7 @@
 # Security Agent Requirements
 
 # Kubernetes
-kubernetes-asyncio==0.29.0
+kubernetes-asyncio==29.0.1
 
 # Redis
 redis>=5.0.0

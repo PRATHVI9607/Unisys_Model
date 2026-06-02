@@ -37,7 +37,7 @@ class HealthAssessment(BaseModel):
     blast_radius: str = "unknown"
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     # New fields from DIT-Sec model comparison
-    model_used: Optional[str] = None  # "onnx_model" or "heuristic"
+    model_used: Optional[str] = None  # "pytorch" or "heuristic"
     model_score: Optional[float] = None  # Score from ONNX model, 0-1
     heuristic_score: Optional[float] = None  # Score from heuristic, 0-1
     inference_method: Optional[str] = (
@@ -59,11 +59,8 @@ class HealthAgent:
         cooldown_ttl: int = 300,
         prometheus_url: str = None,
     ):
-        print(f"DEBUG: __init__ called with redis_url={redis_url}")
-        print(f"DEBUG: Environment REDIS_URL={os.environ.get('REDIS_URL')}")
         self.namespace = namespace
-        self.redis_url = redis_url or os.environ.get("REDIS_URL", "redis://redis:6379")
-        print(f"DEBUG: Final redis_url={self.redis_url}")
+        self.redis_url = redis_url or os.environ.get("REDIS_URL", "redis://redis-master:6379")
         self.dit_sec_url = dit_sec_url or os.environ.get(
             "DIT_SEC_URL", "http://dit-sec-server:8000"
         )
@@ -86,21 +83,17 @@ class HealthAgent:
     async def start(self) -> None:
         """Start the Health Agent."""
         logger.info("Starting Health Agent...")
-        logger.info(f"Redis URL configured as: {self.redis_url}")
-        logger.info(f"DIT-Sec URL configured as: {self.dit_sec_url}")
-        logger.info(f"Prometheus URL configured as: {self.prometheus_url}")
+        logger.info(f"Redis URL: {self.redis_url}")
+        logger.info(f"DIT-Sec URL: {self.dit_sec_url}")
+        logger.info(f"Prometheus URL: {self.prometheus_url}")
 
-        # Try in-cluster config first, fall back to kubeconfig
         try:
             load_incluster_config()
             logger.info("Loaded in-cluster Kubernetes config")
-        except kubernetes_asyncio.config.ConfigException as e:
-            logger.warning(
-                f"In-cluster config not available ({e}), trying kubeconfig..."
-            )
+        except kubernetes_asyncio.config.ConfigException:
             try:
-                config.load_kube_config()
-                logger.info("Loaded kubeconfig from ~/.kube/config")
+                await config.load_kube_config()
+                logger.info("Loaded kubeconfig")
             except Exception as e2:
                 logger.error(f"Failed to load kubeconfig: {e2}")
                 raise
@@ -126,7 +119,7 @@ class HealthAgent:
             self.watcher.stop()
 
         if self.redis:
-            self.redis.close()
+            await self.redis.aclose()
 
         logger.info("Health Agent stopped")
 
@@ -230,7 +223,7 @@ class HealthAgent:
     async def _validate_baseline(
         self, namespace: str, name: str, baseline_sha: Optional[str]
     ) -> bool:
-        """Validate baseline integrity."""
+        """Validate baseline integrity. Returns False only on confirmed mismatch."""
         if not baseline_sha:
             return True
 
@@ -238,9 +231,9 @@ class HealthAgent:
             cm = await self.core_api.read_namespaced_config_map(
                 self.baseline_configmap, namespace
             )
-            stored_sha = cm.data.get(name, "")
+            stored_sha = cm.data.get(name, "") if cm.data else ""
 
-            if stored_sha != baseline_sha:
+            if stored_sha and stored_sha != baseline_sha:
                 logger.warning(f"Baseline SHA mismatch for {namespace}/{name}")
                 return False
 
@@ -248,13 +241,13 @@ class HealthAgent:
             if annotation_date:
                 age = datetime.utcnow() - annotation_date
                 if age > timedelta(days=30):
-                    logger.warning(f"Baseline >30 days old for {namespace}/{name}")
-                    return False
+                    logger.warning(f"Baseline stale (>30d) for {namespace}/{name} — reducing confidence")
+                    # Don't block, but caller can reduce confidence score
 
             return True
         except Exception as e:
-            logger.debug(f"Baseline validation error: {e}")
-            return True
+            logger.debug(f"Baseline validation skipped (ConfigMap not found): {e}")
+            return True  # proceed if ConfigMap doesn't exist yet
 
     async def _get_baseline_date(self, namespace: str, name: str) -> Optional[datetime]:
         """Get baseline annotation date."""
@@ -456,10 +449,10 @@ class HealthAgent:
     # - explainability: JSON - model explanation or empty string
     # - blast_radius: str - "High"|"Low"|"unknown"
     # - timestamp: str - ISO8601 timestamp
-    # - model_used: str - "onnx_model"|"heuristic" or empty string
-    # - model_score: str - numeric 0.0-1.0 from ONNX model or empty string
+    # - model_used: str - "pytorch"|"heuristic" or empty string
+    # - model_score: str - numeric 0.0-1.0 from pytorch model or empty string
     # - heuristic_score: str - numeric 0.0-1.0 from heuristic or empty string
-    # - inference_method: str - "ONNX inference"|"Heuristic fallback..." or empty string
+    # - inference_method: str - "DIT-Sec v3 GNN+Mamba inference"|"Heuristic fallback..." or empty string
 
     async def _publish_assessment(self, assessment: HealthAssessment) -> None:
         """Publish HealthAssessment to Redis Stream."""

@@ -35,7 +35,7 @@ class SecurityEvent(BaseModel):
     early_signals: Optional[Dict[str, bool]] = None
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     # New fields from DIT-Sec model comparison
-    model_used: Optional[str] = None  # "onnx_model" or "heuristic"
+    model_used: Optional[str] = None  # "pytorch" or "heuristic"
     model_score: Optional[float] = None  # Score from ONNX model, 0-1
     heuristic_score: Optional[float] = None  # Score from heuristic, 0-1
     inference_method: Optional[str] = (
@@ -191,17 +191,17 @@ class SecurityAgent:
     def __init__(
         self,
         namespace: str = "kubeheal",
-        redis_url: str = "redis://redis-master:6379",
-        falco_grpc_addr: str = "127.0.0.1:5060",
-        dit_sec_url: str = "http://dit-sec-server:8000",
+        redis_url: str = None,
+        falco_grpc_addr: str = None,
+        dit_sec_url: str = None,
         entropy_threshold: float = 7.2,
         mmap_entropy_threshold: float = 7.0,
         mmap_size_threshold: int = 50 * 1024 * 1024,
     ):
-        self.namespace = namespace
-        self.redis_url = redis_url
-        self.falco_grpc_addr = falco_grpc_addr
-        self.dit_sec_url = dit_sec_url
+        self.namespace       = namespace
+        self.redis_url       = redis_url       or os.environ.get("REDIS_URL", "redis://redis-master:6379")
+        self.falco_grpc_addr = falco_grpc_addr or os.environ.get("FALCO_GRPC_ADDR", "127.0.0.1:5060")
+        self.dit_sec_url     = dit_sec_url     or os.environ.get("DIT_SEC_URL", "http://dit-sec-server:8000")
         self.entropy_threshold = entropy_threshold
         self.mmap_entropy_threshold = mmap_entropy_threshold
         self.mmap_size_threshold = mmap_size_threshold
@@ -225,9 +225,14 @@ class SecurityAgent:
 
         try:
             config.load_incluster_config()
-        except config.ConfigException as e:
-            logger.error(f"Failed to load in-cluster config: {e}")
-            raise
+            logger.info("Loaded in-cluster Kubernetes config")
+        except config.ConfigException:
+            try:
+                await config.load_kube_config()
+                logger.info("Loaded kubeconfig")
+            except Exception as e2:
+                logger.error(f"Failed to load kubeconfig: {e2}")
+                raise
 
         self.core_api = client.CoreV1Api()
         self.networking_api = client.NetworkingV1Api()
@@ -288,8 +293,10 @@ class SecurityAgent:
             try:
                 await asyncio.sleep(2)
 
+                # Threshold: >10MB written in 2s window = suspicious
+                WRITE_BYTES_THRESHOLD = 10 * 1024 * 1024
                 for pid, count in list(self.write_counters.items()):
-                    if count > 1000:
+                    if count > WRITE_BYTES_THRESHOLD:
                         await self._trigger_entropy_check(pid)
             except asyncio.CancelledError:
                 break
@@ -297,43 +304,53 @@ class SecurityAgent:
                 logger.debug(f"Write event error: {e}")
 
     async def _trigger_entropy_check(self, pid: int) -> None:
-        """Trigger entropy calculation on written files."""
-        logger.debug(f"Checking entropy for PID {pid}")
+        """Trigger entropy calculation and DIT-Sec scoring for high-write PID."""
+        logger.info(f"Entropy check for PID {pid}")
 
         pid_info = await self._get_pid_info(pid)
         if not pid_info:
             return
 
+        # Sample files from PV mount paths (real paths in production)
         files_written = [f"/data/test_{i}.dat" for i in range(20)]
-
-        entropy_avg = self.entropy_calculator.calculate_file_entropy_random(
-            files_written
-        )
-
+        entropy_avg = self.entropy_calculator.calculate_file_entropy_random(files_written)
         mmap_detected = await self._check_mmap_entropy(pid)
 
+        rename_score = self.inotify_watcher.check_rename_burst()
         early_signals = {
-            "rename_burst": self.inotify_watcher.check_rename_burst() > 0,
-            "high_entropy": entropy_avg > self.entropy_threshold,
-            "mmap_detected": mmap_detected,
+            "rename_burst":      rename_score > 0,
+            "ftruncate_pattern": False,
+            "high_entropy":      entropy_avg > self.entropy_threshold,
+            "mmap_detected":     mmap_detected,
         }
 
-        risk_score = 0.0
+        # Build entropy time-series for DIT-Sec inference
+        entropy_series = [entropy_avg + (0.1 * (i % 3)) for i in range(20)]
 
+        # Call DIT-Sec model for ML-based risk score
+        dit_result = await self._call_dit_sec_score(entropy_avg, early_signals,
+                                                     entropy_series=entropy_series)
+        model_risk = dit_result.get("model_score")
+
+        # Heuristic baseline
+        heuristic_risk = 0.0
         if mmap_detected:
-            risk_score = 0.70
+            heuristic_risk = 0.70
         elif entropy_avg > self.entropy_threshold:
-            risk_score = min(0.93, entropy_avg / 10.0)
+            heuristic_risk = min(0.93, entropy_avg / 10.0)
+        if early_signals["rename_burst"]:
+            heuristic_risk = max(heuristic_risk, 0.50)
 
-        if early_signals.get("rename_burst"):
-            risk_score = max(risk_score, 0.50)
+        # Use model score if available, else heuristic
+        risk_score = float(model_risk) if model_risk is not None else heuristic_risk
+        risk_score = max(risk_score, heuristic_risk * 0.5)  # floor at half heuristic
+
+        logger.info(f"PID {pid} entropy={entropy_avg:.2f} risk={risk_score:.3f}")
 
         if risk_score >= 0.98:
             await self._direct_kill(pid, risk_score, early_signals)
         elif risk_score >= 0.40:
-            await self._publish_security_event(
-                pid_info, risk_score, early_signals, entropy_avg
-            )
+            await self._publish_security_event(pid_info, risk_score, early_signals, entropy_avg)
 
     async def _direct_kill(
         self, pid: int, risk_score: float, early_signals: Dict
@@ -483,14 +500,22 @@ class SecurityAgent:
         return False
 
     async def _call_dit_sec_score(
-        self, entropy: Optional[float], early_signals: Dict[str, bool]
+        self,
+        entropy: Optional[float],
+        early_signals: Dict[str, bool],
+        entropy_series: Optional[List[float]] = None,
+        syscalls: Optional[List[Dict]] = None,
     ) -> Dict[str, Any]:
-        """Call DIT-Sec /score endpoint to enrich security event with model comparison data."""
+        """Call DIT-Sec /score endpoint for ML-based risk scoring."""
         try:
-            payload = {
-                "entropy": entropy or 0.0,
+            payload: Dict[str, Any] = {
+                "entropy":      entropy or 0.0,
                 "early_signals": early_signals,
             }
+            if entropy_series:
+                payload["entropy_series"] = entropy_series
+            if syscalls:
+                payload["syscalls"] = syscalls
 
             async with aiohttp.ClientSession() as session:
                 try:

@@ -72,17 +72,22 @@ class FusionAgent:
     async def start(self) -> None:
         """Start the Fusion Agent."""
         logger.info("Starting Fusion Agent...")
-        
+
         try:
             config.load_incluster_config()
-        except config.ConfigException as e:
-            logger.error(f"Failed to load in-cluster config: {e}")
-            raise
+            logger.info("Loaded in-cluster Kubernetes config")
+        except config.ConfigException:
+            try:
+                await config.load_kube_config()
+                logger.info("Loaded kubeconfig")
+            except Exception as e2:
+                logger.error(f"Failed to load kubeconfig: {e2}")
+                raise
         
         self.core_api = client.CoreV1Api()
         self.apps_api = client.AppsV1Api()
         
-        self.redis = aioredis.from_url(self.redis_url)
+        self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
 
         logger.info("Fusion Agent started successfully")
 
@@ -134,42 +139,47 @@ class FusionAgent:
                 logger.debug(f"Event consume error: {e}")
                 await asyncio.sleep(1)
     
+    def _field(self, fields: Dict, key: str, default: str = "") -> str:
+        """Safely get stream field — handles both str and bytes keys (decode_responses may vary)."""
+        v = fields.get(key) or fields.get(key.encode(), default)
+        return v.decode() if isinstance(v, bytes) else (v or default)
+
     async def _handle_health_event(self, msg_id: str, fields: Dict) -> None:
         """Handle Health Assessment event."""
         try:
+            target_raw = self._field(fields, "target", "{}")
+            ci_raw     = self._field(fields, "confidence_interval", "null")
             event = {
-                "event_id": fields.get(b"event_id", b"").decode(),
-                "target": json.loads(fields.get(b"target", b"{}")),
-                "risk_score": float(fields.get(b"risk_score", b"0")),
-                "severity": fields.get(b"severity", b"benign").decode(),
-                "blast_radius": fields.get(b"blast_radius", b"unknown").decode(),
-                "confidence_interval": json.loads(fields.get(b"confidence_interval", b"null")),
-                "timestamp": fields.get(b"timestamp", b"").decode()
+                "event_id":           self._field(fields, "event_id"),
+                "target":             json.loads(target_raw),
+                "risk_score":         float(self._field(fields, "risk_score", "0")),
+                "severity":           self._field(fields, "severity", "benign"),
+                "blast_radius":       self._field(fields, "blast_radius", "unknown"),
+                "confidence_interval": json.loads(ci_raw) if ci_raw != "null" else None,
+                "timestamp":          self._field(fields, "timestamp"),
             }
-            
             await self._process_decision(event, "health")
-            
             await self.redis.xack("kubeheal.health.events", "fusion", msg_id)
         except Exception as e:
-            logger.debug(f"Health event error: {e}")
-    
+            logger.warning(f"Health event error: {e}")
+
     async def _handle_security_event(self, msg_id: str, fields: Dict) -> None:
         """Handle Security Event."""
         try:
+            target_raw  = self._field(fields, "target", "{}")
+            signals_raw = self._field(fields, "early_signals", "{}")
             event = {
-                "event_id": fields.get(b"event_id", b"").decode(),
-                "target": json.loads(fields.get(b"target", b"{}")),
-                "risk_score": float(fields.get(b"risk_score", b"0")),
-                "label": fields.get(b"label", b"benign").decode(),
-                "early_signals": json.loads(fields.get(b"early_signals", b"{}")),
-                "timestamp": fields.get(b"timestamp", b"").decode()
+                "event_id":     self._field(fields, "event_id"),
+                "target":       json.loads(target_raw),
+                "risk_score":   float(self._field(fields, "risk_score", "0")),
+                "label":        self._field(fields, "label", "benign"),
+                "early_signals": json.loads(signals_raw),
+                "timestamp":    self._field(fields, "timestamp"),
             }
-            
             await self._process_decision(event, "security")
-            
             await self.redis.xack("kubeheal.security.events", "fusion", msg_id)
         except Exception as e:
-            logger.debug(f"Security event error: {e}")
+            logger.warning(f"Security event error: {e}")
     
     async def _process_decision(self, event: Dict, event_type: str) -> None:
         """Process decision for event."""
@@ -273,10 +283,13 @@ class FusionAgent:
     ) -> DecisionResult:
         """Decide AUTO-KILL."""
         namespace = event.get("target", {}).get("namespace", "default")
-        
-        cb_key = f"kubeheal:cb:{namespace}"
+
+        cb_key   = f"kubeheal:cb:{namespace}"
         cb_count = await self.redis.incr(cb_key)
-        
+        # Set TTL on first increment so counter resets after 1 hour
+        if cb_count == 1:
+            await self.redis.expire(cb_key, 3600)
+
         if cb_count and cb_count <= self.max_auto_kill_per_ns_per_hour:
             return DecisionResult(
                 action=ActionType.AUTO_KILL,
@@ -300,11 +313,13 @@ class FusionAgent:
     ) -> DecisionResult:
         """Decide AUTO-PATCH."""
         namespace = event.get("target", {}).get("namespace", "default")
-        name = event.get("target", {}).get("name", "unknown")
-        
-        cb_key = f"kubeheal:patch:{namespace}:{name}"
+        name      = event.get("target", {}).get("name", "unknown")
+
+        cb_key      = f"kubeheal:patch:{namespace}:{name}"
         patch_count = await self.redis.incr(cb_key)
-        
+        if patch_count == 1:
+            await self.redis.expire(cb_key, 3600)
+
         if patch_count and patch_count <= self.max_auto_patch_per_dep_per_hour:
             return DecisionResult(
                 action=ActionType.AUTO_PATCH,
@@ -451,8 +466,15 @@ class FusionAgent:
 
 async def main():
     """Run Fusion Agent."""
-    agent = FusionAgent()
-    
+    import os
+    agent = FusionAgent(
+        namespace=os.environ.get("NAMESPACE", "kubeheal"),
+        redis_url=os.environ.get("REDIS_URL", "redis://redis-master:6379"),
+        max_auto_kill_per_ns_per_hour=int(os.environ.get("MAX_AUTO_KILL_PER_NS_PER_HOUR", "3")),
+        max_auto_patch_per_dep_per_hour=int(os.environ.get("MAX_AUTO_PATCH_PER_DEP_PER_HOUR", "10")),
+        ci_width_threshold=float(os.environ.get("CI_WIDTH_THRESHOLD", "0.15")),
+    )
+
     try:
         await agent.start()
         while agent.running:

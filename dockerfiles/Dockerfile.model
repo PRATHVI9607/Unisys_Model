@@ -3,19 +3,20 @@ FROM python:3.11-slim
 WORKDIR /app
 
 RUN pip install --no-cache-dir \
-    onnxruntime==1.19.2 \
     "numpy<2" \
+    torch==2.2.0 --index-url https://download.pytorch.org/whl/cpu \
+    torch-geometric==2.5.0 \
+    torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.2.0+cpu.html \
     fastapi==0.110.0 \
     uvicorn==0.27.0 \
     pydantic==2.6.0 \
-    aioredis==2.0.1 \
     aiohttp
 
 COPY models/ /models/
 
 WORKDIR /models/dit_sec_v3
 
-ENV MODEL_PATH=/models/dit_sec_v3/models/dit_sec_v3_simple.onnx
+ENV MODEL_PATH=/models/dit_sec_v3/models/dit_sec_v3_trained.pt
 ENV REDIS_URL=redis://redis-master:6379
 ENV LOG_LEVEL=INFO
 

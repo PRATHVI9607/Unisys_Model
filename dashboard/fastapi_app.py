@@ -727,10 +727,13 @@ async def websocket_endpoint(websocket: WebSocket):
         await dashboard.disconnect_websocket(websocket)
 
 
+_TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
+
+
 @app.get("/")
 async def root():
     """Serve the dashboard HTML."""
-    return FileResponse("templates/index.html")
+    return FileResponse(os.path.join(_TEMPLATES_DIR, "index.html"))
 
 
 if __name__ == "__main__":
