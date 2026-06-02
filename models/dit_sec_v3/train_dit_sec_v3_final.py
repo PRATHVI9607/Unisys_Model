@@ -133,6 +133,35 @@ def load_health_csv(csv_path: str) -> List[Dict]:
 
 
 # ─────────────────────────────────────────────
+# Z-score standardization (fit on TRAIN only)
+# ─────────────────────────────────────────────
+
+def compute_metric_stats(samples: List[Dict]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute per-feature mean/std over all (sample × timestep) metric rows
+    from samples that actually carry metrics (health domain).
+    Returns (mean[15], std[15]). Zero-variance features get std=1 so the
+    transform leaves them at 0 instead of dividing by zero.
+    """
+    mats = [s["metrics"] for s in samples if s.get("metrics") is not None]
+    if not mats:
+        return np.zeros(NUM_METRICS, dtype=np.float32), np.ones(NUM_METRICS, dtype=np.float32)
+
+    stacked = np.concatenate(mats, axis=0)          # (N*T, 15)
+    mean = stacked.mean(axis=0).astype(np.float32)  # (15,)
+    std = stacked.std(axis=0).astype(np.float32)    # (15,)
+    std = np.where(std < 1e-6, 1.0, std).astype(np.float32)
+    return mean, std
+
+
+def apply_standardization(samples: List[Dict], mean: np.ndarray, std: np.ndarray) -> None:
+    """In-place z-score: (x - mean) / std for every sample carrying metrics."""
+    for s in samples:
+        if s.get("metrics") is not None:
+            s["metrics"] = ((s["metrics"] - mean) / std).astype(np.float32)
+
+
+# ─────────────────────────────────────────────
 # Security domain data — synthetic generator
 # ─────────────────────────────────────────────
 
@@ -414,6 +443,16 @@ def train(
     train_samples = all_samples[n_val:]
     print(f"Train: {len(train_samples)}  Val: {len(val_samples)}", flush=True)
 
+    # ── Z-score standardization: fit on TRAIN only, apply to both ──
+    metric_mean, metric_std = compute_metric_stats(train_samples)
+    apply_standardization(train_samples, metric_mean, metric_std)
+    apply_standardization(val_samples,   metric_mean, metric_std)
+    stats_path = res_dir / "metric_stats.json"
+    with open(stats_path, "w") as f:
+        json.dump({"mean": metric_mean.tolist(), "std": metric_std.tolist(),
+                   "metric_cols": METRIC_COLS}, f, indent=2)
+    print(f"[Standardize] Fit on train, applied to train+val. Stats -> {stats_path}", flush=True)
+
     plot_class_distribution(train_samples, res_dir)
 
     train_loader = DataLoader(
@@ -512,6 +551,7 @@ def train(
             "entropy": "EntropyConv1DEncoder (Conv1D+SE)",
         },
         "fusion":          "MHCAFusion (3-head cross-attention)",
+        "preprocessing":   "z-score standardization (fit on train split, per-feature)",
         "total_params":    model.param_count(),
         "epochs_trained":  len(history["train_loss"]),
         "best_val_f1":     round(best_val_f1, 4),

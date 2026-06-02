@@ -23,9 +23,14 @@ wheels/
 
 # Virtual Environments
 .venv
+.venv_train/
 venv/
 ENV/
 env/
+
+# Local scratch / render helpers
+.tmp_dryrun/
+docs/puppeteer-config.json
 
 # IDE
 .vscode/

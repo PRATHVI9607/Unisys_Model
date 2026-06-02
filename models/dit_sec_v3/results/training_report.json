@@ -1,0 +1,26 @@
+{
+  "architecture": "DIT-Sec v3 \u2014 GNN+Mamba Hybrid",
+  "encoders": {
+    "yaml": "YAMLGATEncoder (GATConv 3L\u00d74H)",
+    "metrics": "PrometheusMambaEncoder (SSM 2L)",
+    "events": "FalcoTransformerEncoder (4H\u00d72L)",
+    "entropy": "EntropyConv1DEncoder (Conv1D+SE)"
+  },
+  "fusion": "MHCAFusion (3-head cross-attention)",
+  "preprocessing": "z-score standardization (fit on train split, per-feature)",
+  "total_params": 436006,
+  "epochs_trained": 14,
+  "best_val_f1": 0.8116,
+  "final_train_acc": 0.894,
+  "final_val_acc": 0.8261,
+  "final_train_loss": 0.2724,
+  "final_val_loss": 0.5219,
+  "classes": [
+    "benign",
+    "health-critical",
+    "ransomware-critical",
+    "sec-medium",
+    "perf-risk"
+  ],
+  "checkpoint": "C:\\Workspace\\Unisys_Model\\models\\dit_sec_v3\\models\\dit_sec_v3_trained.pt"
+}

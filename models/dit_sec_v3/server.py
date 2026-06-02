@@ -43,6 +43,11 @@ app = FastAPI(
 # ── global model state ─────────────────────────────────────
 model      = None
 model_loaded = False
+# Z-score standardization stats (fit on train split during training).
+# Loaded from results/metric_stats.json so inference applies the EXACT
+# same per-feature transform the model was trained with.
+metric_mean = None
+metric_std  = None
 
 
 # ══════════════════════════════════════════════════════════
@@ -83,13 +88,33 @@ class ScoreResponse(BaseModel):
 
 @app.on_event("startup")
 async def startup():
-    global model, model_loaded
+    global model, model_loaded, metric_mean, metric_std
     logger.info("Starting DIT-Sec v3 Model Server...")
 
     model_path = os.environ.get(
         "MODEL_PATH",
         str(SCRIPT_DIR / "models" / "dit_sec_v3_trained.pt"),
     )
+
+    # Load z-score standardization stats (train/inference parity).
+    stats_path = os.environ.get(
+        "METRIC_STATS_PATH",
+        str(SCRIPT_DIR / "results" / "metric_stats.json"),
+    )
+    try:
+        if os.path.exists(stats_path):
+            with open(stats_path) as f:
+                stats = json.load(f)
+            metric_mean = np.asarray(stats["mean"], dtype=np.float32)
+            metric_std  = np.asarray(stats["std"],  dtype=np.float32)
+            logger.info(f"Metric standardization stats loaded from {stats_path}")
+        else:
+            logger.warning(
+                f"Metric stats not found at {stats_path} — metrics will be "
+                f"passed through unstandardized (model trained WITH standardization)"
+            )
+    except Exception as e:
+        logger.error(f"Failed to load metric stats: {e} — passing metrics through")
 
     try:
         import torch
@@ -206,6 +231,20 @@ async def explain(request: ScoreRequest):
 # Model inference
 # ══════════════════════════════════════════════════════════
 
+def _standardize_metrics(metrics: List[List[float]]):
+    """
+    Apply the training-time z-score transform (x - mean) / std per feature.
+    Returns a float32 torch tensor. If stats are unavailable, falls back to
+    the raw values (logged at startup) so the server still responds.
+    """
+    import torch
+    arr = np.asarray(metrics, dtype=np.float32)          # (T, 15)
+    if metric_mean is not None and metric_std is not None \
+            and arr.ndim == 2 and arr.shape[-1] == metric_mean.shape[0]:
+        arr = (arr - metric_mean) / metric_std
+    return torch.tensor(arr, dtype=torch.float32)
+
+
 def _model_score(request: ScoreRequest) -> Optional[Dict]:
     try:
         import torch
@@ -216,7 +255,7 @@ def _model_score(request: ScoreRequest) -> Optional[Dict]:
             kwargs["new_spec"] = request.new_spec
 
         if request.metrics:
-            kwargs["metrics"] = torch.tensor(request.metrics, dtype=torch.float32)
+            kwargs["metrics"] = _standardize_metrics(request.metrics)
 
         if request.syscalls:
             kwargs["syscalls"] = request.syscalls
