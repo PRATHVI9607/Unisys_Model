@@ -151,10 +151,12 @@ PYTHONPATH=. python models/upload_to_registry.py --version v4.0.0
 Outputs land in `models/<model>/checkpoints/best_*.pt` + `*_conformal.json` +
 `*_report.json`. The servers auto-load the checkpoints on startup.
 
-> ONNX note: the security and DCM models export to **FP16 ONNX** (validated;
-> falls back to FP32 if a graph op rejects FP16). The health model serves via
-> torch — its GATv2 over a *variable* YAML graph isn't ONNX-exportable, so
-> `export_health_model.py` emits a validated torch bundle instead.
+> ONNX note: all three models export to ONNX. The health GATv2 export is
+> **numerically parity-checked** against torch (it ships ONNX only if
+> max|Δlogits| ≤ 1e-3, else a validated torch bundle). DCM exports to true
+> **FP16**; security/health revert to validated **FP32** when transformer/GAT
+> Cast nodes reject FP16 (~2 MB models — marginal). A working, validated
+> artifact is produced in every case.
 
 **GPU note:** GATv2 builds one graph per sample in Python — CPU runs ~minutes
 per epoch; a GPU (RTX 3060+) finishes each model in minutes.

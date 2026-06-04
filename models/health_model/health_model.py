@@ -58,6 +58,15 @@ class HealthModel(nn.Module):
             "fusion_attn": fusion_attn,
         }
 
+    def forward_export(self, node_ids, edge_index, pos_idx, pos_val, metrics):
+        """ONNX-exportable forward: pure-tensor inputs → (logits, risk).
+        Graph build stays in Python preprocessing (yaml_diff_to_graph)."""
+        yaml_emb = self.yaml_encoder.encode_tensors(node_ids, edge_index, pos_idx, pos_val)
+        metric_emb = self.metric_encoder(metrics)
+        fused, _ = self.fusion(yaml_emb.unsqueeze(0), metric_emb)
+        logits, risk = self.output_head(fused)
+        return logits, risk
+
     def predict(self, graph: Data, metrics: torch.Tensor) -> Dict:
         self.eval()
         with torch.no_grad():

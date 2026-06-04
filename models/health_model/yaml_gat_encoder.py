@@ -126,6 +126,23 @@ class YAMLGATEncoder(nn.Module):
 
         return graph_embedding, node_importance
 
+    def encode_tensors(self, node_ids: torch.Tensor, edge_index: torch.Tensor,
+                       pos_idx: torch.Tensor, pos_val: torch.Tensor) -> torch.Tensor:
+        """ONNX-exportable forward: pure-tensor inputs (the Python graph build
+        in yaml_diff_to_graph stays as preprocessing). Returns ONLY the 128-dim
+        graph embedding — no attention weights (those are computed server-side
+        for interpretation). num_nodes/num_edges are dynamic axes."""
+        x = self.node_embedding(node_ids)
+        if pos_idx.numel() > 0:
+            x = x.index_add(0, pos_idx, self.positional_embedding(
+                torch.clamp(pos_val, 0, MAX_CONTAINER_TOKENS - 1)))
+        for i, gat in enumerate(self.gat_layers):
+            x = gat(x, edge_index)                 # no return_attention_weights → exportable
+            if i < len(self.gat_layers) - 1:
+                x = F.relu(x)
+        graph_embedding = self.output_projection(x.mean(dim=0))
+        return self.layer_norm(graph_embedding)
+
 
 # ──────────────────────────────────────────────────────────────
 # YAML diff → PyG graph
