@@ -17,6 +17,7 @@ eval "$(minikube docker-env)"
 echo "[2/6] Dependencies (Redis Sentinel + Prometheus)..."
 helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null 2>&1 || true
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+helm repo add falcosecurity https://falcosecurity.github.io/charts >/dev/null 2>&1 || true
 helm repo update >/dev/null
 kubectl create namespace kubeheal  >/dev/null 2>&1 || true
 kubectl create namespace demo      >/dev/null 2>&1 || true
@@ -24,6 +25,14 @@ kubectl create namespace monitoring>/dev/null 2>&1 || true
 helm install redis bitnami/redis --set architecture=replication --set sentinel.enabled=true \
   --set sentinel.masterSet=mymaster -n kubeheal 2>/dev/null || true
 helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring 2>/dev/null || true
+# Falco — real syscall detection. Writes KubeHeal rule output as JSON to a
+# hostPath the Security Agent tails. (Optional: skip if no eBPF on the node;
+# detection still works via the /proc write-byte tracker.)
+helm install falco falcosecurity/falco -n falco --create-namespace \
+  --set driver.kind=ebpf --set json_output=true --set tty=true \
+  --set-file customRules."kubeheal_rules\.yaml"=k8s/falco-kubeheal-rules.yaml \
+  --set 'extra.args={-o,file_output.enabled=true,-o,file_output.filename=/var/run/falco/events.jsonl,-o,file_output.keep_alive=true}' \
+  2>/dev/null || echo "  (Falco install skipped — /proc tracker covers detection)"
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=redis -n kubeheal --timeout=120s || true
 
 echo "[3/6] Build images (v4: 2 models + DCM + 3 agents + dashboard)..."

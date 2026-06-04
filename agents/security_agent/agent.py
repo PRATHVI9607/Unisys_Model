@@ -310,18 +310,59 @@ class SecurityAgent:
                 await asyncio.sleep(5)
 
     async def _handle_falco_events(self) -> None:
-        """Optional Falco gRPC stream. Detection is driven by the /proc write
-        tracker (_process_write_events), which needs no external dependency;
-        Falco is only consumed if FALCO_ENABLED=true."""
+        """Consume REAL Falco syscall events (gRPC Outputs API or JSON tail),
+        maintain a rolling syscall window per PID, and trigger an entropy check
+        when a window shows a ransomware-indicative burst (mass write+rename+
+        ftruncate) or a Falco ransomware rule fires. Disabled by default
+        (the /proc write tracker covers detection); enable with FALCO_ENABLED."""
         if os.environ.get("FALCO_ENABLED", "false").lower() != "true":
-            logger.info("Falco gRPC disabled; using /proc write tracker")
+            logger.info("Falco disabled; using /proc write tracker")
             return
-        logger.info("Falco gRPC enabled (integration point)")
+        from agents.security_agent.falco_client import (
+            falco_event_stream, RANSOMWARE_SYSCALLS,
+        )
+        logger.info("Falco event consumer started")
+        BURST = int(os.environ.get("FALCO_BURST_THRESHOLD", "15"))  # ops/window
+        windows: Dict[int, list] = {}   # pid -> recent ransomware-syscall names
+        last_fire: Dict[int, float] = {}
+        import time as _t
         while self.running:
             try:
-                await asyncio.sleep(1)
+                async for evt in falco_event_stream(self.falco_grpc_addr):
+                    if not self.running:
+                        break
+                    pid = evt.get("pid")
+                    sysc = evt.get("syscall", "")
+                    # Record PID→pod mapping from Falco's k8s fields
+                    if pid and evt.get("pod"):
+                        await self.redis.setex(
+                            f"kubeheal:pid:{pid}", 300,
+                            json.dumps({"pid": pid, "pod": evt["pod"],
+                                        "namespace": evt.get("namespace", "default")}),
+                        )
+                    if not pid:
+                        continue
+                    # rolling window of ransomware-relevant syscalls
+                    if sysc in RANSOMWARE_SYSCALLS:
+                        w = windows.setdefault(pid, [])
+                        w.append(sysc)
+                        if len(w) > 256:
+                            del w[: len(w) - 256]
+                        renames = sum(1 for s in w if s.startswith("rename"))
+                        writes = sum(1 for s in w if "write" in s or s == "ftruncate")
+                        ransom_rule = "ransom" in evt.get("rule", "").lower()
+                        if (renames + writes >= BURST or ransom_rule) and \
+                           (_t.monotonic() - last_fire.get(pid, 0) > 5):
+                            last_fire[pid] = _t.monotonic()
+                            self.inotify_watcher.recent_events = [
+                                {"syscall": s} for s in w
+                            ]
+                            await self._trigger_entropy_check(pid)
             except asyncio.CancelledError:
                 break
+            except Exception as e:
+                logger.warning(f"Falco consumer error: {e}; retry in 3s")
+                await asyncio.sleep(3)
 
     def _sample_write_bytes(self) -> Dict[int, int]:
         """Cumulative write_bytes per kubepods PID from /proc/<pid>/io."""
@@ -393,9 +434,12 @@ class SecurityAgent:
             "mmap_detected":     mmap_detected,
         }
 
-        # Build entropy series (30 steps) + synthesized syscall window
+        # Build entropy series (30 steps). Prefer the REAL Falco syscall window
+        # when present (set by _handle_falco_events); else synthesize from signals.
         entropy_series = [entropy_avg + (0.1 * (i % 3)) for i in range(30)]
-        events = synth_events(early_signals)
+        real = getattr(self.inotify_watcher, "recent_events", None)
+        events = ([{"syscall": e.get("syscall", ""), "fd_path": ""} for e in real]
+                  if real else synth_events(early_signals))
 
         # Call the v4 Security Model
         sec = await self._call_security_model(events, entropy_series, early_signals)

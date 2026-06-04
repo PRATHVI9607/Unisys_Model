@@ -26,3 +26,15 @@ def test_security_model_predict():
 def test_dcm_correlate_range():
     from models.dcm.cross_modal_attention import CrossModalAttention
     s=CrossModalAttention().correlate([0.1]*128,[0.2]*64); assert 0.0<=s<=1.0
+
+
+def test_falco_event_normalise():
+    from agents.security_agent.falco_client import _normalise, RANSOMWARE_SYSCALLS
+    e = _normalise({"rule": "KubeHeal Ransomware Mass Write", "priority": "Warning",
+                    "output_fields": {"evt.type": "write", "proc.pid": "99",
+                                      "fd.name": "/data/db.locked",
+                                      "k8s.pod.name": "victim-x", "k8s.ns.name": "demo"}})
+    assert e["syscall"] == "write" and e["pid"] == 99 and e["pod"] == "victim-x"
+    assert e["namespace"] == "demo" and "write" in RANSOMWARE_SYSCALLS
+    # benign / non-syscall event → dropped
+    assert _normalise({"output_fields": {}}) is None
