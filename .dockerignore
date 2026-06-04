@@ -32,15 +32,28 @@ build/
 htmlcov/
 .tox/
 .mypy_cache/
+tests/
 
-# Documentation
-docs/_build/
-*.md.bak
+# Docs / assets (never needed in an image)
+docs/
+*.md
+*.docx
+*.png
+*.jpg
+Screenshot*
 
 # Logs
 *.log
 
-# Model artifacts (in production, these come from volumes)
+# Archived v3 code (30M) — not part of v4 images
+models/_archive_v3/
+
+# Training data (only needed at train time, not at serve time)
+data/
+*.csv
+*.jsonl
+
+# Large legacy model binaries at models/ root (checkpoints under
+# models/*/checkpoints/ ARE kept so images are shareable/self-contained)
 models/*.pt
 models/*.onnx
-!models/dit_sec_v3/dit_sec_model.py

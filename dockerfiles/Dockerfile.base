@@ -1,0 +1,12 @@
+# Shared base for the 3 model servers — heavy ML deps installed ONCE here,
+# so health/security/dcm images build in seconds (FROM this) instead of each
+# re-downloading ~750MB torch + torch-geometric.
+#   docker build -t kubeheal/base:v4 -f dockerfiles/Dockerfile.base .
+FROM python:3.11-slim
+WORKDIR /app
+RUN pip install --no-cache-dir "numpy<2" \
+        torch==2.2.0 --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir \
+        torch-geometric==2.5.0 \
+        fastapi==0.110.0 uvicorn==0.27.0 pydantic==2.6.0
+ENV PYTHONPATH=/app

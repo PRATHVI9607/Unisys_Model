@@ -12,6 +12,7 @@ COPY agents/ /app/agents/
 
 ENV REDIS_URL=redis://redis-master:6379
 ENV NAMESPACE=kubeheal
+ENV DCM_URL=http://kubeheal-dcm:8003
 ENV LOG_LEVEL=INFO
 ENV MAX_AUTO_KILL_PER_NS_PER_HOUR=3
 ENV MAX_AUTO_PATCH_PER_DEP_PER_HOUR=10

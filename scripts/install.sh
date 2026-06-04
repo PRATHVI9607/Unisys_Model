@@ -27,6 +27,8 @@ helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=redis -n kubeheal --timeout=120s || true
 
 echo "[3/6] Build images (v4: 2 models + DCM + 3 agents + dashboard)..."
+echo "  Building shared ML base once (torch + torch-geometric)..."
+docker build -t kubeheal/base:v4 -f dockerfiles/Dockerfile.base .
 docker build -t kubeheal/health-model-server:v4   -f dockerfiles/Dockerfile.health_model .
 docker build -t kubeheal/security-model-server:v4 -f dockerfiles/Dockerfile.security_model .
 docker build -t kubeheal/dcm-server:v4            -f dockerfiles/Dockerfile.dcm .

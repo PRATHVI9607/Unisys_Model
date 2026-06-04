@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir \
 COPY agents/ /app/agents/
 
 ENV REDIS_URL=redis://redis-master:6379
-ENV DIT_SEC_URL=http://dit-sec-server:8000
+ENV DIT_SEC_URL=http://kubeheal-security-model:8002
 ENV FALCO_GRPC_ADDR=127.0.0.1:5060
 ENV ENTROPY_THRESHOLD=7.2
 ENV LOG_LEVEL=INFO

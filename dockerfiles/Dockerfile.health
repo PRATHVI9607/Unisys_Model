@@ -13,8 +13,8 @@ RUN pip install --no-cache-dir \
 COPY agents/ /app/agents/
 
 ENV REDIS_URL=redis://redis-master:6379
-ENV DIT_SEC_URL=http://dit-sec-server:8000
-ENV PROMETHEUS_URL=http://prometheus:9090
+ENV HEALTH_MODEL_URL=http://kubeheal-health-model:8001
+ENV PROMETHEUS_URL=http://prometheus-operated.monitoring.svc.cluster.local:9090
 ENV NAMESPACE=kubeheal
 ENV LOG_LEVEL=INFO
 

@@ -1,10 +1,9 @@
-FROM python:3.11-slim
+# Build base first:  docker build -t kubeheal/base:v4 -f dockerfiles/Dockerfile.base .
+FROM kubeheal/base:v4
 WORKDIR /app
-RUN pip install --no-cache-dir "numpy<2" torch==2.2.0 --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir torch-geometric==2.5.0 fastapi==0.110.0 uvicorn==0.27.0 pydantic==2.6.0 anthropic
+# Only the code + checkpoints the server needs (data/_archive_v3/csv excluded via .dockerignore)
 COPY models/ /app/models/
 COPY services/ /app/services/
-ENV PYTHONPATH=/app
 ENV PORT=8001
 EXPOSE 8001
 CMD ["python", "services/health_model_server/main.py"]
