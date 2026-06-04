@@ -1,16 +1,32 @@
-flowchart TD
-    subgraph CLUSTER["☸️ Kubernetes Cluster — live signals"]
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "fontFamily": "Inter, Segoe UI, sans-serif",
+    "fontSize": "15px",
+    "lineColor": "#64748b",
+    "primaryColor": "#eef2ff",
+    "primaryTextColor": "#0f172a"
+  },
+  "flowchart": { "curve": "basis", "nodeSpacing": 45, "rankSpacing": 60, "htmlLabels": true }
+}}%%
+flowchart TB
+
+%% ════════════════════════════════════════════════════════════════
+%%  KubeHeal v4 — Two Specialized Models + Dependency Correlation
+%% ════════════════════════════════════════════════════════════════
+
+    subgraph SRC["☸️ &nbsp;SIGNAL SOURCES — live Kubernetes telemetry"]
         direction LR
-        K1["📄 Deployment YAML<br/>baseline vs live spec"]
-        K2["📈 Prometheus Metrics<br/>CPU · mem · latency · replicas"]
-        K3["🔬 Falco eBPF Syscalls<br/>read · write · execve · …"]
-        K4["🔥 File Entropy Series<br/>encryption fingerprint"]
+        K1["📄 <b>K8s Watch API</b><br/><i>Deployment YAML</i><br/>baseline ⟷ live spec diff"]
+        K2["📈 <b>Prometheus</b> · 5s scrape<br/><i>15 metrics × 60 steps</i><br/>cpu·mem·p99·errors·restarts"]
+        K3["🔬 <b>Falco eBPF</b><br/><i>syscall traces ≤256</i><br/>open·read·write·rename·mmap"]
+        K4["🔥 <b>inotify + entropy</b><br/><i>30-step bits/byte series</i><br/>encryption fingerprint"]
     end
 
-    subgraph AGENTS["🤖 KubeHeal Agents — collectors"]
+    subgraph AGENTS["🤖 &nbsp;COLLECTOR AGENTS"]
         direction LR
-        HA["💚 Health Agent"]
-        SA["🛡️ Security Agent<br/>(DaemonSet)"]
+        HA["💚 <b>Health Agent</b><br/>Deployment<br/>watch-reconnect · Prom cache<br/>baseline diff · blast radius"]
+        SA["🛡️ <b>Security Agent</b><br/>DaemonSet · hostPID<br/>cgroups v1/v2 · /proc io<br/>entropy · mmap detect"]
     end
 
     K1 --> HA
@@ -18,68 +34,151 @@ flowchart TD
     K3 --> SA
     K4 --> SA
 
-    subgraph MODEL["🧠 DIT-Sec v3 — GNN + Mamba Hybrid Model"]
+%% ─────────────────────── HEALTH MODEL ───────────────────────
+    subgraph HM["🩺 &nbsp;HEALTH MODEL &nbsp;·&nbsp; <i>'is this config change harming performance?'</i>"]
         direction TB
-        subgraph ENC["Modality Encoders"]
-            direction LR
-            E1["🕸️ YAML → GAT<br/>3-layer GATConv · 4 heads<br/><b>128-dim</b>"]
-            E2["🌊 Metrics → Mamba SSM<br/>2 layers · O(n) scan<br/><b>64-dim</b>"]
-            E3["🔡 Events → Transformer<br/>4 heads × 2 layers<br/><b>64-dim</b>"]
-            E4["📉 Entropy → Conv1D + SE<br/>squeeze-excitation<br/><b>64-dim</b>"]
-        end
-        FUSE["🔗 MHCA Fusion<br/>3-head cross-attention<br/>4 slots → <b>192-dim</b>"]
-        subgraph HEAD["Output Head"]
-            direction LR
-            O1["⚠️ Risk Score<br/>0.0 – 1.0"]
-            O2["🏷️ Class label<br/>benign · health-critical<br/>ransomware-critical<br/>sec-medium · perf-risk"]
-        end
-        E1 --> FUSE
-        E2 --> FUSE
-        E3 --> FUSE
-        E4 --> FUSE
-        FUSE --> O1
-        FUSE --> O2
+        HENC1["🕸️ <b>YAML → GATv2 Encoder</b><br/>3 layers × 8 heads · dynamic attention<br/>parent→child DAG · container pos-tokens<br/><b>→ 128-dim graph embedding</b>"]
+        HENC2["🔁 <b>Metrics → BiLSTM Encoder</b><br/>2 stacked bi-directional layers<br/>LayerNorm · fwd+bwd causal context<br/><b>→ 64-dim temporal embedding</b>"]
+        HFUSE["🔗 <b>Health Cross-Attention</b><br/>query = YAML · key/value = metrics<br/>'which metric explains this change?'<br/><b>→ 128-dim fused</b>"]
+        HHEAD["🎯 <b>Health Output Head</b><br/>4-class softmax + risk regressor<br/>benign · low-risk · perf-degr · critical"]
+        HENC1 --> HFUSE
+        HENC2 --> HFUSE
+        HFUSE --> HHEAD
     end
 
-    HA -->|"old_spec + new_spec"| E1
-    HA -->|"60 × 15 metrics"| E2
-    SA -->|"syscall sequence"| E3
-    SA -->|"entropy window"| E4
-
-    subgraph FUSION["⚖️ Fusion Agent — decision layer"]
-        D1{"risk ≥ threshold?"}
-        D2["🛑 Circuit Breaker /<br/>Auto-Remediation"]
-        D3["✅ Allow / keep monitoring"]
+%% ─────────────────────── SECURITY MODEL ──────────────────────
+    subgraph SM["🔒 &nbsp;SECURITY MODEL &nbsp;·&nbsp; <i>'is there an attack in progress?'</i>"]
+        direction TB
+        SENC1["🔡 <b>Syscalls → Transformer</b><br/>4 heads × 2 layers · Pre-LN · CLS token<br/>sinusoidal PE · long-range deps<br/><b>→ 64-dim event embedding</b>"]
+        SENC2["📉 <b>Entropy → Conv1D + SE</b><br/>multi-scale k=3·7·15<br/>squeeze-excitation channel attn<br/><b>→ 64-dim entropy embedding</b>"]
+        SFUSE["🔗 <b>Security Cross-Attention</b><br/>query = syscalls · key/value = entropy<br/>'how random were the writes?'<br/><b>→ 64-dim fused</b>"]
+        SHEAD["🎯 <b>Security Output Head</b><br/>5-class softmax + risk regressor<br/>benign·suspicious·staging·active·exfil"]
+        SENC1 --> SFUSE
+        SENC2 --> SFUSE
+        SFUSE --> SHEAD
     end
 
-    O1 --> D1
-    O2 --> D1
-    D1 -->|"yes"| D2
-    D1 -->|"no"| D3
+    HA -->|"old_spec + new_spec"| HENC1
+    HA -->|"60 × 15 metric window"| HENC2
+    SA -->|"syscall sequence + paths"| SENC1
+    SA -->|"30-step entropy window"| SENC2
 
-    DASH["📊 Dashboard<br/>live risk · labels · timeline"]
-    D2 --> DASH
-    D3 --> DASH
-    O1 -.-> DASH
+%% ───── per-model outputs ─────
+    HHEAD --> HOUT["💚 <b>health_risk</b> [0–1] · 4-class label<br/>field_attention · conformal CI<br/><b>health_embedding · 128-dim</b>"]
+    SHEAD --> SOUT["🛡️ <b>sec_risk</b> [0–1] · 5-class label<br/>syscall_attention · entropy spike · CI<br/><b>security_embedding · 64-dim</b>"]
 
-    classDef cluster fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#1e1b4b;
-    classDef agent fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f;
-    classDef gnn fill:#dbeafe,stroke:#2563eb,stroke-width:3px,color:#1e3a8a;
-    classDef mamba fill:#dcfce7,stroke:#16a34a,stroke-width:3px,color:#14532d;
-    classDef trans fill:#ffedd5,stroke:#ea580c,stroke-width:2px,color:#7c2d12;
-    classDef conv fill:#f3e8ff,stroke:#9333ea,stroke-width:2px,color:#581c87;
-    classDef fuse fill:#ccfbf1,stroke:#0d9488,stroke-width:3px,color:#134e4a;
-    classDef head fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12;
-    classDef decision fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d;
-    classDef dash fill:#e2e8f0,stroke:#475569,stroke-width:2px,color:#0f172a;
+%% ─────────────── DEPENDENCY CORRELATION MODULE ───────────────
+    subgraph DCM["🧬 &nbsp;DEPENDENCY CORRELATION MODULE &nbsp;·&nbsp; <b>★ novel contribution ★</b>"]
+        direction TB
+        DCA["↔️ <b>Bidirectional Cross-Modal Attention</b><br/>health ⇄ security embeddings<br/>health-queries-security &amp; security-queries-health"]
+        DCH["📊 <b>Correlation Head</b> → <b>correlation_score [0–1]</b><br/>compound_flag (>0.60)"]
+        DCC["🪢 <b>Causal Chain Builder</b><br/>ordered T+Xs event narrative"]
+        DCA --> DCH
+        DCA --> DCC
+    end
 
-    class K1,K2,K3,K4 cluster;
+    HOUT -->|"128-dim"| DCA
+    SOUT -->|"64-dim"| DCA
+
+%% ─────────────── INTERPRETATION LAYER ───────────────
+    subgraph INT["💬 &nbsp;INTERPRETATION LAYER &nbsp;·&nbsp; <i>auditable AI</i>"]
+        direction LR
+        I1["🧮 <b>SHAP Explainer</b><br/>per-field / per-syscall<br/>attributions"]
+        I2["🗺️ <b>Field-Name Mapper</b><br/>node-id → K8s path<br/>spec…limits.cpu"]
+        I3["📝 <b>NL Summary</b><br/>Claude Haiku<br/>template fallback"]
+    end
+
+    HOUT -.-> I1
+    SOUT -.-> I1
+    I1 --> I2
+    I2 --> I3
+    DCC --> I3
+
+%% ─────────────── REDIS STREAMS ───────────────
+    subgraph RS["🔴 &nbsp;REDIS STREAMS — consumer groups"]
+        direction LR
+        RS1["health.events"]
+        RS2["security.events"]
+        RS3["dcm.events"]
+        RS4["actions"]
+    end
+
+    HOUT --> RS1
+    SOUT --> RS2
+    DCH --> RS3
+    I3 --> RS3
+
+%% ─────────────── FUSION AGENT v4 ───────────────
+    subgraph FA["⚖️ &nbsp;FUSION AGENT v4 — three-signal decision engine"]
+        direction TB
+        FIN["📥 reads <b>health_risk · sec_risk · correlation_score</b>"]
+        FPOL["🧠 <b>Pure Decision Policy</b><br/>tier × (prod 1.20 · staging 1.00 · dev 0.70)<br/>compound ×1.15 · conformal-CI gate<br/>circuit breakers · burn-in mode"]
+        FLOCK["🫀 heartbeat incident lock<br/>10s TTL · 3s refresh"]
+        FIN --> FPOL --> FLOCK
+    end
+
+    RS1 --> FIN
+    RS2 --> FIN
+    RS3 --> FIN
+
+%% ─────────────── DECISIONS ───────────────
+    subgraph DEC["🎬 &nbsp;ACTIONS"]
+        direction LR
+        A1["🛑 <b>AUTO-KILL</b><br/>pod del + PV quarantine"]
+        A2["🩹 <b>AUTO-PATCH</b><br/>canary kubectl patch"]
+        A3["🙋 <b>HUMAN</b><br/>kill / patch approval"]
+        A4["👁️ <b>OBSERVE</b><br/>monitor ×3"]
+        A5["✅ <b>BENIGN</b><br/>ack + continue"]
+    end
+
+    FLOCK --> A1
+    FLOCK --> A2
+    FPOL --> A3
+    FPOL --> A4
+    FPOL --> A5
+
+    DASH["📊 <b>Dashboard</b> · WebSocket live feed<br/>3 model cards · DCM gauge · causal chain · NL summary"]
+    A1 --> DASH
+    A2 --> DASH
+    A3 --> DASH
+    RS4 --> DASH
+    I3 -.-> DASH
+
+%% ════════════════════════════════════════════════════════════════
+%%  STYLE
+%% ════════════════════════════════════════════════════════════════
+    classDef src       fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#1e1b4b;
+    classDef agent     fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f;
+    classDef healthEnc fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a;
+    classDef healthBox fill:#eff6ff,stroke:#3b82f6,stroke-width:3px,color:#1e3a8a;
+    classDef secEnc    fill:#ffe4e6,stroke:#e11d48,stroke-width:2px,color:#881337;
+    classDef secBox    fill:#fff1f2,stroke:#f43f5e,stroke-width:3px,color:#881337;
+    classDef out       fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12;
+    classDef dcm       fill:#f3e8ff,stroke:#9333ea,stroke-width:3px,color:#581c87;
+    classDef interp    fill:#ccfbf1,stroke:#0d9488,stroke-width:2px,color:#134e4a;
+    classDef redis     fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d;
+    classDef fusion    fill:#dcfce7,stroke:#16a34a,stroke-width:3px,color:#14532d;
+    classDef act       fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#7c2d12;
+    classDef dash      fill:#e2e8f0,stroke:#475569,stroke-width:2px,color:#0f172a;
+
+    class K1,K2,K3,K4 src;
     class HA,SA agent;
-    class E1 gnn;
-    class E2 mamba;
-    class E3 trans;
-    class E4 conv;
-    class FUSE fuse;
-    class O1,O2 head;
-    class D1,D2,D3 decision;
+    class HENC1,HENC2,HFUSE,HHEAD healthEnc;
+    class SENC1,SENC2,SFUSE,SHEAD secEnc;
+    class HOUT,SOUT out;
+    class DCA,DCH,DCC dcm;
+    class I1,I2,I3 interp;
+    class RS1,RS2,RS3,RS4 redis;
+    class FIN,FPOL,FLOCK fusion;
+    class A1,A2,A3,A4,A5 act;
     class DASH dash;
+
+    style HM fill:#f8faff,stroke:#3b82f6,stroke-width:3px,color:#1e3a8a;
+    style SM fill:#fff7f8,stroke:#f43f5e,stroke-width:3px,color:#881337;
+    style DCM fill:#faf5ff,stroke:#9333ea,stroke-width:3px,color:#581c87;
+    style INT fill:#f0fdfa,stroke:#0d9488,stroke-width:2px,color:#134e4a;
+    style FA fill:#f0fdf4,stroke:#16a34a,stroke-width:3px,color:#14532d;
+    style SRC fill:#eef2ff,stroke:#6366f1,stroke-width:2px,color:#1e1b4b;
+    style AGENTS fill:#fffbeb,stroke:#f59e0b,stroke-width:2px,color:#78350f;
+    style RS fill:#fef2f2,stroke:#ef4444,stroke-width:2px,color:#7f1d1d;
+    style DEC fill:#fffbeb,stroke:#d97706,stroke-width:2px,color:#7c2d12;

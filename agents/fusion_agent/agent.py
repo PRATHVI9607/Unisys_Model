@@ -1,484 +1,226 @@
+"""
+Fusion Agent v4 — Three-Signal Decision Engine (PRD Section 07 / 09).
+=====================================================================
+Consumes kubeheal.health.events + kubeheal.security.events via a Redis
+consumer group (each event handled by exactly one replica). Correlates the
+two signals through the DCM, runs the pure decision policy, executes under a
+heartbeat incident lock, and writes kubeheal.dcm.events + kubeheal.actions.
+"""
+
 import asyncio
+import base64
 import json
 import logging
+import os
+import socket
+import uuid
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Tuple
-from dataclasses import dataclass, field
-from enum import Enum
-from collections import defaultdict
+from typing import Dict, Optional
 
+import aiohttp
+import numpy as np
 import redis.asyncio as aioredis
-import kubernetes_asyncio
-from kubernetes_asyncio import client, config
-from pydantic import BaseModel, Field
+
+from agents.fusion_agent.decision_policy import (
+    make_decision, DecisionInput, Decision,
+)
+from agents.fusion_agent.incident_lock import acquire_incident_lock
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-class ActionType(str, Enum):
-    AUTO_KILL = "auto_kill"
-    AUTO_PATCH = "auto_patch"
-    HUMAN_APPROVAL = "human_approval"
-    OBSERVE = "observe"
-    BENIGN = "benign"
+GROUP = "fusion"
+HEALTH_STREAM = "kubeheal.health.events"
+SEC_STREAM = "kubeheal.security.events"
+DCM_STREAM = "kubeheal.dcm.events"
+ACTIONS_STREAM = "kubeheal.actions"
 
 
-class DecisionResult(BaseModel):
-    action: ActionType
-    target: Dict[str, str]
-    adjusted_score: float
-    circuit_breaker_state: Optional[Dict[str, Any]] = None
-    message: str = ""
+def _b64_to_vec(b64: str):
+    if not b64:
+        return None
+    return np.frombuffer(base64.b64decode(b64), dtype=np.float32).tolist()
 
 
-class FusionAgent:
-    """
-    Fusion Agent - correlates Health + Security events, makes decisions.
-    Implements decision policy with circuit breakers, namespace tiers.
-    """
-    
-    def __init__(
-        self,
-        namespace: str = "kubeheal",
-        redis_url: str = "redis://redis-master:6379",
-        max_auto_kill_per_ns_per_hour: int = 3,
-        max_auto_patch_per_dep_per_hour: int = 10,
-        ci_width_threshold: float = 0.15,
-        namespace_tiers: Dict[str, float] = None
-    ):
-        self.namespace = namespace
-        self.redis_url = redis_url
-        self.max_auto_kill_per_ns_per_hour = max_auto_kill_per_ns_per_hour
-        self.max_auto_patch_per_dep_per_hour = max_auto_patch_per_dep_per_hour
-        self.ci_width_threshold = ci_width_threshold
-        
-        self.namespace_tiers = namespace_tiers or {
-            "prod": 1.20,
-            "staging": 1.00,
-            "dev": 0.70
-        }
-        
+class FusionAgentV4:
+    def __init__(self):
+        self.redis_url = os.environ.get("REDIS_URL", "redis://redis-master:6379")
+        self.dcm_url = os.environ.get("DCM_URL", "http://kubeheal-dcm:8003")
+        self.burn_in = os.environ.get("BURN_IN_MODE", "false").lower() == "true"
         self.redis: Optional[aioredis.Redis] = None
-        self.core_api: Optional[client.CoreV1Api] = None
-        self.apps_api: Optional[client.AppsV1Api] = None
-        
+        self.consumer = os.environ.get("HOSTNAME") or f"fusion-{uuid.uuid4().hex[:6]}"
         self.running = False
-        
-        self.active_incidents: Dict[str, Dict] = {}
-        
-        self.decision_counts: Dict[str, int] = defaultdict(int)
-    
-    async def start(self) -> None:
-        """Start the Fusion Agent."""
-        logger.info("Starting Fusion Agent...")
+        # short-term correlation buffer: pod → latest opposite-domain event
+        self.pending_health: Dict[str, Dict] = {}
+        self.pending_sec: Dict[str, Dict] = {}
 
-        try:
-            config.load_incluster_config()
-            logger.info("Loaded in-cluster Kubernetes config")
-        except config.ConfigException:
-            try:
-                await config.load_kube_config()
-                logger.info("Loaded kubeconfig")
-            except Exception as e2:
-                logger.error(f"Failed to load kubeconfig: {e2}")
-                raise
-        
-        self.core_api = client.CoreV1Api()
-        self.apps_api = client.AppsV1Api()
-        
+    async def start(self):
         self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
-
-        logger.info("Fusion Agent started successfully")
-
+        for stream in (HEALTH_STREAM, SEC_STREAM):
+            try:
+                await self.redis.xgroup_create(stream, GROUP, id="0", mkstream=True)
+            except Exception as e:
+                if "BUSYGROUP" not in str(e):
+                    logger.warning(f"xgroup_create {stream}: {e}")
+        logger.info(f"Fusion Agent v4 started (consumer={self.consumer}, burn_in={self.burn_in})")
         self.running = True
-        await self._consume_events()
-    
-    async def stop(self) -> None:
-        """Stop the Fusion Agent."""
-        logger.info("Stopping Fusion Agent...")
+        await self._consume()
+
+    async def stop(self):
         self.running = False
-        
         if self.redis:
             await self.redis.aclose()
-        
-        logger.info("Fusion Agent stopped")
-    
-    async def _consume_events(self) -> None:
-        """Consume events from Redis Streams."""
-        logger.info("Consuming events from Redis Streams...")
-        
-        last_ids = {
-            "kubeheal.health.events": "0",
-            "kubeheal.security.events": "0"
-        }
-        
+
+    async def _consume(self):
         while self.running:
             try:
-                for stream_name, last_id in last_ids.items():
-                    messages = await self.redis.xread(
-                        {stream_name: last_id},
-                        count=10,
-                        block=1000
-                    )
-                    
-                    if messages:
-                        for stream, entries in messages:
-                            for msg_id, fields in entries:
-                                last_ids[stream_name] = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
-
-                                if stream_name == "kubeheal.health.events":
-                                    await self._handle_health_event(msg_id, fields)
-                                elif stream_name == "kubeheal.security.events":
-                                    await self._handle_security_event(msg_id, fields)
-                
-                await asyncio.sleep(0.1)
+                msgs = await self.redis.xreadgroup(
+                    GROUP, self.consumer,
+                    {HEALTH_STREAM: ">", SEC_STREAM: ">"}, count=10, block=1000,
+                )
+                for stream, entries in msgs or []:
+                    for msg_id, fields in entries:
+                        try:
+                            if stream == HEALTH_STREAM:
+                                await self._on_health(fields)
+                            else:
+                                await self._on_security(fields)
+                        finally:
+                            await self.redis.xack(stream, GROUP, msg_id)
+                await asyncio.sleep(0.05)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.debug(f"Event consume error: {e}")
+                logger.debug(f"consume error: {e}")
                 await asyncio.sleep(1)
-    
-    def _field(self, fields: Dict, key: str, default: str = "") -> str:
-        """Safely get stream field — handles both str and bytes keys (decode_responses may vary)."""
-        v = fields.get(key) or fields.get(key.encode(), default)
-        return v.decode() if isinstance(v, bytes) else (v or default)
 
-    async def _handle_health_event(self, msg_id: str, fields: Dict) -> None:
-        """Handle Health Assessment event."""
-        try:
-            target_raw = self._field(fields, "target", "{}")
-            ci_raw     = self._field(fields, "confidence_interval", "null")
-            event = {
-                "event_id":           self._field(fields, "event_id"),
-                "target":             json.loads(target_raw),
-                "risk_score":         float(self._field(fields, "risk_score", "0")),
-                "severity":           self._field(fields, "severity", "benign"),
-                "blast_radius":       self._field(fields, "blast_radius", "unknown"),
-                "confidence_interval": json.loads(ci_raw) if ci_raw != "null" else None,
-                "timestamp":          self._field(fields, "timestamp"),
-            }
-            await self._process_decision(event, "health")
-            await self.redis.xack("kubeheal.health.events", "fusion", msg_id)
-        except Exception as e:
-            logger.warning(f"Health event error: {e}")
+    def _key(self, fields: Dict) -> str:
+        return f"{fields.get('namespace','default')}:{fields.get('pod_name','unknown')}"
 
-    async def _handle_security_event(self, msg_id: str, fields: Dict) -> None:
-        """Handle Security Event."""
-        try:
-            target_raw  = self._field(fields, "target", "{}")
-            signals_raw = self._field(fields, "early_signals", "{}")
-            event = {
-                "event_id":     self._field(fields, "event_id"),
-                "target":       json.loads(target_raw),
-                "risk_score":   float(self._field(fields, "risk_score", "0")),
-                "label":        self._field(fields, "label", "benign"),
-                "early_signals": json.loads(signals_raw),
-                "timestamp":    self._field(fields, "timestamp"),
-            }
-            await self._process_decision(event, "security")
-            await self.redis.xack("kubeheal.security.events", "fusion", msg_id)
-        except Exception as e:
-            logger.warning(f"Security event error: {e}")
-    
-    async def _process_decision(self, event: Dict, event_type: str) -> None:
-        """Process decision for event."""
-        target = event.get("target", {})
-        namespace = target.get("namespace", "default")
-        pod_name = target.get("name", target.get("pod", "unknown"))
-        
-        incident_key = f"{namespace}:{pod_name}"
-        
-        if await self._acquire_incident_lock(namespace, pod_name):
-            logger.debug(f"Lock acquired for {incident_key}")
+    async def _on_health(self, f: Dict):
+        key = self._key(f)
+        self.pending_health[key] = f
+        sec = self.pending_sec.get(key)
+        await self._decide(key, f, sec)
+
+    async def _on_security(self, f: Dict):
+        key = self._key(f)
+        self.pending_sec[key] = f
+        health = self.pending_health.get(key)
+        await self._decide(key, health, f)
+
+    async def _decide(self, key: str, health: Optional[Dict], sec: Optional[Dict]):
+        namespace = key.split(":")[0]
+        pod = key.split(":", 1)[1]
+        health = health or {}
+        sec = sec or {}
+
+        health_risk = float(health.get("health_risk", 0) or 0)
+        sec_risk = float(sec.get("sec_risk", 0) or 0)
+
+        # ── DCM correlation (only when both signals present) ──
+        correlation, compound, causal_chain, nl = 0.0, False, [], None
+        h_emb = _b64_to_vec(health.get("health_embedding_b64", ""))
+        s_emb = _b64_to_vec(sec.get("security_embedding_b64", ""))
+        if h_emb and s_emb:
+            corr = await self._call_dcm(h_emb, s_emb, health, sec)
+            correlation = corr.get("correlation_score", 0.0)
+            compound = corr.get("compound_flag", False)
+            causal_chain = corr.get("causal_chain", [])
+            nl = corr.get("nl_summary")
+            await self._publish_dcm(namespace, pod, corr, health, sec)
+
+        inp = DecisionInput(
+            health_risk=health_risk,
+            health_label=health.get("health_label", "benign"),
+            health_ci_width=float(health.get("health_ci_width", 0) or 0),
+            health_field_top=health.get("top_field", ""),
+            sec_risk=sec_risk,
+            sec_label=sec.get("sec_label", "benign"),
+            sec_ci_width=float(sec.get("sec_ci_width", 0) or 0),
+            sec_syscall_top=sec.get("top_syscall", ""),
+            correlation_score=correlation,
+            compound_flag=compound,
+            namespace_tier=(health.get("namespace_tier") or sec.get("namespace_tier") or "staging"),
+            circuit_breaker_kills=await self._cb_count(f"kubeheal:cb:kill:{namespace}"),
+            circuit_breaker_patches=await self._cb_count(f"kubeheal:cb:patch:{namespace}:{pod}"),
+            burn_in_mode=self.burn_in,
+            nl_summary=nl,
+        )
+        out = make_decision(inp)
+
+        if out.requires_incident_lock:
+            async with acquire_incident_lock(self.redis, namespace, pod) as got:
+                if not got:
+                    logger.debug(f"lock held for {key}; skipping")
+                    return
+                await self._execute(namespace, pod, out, inp, causal_chain)
         else:
-            logger.debug(f"Incident already active for {incident_key}")
-            return
-        
-        try:
-            risk_score = event.get("risk_score", 0.0)
-            
-            tier = await self._get_namespace_tier(namespace)
-            tier_multiplier = self.namespace_tiers.get(tier, 1.0)
-            adjusted_score = risk_score * tier_multiplier
-            
-            ci_width = self._parse_confidence_interval(event.get("confidence_interval"))
-            
-            if ci_width and ci_width > self.ci_width_threshold:
-                result = await self._decide_human_escalation(
-                    event, adjusted_score, "wide_ci"
-                )
-                await self._publish_action(result)
-                return
-            
-            label = event.get("label", event.get("severity", "benign"))
-            
-            if event_type == "security" and adjusted_score >= 0.85:
-                result = await self._decide_auto_kill(event, adjusted_score, label)
-            elif event_type == "health" and adjusted_score >= 0.85:
-                result = await self._decide_auto_patch(event, adjusted_score)
-            elif adjusted_score >= 0.65:
-                result = await self._decide_human_approval(event, adjusted_score)
-            elif adjusted_score >= 0.40:
-                result = await self._decide_observe(event, adjusted_score)
-            else:
-                result = await self._decide_benign(event, adjusted_score)
-            
-            await self._publish_action(result)
-            
-            await self._log_incident(event, result, event_type)
-            
-        finally:
-            await self._release_incident_lock(namespace, pod_name)
-    
-    async def _acquire_incident_lock(self, namespace: str, pod_name: str) -> bool:
-        """Acquire incident lock using Redis SETNX."""
-        key = f"kubeheal:incident-lock:{namespace}:{pod_name}"
-        result = await self.redis.set(key, "1", nx=True, ex=30)
-        return result
-    
-    async def _release_incident_lock(self, namespace: str, pod_name: str) -> None:
-        """Release incident lock."""
-        key = f"kubeheal:incident-lock:{namespace}:{pod_name}"
-        await self.redis.delete(key)
-    
-    async def _get_namespace_tier(self, namespace: str) -> str:
-        """Get namespace tier."""
-        try:
-            ns = await self.core_api.read_namespace(namespace)
-            tier = ns.metadata.labels.get("kubeheal.io/namespace-tier")
-            if tier:
-                return tier
-        except:
-            pass
-        
-        if "prod" in namespace:
-            return "prod"
-        elif "staging" in namespace:
-            return "staging"
-        else:
-            return "dev"
-    
-    def _parse_confidence_interval(self, ci: Any) -> Optional[float]:
-        """Parse confidence interval to get width."""
-        if not ci:
-            return None
-        
-        try:
-            if isinstance(ci, str):
-                ci = json.loads(ci)
-            
-            if isinstance(ci, list) and len(ci) == 2:
-                return abs(ci[1] - ci[0])
-        except:
-            pass
-        
-        return None
-    
-    async def _decide_auto_kill(
-        self,
-        event: Dict,
-        adjusted_score: float,
-        label: str
-    ) -> DecisionResult:
-        """Decide AUTO-KILL."""
-        namespace = event.get("target", {}).get("namespace", "default")
+            await self._execute(namespace, pod, out, inp, causal_chain)
 
-        cb_key   = f"kubeheal:cb:{namespace}"
-        cb_count = await self.redis.incr(cb_key)
-        # Set TTL on first increment so counter resets after 1 hour
-        if cb_count == 1:
-            await self.redis.expire(cb_key, 3600)
+        # consume the paired events so we don't re-fire on the same pair
+        self.pending_health.pop(key, None)
+        self.pending_sec.pop(key, None)
 
-        if cb_count and cb_count <= self.max_auto_kill_per_ns_per_hour:
-            return DecisionResult(
-                action=ActionType.AUTO_KILL,
-                target=event.get("target", {}),
-                adjusted_score=adjusted_score,
-                circuit_breaker_state={"count": cb_count, "limit": self.max_auto_kill_per_ns_per_hour},
-                message=f"Auto-kill approved (CB: {cb_count}/{self.max_auto_kill_per_ns_per_hour})"
-            )
-        
-        return DecisionResult(
-            action=ActionType.HUMAN_APPROVAL,
-            target=event.get("target", {}),
-            adjusted_score=adjusted_score,
-            message=f"Circuit breaker reached ({cb_count}), escalating to human"
-        )
-    
-    async def _decide_auto_patch(
-        self,
-        event: Dict,
-        adjusted_score: float
-    ) -> DecisionResult:
-        """Decide AUTO-PATCH."""
-        namespace = event.get("target", {}).get("namespace", "default")
-        name      = event.get("target", {}).get("name", "unknown")
+    async def _execute(self, namespace, pod, out, inp, causal_chain):
+        logger.info(f"DECISION {out.decision.value} {namespace}/{pod} "
+                    f"score={out.adjusted_score:.2f} :: {out.rationale}")
+        if out.decision in (Decision.AUTO_KILL,):
+            await self._cb_incr(f"kubeheal:cb:kill:{namespace}")
+        elif out.decision in (Decision.AUTO_PATCH,):
+            await self._cb_incr(f"kubeheal:cb:patch:{namespace}:{pod}")
+        await self.redis.xadd(ACTIONS_STREAM, {
+            "action_type": out.decision.value,
+            "target": json.dumps({"namespace": namespace, "pod": pod}),
+            "confidence": f"{out.adjusted_score:.4f}",
+            "rationale": out.rationale,
+            "compound": str(out.action_params.get("compound", False)),
+            "nl_summary": out.action_params.get("nl_summary") or "",
+            "causal_chain": json.dumps(causal_chain),
+            "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
+        })
 
-        cb_key      = f"kubeheal:patch:{namespace}:{name}"
-        patch_count = await self.redis.incr(cb_key)
-        if patch_count == 1:
-            await self.redis.expire(cb_key, 3600)
-
-        if patch_count and patch_count <= self.max_auto_patch_per_dep_per_hour:
-            return DecisionResult(
-                action=ActionType.AUTO_PATCH,
-                target=event.get("target", {}),
-                adjusted_score=adjusted_score,
-                circuit_breaker_state={"count": patch_count, "limit": self.max_auto_patch_per_dep_per_hour},
-                message=f"Auto-patch approved (CB: {patch_count}/{self.max_auto_patch_per_dep_per_hour})"
-            )
-        
-        return DecisionResult(
-            action=ActionType.HUMAN_APPROVAL,
-            target=event.get("target", {}),
-            adjusted_score=adjusted_score,
-            message=f"Too many patches, human approval required"
-        )
-    
-    async def _decide_human_approval(
-        self,
-        event: Dict,
-        adjusted_score: float
-    ) -> DecisionResult:
-        """Decide human approval required."""
-        return DecisionResult(
-            action=ActionType.HUMAN_APPROVAL,
-            target=event.get("target", {}),
-            adjusted_score=adjusted_score,
-            message="Score in medium range, human approval required"
-        )
-    
-    async def _decide_observe(
-        self,
-        event: Dict,
-        adjusted_score: float
-    ) -> DecisionResult:
-        """Decide observe (increase monitoring)."""
-        return DecisionResult(
-            action=ActionType.OBSERVE,
-            target=event.get("target", {}),
-            adjusted_score=adjusted_score,
-            message=f"Low risk, monitoring increased"
-        )
-    
-    async def _decide_benign(
-        self,
-        event: Dict,
-        adjusted_score: float
-    ) -> DecisionResult:
-        """Decide benign (dismiss)."""
-        return DecisionResult(
-            action=ActionType.BENIGN,
-            target=event.get("target", {}),
-            adjusted_score=adjusted_score,
-            message="Event marked benign"
-        )
-    
-    async def _decide_human_escalation(
-        self,
-        event: Dict,
-        adjusted_score: float,
-        reason: str
-    ) -> DecisionResult:
-        """Decide human escalation due to uncertainty."""
-        return DecisionResult(
-            action=ActionType.HUMAN_APPROVAL,
-            target=event.get("target", {}),
-            adjusted_score=adjusted_score,
-            message=f"High uncertainty ({reason}), human escalation required"
-        )
-    
-    async def _publish_action(self, result: DecisionResult) -> None:
-        """Publish action to Redis Stream."""
-        action_data = {
-            "action": result.action.value,
-            "target": json.dumps(result.target),
-            "adjusted_score": str(result.adjusted_score),
-            "circuit_breaker_state": json.dumps(result.circuit_breaker_state) if result.circuit_breaker_state else "",
-            "message": result.message,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        
-        await self.redis.xadd("kubeheal.actions", action_data)
-        
-        logger.info(f"Action: {result.action.value} for {result.target}, score={result.adjusted_score:.2f}")
-        
-        if result.action == ActionType.AUTO_KILL:
-            await self._execute_kill(result.target)
-        elif result.action == ActionType.AUTO_PATCH:
-            await self._execute_patch(result.target)
-    
-    async def _execute_kill(self, target: Dict) -> None:
-        """Execute auto-kill action."""
-        logger.warning(f"EXECUTING AUTO-KILL: {target}")
-        
-        namespace = target.get("namespace", "default")
-        pod_name = target.get("name", target.get("pod"))
-        
-        if not pod_name:
-            return
-        
+    async def _call_dcm(self, h_emb, s_emb, health, sec) -> Dict:
         try:
-            await self.core_api.delete_namespaced_pod(
-                pod_name,
-                namespace,
-                grace_period_seconds=0
-            )
-            logger.info(f"Pod {namespace}/{pod_name} killed")
+            async with aiohttp.ClientSession() as s:
+                async with s.post(f"{self.dcm_url}/dcm/correlate", json={
+                    "health_embedding": h_emb, "security_embedding": s_emb,
+                    "health_assessment": health, "security_event": sec,
+                    "want_nl_summary": True,
+                }, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    if r.status == 200:
+                        return await r.json()
         except Exception as e:
-            logger.error(f"Failed to kill pod: {e}")
-    
-    async def _execute_patch(self, target: Dict) -> None:
-        """Execute auto-patch action."""
-        logger.info(f"EXECUTING AUTO-PATCH: {target}")
-        
-        namespace = target.get("namespace", "default")
-        dep_name = target.get("name")
-        
-        if not dep_name:
-            return
-        
-        logger.info(f"Patch would be applied to {namespace}/{dep_name}")
-    
-    async def _log_incident(
-        self,
-        event: Dict,
-        result: DecisionResult,
-        event_type: str
-    ) -> None:
-        """Log incident to audit trail."""
-        incident_record = {
-            "incident_id": f"{event_type}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
-            "type": event_type,
-            "target": json.dumps(event.get("target", {})),
-            "risk_score": str(event.get("risk_score", 0.0)),
-            "adjusted_score": str(result.adjusted_score),
-            "action": result.action.value,
-            "outcome": "pending",
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        
-        await self.redis.xadd("kubeheal.incidents", incident_record)
-        
-        logger.info(f"Incident logged: {incident_record['incident_id']}")
+            logger.debug(f"DCM call failed: {e}")
+        return {"correlation_score": 0.0, "compound_flag": False, "causal_chain": []}
+
+    async def _publish_dcm(self, namespace, pod, corr, health, sec):
+        await self.redis.xadd(DCM_STREAM, {
+            "namespace": namespace, "pod_name": pod,
+            "correlation_score": f"{corr.get('correlation_score',0):.4f}",
+            "compound_flag": str(corr.get("compound_flag", False)),
+            "causal_chain_json": json.dumps(corr.get("causal_chain", [])),
+            "correlation_confidence": f"{corr.get('correlation_confidence',0):.4f}",
+            "nl_summary": corr.get("nl_summary") or "",
+            "health_event_id": health.get("event_id", ""),
+            "security_event_id": sec.get("event_id", ""),
+            "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
+        })
+
+    async def _cb_count(self, key: str) -> int:
+        v = await self.redis.get(key)
+        return int(v) if v else 0
+
+    async def _cb_incr(self, key: str):
+        c = await self.redis.incr(key)
+        if c == 1:
+            await self.redis.expire(key, 3600)
 
 
 async def main():
-    """Run Fusion Agent."""
-    import os
-    agent = FusionAgent(
-        namespace=os.environ.get("NAMESPACE", "kubeheal"),
-        redis_url=os.environ.get("REDIS_URL", "redis://redis-master:6379"),
-        max_auto_kill_per_ns_per_hour=int(os.environ.get("MAX_AUTO_KILL_PER_NS_PER_HOUR", "3")),
-        max_auto_patch_per_dep_per_hour=int(os.environ.get("MAX_AUTO_PATCH_PER_DEP_PER_HOUR", "10")),
-        ci_width_threshold=float(os.environ.get("CI_WIDTH_THRESHOLD", "0.15")),
-    )
-
+    agent = FusionAgentV4()
     try:
         await agent.start()
-        while agent.running:
-            await asyncio.sleep(1)
     except KeyboardInterrupt:
         pass
     finally:

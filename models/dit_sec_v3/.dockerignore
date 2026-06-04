@@ -1,4 +1,0 @@
-# Ignore everything except server.py
-*
-!.server.py
-!requirements.txt

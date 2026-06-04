@@ -1,0 +1,10 @@
+FROM python:3.11-slim
+WORKDIR /app
+RUN pip install --no-cache-dir "numpy<2" torch==2.2.0 --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir torch-geometric==2.5.0 fastapi==0.110.0 uvicorn==0.27.0 pydantic==2.6.0 anthropic
+COPY models/ /app/models/
+COPY services/ /app/services/
+ENV PYTHONPATH=/app
+ENV PORT=8003
+EXPOSE 8003
+CMD ["python", "services/dcm_server/main.py"]
