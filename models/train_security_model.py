@@ -28,9 +28,11 @@ sys.path.insert(0, str(ROOT))
 from models.security_model.security_model import (
     SecurityModel, encode_syscall_window, pad_entropy,
 )
-from models.security_model.security_output_head import SECURITY_LABELS
+from models.security_model.security_output_head import SECURITY_LABELS, CLASS_RISK
 from models.security_model.security_conformal import ConformalRegressor
-from models.train_utils import setup_torch, clipped_step, make_plateau
+from models.train_utils import (
+    setup_torch, clipped_step, make_plateau, focal_loss,
+)
 
 LABEL_IDX = {l: i for i, l in enumerate(SECURITY_LABELS)}
 
@@ -58,37 +60,39 @@ def class_weights(rows, device):
 
 def run_epoch(model, rows, opt, cw, device, train, bs):
     model.train(train)
+    order = list(range(len(rows)))
     if train:
-        random.shuffle(rows)
-    total, preds, labels = 0.0, [], []
+        random.shuffle(order)
+    total, nb, preds, labels = 0.0, 0, [], []
     ctx = torch.enable_grad() if train else torch.no_grad()
     with ctx:
-        for i in range(0, len(rows), bs):
-            batch = rows[i:i + bs]
+        for i in range(0, len(order), bs):
+            batch = [rows[j] for j in order[i:i + bs]]
             sids, pids, masks, ents, ys, rts = [], [], [], [], [], []
             for r in batch:
                 sid, pid, mask = encode_syscall_window(r["events"])
                 sids.append(sid); pids.append(pid); masks.append(mask)
                 ents.append(pad_entropy(r["entropy_series"]))
-                ys.append(LABEL_IDX[r["label"]]); rts.append(r["risk"])
+                lid = LABEL_IDX[r["label"]]
+                ys.append(lid); rts.append(CLASS_RISK[lid])
             sid = torch.cat(sids).to(device); pid = torch.cat(pids).to(device)
             mask = torch.cat(masks).to(device); ent = torch.cat(ents).to(device)
             out = model(sid, pid, mask, ent)
             y = torch.tensor(ys, dtype=torch.long, device=device)
-            ce = F.cross_entropy(out["label_logits"], y, weight=cw)
+            fl = focal_loss(out["label_logits"], y, alpha=cw, gamma=2.0)
             risk = out["risk_score"].reshape(-1)
             rt = torch.tensor(rts, dtype=torch.float32, device=device)
-            loss = ce + 0.5 * F.mse_loss(risk, rt)
+            loss = fl + 0.5 * F.mse_loss(risk, rt)
             if train:
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
-                clipped_step(model, opt, max_norm=1.0)  # clip + NaN/Inf guard
-            total += float(loss)
+                clipped_step(model, opt, max_norm=1.0)
+            total += float(loss); nb += 1
             preds.extend(torch.argmax(out["label_logits"], -1).cpu().tolist())
             labels.extend(ys)
     f1 = f1_score(labels, preds, average="weighted", zero_division=0) if labels else 0.0
     acc = sum(p == l for p, l in zip(preds, labels)) / max(len(preds), 1)
-    return total / max(1, len(rows) // bs), acc, f1, preds, labels
+    return total / max(1, nb), acc, f1, preds, labels
 
 
 def main():
@@ -150,16 +154,17 @@ def main():
     if ckpt.exists():
         model.load_state_dict(torch.load(ckpt, map_location=device))
     model.eval()
-    cp, ct = [], []
+    scores = []
     with torch.no_grad():
         for r in cal:
             sid, pid, mask = encode_syscall_window(r["events"])
             ent = pad_entropy(r["entropy_series"])
             out = model(sid.to(device), pid.to(device), mask.to(device), ent.to(device))
-            cp.append(float(out["risk_score"].reshape(-1)[0])); ct.append(r["risk"])
-    conf = ConformalRegressor(alpha=0.05); q = conf.calibrate(cp, ct)
+            probs = torch.softmax(out["label_logits"][0], dim=-1)
+            scores.append(1.0 - float(probs[LABEL_IDX[r["label"]]]))
+    conf = ConformalRegressor(alpha=0.10); q = conf.calibrate_scores(scores)
     conf.save(str(out_dir / "security_conformal.json"))
-    print(f"[Conformal] q={q:.4f}  ci_width={2*q:.4f}", flush=True)
+    print(f"[Conformal] confidence threshold q={q:.4f}  (escalate if 1-max_prob > q)", flush=True)
 
     if last[0]:
         present = sorted(set(last[1]))

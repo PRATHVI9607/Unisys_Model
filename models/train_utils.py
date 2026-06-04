@@ -22,9 +22,12 @@ scripts behave identically:
 
 import os
 import random
+from collections import defaultdict
+from typing import List
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 def setup_torch(seed: int = 42, threads: int = 1) -> torch.device:
@@ -63,3 +66,39 @@ def warmup_factor(epoch: int, warmup_epochs: int = 1) -> float:
     if epoch >= warmup_epochs:
         return 1.0
     return 0.1 + 0.9 * (epoch / max(1, warmup_epochs))
+
+
+def focal_loss(logits: torch.Tensor, target: torch.Tensor,
+               alpha: torch.Tensor = None, gamma: float = 2.0) -> torch.Tensor:
+    """Multi-class focal loss. Down-weights easy (high-confidence) examples by
+    (1-p_t)^gamma so the gradient focuses on the hard, rare classes — the
+    correct imbalance tool for graph/sequence inputs where SMOTE can't apply
+    (you cannot interpolate two YAML graphs or two syscall traces).
+    `alpha` = per-class weight tensor (inverse-frequency)."""
+    logp = F.log_softmax(logits, dim=-1)
+    ce = F.nll_loss(logp, target, weight=alpha, reduction="none")
+    pt = torch.exp(-ce.clamp(max=20))
+    return ((1.0 - pt) ** gamma * ce).mean()
+
+
+def balanced_indices(labels: List[int], num_classes: int, seed_rng=random) -> List[int]:
+    """Class-balanced oversampling order for one epoch: every class is drawn
+    the same number of times (= size of the largest class), sampling minority
+    classes with replacement. Returns a shuffled index list."""
+    by_class = defaultdict(list)
+    for i, y in enumerate(labels):
+        by_class[y].append(i)
+    if not by_class:
+        return list(range(len(labels)))
+    target = max(len(v) for v in by_class.values())
+    out: List[int] = []
+    for c in range(num_classes):
+        idxs = by_class.get(c, [])
+        if not idxs:
+            continue
+        # repeat to reach `target`, then trim
+        reps = (target + len(idxs) - 1) // len(idxs)
+        pool = (idxs * reps)[:target]
+        out.extend(pool)
+    seed_rng.shuffle(out)
+    return out

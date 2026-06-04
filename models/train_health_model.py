@@ -34,13 +34,15 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from models.health_model.health_model import HealthModel
-from models.health_model.health_output_head import HEALTH_LABELS
+from models.health_model.health_output_head import HEALTH_LABELS, CLASS_RISK
 from models.health_model.yaml_gat_encoder import yaml_diff_to_graph
 from models.health_model.metric_bilstm_encoder import (
     METRIC_COLUMNS, NUM_METRICS, INPUT_SEQUENCE_LENGTH,
 )
 from models.health_model.health_conformal import ConformalRegressor
-from models.train_utils import setup_torch, clipped_step, make_plateau
+from models.train_utils import (
+    setup_torch, clipped_step, make_plateau, focal_loss,
+)
 
 LABEL_IDX = {l: i for i, l in enumerate(HEALTH_LABELS)}
 
@@ -135,43 +137,48 @@ def class_weights(samples, device):
 
 def run_epoch(model, samples, optimizer, cw, device, train: bool, bs: int):
     model.train(train)
+    # Focal loss (alpha=inverse-freq) handles imbalance; a plain shuffle avoids
+    # the double-correction (oversample + inverse-freq focal) that collapses the
+    # majority class. SMOTE is inapplicable here (cannot interpolate YAML graphs).
+    order = list(range(len(samples)))
     if train:
-        random.shuffle(samples)
-    total, preds, labels = 0.0, [], []
+        random.shuffle(order)
+    total, nb, preds, labels = 0.0, 0, [], []
     ctx = torch.enable_grad() if train else torch.no_grad()
     with ctx:
-        for i in range(0, len(samples), bs):
-            batch = samples[i:i + bs]
+        for i in range(0, len(order), bs):
+            batch = [samples[j] for j in order[i:i + bs]]
             logit_list, risk_list, lab_list, rt_list = [], [], [], []
             for s in batch:
                 try:
                     g = yaml_diff_to_graph(s["old"], s["new"])
                     m = torch.tensor(s["metrics"], dtype=torch.float32, device=device)
                     out = model(g, m)
+                    lid = LABEL_IDX[s["label"]]
                     logit_list.append(out["label_logits"][0])
                     risk_list.append(out["risk_score"].reshape(-1)[0])
-                    lab_list.append(LABEL_IDX[s["label"]])
-                    rt_list.append(s["risk"])
+                    lab_list.append(lid)
+                    rt_list.append(CLASS_RISK[lid])   # grounded target → tight conformal
                 except Exception:
                     continue
             if not logit_list:
                 continue
             logits = torch.stack(logit_list)
             y = torch.tensor(lab_list, dtype=torch.long, device=device)
-            ce = F.cross_entropy(logits, y, weight=cw)
+            fl = focal_loss(logits, y, alpha=cw, gamma=2.0)   # focal handles imbalance
             risk = torch.stack(risk_list)
             rt = torch.tensor(rt_list, dtype=torch.float32, device=device)
-            loss = ce + 0.5 * F.mse_loss(risk, rt)
+            loss = fl + 0.5 * F.mse_loss(risk, rt)
             if train:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                clipped_step(model, optimizer, max_norm=1.0)  # clip + NaN/Inf guard
-            total += float(loss)
+                clipped_step(model, optimizer, max_norm=1.0)
+            total += float(loss); nb += 1
             preds.extend(torch.argmax(logits, -1).cpu().tolist())
             labels.extend(lab_list)
     f1 = f1_score(labels, preds, average="weighted", zero_division=0) if labels else 0.0
     acc = (sum(p == l for p, l in zip(preds, labels)) / max(len(preds), 1))
-    return total / max(1, len(samples) // bs), acc, f1, preds, labels
+    return total / max(1, nb), acc, f1, preds, labels
 
 
 def main():
@@ -239,20 +246,20 @@ def main():
     if ckpt.exists():
         model.load_state_dict(torch.load(ckpt, map_location=device))
     model.eval()
-    cp, ct = [], []
+    scores = []  # nonconformity = 1 - p(true class)
     with torch.no_grad():
         for s in cal:
             try:
                 g = yaml_diff_to_graph(s["old"], s["new"])
                 m = torch.tensor(s["metrics"], dtype=torch.float32, device=device)
-                cp.append(float(model(g, m)["risk_score"].reshape(-1)[0]))
-                ct.append(s["risk"])
+                probs = torch.softmax(model(g, m)["label_logits"][0], dim=-1)
+                scores.append(1.0 - float(probs[LABEL_IDX[s["label"]]]))
             except Exception:
                 continue
-    conf = ConformalRegressor(alpha=0.05)
-    q = conf.calibrate(cp, ct)
+    conf = ConformalRegressor(alpha=0.10)
+    q = conf.calibrate_scores(scores)
     conf.save(str(out_dir / "health_conformal.json"))
-    print(f"[Conformal] q={q:.4f}  ci_width={2*q:.4f}", flush=True)
+    print(f"[Conformal] confidence threshold q={q:.4f}  (escalate if 1-max_prob > q)", flush=True)
 
     if last[0]:
         present = sorted(set(last[1]))

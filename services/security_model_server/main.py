@@ -88,7 +88,8 @@ def score(req: ScoreRequest):
     top_syscall = next(iter(syscall_attr), "unknown")
     spike = STATE["shap"].entropy_spike(entropy)
 
-    lo, hi, width = STATE["conformal"].interval(risk)
+    ci_width = float(1.0 - float(probs.max()))   # per-sample confidence uncertainty
+    lo, hi, width = STATE["conformal"].interval(risk, ci_width)
     return {
         "risk_score": risk,
         "label": label,

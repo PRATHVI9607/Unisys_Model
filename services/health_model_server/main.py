@@ -93,7 +93,8 @@ def score(req: ScoreRequest):
     metric_attr = STATE["shap"].explain_metrics(metrics)
     top_metric = max(metric_attr, key=metric_attr.get) if metric_attr else "unknown"
 
-    lo, hi, width = STATE["conformal"].interval(risk)
+    ci_width = float(1.0 - float(probs.max()))   # per-sample confidence uncertainty
+    lo, hi, width = STATE["conformal"].interval(risk, ci_width)
     return {
         "risk_score": risk,
         "label": label,
