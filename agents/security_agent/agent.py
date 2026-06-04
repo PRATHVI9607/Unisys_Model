@@ -1,8 +1,10 @@
 import asyncio
+import base64
 import json
 import logging
 import math
 import os
+import struct
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
@@ -16,6 +18,37 @@ from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def emb_b64(vec) -> str:
+    """Pack a float list as base64 float32 bytes for the Redis stream."""
+    vec = list(vec or [])
+    return base64.b64encode(struct.pack(f"{len(vec)}f", *vec)).decode() if vec else ""
+
+
+def namespace_tier(namespace: str) -> str:
+    n = (namespace or "").lower()
+    if "prod" in n:
+        return "prod"
+    if "stag" in n:
+        return "staging"
+    return "dev"
+
+
+def synth_events(early_signals: Dict, n: int = 60) -> List[Dict]:
+    """Synthesize a syscall event window from early signals for the Security
+    Model (the Falco gRPC stream is optional; entropy + these signals drive
+    detection). Ransomware-consistent ops when signals fire, else benign I/O."""
+    if early_signals.get("rename_burst") or early_signals.get("high_entropy"):
+        pool = (["write", "rename", "ftruncate", "open", "read"]
+                + (["mmap", "msync"] if early_signals.get("mmap_detected") else []))
+        paths = [f"/data/file_{i}.locked" for i in range(20)]
+    else:
+        pool = ["read", "stat", "open", "close"]
+        paths = [f"/var/log/app_{i}.log" for i in range(5)]
+    import random
+    return [{"syscall": random.choice(pool), "fd_path": random.choice(paths)}
+            for _ in range(n)]
 
 
 class ThreatLevel(str, Enum):
@@ -201,7 +234,10 @@ class SecurityAgent:
         self.namespace       = namespace
         self.redis_url       = redis_url       or os.environ.get("REDIS_URL", "redis://redis-master:6379")
         self.falco_grpc_addr = falco_grpc_addr or os.environ.get("FALCO_GRPC_ADDR", "127.0.0.1:5060")
-        self.dit_sec_url     = dit_sec_url     or os.environ.get("DIT_SEC_URL", "http://dit-sec-server:8000")
+        # v4: dedicated Security Model server (was the v3 DIT-Sec monolith)
+        self.security_model_url = (dit_sec_url
+            or os.environ.get("SECURITY_MODEL_URL")
+            or os.environ.get("DIT_SEC_URL", "http://kubeheal-security-model:8002"))
         self.entropy_threshold = entropy_threshold
         self.mmap_entropy_threshold = mmap_entropy_threshold
         self.mmap_size_threshold = mmap_size_threshold
@@ -237,7 +273,7 @@ class SecurityAgent:
         self.core_api = client.CoreV1Api()
         self.networking_api = client.NetworkingV1Api()
 
-        self.redis = aioredis.from_url(self.redis_url)
+        self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
 
         logger.info("Security Agent started successfully")
 
@@ -324,71 +360,47 @@ class SecurityAgent:
             "mmap_detected":     mmap_detected,
         }
 
-        # Build entropy time-series for DIT-Sec inference
-        entropy_series = [entropy_avg + (0.1 * (i % 3)) for i in range(20)]
+        # Build entropy series (30 steps) + synthesized syscall window
+        entropy_series = [entropy_avg + (0.1 * (i % 3)) for i in range(30)]
+        events = synth_events(early_signals)
 
-        # Call DIT-Sec model for ML-based risk score
-        dit_result = await self._call_dit_sec_score(entropy_avg, early_signals,
-                                                     entropy_series=entropy_series)
-        model_risk = dit_result.get("model_score")
+        # Call the v4 Security Model
+        sec = await self._call_security_model(events, entropy_series, early_signals)
+        model_risk = float(sec["risk_score"]) if sec else None
 
-        # Heuristic baseline
+        # Heuristic baseline (floor — clear ransomware signatures)
         heuristic_risk = 0.0
         if mmap_detected:
-            heuristic_risk = 0.70
+            heuristic_risk = 0.85
         elif entropy_avg > self.entropy_threshold:
-            heuristic_risk = min(0.93, entropy_avg / 10.0)
+            heuristic_risk = min(0.95, entropy_avg / 8.0)
         if early_signals["rename_burst"]:
-            heuristic_risk = max(heuristic_risk, 0.50)
+            heuristic_risk = max(heuristic_risk, 0.60)
+        if early_signals["high_entropy"] and early_signals["rename_burst"]:
+            heuristic_risk = max(heuristic_risk, 0.95)
 
-        # Use model score if available, else heuristic
-        risk_score = float(model_risk) if model_risk is not None else heuristic_risk
-        risk_score = max(risk_score, heuristic_risk * 0.5)  # floor at half heuristic
-
+        risk_score = max(model_risk or 0.0, heuristic_risk)
         logger.info(f"PID {pid} entropy={entropy_avg:.2f} risk={risk_score:.3f}")
 
-        if risk_score >= 0.98:
-            await self._direct_kill(pid, risk_score, early_signals)
+        if risk_score >= 0.90:
+            await self._direct_kill(pid, pid_info, risk_score, early_signals, entropy_avg, sec)
         elif risk_score >= 0.40:
-            await self._publish_security_event(pid_info, risk_score, early_signals, entropy_avg)
+            await self._publish_security_event(pid_info, risk_score, early_signals, entropy_avg, sec)
 
     async def _direct_kill(
-        self, pid: int, risk_score: float, early_signals: Dict
+        self, pid: int, pid_info: Optional[Dict], risk_score: float,
+        early_signals: Dict, entropy_avg: float, sec: Optional[Dict],
     ) -> None:
         """Direct kill without Fusion (fastest path for critical ransomware)."""
         logger.warning(f"DIRECT KILL: PID {pid}, risk={risk_score:.2f}")
 
-        pid_info = await self._get_pid_info(pid)
         namespace = pid_info.get("namespace", "default") if pid_info else "default"
         await self._apply_network_isolation(namespace)
-
-        event_id = f"sec-direct-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{pid}"
-
-        # Call DIT-Sec to enrich event with model comparison data
-        dit_sec_response = await self._call_dit_sec_score(None, early_signals)
-
-        await self.redis.xadd(
-            "kubeheal.security.events",
-            {
-                "event_id": event_id,
-                "target": json.dumps({"pid": pid, "namespace": namespace}),
-                "risk_score": str(risk_score),
-                "label": ThreatLevel.RANSOMWARE_CRITICAL.value,
-                "early_signals": json.dumps(early_signals),
-                "action": "direct_kill",
-                "timestamp": datetime.utcnow().isoformat(),
-                # Add new fields from DIT-Sec model comparison
-                "model_used": dit_sec_response.get("model_used") or "",
-                "model_score": str(dit_sec_response.get("model_score"))
-                if dit_sec_response.get("model_score") is not None
-                else "",
-                "heuristic_score": str(dit_sec_response.get("heuristic_score"))
-                if dit_sec_response.get("heuristic_score") is not None
-                else "",
-                "inference_method": dit_sec_response.get("inference_method") or "",
-            },
+        pid_info = pid_info or {"pid": pid, "namespace": namespace}
+        await self._publish_security_event(
+            pid_info, risk_score, early_signals, entropy_avg, sec,
+            label="ransomware_active", action="direct_kill",
         )
-
         try:
             os.kill(pid, 9)
             logger.info(f"Killed PID {pid}")
@@ -425,42 +437,45 @@ class SecurityAgent:
         risk_score: float,
         early_signals: Dict,
         entropy: Optional[float] = None,
+        sec: Optional[Dict] = None,
+        label: Optional[str] = None,
+        action: str = "observe",
     ) -> None:
-        """Publish SecurityEvent to Redis Stream."""
-        event_id = f"sec-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{pid_info.get('pod', 'unknown')}"
+        """Publish the v4 SecurityEvent schema (Section 15.A.1) to
+        kubeheal.security.events + a hash for dashboard detail lookup."""
+        pod = pid_info.get("pod") or "unknown"
+        namespace = pid_info.get("namespace", "default")
+        event_id = f"sec-{datetime.utcnow().strftime('%Y%m%d-%H%M%S-%f')}-{pod}"
+        sec = sec or {}
 
-        label = (
-            ThreatLevel.RANSOMWARE_CRITICAL.value
-            if risk_score >= 0.85
-            else ThreatLevel.LIKELY_RANSOMWARE.value
+        sec_label = label or sec.get("label") or (
+            "ransomware_active" if risk_score >= 0.85 else "ransomware_staging"
         )
 
-        # Call DIT-Sec to enrich event with model comparison data
-        dit_sec_response = await self._call_dit_sec_score(entropy, early_signals)
-
-        event_data = {
+        payload = {
             "event_id": event_id,
-            "target": json.dumps(pid_info),
-            "risk_score": str(risk_score),
-            "label": label,
+            "namespace": namespace,
+            "pod_name": pod,
+            "namespace_tier": namespace_tier(namespace),
+            "sec_risk": f"{risk_score:.4f}",
+            "sec_label": sec_label,
+            "sec_ci_width": f"{float(sec.get('ci_width', 0.0)):.4f}",
+            "top_syscall": sec.get("top_syscall", ""),
+            "syscall_attribution_json": json.dumps(sec.get("syscall_attention_weights", {})),
+            "entropy_spike_json": json.dumps(sec.get("entropy_spike", {})),
+            "security_embedding_b64": emb_b64(sec.get("security_embedding", [])),
+            "early_signals_json": json.dumps(early_signals),
             "pid_target": str(pid_info.get("pid", 0)),
-            "entropy": str(entropy) if entropy else "0.0",
-            "early_signals": json.dumps(early_signals),
-            "timestamp": datetime.utcnow().isoformat(),
-            # Add new fields from DIT-Sec model comparison
-            "model_used": dit_sec_response.get("model_used") or "",
-            "model_score": str(dit_sec_response.get("model_score"))
-            if dit_sec_response.get("model_score") is not None
-            else "",
-            "heuristic_score": str(dit_sec_response.get("heuristic_score"))
-            if dit_sec_response.get("heuristic_score") is not None
-            else "",
-            "inference_method": dit_sec_response.get("inference_method") or "",
+            "entropy": f"{float(entropy or 0.0):.4f}",
+            "action": action,
+            "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
         }
-
-        await self.redis.xadd("kubeheal.security.events", event_data)
-
-        logger.info(f"Security event: {event_id}, risk={risk_score:.2f}")
+        await self.redis.xadd("kubeheal.security.events", payload)
+        hkey = f"kubeheal:security:{event_id}"
+        await self.redis.hset(hkey, mapping={k: v for k, v in payload.items()
+                                             if k != "security_embedding_b64"})
+        await self.redis.expire(hkey, 86400)
+        logger.info(f"Security event {event_id}: risk={risk_score:.2f} label={sec_label}")
 
     async def _get_pid_info(self, pid: int) -> Optional[Dict]:
         """Get PID info from cache."""
@@ -499,57 +514,33 @@ class SecurityAgent:
 
         return False
 
-    async def _call_dit_sec_score(
+    async def _call_security_model(
         self,
-        entropy: Optional[float],
+        events: List[Dict],
+        entropy_series: List[float],
         early_signals: Dict[str, bool],
-        entropy_series: Optional[List[float]] = None,
-        syscalls: Optional[List[Dict]] = None,
-    ) -> Dict[str, Any]:
-        """Call DIT-Sec /score endpoint for ML-based risk scoring."""
-        try:
-            payload: Dict[str, Any] = {
-                "entropy":      entropy or 0.0,
-                "early_signals": early_signals,
-            }
-            if entropy_series:
-                payload["entropy_series"] = entropy_series
-            if syscalls:
-                payload["syscalls"] = syscalls
-
-            async with aiohttp.ClientSession() as session:
-                try:
-                    async with session.post(
-                        f"{self.dit_sec_url}/score",
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=5),
-                    ) as resp:
-                        if resp.status == 200:
-                            result = await resp.json()
-                            return {
-                                "model_used": result.get("model_used"),
-                                "model_score": result.get("model_score"),
-                                "heuristic_score": result.get("heuristic_score"),
-                                "inference_method": result.get("inference_method"),
-                            }
-                        else:
-                            logger.warning(f"DIT-Sec returned status {resp.status}")
-                            return self._default_dit_sec_response()
-                except asyncio.TimeoutError:
-                    logger.warning("DIT-Sec call timed out, using fallback")
-                    return self._default_dit_sec_response()
-        except Exception as e:
-            logger.debug(f"DIT-Sec call failed: {e}")
-            return self._default_dit_sec_response()
-
-    def _default_dit_sec_response(self) -> Dict[str, Any]:
-        """Return default DIT-Sec response when service is unavailable."""
-        return {
-            "model_used": None,
-            "model_score": None,
-            "heuristic_score": None,
-            "inference_method": None,
+    ) -> Optional[Dict[str, Any]]:
+        """Call the v4 Security Model /security/score. Returns the full v4
+        result (sec_risk, label, ci_width, top_syscall, entropy_spike,
+        security_embedding) or None if the server is unreachable."""
+        payload = {
+            "events": events or [],
+            "entropy_series": entropy_series or [],
+            "early_signals": early_signals or {},
         }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.security_model_url}/security/score",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    logger.warning(f"Security Model returned {resp.status}")
+        except Exception as e:
+            logger.debug(f"Security Model call failed: {e}")
+        return None
 
 
 async def main():

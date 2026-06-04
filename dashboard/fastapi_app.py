@@ -150,25 +150,20 @@ class KubeHealDashboard:
                                 msg_id.decode() if isinstance(msg_id, bytes) else msg_id
                             )
 
-                            # Parse health event
-                            event_id = fields.get(b"event_id", b"").decode()
-                            target = json.loads(fields.get(b"target", b"{}"))
-                            risk_score = float(fields.get(b"risk_score", b"0"))
-                            severity = fields.get(b"severity", b"benign").decode()
-                            timestamp = fields.get(b"timestamp", b"").decode()
-                            blast_radius = fields.get(
-                                b"blast_radius", b"unknown"
-                            ).decode()
-
-                            # Parse model comparison fields
-                            model_used = fields.get(b"model_used", b"").decode() or None
-                            model_score = fields.get(b"model_score", b"")
-                            heuristic_score = fields.get(b"heuristic_score", b"")
-                            inference_method = (
-                                fields.get(b"inference_method", b"").decode() or None
-                            )
-                            explainability = fields.get(b"explainability", b"{}")
-                            patch_proposal = fields.get(b"patch_proposal", b"{}")
+                            # Parse v4 health event
+                            def _g(k, d=b""):
+                                return fields.get(k, d).decode()
+                            event_id = _g(b"event_id")
+                            namespace = _g(b"namespace", b"default")
+                            pod_name = _g(b"pod_name", b"unknown")
+                            target = {"namespace": namespace, "name": pod_name, "kind": "Deployment"}
+                            risk_score = float(_g(b"health_risk", b"0") or 0)
+                            severity = _g(b"health_label", b"benign")  # v4 label as severity
+                            blast_radius = _g(b"blast_radius", b"unknown")
+                            timestamp = _g(b"timestamp_ms")
+                            inference_method = _g(b"inference_method") or None
+                            field_attr = fields.get(b"field_attribution_json", b"{}")
+                            patch_proposal = fields.get(b"patch_proposal_json", b"{}")
 
                             assessment = HealthAssessment(
                                 event_id=event_id,
@@ -178,25 +173,17 @@ class KubeHealDashboard:
                                 blast_radius=blast_radius,
                                 timestamp=timestamp,
                             )
-
-                            # Store extra fields for detail lookup
-                            assessment.model_used = model_used
-                            assessment.model_score = (
-                                float(model_score) if model_score else None
-                            )
-                            assessment.heuristic_score = (
-                                float(heuristic_score) if heuristic_score else None
-                            )
+                            assessment.model_used = "health_model_v4"
+                            assessment.model_score = risk_score
+                            assessment.heuristic_score = None
                             assessment.inference_method = inference_method
                             assessment.explainability = (
-                                json.loads(explainability)
-                                if explainability and explainability != b"{}"
-                                else {}
+                                json.loads(field_attr)
+                                if field_attr and field_attr != b"{}" else {}
                             )
                             assessment.patch_proposal = (
                                 json.loads(patch_proposal)
-                                if patch_proposal and patch_proposal != b"{}"
-                                else None
+                                if patch_proposal and patch_proposal != b"{}" else None
                             )
 
                             self.health_events.append(assessment)
@@ -239,25 +226,21 @@ class KubeHealDashboard:
                                 msg_id.decode() if isinstance(msg_id, bytes) else msg_id
                             )
 
-                            # Parse security event
-                            event_id = fields.get(b"event_id", b"").decode()
-                            target = json.loads(fields.get(b"target", b"{}"))
-                            risk_score = float(fields.get(b"risk_score", b"0"))
-                            label = fields.get(b"label", b"benign").decode()
-                            early_signals = json.loads(
-                                fields.get(b"early_signals", b"{}")
-                            )
-                            timestamp = fields.get(b"timestamp", b"").decode()
-
-                            # Parse model comparison fields if present
-                            model_used = fields.get(b"model_used", b"").decode() or None
-                            model_score = fields.get(b"model_score", b"")
-                            heuristic_score = fields.get(b"heuristic_score", b"")
-                            inference_method = (
-                                fields.get(b"inference_method", b"").decode() or None
-                            )
-                            entropy = fields.get(b"entropy", b"")
-                            pid_target = fields.get(b"pid_target", b"").decode() or None
+                            # Parse v4 security event
+                            def _g(k, d=b""):
+                                return fields.get(k, d).decode()
+                            event_id = _g(b"event_id")
+                            namespace = _g(b"namespace", b"default")
+                            pod_name = _g(b"pod_name", b"unknown")
+                            target = {"namespace": namespace, "pod": pod_name}
+                            risk_score = float(_g(b"sec_risk", b"0") or 0)
+                            label = _g(b"sec_label", b"benign")
+                            early_signals = json.loads(fields.get(b"early_signals_json", b"{}"))
+                            timestamp = _g(b"timestamp_ms")
+                            inference_method = "security_model_v4"
+                            entropy = _g(b"entropy")
+                            pid_target = _g(b"pid_target") or None
+                            top_syscall = _g(b"top_syscall") or None
 
                             event = SecurityEvent(
                                 event_id=event_id,
@@ -267,15 +250,9 @@ class KubeHealDashboard:
                                 early_signals=early_signals,
                                 timestamp=timestamp,
                             )
-
-                            # Store extra fields in event for detail lookup
-                            event.model_used = model_used
-                            event.model_score = (
-                                float(model_score) if model_score else None
-                            )
-                            event.heuristic_score = (
-                                float(heuristic_score) if heuristic_score else None
-                            )
+                            event.model_used = "security_model_v4"
+                            event.model_score = risk_score
+                            event.heuristic_score = None
                             event.inference_method = inference_method
                             event.entropy = float(entropy) if entropy else None
                             event.pid_target = pid_target

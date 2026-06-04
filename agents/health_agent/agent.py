@@ -1,8 +1,10 @@
 import asyncio
+import base64
 import json
 import logging
 import hashlib
 import os
+import struct
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
@@ -10,9 +12,25 @@ from enum import Enum
 
 import redis.asyncio as aioredis
 import kubernetes_asyncio
-from kubernetes_asyncio import client, watch
-from kubernetes_asyncio.config import load_incluster_config, config
+from kubernetes_asyncio import client, watch, config
+from kubernetes_asyncio.config import load_incluster_config
 from pydantic import BaseModel, Field
+
+
+def emb_b64(vec) -> str:
+    """Pack a float list as base64 float32 bytes for the Redis stream."""
+    vec = list(vec or [])
+    return base64.b64encode(struct.pack(f"{len(vec)}f", *vec)).decode() if vec else ""
+
+
+def namespace_tier(namespace: str) -> str:
+    """Map a namespace to its risk tier (prod / staging / dev)."""
+    n = (namespace or "").lower()
+    if "prod" in n:
+        return "prod"
+    if "stag" in n:
+        return "staging"
+    return "dev"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -61,12 +79,14 @@ class HealthAgent:
     ):
         self.namespace = namespace
         self.redis_url = redis_url or os.environ.get("REDIS_URL", "redis://redis-master:6379")
-        self.dit_sec_url = dit_sec_url or os.environ.get(
-            "DIT_SEC_URL", "http://dit-sec-server:8000"
+        # v4: dedicated Health Model server (was the v3 DIT-Sec monolith)
+        self.health_model_url = dit_sec_url or os.environ.get(
+            "HEALTH_MODEL_URL", "http://kubeheal-health-model:8001"
         )
         self.cooldown_ttl = cooldown_ttl
         self.prometheus_url = prometheus_url or os.environ.get(
-            "PROMETHEUS_URL", "http://prometheus:9090"
+            "PROMETHEUS_URL",
+            "http://prometheus-operated.monitoring.svc.cluster.local:9090",
         )
 
         self.redis: Optional[aioredis.Redis] = None
@@ -82,9 +102,9 @@ class HealthAgent:
 
     async def start(self) -> None:
         """Start the Health Agent."""
-        logger.info("Starting Health Agent...")
+        logger.info("Starting Health Agent (v4)...")
         logger.info(f"Redis URL: {self.redis_url}")
-        logger.info(f"DIT-Sec URL: {self.dit_sec_url}")
+        logger.info(f"Health Model URL: {self.health_model_url}")
         logger.info(f"Prometheus URL: {self.prometheus_url}")
 
         try:
@@ -184,20 +204,21 @@ class HealthAgent:
             new_spec = deployment.spec.to_dict() if deployment.spec else {}
             await self._save_spec(namespace, name, new_spec)
 
-            await asyncio.sleep(15)
-
-            telemetry = await self._fetch_telemetry(namespace, name)
+            # v4: poll for fresh 60×15 Prometheus window (shared cache, backoff)
+            # — replaces the v3 hard-coded sleep(15) + single-metric fetch.
+            from agents.health_agent.prometheus_client import wait_for_fresh_metrics
+            metrics = await wait_for_fresh_metrics(namespace, name, self.prometheus_url)
 
             assessment = await self._assess_health(
-                namespace, name, old_spec, new_spec, telemetry, blast_radius
+                namespace, name, old_spec, new_spec, metrics, blast_radius
             )
 
             if assessment:
                 await self._publish_assessment(assessment)
                 await self._set_cooldown(namespace, name)
-
-                logger.info(f"Assessment: risk_score={assessment.risk_score:.2f}")
-                logger.info(f"handle_deployment_event COMPLETED successfully")
+                logger.info(f"Assessment {namespace}/{name}: "
+                            f"health_risk={assessment['health_risk']:.2f} "
+                            f"label={assessment['health_label']}")
         except Exception as e:
             logger.error(f"Error handling deployment event: {e}", exc_info=True)
 
@@ -331,59 +352,70 @@ class HealthAgent:
         name: str,
         old_spec: Optional[Dict],
         new_spec: Dict,
-        telemetry: Dict,
+        metrics,                 # np.ndarray [60,15] from wait_for_fresh_metrics
         blast_radius: str,
-    ) -> Optional[HealthAssessment]:
-        """Assess health with DIT-Sec model."""
-        try:
-            import aiohttp
+    ) -> Optional[Dict]:
+        """Score the drift with the v4 Health Model server. Returns a v4 dict
+        (the schema the Fusion Agent + dashboard consume), or a heuristic
+        fallback if the server is unreachable."""
+        import aiohttp
 
-            payload = {
-                "old_spec": old_spec,
-                "new_spec": new_spec,
-                "telemetry": telemetry,
-                "blast_radius": blast_radius,
+        payload = {
+            "old_spec": old_spec or {},
+            "new_spec": new_spec or {},
+            "metrics": metrics.tolist() if hasattr(metrics, "tolist") else metrics,
+        }
+        result = None
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.health_model_url}/health/score",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                    else:
+                        logger.warning(f"Health Model returned {resp.status}")
+        except Exception as e:
+            logger.debug(f"Health Model call failed: {e}")
+
+        event_id = f"health-{datetime.utcnow().strftime('%Y%m%d-%H%M%S-%f')}-{name}"
+
+        if result is None:
+            # local heuristic fallback → still emit the v4 schema
+            local = self._local_assessment(new_spec, {})
+            return {
+                "event_id": event_id, "namespace": namespace, "pod_name": name,
+                "namespace_tier": namespace_tier(namespace),
+                "health_risk": float(local["risk_score"]),
+                "health_label": local.get("model_used", "heuristic"),
+                "health_ci_width": 1.0,            # unknown → max uncertainty
+                "top_field": "", "field_attribution": {},
+                "health_embedding": [], "patch_proposal": local.get("patch_proposal"),
+                "blast_radius": blast_radius, "inference_method": "heuristic_fallback",
             }
 
-            result = None
-            async with aiohttp.ClientSession() as session:
-                try:
-                    async with session.post(
-                        f"{self.dit_sec_url}/score",
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=5),
-                    ) as resp:
-                        if resp.status == 200:
-                            result = await resp.json()
-                        else:
-                            logger.warning(f"DIT-Sec returned status {resp.status}")
-                            result = self._local_assessment(new_spec, telemetry)
-                except asyncio.TimeoutError:
-                    logger.warning("DIT-Sec call timed out, using local assessment")
-                    result = self._local_assessment(new_spec, telemetry)
-        except Exception as e:
-            logger.debug(f"DIT-Sec call failed: {e}")
-            result = self._local_assessment(new_spec, telemetry)
+        return {
+            "event_id": event_id, "namespace": namespace, "pod_name": name,
+            "namespace_tier": namespace_tier(namespace),
+            "health_risk": float(result.get("risk_score", 0.0)),
+            "health_label": result.get("label", "benign"),
+            "health_ci_width": float(result.get("ci_width", 0.0)),
+            "top_field": result.get("top_field", ""),
+            "top_metric": result.get("top_metric", ""),
+            "field_attribution": result.get("field_attention_weights", {}),
+            "health_embedding": result.get("health_embedding", []),
+            "patch_proposal": self._patch_from_field(result.get("top_field", ""), old_spec, new_spec),
+            "blast_radius": blast_radius,
+            "inference_method": "health_model_v4",
+        }
 
-        if not result:
+    def _patch_from_field(self, top_field: str, old_spec, new_spec) -> Optional[Dict]:
+        """Propose restoring the highest-attribution field to its baseline value."""
+        if not top_field or not old_spec:
             return None
-
-        event_id = f"health-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{name}"
-
-        return HealthAssessment(
-            event_id=event_id,
-            target={"namespace": namespace, "name": name, "kind": "Deployment"},
-            risk_score=result.get("risk_score", 0.0),
-            severity=self._score_to_severity(result.get("risk_score", 0.0)),
-            patch_proposal=result.get("patch_proposal"),
-            explainability=result.get("explainability"),
-            confidence_interval=result.get("confidence_interval"),
-            blast_radius=blast_radius,
-            model_used=result.get("model_used"),
-            model_score=result.get("model_score"),
-            heuristic_score=result.get("heuristic_score"),
-            inference_method=result.get("inference_method"),
-        )
+        return {"restore_field": top_field, "note": "restore to recorded baseline"}
 
     def _local_assessment(self, new_spec: Dict, telemetry: Dict) -> Dict:
         """Local assessment fallback."""
@@ -440,77 +472,33 @@ class HealthAgent:
             return SeverityLevel.LOW
         return SeverityLevel.BENIGN
 
-    # Redis hash structure for each event (kubeheal:health:{event_id}):
-    # - event_id: str - unique event identifier
-    # - target: JSON - {namespace, name, kind}
-    # - risk_score: str - numeric 0.0-1.0
-    # - severity: str - "benign"|"low"|"medium"|"high"|"critical"
-    # - patch_proposal: JSON - proposed patches or empty string
-    # - explainability: JSON - model explanation or empty string
-    # - blast_radius: str - "High"|"Low"|"unknown"
-    # - timestamp: str - ISO8601 timestamp
-    # - model_used: str - "pytorch"|"heuristic" or empty string
-    # - model_score: str - numeric 0.0-1.0 from pytorch model or empty string
-    # - heuristic_score: str - numeric 0.0-1.0 from heuristic or empty string
-    # - inference_method: str - "DIT-Sec v3 GNN+Mamba inference"|"Heuristic fallback..." or empty string
-
-    async def _publish_assessment(self, assessment: HealthAssessment) -> None:
-        """Publish HealthAssessment to Redis Stream."""
-        key = f"kubeheal:health:{assessment.event_id}"
-
-        # Build hash mapping with all fields
-        hash_mapping = {
-            "event_id": assessment.event_id,
-            "target": json.dumps(assessment.target),
-            "risk_score": str(assessment.risk_score),
-            "severity": assessment.severity.value,
-            "patch_proposal": json.dumps(assessment.patch_proposal)
-            if assessment.patch_proposal
-            else "",
-            "explainability": json.dumps(assessment.explainability)
-            if assessment.explainability
-            else "",
-            "blast_radius": assessment.blast_radius,
-            "timestamp": assessment.timestamp,
-            # Add new model comparison fields
-            "model_used": assessment.model_used or "",
-            "model_score": str(assessment.model_score)
-            if assessment.model_score is not None
-            else "",
-            "heuristic_score": str(assessment.heuristic_score)
-            if assessment.heuristic_score is not None
-            else "",
-            "inference_method": assessment.inference_method or "",
+    async def _publish_assessment(self, a: Dict) -> None:
+        """Publish the v4 HealthAssessment schema (Section 15.A.1) to the
+        kubeheal.health.events stream + a hash for dashboard detail lookup."""
+        payload = {
+            "event_id": a["event_id"],
+            "namespace": a["namespace"],
+            "pod_name": a["pod_name"],
+            "namespace_tier": a["namespace_tier"],
+            "health_risk": f"{a['health_risk']:.4f}",
+            "health_label": a["health_label"],
+            "health_ci_width": f"{a['health_ci_width']:.4f}",
+            "field_attribution_json": json.dumps(a.get("field_attribution", {})),
+            "top_field": a.get("top_field", ""),
+            "top_metric": a.get("top_metric", ""),
+            "health_embedding_b64": emb_b64(a.get("health_embedding", [])),
+            "patch_proposal_json": json.dumps(a.get("patch_proposal") or {}),
+            "blast_radius": a.get("blast_radius", "unknown"),
+            "inference_method": a.get("inference_method", ""),
+            "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
         }
-
-        await self.redis.hset(key, mapping=hash_mapping)
-
-        # Build stream payload with new fields
-        stream_payload = {
-            "event_id": assessment.event_id,
-            "target": json.dumps(assessment.target),
-            "risk_score": str(assessment.risk_score),
-            "severity": assessment.severity.value,
-            "blast_radius": assessment.blast_radius,
-            "confidence_interval": str(assessment.confidence_interval),
-            "timestamp": assessment.timestamp,
-            # Add new model comparison fields
-            "model_used": assessment.model_used or "",
-            "model_score": str(assessment.model_score)
-            if assessment.model_score is not None
-            else "",
-            "heuristic_score": str(assessment.heuristic_score)
-            if assessment.heuristic_score is not None
-            else "",
-            "inference_method": assessment.inference_method or "",
-        }
-
-        await self.redis.xadd(
-            "kubeheal.health.events",
-            stream_payload,
-        )
-
-        logger.info(f"Published {assessment.event_id}")
+        await self.redis.xadd("kubeheal.health.events", payload)
+        # hash (sans large embedding) for the dashboard detail endpoint
+        hkey = f"kubeheal:health:{a['event_id']}"
+        await self.redis.hset(hkey, mapping={k: v for k, v in payload.items()
+                                             if k != "health_embedding_b64"})
+        await self.redis.expire(hkey, 86400)
+        logger.info(f"Published {a['event_id']}")
 
 
 async def main():
