@@ -392,11 +392,11 @@ class EventDetailsModal {
                 <div class="model-comparison">
         `;
 
-        // ONNX Model Box
+        // Model Box
         html += `
             <div class="comparison-box ${isModelUsed ? 'active' : ''}">
                 <div class="comparison-header">
-                    <div class="comparison-title">ONNX Model</div>
+                    <div class="comparison-title">Model</div>
                     ${isModelUsed ? '<span class="comparison-used-badge">✓ USED</span>' : ''}
                 </div>
                 <div class="comparison-items">

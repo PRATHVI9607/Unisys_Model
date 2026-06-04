@@ -56,10 +56,10 @@ class HealthAssessment(BaseModel):
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     # New fields from DIT-Sec model comparison
     model_used: Optional[str] = None  # "pytorch" or "heuristic"
-    model_score: Optional[float] = None  # Score from ONNX model, 0-1
+    model_score: Optional[float] = None  # model risk score, 0-1
     heuristic_score: Optional[float] = None  # Score from heuristic, 0-1
     inference_method: Optional[str] = (
-        None  # e.g., "ONNX inference" or "Heuristic fallback"
+        None  # e.g., "health_model_v4"/"security_model_v4" or "heuristic"
     )
 
 
@@ -124,7 +124,7 @@ class HealthAgent:
 
         self.networking_api = client.NetworkingV1Api()
 
-        self.redis = aioredis.from_url(self.redis_url)
+        self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
 
         logger.info("Health Agent started successfully")
 
@@ -144,27 +144,45 @@ class HealthAgent:
         logger.info("Health Agent stopped")
 
     async def watch_deployments(self) -> None:
-        """Watch for Deployment changes in all namespaces."""
-        logger.info("Starting Deployment watch...")
+        """Watch Deployment changes, reconnecting across watch timeouts.
 
-        async with watch.Watch() as w:
-            self.watcher = w
-            self.running = True
-
-            async for event in w.stream(
-                self.apps_api.list_deployment_for_all_namespaces,
-                label_selector="kubeheal.io/watch=true",
-                resource_version=None,
-            ):
-                logger.info(f"Watch loop received event: {event['type']}")
-                if not self.running:
-                    break
-
-                obj = event["object"]
-                event_type = event["type"]
-
-                await self.handle_deployment_event(event_type, obj)
-                logger.info(f"handle_deployment_event returned for {event_type}")
+        K8s closes watch streams every few minutes; v3 exited on the first
+        timeout. We wrap the watch in a reconnect loop, resume from the last
+        resourceVersion, and restart on 410 Gone — the agent never exits on a
+        normal timeout.
+        """
+        logger.info("Starting Deployment watch (reconnecting)...")
+        self.running = True
+        resource_version = None
+        while self.running:
+            try:
+                async with watch.Watch() as w:
+                    self.watcher = w
+                    async for event in w.stream(
+                        self.apps_api.list_deployment_for_all_namespaces,
+                        label_selector="kubeheal.io/watch=true",
+                        resource_version=resource_version,
+                        timeout_seconds=300,
+                    ):
+                        if not self.running:
+                            break
+                        obj = event["object"]
+                        if obj.metadata and obj.metadata.resource_version:
+                            resource_version = obj.metadata.resource_version
+                        await self.handle_deployment_event(event["type"], obj)
+            except asyncio.CancelledError:
+                break
+            except kubernetes_asyncio.client.exceptions.ApiException as e:
+                if e.status == 410:   # resourceVersion too old → restart fresh
+                    logger.warning("Watch expired (410); restarting fresh")
+                    resource_version = None
+                else:
+                    logger.error(f"Watch API error: {e}; retry in 5s")
+                    await asyncio.sleep(5)
+            except Exception as e:
+                logger.error(f"Watch error: {e}; reconnecting in 5s", exc_info=True)
+                await asyncio.sleep(5)
+        logger.info("Deployment watch stopped")
 
     async def handle_deployment_event(self, event_type: str, deployment) -> None:
         try:

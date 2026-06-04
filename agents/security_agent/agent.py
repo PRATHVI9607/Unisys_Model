@@ -69,10 +69,10 @@ class SecurityEvent(BaseModel):
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     # New fields from DIT-Sec model comparison
     model_used: Optional[str] = None  # "pytorch" or "heuristic"
-    model_score: Optional[float] = None  # Score from ONNX model, 0-1
+    model_score: Optional[float] = None  # model risk score, 0-1
     heuristic_score: Optional[float] = None  # Score from heuristic, 0-1
     inference_method: Optional[str] = (
-        None  # e.g., "ONNX inference" or "Heuristic fallback"
+        None  # e.g., "health_model_v4"/"security_model_v4" or "heuristic"
     )
 
 
