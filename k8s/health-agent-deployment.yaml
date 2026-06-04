@@ -31,18 +31,18 @@ spec:
       serviceAccountName: kubeheal
       containers:
         - name: agent
-          image: kubeheal/health-agent:v3
+          image: kubeheal/health-agent:v4
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
               name: http
           env:
             - name: REDIS_URL
-              value: redis://default:aNCeXDoN1k@redis-node-0.redis-headless.kubeheal.svc.cluster.local:6379
-            - name: DIT_SEC_URL
-              value: http://dit-sec-server:8000
+              value: redis://redis-master:6379
+            - name: HEALTH_MODEL_URL
+              value: http://kubeheal-health-model:8001
             - name: PROMETHEUS_URL
-              value: http://prometheus:9090
+              value: http://prometheus-operated.monitoring.svc.cluster.local:9090
             - name: NAMESPACE
               value: kubeheal
             - name: COOLDOWN_TTL

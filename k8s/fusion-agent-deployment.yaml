@@ -31,7 +31,7 @@ spec:
       serviceAccountName: kubeheal
       containers:
         - name: agent
-          image: kubeheal/fusion-agent:v3
+          image: kubeheal/fusion-agent:v4
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8081
