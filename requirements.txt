@@ -23,6 +23,8 @@ PyYAML>=6.0.0
 # Export
 onnx==1.16.0
 onnxruntime==1.17.0
+onnxconverter-common>=1.14.0
+minio>=7.2.0  # optional: model registry upload
 
 # Testing
 pytest>=7.4.0

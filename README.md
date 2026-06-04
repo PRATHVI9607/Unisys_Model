@@ -132,10 +132,29 @@ PYTHONPATH=. python -u models/train_security_model.py \
 
 # 4. DCM — staged, AFTER 1 & 3 (freezes both base models)
 PYTHONPATH=. python -u models/train_dcm.py --epochs 25 --batch-size 32
+
+# 5. (optional) recalibrate conformal on a held-out set
+PYTHONPATH=. python models/calibrate_conformal.py --coverage 0.90
+
+# 6. validate promotion gates (F1 / AUROC; latency advisory)
+PYTHONPATH=. python models/validate_all_models.py
+
+# 7. export for serving — security/DCM → FP16 ONNX, health → torch bundle
+PYTHONPATH=. python models/export_security_model.py --quantize fp16
+PYTHONPATH=. python models/export_dcm.py --quantize fp16
+PYTHONPATH=. python models/export_health_model.py
+
+# 8. (optional) push to the MinIO model registry
+PYTHONPATH=. python models/upload_to_registry.py --version v4.0.0
 ```
 
 Outputs land in `models/<model>/checkpoints/best_*.pt` + `*_conformal.json` +
-`*_report.json`. The servers auto-load them on startup.
+`*_report.json`. The servers auto-load the checkpoints on startup.
+
+> ONNX note: the security and DCM models export to **FP16 ONNX** (validated;
+> falls back to FP32 if a graph op rejects FP16). The health model serves via
+> torch — its GATv2 over a *variable* YAML graph isn't ONNX-exportable, so
+> `export_health_model.py` emits a validated torch bundle instead.
 
 **GPU note:** GATv2 builds one graph per sample in Python — CPU runs ~minutes
 per epoch; a GPU (RTX 3060+) finishes each model in minutes.
