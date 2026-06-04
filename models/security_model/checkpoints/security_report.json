@@ -1,0 +1,12 @@
+{
+  "best_val_f1": 1.0,
+  "params": 530838,
+  "labels": [
+    "benign",
+    "suspicious",
+    "ransomware_staging",
+    "ransomware_active",
+    "data_exfiltration"
+  ],
+  "conformal_q": 0.08182301419121879
+}
