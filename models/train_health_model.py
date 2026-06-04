@@ -41,7 +41,7 @@ from models.health_model.metric_bilstm_encoder import (
 )
 from models.health_model.health_conformal import ConformalRegressor
 from models.train_utils import (
-    setup_torch, clipped_step, make_plateau, focal_loss,
+    setup_torch, clipped_step, make_plateau, focal_loss, augment_minority,
 )
 
 LABEL_IDX = {l: i for i, l in enumerate(HEALTH_LABELS)}
@@ -135,7 +135,8 @@ def class_weights(samples, device):
     return torch.tensor(w, dtype=torch.float32, device=device)
 
 
-def run_epoch(model, samples, optimizer, cw, device, train: bool, bs: int):
+def run_epoch(model, samples, optimizer, cw, device, train: bool, bs: int,
+              focal_gamma: float = 1.0):
     model.train(train)
     # Focal loss (alpha=inverse-freq) handles imbalance; a plain shuffle avoids
     # the double-correction (oversample + inverse-freq focal) that collapses the
@@ -165,7 +166,10 @@ def run_epoch(model, samples, optimizer, cw, device, train: bool, bs: int):
                 continue
             logits = torch.stack(logit_list)
             y = torch.tensor(lab_list, dtype=torch.long, device=device)
-            fl = focal_loss(logits, y, alpha=cw, gamma=2.0)   # focal handles imbalance
+            # focal WITHOUT class-weight alpha: oversample-augmentation already
+            # rebalances the data, so stacking inverse-freq alpha here would
+            # double-correct and collapse precision (as the γ=2+α run showed).
+            fl = focal_loss(logits, y, alpha=None, gamma=focal_gamma)
             risk = torch.stack(risk_list)
             rt = torch.tensor(rt_list, dtype=torch.float32, device=device)
             loss = fl + 0.5 * F.mse_loss(risk, rt)
@@ -190,6 +194,9 @@ def main():
     ap.add_argument("--val-split", type=float, default=0.15)
     ap.add_argument("--patience", type=int, default=6)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--focal-gamma", type=float, default=1.0)
+    ap.add_argument("--oversample-ratio", type=float, default=0.5,
+                    help="oversample minority up to this × the largest class (0 disables)")
     args = ap.parse_args()
 
     device = setup_torch(args.seed)   # pins threads (CPU speed) + seeds
@@ -204,6 +211,18 @@ def main():
     n_cal = max(50, len(val) // 2)
     cal, val = val[:n_cal], val[n_cal:]
     print(f"Train {len(train)}  Val {len(val)}  Calib {len(cal)}", flush=True)
+
+    # Data-level imbalance fix: mild minority oversampling with metric-noise
+    # augmentation (TRAIN only — never touch val/calib).
+    if args.oversample_ratio > 0:
+        train = augment_minority(
+            train, label_of=lambda s: LABEL_IDX[s["label"]],
+            num_classes=len(HEALTH_LABELS), target_ratio=args.oversample_ratio,
+        )
+        aug_counts = defaultdict(int)
+        for s in train:
+            aug_counts[s["label"]] += 1
+        print(f"Train after augment: {len(train)}  {dict(aug_counts)}", flush=True)
 
     model = HealthModel().to(device)
     print(f"Params: {model.param_count():,}", flush=True)
@@ -223,8 +242,8 @@ def main():
             for g in opt.param_groups: g["lr"] = base_lr * 0.1
         elif ep == 2:
             for g in opt.param_groups: g["lr"] = base_lr
-        tl, ta, tf, _, _ = run_epoch(model, train, opt, cw, device, True, args.batch_size)
-        vl, va, vf, vp, vy = run_epoch(model, val, opt, cw, device, False, args.batch_size)
+        tl, ta, tf, _, _ = run_epoch(model, train, opt, cw, device, True, args.batch_size, args.focal_gamma)
+        vl, va, vf, vp, vy = run_epoch(model, val, opt, cw, device, False, args.batch_size, args.focal_gamma)
         if ep >= 2:
             sched.step(vf)   # plateau watches val F1
         improved = vf > best_f1

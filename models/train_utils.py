@@ -81,6 +81,45 @@ def focal_loss(logits: torch.Tensor, target: torch.Tensor,
     return ((1.0 - pt) ** gamma * ce).mean()
 
 
+def augment_minority(samples, label_of, num_classes, target_ratio: float = 0.5,
+                     cap: float = 4.0, noise_key: str = "metrics", noise_std: float = 0.05):
+    """Mild minority oversampling WITH augmentation (not SMOTE).
+
+    For graph/sequence inputs you cannot interpolate samples, so instead we
+    replicate minority-class samples and add fresh Gaussian noise to their
+    metric window each copy — giving the model varied views of rare classes
+    without fabricating impossible interpolated graphs. Oversamples each
+    minority class up to `target_ratio × (largest class)`, capped at `cap×`
+    its original size, so the majority is never swamped (which collapses it).
+
+    `label_of(sample) -> int`. Returns a NEW augmented sample list.
+    """
+    from collections import defaultdict
+    buckets = defaultdict(list)
+    for s in samples:
+        buckets[label_of(s)].append(s)
+    if not buckets:
+        return list(samples)
+    largest = max(len(v) for v in buckets.values())
+    target = int(target_ratio * largest)
+
+    out = list(samples)
+    for c, items in buckets.items():
+        n = len(items)
+        want = min(target, int(cap * n))
+        extra = max(0, want - n)
+        for _ in range(extra):
+            base = random.choice(items)
+            s2 = dict(base)
+            arr = s2.get(noise_key)
+            if arr is not None:
+                s2[noise_key] = (np.asarray(arr, dtype=np.float32)
+                                 + np.random.randn(*np.shape(arr)).astype(np.float32) * noise_std)
+            out.append(s2)
+    random.shuffle(out)
+    return out
+
+
 def balanced_indices(labels: List[int], num_classes: int, seed_rng=random) -> List[int]:
     """Class-balanced oversampling order for one epoch: every class is drawn
     the same number of times (= size of the largest class), sampling minority
