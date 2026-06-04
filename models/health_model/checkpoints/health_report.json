@@ -1,0 +1,11 @@
+{
+  "best_val_f1": 0.7979305297099154,
+  "params": 1028595,
+  "labels": [
+    "benign",
+    "low_risk_drift",
+    "harmful_performance_degradation",
+    "critical_config_error"
+  ],
+  "conformal_q": 0.7302716440994654
+}

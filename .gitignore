@@ -6,5 +6,8 @@ models/*/checkpoints/
 models/*.onnx
 data/*.jsonl
 *.pt
+!models/*/checkpoints/
+!models/*/checkpoints/*.pt
+!models/*/checkpoints/*.json
 !models/health_model/dit-merged-complete.csv
 .DS_Store
