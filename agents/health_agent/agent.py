@@ -429,7 +429,7 @@ class HealthAgent:
             resources = container.get("resources", {})
             limits = resources.get("limits", {})
 
-            cpu_limit = limits.get("cpu", "0")
+            cpu_limit = str(limits.get("cpu", "0"))   # may be int in some specs
             if cpu_limit.endswith("m"):
                 cpu_millicores = int(cpu_limit.rstrip("m"))
                 if cpu_millicores < 100:

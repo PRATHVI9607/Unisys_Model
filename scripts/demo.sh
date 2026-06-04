@@ -11,6 +11,6 @@ kubectl patch deployment victim-app -n $NS --type=merge \
 echo "Watch the dashboard: health_risk should rise, field attribution = containers[0].resources.limits.cpu,"
 echo "sec_risk stays low, DCM correlation low -> AUTO-PATCH (canary)."
 read -rp "ENTER for Demo B — Ransomware..."
-kubectl apply -f chaos/ransomware-simulator.yaml -n $NS 2>/dev/null || kubectl apply -f chaos/chaos-pods.yaml -n $NS
+kubectl apply -f chaos/chaos-pods.yaml -n $NS
 echo "Watch: rename burst -> NetworkPolicy egress block -> entropy 7.7 bits -> sec_risk high"
 echo "DCM correlation high (CPU thrash looks like drift) -> compound AUTO-KILL <8s. See causal chain panel."

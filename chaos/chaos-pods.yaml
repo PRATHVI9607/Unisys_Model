@@ -10,7 +10,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: simulator
-      image: kubeheal/ransomware-simulator:v3
+      image: kubeheal/ransomware-simulator:v4
       imagePullPolicy: IfNotPresent
       command: ["/usr/bin/python3", "/app/ransomware-simulator.py"]
       args:

@@ -16,6 +16,26 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _normalize_v4(d: dict, kind: str) -> None:
+    """Map v4 hash fields → the EventDetails shape (risk_score, target,
+    timestamp, label) so the detail endpoint works on the v4 schema."""
+    if d.get("risk_score") in (None, ""):
+        v = d.get("health_risk") if kind == "health" else d.get("sec_risk")
+        try:
+            d["risk_score"] = float(v) if v not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            d["risk_score"] = 0.0
+    if not d.get("timestamp"):
+        d["timestamp"] = d.get("timestamp_ms") or ""
+    if not d.get("target"):
+        d["target"] = {"namespace": d.get("namespace", "default"),
+                       "name" if kind == "health" else "pod": d.get("pod_name", "unknown")}
+    if kind == "health" and not d.get("severity"):
+        d["severity"] = d.get("health_label")
+    if kind == "security" and not d.get("label"):
+        d["label"] = d.get("sec_label")
+
+
 class HealthAssessment(BaseModel):
     event_id: str
     target: Dict[str, Any]  # Values can be int or str
@@ -60,10 +80,12 @@ class Incident(BaseModel):
 class EventDetails(BaseModel):
     """Complete event details with all fields including model comparison data."""
 
-    event_id: str
-    target: Dict[str, Any]
-    risk_score: float
-    timestamp: str
+    model_config = {"extra": "ignore"}
+
+    event_id: str = ""
+    target: Dict[str, Any] = {}
+    risk_score: float = 0.0
+    timestamp: str = ""
 
     # Health-specific fields
     severity: Optional[str] = None
@@ -412,7 +434,7 @@ class KubeHealDashboard:
                 # Remove empty strings for optional fields
                 decoded = {k: v if v != "" else None for k, v in decoded.items()}
                 decoded["event_type"] = "health"
-
+                _normalize_v4(decoded, kind="health")
                 return decoded
 
             # Try security event key pattern
@@ -474,7 +496,7 @@ class KubeHealDashboard:
                 # Remove empty strings for optional fields
                 decoded = {k: v if v != "" else None for k, v in decoded.items()}
                 decoded["event_type"] = "security"
-
+                _normalize_v4(decoded, kind="security")
                 return decoded
 
             # Event not found
