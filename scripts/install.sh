@@ -36,12 +36,10 @@ docker build -t kubeheal/fusion-agent:v4   -f dockerfiles/Dockerfile.fusion .
 docker build -t kubeheal/dashboard:v4      -f dockerfiles/Dockerfile.dashboard .
 docker build -t kubeheal/ransomware-simulator:v4 -f dockerfiles/Dockerfile.ransomware .
 
-echo "[4/6] RBAC + CRDs + secret..."
+echo "[4/6] RBAC + CRDs..."
 kubectl apply -f k8s/rbac/
 kubectl apply -f k8s/crds/
-# Anthropic key optional — create from template if you have one:
-[ -f k8s/secrets/kubeheal-secrets.yaml ] && kubectl apply -f k8s/secrets/kubeheal-secrets.yaml || \
-  echo "  (no kubeheal-secrets.yaml — NL summaries will use template fallback)"
+# (NL summaries are generated locally — no external API key required)
 
 echo "[5/6] Deploy model servers + agents..."
 kubectl apply -f k8s/health-model-deployment.yaml

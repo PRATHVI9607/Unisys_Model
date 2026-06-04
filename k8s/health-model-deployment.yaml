@@ -19,8 +19,6 @@ spec:
         env:
         - {name: MODEL_PATH, value: /models/health_model/checkpoints/best_health_model.pt}
         - {name: ENABLE_SHAP, value: "true"}
-        - name: ANTHROPIC_API_KEY
-          valueFrom: {secretKeyRef: {name: kubeheal-secrets, key: anthropic-api-key, optional: true}}
         resources:
           requests: {cpu: "500m", memory: "512Mi"}
           limits: {cpu: "1000m", memory: "1Gi"}

@@ -30,6 +30,7 @@ from models.security_model.security_model import (
 )
 from models.security_model.security_output_head import SECURITY_LABELS
 from models.security_model.security_conformal import ConformalRegressor
+from models.train_utils import setup_torch, clipped_step, make_plateau
 
 LABEL_IDX = {l: i for i, l in enumerate(SECURITY_LABELS)}
 
@@ -64,8 +65,6 @@ def run_epoch(model, rows, opt, cw, device, train, bs):
     with ctx:
         for i in range(0, len(rows), bs):
             batch = rows[i:i + bs]
-            if train:
-                opt.zero_grad()
             sids, pids, masks, ents, ys, rts = [], [], [], [], [], []
             for r in batch:
                 sid, pid, mask = encode_syscall_window(r["events"])
@@ -81,9 +80,9 @@ def run_epoch(model, rows, opt, cw, device, train, bs):
             rt = torch.tensor(rts, dtype=torch.float32, device=device)
             loss = ce + 0.5 * F.mse_loss(risk, rt)
             if train:
+                opt.zero_grad(set_to_none=True)
                 loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                opt.step()
+                clipped_step(model, opt, max_norm=1.0)  # clip + NaN/Inf guard
             total += float(loss)
             preds.extend(torch.argmax(out["label_logits"], -1).cpu().tolist())
             labels.extend(ys)
@@ -103,10 +102,9 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
-    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = setup_torch(args.seed)
     out_dir = ROOT / "models/security_model/checkpoints"; out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Device: {device}", flush=True)
+    print(f"Device: {device}  threads={torch.get_num_threads()}", flush=True)
 
     rows = load(args.data)
     random.shuffle(rows)
@@ -120,27 +118,38 @@ def main():
     print(f"Params: {model.param_count():,}", flush=True)
     cw = class_weights(train, device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
+    sched = make_plateau(opt, mode="max", factor=0.5, patience=2, min_lr=1e-6)
+    base_lr = args.lr
 
     best_f1, no_imp = 0.0, 0
     ckpt = out_dir / "best_security_model.pt"
     last = ([], [])
     for ep in range(1, args.epochs + 1):
+        if ep == 1:
+            for g in opt.param_groups: g["lr"] = base_lr * 0.1
+        elif ep == 2:
+            for g in opt.param_groups: g["lr"] = base_lr
         tl, ta, tf, _, _ = run_epoch(model, train, opt, cw, device, True, args.batch_size)
         vl, va, vf, vp, vy = run_epoch(model, val, opt, cw, device, False, args.batch_size)
-        sched.step()
+        if ep >= 2:
+            sched.step(vf)
         improved = vf > best_f1
-        if improved:
-            best_f1, no_imp = vf, 0
-            torch.save(model.state_dict(), ckpt); last = (vp, vy)
+        if improved or not ckpt.exists():
+            best_f1 = max(best_f1, vf); no_imp = 0 if improved else no_imp + 1
+            torch.save(model.state_dict(), ckpt)
+            if vp:
+                last = (vp, vy)
         else:
             no_imp += 1
         print(f"Epoch {ep:3d}/{args.epochs}  loss {tl:.3f}/{vl:.3f}  "
-              f"acc {ta:.3f}/{va:.3f}  F1 {vf:.3f}{' *' if improved else ''}", flush=True)
+              f"acc {ta:.3f}/{va:.3f}  F1 {vf:.3f}  lr {opt.param_groups[0]['lr']:.2e}"
+              f"{' *' if improved else ''}", flush=True)
         if no_imp >= args.patience:
             print(f"Early stop at epoch {ep}", flush=True); break
 
-    model.load_state_dict(torch.load(ckpt, map_location=device)); model.eval()
+    if ckpt.exists():
+        model.load_state_dict(torch.load(ckpt, map_location=device))
+    model.eval()
     cp, ct = [], []
     with torch.no_grad():
         for r in cal:

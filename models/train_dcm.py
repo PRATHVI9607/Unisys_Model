@@ -25,6 +25,8 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import roc_auc_score
 
+from models.train_utils import setup_torch, clipped_step, make_plateau
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -62,10 +64,10 @@ def main():
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--patience", type=int, default=6)
     args = ap.parse_args()
 
-    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = setup_torch(args.seed)
     out_dir = ROOT / "models/dcm/checkpoints"; out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Device: {device}", flush=True)
 
@@ -105,6 +107,7 @@ def main():
 
     dcm = CrossModalAttention().to(device)
     opt = torch.optim.AdamW(dcm.parameters(), lr=args.lr, weight_decay=1e-4)
+    sched = make_plateau(opt, mode="max", factor=0.5, patience=3, min_lr=1e-6)
     crit = nn.BCELoss()
     print(f"DCM params {dcm.param_count():,}", flush=True)
 
@@ -118,16 +121,17 @@ def main():
             y = torch.tensor([[x[2]] for x in b], dtype=torch.float32, device=device)
             yield h, s, y
 
-    best_auroc = 0.0
+    best_auroc, no_imp = 0.0, 0
     ckpt = out_dir / "best_dcm.pt"
     for ep in range(1, args.epochs + 1):
         dcm.train()
         tot = 0.0
         for h, s, y in batch_iter(train, args.batch_size, True):
-            opt.zero_grad()
+            opt.zero_grad(set_to_none=True)
             score, _, _ = dcm(h, s)
             loss = crit(score, y)
-            loss.backward(); opt.step()
+            loss.backward()
+            clipped_step(dcm, opt, max_norm=1.0)   # clip + NaN/Inf guard
             tot += float(loss)
         dcm.eval()
         ys, ps = [], []
@@ -137,12 +141,18 @@ def main():
                 ps.extend(score.reshape(-1).cpu().tolist())
                 ys.extend(y.reshape(-1).cpu().tolist())
         auroc = roc_auc_score(ys, ps) if len(set(ys)) > 1 else 0.0
+        sched.step(auroc)
         improved = auroc > best_auroc
         if improved:
-            best_auroc = auroc
+            best_auroc, no_imp = auroc, 0
             torch.save(dcm.state_dict(), ckpt)
+        else:
+            no_imp += 1
         print(f"Epoch {ep:3d}/{args.epochs}  loss {tot/max(1,len(train)//args.batch_size):.4f}  "
-              f"val AUROC {auroc:.4f}{' *' if improved else ''}", flush=True)
+              f"val AUROC {auroc:.4f}  lr {opt.param_groups[0]['lr']:.2e}"
+              f"{' *' if improved else ''}", flush=True)
+        if no_imp >= args.patience:
+            print(f"Early stop at epoch {ep}", flush=True); break
 
     json.dump({"best_val_auroc": best_auroc, "params": dcm.param_count()},
               open(out_dir / "dcm_report.json", "w"), indent=2)
