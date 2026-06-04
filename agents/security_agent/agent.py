@@ -310,29 +310,62 @@ class SecurityAgent:
                 await asyncio.sleep(5)
 
     async def _handle_falco_events(self) -> None:
-        """Handle Falco gRPC events."""
-        logger.info("Handling Falco events...")
-
+        """Optional Falco gRPC stream. Detection is driven by the /proc write
+        tracker (_process_write_events), which needs no external dependency;
+        Falco is only consumed if FALCO_ENABLED=true."""
+        if os.environ.get("FALCO_ENABLED", "false").lower() != "true":
+            logger.info("Falco gRPC disabled; using /proc write tracker")
+            return
+        logger.info("Falco gRPC enabled (integration point)")
         while self.running:
             try:
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.debug(f"Falco handler error: {e}")
+
+    def _sample_write_bytes(self) -> Dict[int, int]:
+        """Cumulative write_bytes per kubepods PID from /proc/<pid>/io."""
+        proc = os.environ.get("PROC_ROOT", "/proc")
+        out: Dict[int, int] = {}
+        try:
+            for d in os.listdir(proc):
+                if not d.isdigit():
+                    continue
+                pid = int(d)
+                try:
+                    with open(f"{proc}/{pid}/cgroup") as f:
+                        if "kubepods" not in f.read():
+                            continue
+                    with open(f"{proc}/{pid}/io") as f:
+                        for line in f:
+                            if line.startswith("write_bytes:"):
+                                out[pid] = int(line.split()[1])
+                                break
+                except (FileNotFoundError, PermissionError, ProcessLookupError):
+                    continue
+        except Exception as e:
+            logger.debug(f"write-bytes sample error: {e}")
+        return out
 
     async def _process_write_events(self) -> None:
-        """Process write events and check entropy."""
-        logger.info("Processing write events...")
-
+        """Detect high write throughput per PID via /proc/<pid>/io deltas, then
+        trigger an entropy check. This is what actually wires ransomware
+        detection (write_counters is populated here from real deltas)."""
+        logger.info("Processing write events (/proc io tracker)...")
+        WRITE_BYTES_THRESHOLD = int(os.environ.get("WRITE_BYTES_THRESHOLD", str(10 * 1024 * 1024)))
+        prev: Dict[int, int] = {}
         while self.running:
             try:
                 await asyncio.sleep(2)
-
-                # Threshold: >10MB written in 2s window = suspicious
-                WRITE_BYTES_THRESHOLD = 10 * 1024 * 1024
-                for pid, count in list(self.write_counters.items()):
-                    if count > WRITE_BYTES_THRESHOLD:
+                current = self._sample_write_bytes()
+                self.write_counters = {
+                    pid: cum - prev[pid]
+                    for pid, cum in current.items()
+                    if pid in prev and cum >= prev[pid]
+                }
+                prev = current
+                for pid, delta in self.write_counters.items():
+                    if delta > WRITE_BYTES_THRESHOLD:
                         await self._trigger_entropy_check(pid)
             except asyncio.CancelledError:
                 break

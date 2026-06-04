@@ -39,6 +39,10 @@ spec:
           env:
             - name: REDIS_URL
               value: redis://redis-master:6379
+            - name: DCM_URL
+              value: http://kubeheal-dcm:8003
+            - name: BURN_IN_MODE
+              value: "false"
             - name: NAMESPACE
               value: kubeheal
             - name: MAX_AUTO_KILL_PER_NS_PER_HOUR
