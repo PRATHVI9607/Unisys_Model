@@ -21,6 +21,8 @@ from typing import Dict, Optional
 import aiohttp
 import numpy as np
 import redis.asyncio as aioredis
+import kubernetes_asyncio
+from kubernetes_asyncio import client, config
 
 from agents.fusion_agent.decision_policy import (
     make_decision, DecisionInput, Decision,
