@@ -55,7 +55,7 @@ class HealthAssessment(BaseModel):
     confidence_interval: Optional[Tuple[float, float]] = None
     blast_radius: str = "unknown"
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    # New fields from DIT-Sec model comparison
+    # Fields from the Health Model server's score response
     model_used: Optional[str] = None  # "pytorch" or "heuristic"
     model_score: Optional[float] = None  # model risk score, 0-1
     heuristic_score: Optional[float] = None  # Score from heuristic, 0-1
@@ -67,21 +67,21 @@ class HealthAssessment(BaseModel):
 class HealthAgent:
     """
     Kubernetes operator for Health Agent.
-    Watches YAML drift, assesses with DIT-Sec, publishes HealthAssessment.
+    Watches YAML drift, assesses with the Health Model, publishes HealthAssessment.
     """
 
     def __init__(
         self,
         namespace: str = "kubeheal",
         redis_url: str = None,
-        dit_sec_url: str = None,
+        health_model_url: str = None,
         cooldown_ttl: int = 300,
         prometheus_url: str = None,
     ):
         self.namespace = namespace
         self.redis_url = redis_url or os.environ.get("REDIS_URL", "redis://redis-master:6379")
         # v4: dedicated Health Model server (was the v3 DIT-Sec monolith)
-        self.health_model_url = dit_sec_url or os.environ.get(
+        self.health_model_url = health_model_url or os.environ.get(
             "HEALTH_MODEL_URL", "http://kubeheal-health-model:8001"
         )
         self.cooldown_ttl = cooldown_ttl

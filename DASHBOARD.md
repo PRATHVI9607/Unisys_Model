@@ -418,7 +418,7 @@ GET /api/events/health-20260516-120000-deployment-test
 **Model Comparison Fields:**
 - `model_used`: Which scoring method was used ("onnx_model" or "heuristic")
   - "onnx_model": ONNX neural network inference
-  - "heuristic": Fallback heuristic scoring (when DIT-Sec unavailable)
+  - "heuristic": Fallback heuristic scoring (when the model server is unavailable)
 - `model_score`: Score from trained ONNX model (0-1, null if unavailable)
 - `heuristic_score`: Score from heuristic function (0-1)
 - `inference_method`: Description of the scoring method used
@@ -604,7 +604,7 @@ Shows ONNX model scores versus heuristic scores for verification:
 - `inference_method`: Descriptive name of which method was used ("ONNX inference" or "heuristic scoring")
 - `model_used`: Programmatic flag showing which method was actually used
   - "onnx_model" - ONNX model inference
-  - "heuristic" - Fallback heuristic (when DIT-Sec unavailable)
+  - "heuristic" - Fallback heuristic (when the model server is unavailable)
 - Visual indicator: "✓ USED" badge next to the method that was actually used
 
 **Why This Matters:**

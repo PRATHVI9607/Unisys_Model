@@ -68,7 +68,7 @@ class SecurityEvent(BaseModel):
     entropy: Optional[float] = None
     early_signals: Optional[Dict[str, bool]] = None
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    # New fields from DIT-Sec model comparison
+    # Fields from the Security Model server's score response
     model_used: Optional[str] = None  # "pytorch" or "heuristic"
     model_score: Optional[float] = None  # model risk score, 0-1
     heuristic_score: Optional[float] = None  # Score from heuristic, 0-1
@@ -227,7 +227,7 @@ class SecurityAgent:
         namespace: str = "kubeheal",
         redis_url: str = None,
         falco_grpc_addr: str = None,
-        dit_sec_url: str = None,
+        security_model_url: str = None,
         entropy_threshold: float = 7.2,
         mmap_entropy_threshold: float = 7.0,
         mmap_size_threshold: int = 50 * 1024 * 1024,
@@ -236,9 +236,9 @@ class SecurityAgent:
         self.redis_url       = redis_url       or os.environ.get("REDIS_URL", "redis://redis-master:6379")
         self.falco_grpc_addr = falco_grpc_addr or os.environ.get("FALCO_GRPC_ADDR", "127.0.0.1:5060")
         # v4: dedicated Security Model server (was the v3 DIT-Sec monolith)
-        self.security_model_url = (dit_sec_url
-            or os.environ.get("SECURITY_MODEL_URL")
-            or os.environ.get("DIT_SEC_URL", "http://kubeheal-security-model:8002"))
+        self.security_model_url = security_model_url or os.environ.get(
+            "SECURITY_MODEL_URL", "http://kubeheal-security-model:8002"
+        )
         self.entropy_threshold = entropy_threshold
         self.mmap_entropy_threshold = mmap_entropy_threshold
         self.mmap_size_threshold = mmap_size_threshold
@@ -415,7 +415,7 @@ class SecurityAgent:
                 logger.debug(f"Write event error: {e}")
 
     async def _trigger_entropy_check(self, pid: int) -> None:
-        """Trigger entropy calculation and DIT-Sec scoring for high-write PID."""
+        """Trigger entropy calculation and Security Model scoring for high-write PID."""
         logger.info(f"Entropy check for PID {pid}")
 
         pid_info = await self._get_pid_info(pid)

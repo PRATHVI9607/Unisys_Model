@@ -1,4 +1,4 @@
-# DIT-Sec Model Server Requirements
+# KubeHeal v4 — model training/serving requirements
 # Install with: pip install -r requirements.txt
 
 # Core ML
@@ -10,7 +10,7 @@ uvicorn[standard]==0.27.0
 pydantic==2.6.0
 
 # Utilities
-"numpy<2"
+numpy<2
 scipy>=1.12.0
 networkx>=3.2.0
 

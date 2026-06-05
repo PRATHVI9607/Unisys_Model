@@ -91,7 +91,7 @@ docs/  architecture-flow.mmd · .md · .png
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt          # torch, torch-geometric, shap, anthropic, fastapi …
+pip install -r requirements.txt          # torch, torch-geometric, shap, fastapi …
 
 # run the three model servers (loads trained checkpoints if present, else random weights)
 PYTHONPATH=. python services/health_model_server/main.py     # :8001
