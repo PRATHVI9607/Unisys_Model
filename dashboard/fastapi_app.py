@@ -10,7 +10,7 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,6 +37,7 @@ def _normalize_v4(d: dict, kind: str) -> None:
 
 
 class HealthAssessment(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())  # allow model_* fields
     event_id: str
     target: Dict[str, Any]  # Values can be int or str
     risk_score: float
@@ -53,6 +54,7 @@ class HealthAssessment(BaseModel):
 
 
 class SecurityEvent(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())  # allow model_* fields
     event_id: str
     target: Dict[str, Any]  # PID can be int or str
     risk_score: float
@@ -79,6 +81,7 @@ class Incident(BaseModel):
 
 class EventDetails(BaseModel):
     """Complete event details with all fields including model comparison data."""
+    model_config = ConfigDict(protected_namespaces=())  # allow model_* fields
 
     model_config = {"extra": "ignore"}
 

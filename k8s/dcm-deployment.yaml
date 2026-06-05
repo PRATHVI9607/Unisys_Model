@@ -17,12 +17,13 @@ spec:
         imagePullPolicy: IfNotPresent
         ports: [{containerPort: 8003, name: http}]
         env:
-        - {name: MODEL_PATH, value: /models/dcm/checkpoints/best_dcm.pt}
+        - {name: MODEL_PATH, value: /app/models/dcm/checkpoints/best_dcm.pt}
         resources:
           requests: {cpu: "200m", memory: "256Mi"}
           limits: {cpu: "500m", memory: "512Mi"}
-        readinessProbe: {httpGet: {path: /health, port: 8003}, initialDelaySeconds: 10, periodSeconds: 5}
-        livenessProbe: {httpGet: {path: /health, port: 8003}, initialDelaySeconds: 20, periodSeconds: 10}
+        startupProbe: {httpGet: {path: /health, port: 8003}, periodSeconds: 5, failureThreshold: 40}
+        readinessProbe: {httpGet: {path: /health, port: 8003}, periodSeconds: 5}
+        livenessProbe: {httpGet: {path: /health, port: 8003}, periodSeconds: 15, failureThreshold: 3}
       nodeSelector: {kubernetes.io/arch: amd64}
 ---
 apiVersion: v1

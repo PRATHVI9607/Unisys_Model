@@ -102,8 +102,8 @@ PYTHONPATH=. python services/dcm_server/main.py              # :8003
 PYTHONPATH=. pytest tests/ -q
 ```
 
-Kubernetes deploy: `./scripts/install.sh` (Minikube + Redis Sentinel +
-Prometheus + agents + the 3 model servers).
+Kubernetes deploy: `./scripts/install.sh` (Minikube + Redis + Prometheus +
+Falco + agents + the 3 model servers).
 
 ---
 

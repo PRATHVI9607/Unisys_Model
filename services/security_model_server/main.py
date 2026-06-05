@@ -12,6 +12,8 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from contextlib import asynccontextmanager
+
 import torch
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -30,7 +32,6 @@ from models.interpretation.shap_explainer import SecurityModelSHAPExplainer
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="KubeHeal Security Model", version="4.0.0")
 STATE: Dict = {"model": None, "conformal": None, "shap": SecurityModelSHAPExplainer()}
 
 
@@ -40,8 +41,7 @@ class ScoreRequest(BaseModel):
     early_signals: Optional[Dict] = None
 
 
-@app.on_event("startup")
-def startup():
+def _load_model():
     ckpt = os.environ.get("MODEL_PATH",
                           str(ROOT / "models/security_model/checkpoints/best_security_model.pt"))
     m = SecurityModel()
@@ -59,6 +59,15 @@ def startup():
     STATE["conformal"] = ConformalRegressor.load(conf_path) if os.path.exists(conf_path) \
         else ConformalRegressor()
     logger.info("Security Model Server ready")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _load_model()
+    yield
+
+
+app = FastAPI(title="KubeHeal Security Model", version="4.0.0", lifespan=lifespan)
 
 
 @app.get("/health")

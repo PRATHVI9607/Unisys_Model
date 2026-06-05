@@ -13,7 +13,7 @@ from typing import Optional
 
 import numpy as np
 
-from models.health_model.metric_bilstm_encoder import (
+from models.health_model.metric_schema import (
     METRIC_COLUMNS, NUM_METRICS, INPUT_SEQUENCE_LENGTH,
 )
 

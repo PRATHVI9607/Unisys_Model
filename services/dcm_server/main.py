@@ -11,6 +11,8 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from contextlib import asynccontextmanager
+
 import torch
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -27,7 +29,6 @@ from models.interpretation.nl_summary_generator import generate_incident_summary
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="KubeHeal DCM", version="4.0.0")
 STATE: Dict = {"model": None, "chain": CausalChainBuilder(), "trained": False}
 
 
@@ -40,8 +41,7 @@ class CorrelateRequest(BaseModel):
     want_nl_summary: bool = False
 
 
-@app.on_event("startup")
-def startup():
+def _load_model():
     ckpt = os.environ.get("MODEL_PATH", str(ROOT / "models/dcm/checkpoints/best_dcm.pt"))
     m = CrossModalAttention()
     if os.path.exists(ckpt):
@@ -55,6 +55,15 @@ def startup():
         logger.warning(f"No DCM checkpoint at {ckpt} — cold start (correlation ~0.5)")
     m.eval()
     STATE["model"] = m
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _load_model()
+    yield
+
+
+app = FastAPI(title="KubeHeal DCM", version="4.0.0", lifespan=lifespan)
 
 
 @app.get("/health")

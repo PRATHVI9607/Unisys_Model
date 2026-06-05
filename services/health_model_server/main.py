@@ -13,6 +13,8 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from contextlib import asynccontextmanager
+
 import numpy as np
 import torch
 from fastapi import FastAPI
@@ -32,7 +34,6 @@ from models.interpretation.shap_explainer import HealthModelSHAPExplainer
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="KubeHeal Health Model", version="4.0.0")
 STATE: Dict = {"model": None, "conformal": None, "mapper": FieldNameMapper(),
                "shap": HealthModelSHAPExplainer()}
 
@@ -44,8 +45,7 @@ class ScoreRequest(BaseModel):
     request_id: Optional[str] = None
 
 
-@app.on_event("startup")
-def startup():
+def _load_model():
     ckpt = os.environ.get("MODEL_PATH",
                           str(ROOT / "models/health_model/checkpoints/best_health_model.pt"))
     m = HealthModel()
@@ -63,6 +63,15 @@ def startup():
     STATE["conformal"] = ConformalRegressor.load(conf_path) if os.path.exists(conf_path) \
         else ConformalRegressor()
     logger.info("Health Model Server ready")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _load_model()
+    yield
+
+
+app = FastAPI(title="KubeHeal Health Model", version="4.0.0", lifespan=lifespan)
 
 
 @app.get("/health")

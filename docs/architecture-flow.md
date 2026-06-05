@@ -158,5 +158,5 @@ mid-incident frees the lock in ≤10s instead of v3's 30s gap.
 | no explainability | SHAP + field mapper + NL summary + causal chain |
 | `replicas:2` double-processed | Redis consumer groups |
 | 30s incident lock | 10s heartbeat lock |
-| Kafka DLQ (heavy) | removed (Redis Sentinel HA) |
+| Kafka DLQ (heavy) | removed (Redis Streams + consumer groups) |
 | cgroups v1 only | cgroups v1 **and** v2 |

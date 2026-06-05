@@ -1,12 +1,14 @@
-# Shared base for the 3 model servers — heavy ML deps installed ONCE here,
-# so health/security/dcm images build in seconds (FROM this) instead of each
-# re-downloading ~750MB torch + torch-geometric.
+# Shared ML base for the 3 model servers — heavy deps (torch + torch-geometric)
+# installed ONCE here via uv (10-30× faster than pip; UV_NO_CACHE keeps the
+# layer lean). The 3 model images FROM this add only MBs.
 #   docker build -t kubeheal/base:v4 -f dockerfiles/Dockerfile.base .
 FROM python:3.11-slim
+# uv: copy the prebuilt static binary (no `pip install uv` overhead)
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /bin/
+ENV UV_NO_CACHE=1 UV_SYSTEM_PYTHON=1
 WORKDIR /app
-RUN pip install --no-cache-dir "numpy<2" \
-        torch==2.2.0 --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir \
-        torch-geometric==2.5.0 \
-        fastapi==0.110.0 uvicorn==0.27.0 pydantic==2.6.0
+RUN uv pip install --system "numpy<2" torch==2.2.0 \
+        --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install --system \
+        torch-geometric==2.5.0 fastapi==0.110.0 uvicorn==0.27.0 pydantic==2.6.0
 ENV PYTHONPATH=/app

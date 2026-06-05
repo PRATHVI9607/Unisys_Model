@@ -1,22 +1,16 @@
 FROM python:3.11-slim
-
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /bin/
+ENV UV_NO_CACHE=1 UV_SYSTEM_PYTHON=1
 WORKDIR /app
-
-RUN pip install --no-cache-dir \
-    kubernetes-asyncio==29.0.1 \
-    redis==5.0.0 \
-    pydantic==2.6.0 \
-    aiohttp==3.9.0 \
-    "numpy<2"
-
+RUN uv pip install --system \
+    kubernetes-asyncio==29.0.1 redis==5.0.0 pydantic==2.6.0 aiohttp==3.9.0 "numpy<2"
 COPY agents/ /app/agents/
-
 ENV REDIS_URL=redis://redis-master:6379
-ENV DIT_SEC_URL=http://kubeheal-security-model:8002
-ENV FALCO_GRPC_ADDR=127.0.0.1:5060
+ENV SECURITY_MODEL_URL=http://kubeheal-security-model:8002
+ENV FALCO_ENABLED=false
+ENV FALCO_EVENTS_PATH=/var/run/falco/events.jsonl
+ENV PROC_ROOT=/proc
 ENV ENTROPY_THRESHOLD=7.2
 ENV LOG_LEVEL=INFO
-
 EXPOSE 8080
-
 CMD ["python", "-m", "agents.security_agent.agent"]

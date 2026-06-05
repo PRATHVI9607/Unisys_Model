@@ -14,7 +14,7 @@ minikube status >/dev/null 2>&1 || minikube start --driver=docker --cpus=4 --mem
   --addons=ingress,metrics-server,csi-hostpath-driver,volumesnapshots
 eval "$(minikube docker-env)"
 
-echo "[2/6] Dependencies (Redis Sentinel + Prometheus)..."
+echo "[2/6] Dependencies (Redis standalone + Prometheus + Falco)..."
 helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null 2>&1 || true
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
 helm repo add falcosecurity https://falcosecurity.github.io/charts >/dev/null 2>&1 || true
@@ -22,8 +22,12 @@ helm repo update >/dev/null
 kubectl create namespace kubeheal  >/dev/null 2>&1 || true
 kubectl create namespace demo      >/dev/null 2>&1 || true
 kubectl create namespace monitoring>/dev/null 2>&1 || true
-helm install redis bitnami/redis --set architecture=replication --set sentinel.enabled=true \
-  --set sentinel.masterSet=mymaster --set auth.enabled=false -n kubeheal 2>/dev/null || true
+# Standalone + persistence OFF: Redis is an ephemeral Streams broker for the
+# demo. Replication/sentinel + an AOF that bloats over days made the master
+# take 60-70s to reload on restart, exceeding the probe timeout → CrashLoop.
+# Standalone with no persistence starts instantly and never accumulates AOF.
+helm install redis bitnami/redis --set architecture=standalone \
+  --set auth.enabled=false --set master.persistence.enabled=false -n kubeheal 2>/dev/null || true
 helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring 2>/dev/null || true
 # Falco — real syscall detection. Writes KubeHeal rule output as JSON to a
 # hostPath the Security Agent tails. (Optional: skip if no eBPF on the node;

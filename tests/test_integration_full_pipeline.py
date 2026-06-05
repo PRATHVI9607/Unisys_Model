@@ -4,9 +4,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient
 
 def test_full_v4_pipeline():
-    from services.health_model_server.main import app as h_app, startup as h_start
-    from services.security_model_server.main import app as s_app, startup as s_start
-    from services.dcm_server.main import app as d_app, startup as d_start
+    from services.health_model_server.main import app as h_app, _load_model as h_start
+    from services.security_model_server.main import app as s_app, _load_model as s_start
+    from services.dcm_server.main import app as d_app, _load_model as d_start
     h_start(); s_start(); d_start()
     h = TestClient(h_app); s = TestClient(s_app); d = TestClient(d_app)
 

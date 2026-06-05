@@ -14,7 +14,7 @@ import aiohttp
 import redis.asyncio as aioredis
 import kubernetes_asyncio
 from kubernetes_asyncio import client, config
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -59,6 +59,7 @@ class ThreatLevel(str, Enum):
 
 
 class SecurityEvent(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())  # allow model_* fields
     event_id: str
     target: Dict[str, str]
     risk_score: float = Field(ge=0.0, le=1.0)

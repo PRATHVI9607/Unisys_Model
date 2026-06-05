@@ -12,32 +12,15 @@ leading indicators (CPU rises before latency) and lagging ones (latency stays
 high after CPU recovers).
 """
 
-from typing import List
-
 import numpy as np
 import torch
 import torch.nn as nn
 
-
-METRIC_COLUMNS: List[str] = [
-    "cpu_throttle_percent",
-    "cpu_usage_millicores",
-    "memory_rss_bytes",
-    "memory_working_set_bytes",
-    "memory_limit_bytes",
-    "cpu_limit_millicores",
-    "http_request_rate",
-    "http_error_rate",
-    "http_p50_latency_ms",
-    "http_p99_latency_ms",
-    "http_p999_latency_ms",
-    "pod_restarts_total",
-    "network_receive_bytes",
-    "network_transmit_bytes",
-    "disk_io_bytes",
-]
-NUM_METRICS = len(METRIC_COLUMNS)          # 15
-INPUT_SEQUENCE_LENGTH = 60                 # 5 min @ 5s resolution
+# Torch-free schema lives in metric_schema.py so slim agents can import it
+# without pulling torch; re-exported here for backward compatibility.
+from models.health_model.metric_schema import (
+    METRIC_COLUMNS, NUM_METRICS, INPUT_SEQUENCE_LENGTH,
+)
 
 
 class MetricBiLSTMEncoder(nn.Module):

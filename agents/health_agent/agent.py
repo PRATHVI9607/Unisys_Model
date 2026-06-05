@@ -14,7 +14,7 @@ import redis.asyncio as aioredis
 import kubernetes_asyncio
 from kubernetes_asyncio import client, watch, config
 from kubernetes_asyncio.config import load_incluster_config
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 def emb_b64(vec) -> str:
@@ -45,6 +45,7 @@ class SeverityLevel(str, Enum):
 
 
 class HealthAssessment(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())  # allow model_* fields
     event_id: str
     target: Dict[str, str]
     risk_score: float = Field(ge=0.0, le=1.0)
@@ -172,6 +173,10 @@ class HealthAgent:
                         await self.handle_deployment_event(event["type"], obj)
             except asyncio.CancelledError:
                 break
+            except asyncio.TimeoutError:
+                # Expected: the watch hit timeout_seconds with no new events.
+                # Reconnect immediately, resuming from the last resourceVersion.
+                logger.debug("Watch idle timeout; reconnecting")
             except kubernetes_asyncio.client.exceptions.ApiException as e:
                 if e.status == 410:   # resourceVersion too old → restart fresh
                     logger.warning("Watch expired (410); restarting fresh")

@@ -1,23 +1,17 @@
 FROM python:3.11-slim
-
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /bin/
+ENV UV_NO_CACHE=1 UV_SYSTEM_PYTHON=1
 WORKDIR /app
-
-RUN pip install --no-cache-dir \
-    kubernetes-asyncio==29.0.1 \
-    redis==5.0.0 \
-    pydantic==2.6.0 \
-    "numpy<2"
-
+RUN uv pip install --system \
+    kubernetes-asyncio==29.0.1 redis==5.0.0 pydantic==2.6.0 aiohttp==3.9.0 "numpy<2"
 COPY agents/ /app/agents/
-
 ENV REDIS_URL=redis://redis-master:6379
-ENV NAMESPACE=kubeheal
 ENV DCM_URL=http://kubeheal-dcm:8003
+ENV BURN_IN_MODE=false
+ENV NAMESPACE=kubeheal
 ENV LOG_LEVEL=INFO
 ENV MAX_AUTO_KILL_PER_NS_PER_HOUR=3
 ENV MAX_AUTO_PATCH_PER_DEP_PER_HOUR=10
 ENV CI_WIDTH_THRESHOLD=0.15
-
 EXPOSE 8081
-
 CMD ["python", "-m", "agents.fusion_agent.agent"]

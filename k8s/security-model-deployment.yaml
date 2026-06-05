@@ -5,7 +5,7 @@ metadata:
   namespace: kubeheal
   labels: {app: kubeheal-security-model, version: v4.0.0}
 spec:
-  replicas: 2
+  replicas: 1   # single-node minikube demo; raise for multi-node HA
   selector: {matchLabels: {app: kubeheal-security-model}}
   template:
     metadata: {labels: {app: kubeheal-security-model}}
@@ -17,13 +17,14 @@ spec:
         imagePullPolicy: IfNotPresent
         ports: [{containerPort: 8002, name: http}]
         env:
-        - {name: MODEL_PATH, value: /models/security_model/checkpoints/best_security_model.pt}
+        - {name: MODEL_PATH, value: /app/models/security_model/checkpoints/best_security_model.pt}
         - {name: ENABLE_SHAP, value: "true"}
         resources:
           requests: {cpu: "500m", memory: "512Mi"}
           limits: {cpu: "1000m", memory: "1Gi"}
-        readinessProbe: {httpGet: {path: /health, port: 8002}, initialDelaySeconds: 15, periodSeconds: 5}
-        livenessProbe: {httpGet: {path: /health, port: 8002}, initialDelaySeconds: 30, periodSeconds: 10}
+        startupProbe: {httpGet: {path: /health, port: 8002}, periodSeconds: 5, failureThreshold: 40}
+        readinessProbe: {httpGet: {path: /health, port: 8002}, periodSeconds: 5}
+        livenessProbe: {httpGet: {path: /health, port: 8002}, periodSeconds: 15, failureThreshold: 3}
       nodeSelector: {kubernetes.io/arch: amd64}
 ---
 apiVersion: v1
