@@ -3,585 +3,424 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KubeHeal Dashboard</title>
+    <title>KubeHeal — Autonomous Remediation Console</title>
     <link rel="stylesheet" href="/static/event-details.css">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+        /* ============================================================
+           KubeHeal v4 Console — Claude (Anthropic) warm-paper theme.
+           Vanilla CSS, no build step. Single locked light theme.
+           Risk encoded in a warm scale (sage / amber / rust), never neon.
+           ============================================================ */
+        :root {
+            --bg:            #F0EEE6;
+            --surface:       #FAF9F5;
+            --surface-2:     #F4F2EA;
+            --ink:           #1F1E1C;
+            --ink-soft:      #6B6862;
+            --ink-faint:     #94908A;
+            --border:        #E4E0D4;
+            --border-strong: #D6D0C0;
+            --clay:          #C96442;  /* Anthropic clay — single accent */
+            --clay-deep:     #A84F33;
+            --clay-wash:     #F1E3DC;
+            --sage:          #5E8C5A;  /* low risk */
+            --amber:         #BE8A2E;  /* medium risk */
+            --rust:          #BC4B3C;  /* high / critical risk */
+            --sage-wash:     #E7EEE3;
+            --amber-wash:    #F3E9D2;
+            --rust-wash:     #F2DED9;
+            --radius:        12px;
+            --radius-sm:     8px;
+            --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+            --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
         }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-            color: #e2e8f0;
-            min-height: 100vh;
-            padding: 20px;
+            font-family: var(--sans);
+            background: var(--bg);
+            color: var(--ink);
+            min-height: 100dvh;
+            line-height: 1.5;
         }
 
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-        }
+        .wrap { max-width: 1320px; margin: 0 auto; padding: 28px 28px 64px; }
 
-        header {
-            background: rgba(15, 23, 42, 0.8);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(100, 116, 139, 0.2);
-            border-radius: 12px;
-            padding: 24px;
-            margin-bottom: 24px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+        /* ---- Top bar ---------------------------------------------- */
+        .topbar {
+            display: flex; align-items: center; justify-content: space-between;
+            padding-bottom: 22px; margin-bottom: 26px;
+            border-bottom: 1px solid var(--border);
         }
-
-        .header-title {
-            display: flex;
-            align-items: center;
-            gap: 16px;
+        .brand { display: flex; align-items: center; gap: 13px; }
+        .brand .mark {
+            width: 38px; height: 38px; border-radius: 10px;
+            background: var(--clay); color: #fff;
+            display: grid; place-items: center; flex-shrink: 0;
+            box-shadow: 0 1px 0 rgba(0,0,0,.04), inset 0 1px 0 rgba(255,255,255,.18);
         }
+        .brand .mark svg { width: 22px; height: 22px; }
+        .brand h1 { font-size: 19px; font-weight: 600; letter-spacing: -.01em; }
+        .brand .sub { font-size: 12.5px; color: var(--ink-soft); margin-top: 1px; }
 
-        .header-title h1 {
-            font-size: 28px;
-            font-weight: 700;
-            background: linear-gradient(135deg, #60a5fa, #3b82f6);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+        .conn {
+            display: flex; align-items: center; gap: 9px;
+            font-size: 13px; color: var(--ink-soft);
+            background: var(--surface); border: 1px solid var(--border);
+            padding: 7px 13px; border-radius: 999px;
         }
-
-        .status-indicator {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background: #10b981;
-            animation: pulse 2s infinite;
+        .conn .dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: var(--sage); position: relative;
         }
-
-        .status-indicator.disconnected {
-            background: #ef4444;
-            animation: none;
+        .conn .dot::after {
+            content: ""; position: absolute; inset: -4px; border-radius: 50%;
+            background: var(--sage); opacity: .35;
+            animation: ping 2s cubic-bezier(0,0,.2,1) infinite;
         }
+        .conn .dot.disconnected { background: var(--rust); }
+        .conn .dot.disconnected::after { display: none; }
+        @keyframes ping { 0% { transform: scale(1); opacity: .35; } 70%,100% { transform: scale(2.4); opacity: 0; } }
+        @media (prefers-reduced-motion: reduce) { .conn .dot::after { animation: none; } }
 
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
+        /* ---- KPI strip -------------------------------------------- */
+        .kpis {
+            display: grid; grid-template-columns: repeat(4, 1fr);
+            gap: 1px; background: var(--border);
+            border: 1px solid var(--border); border-radius: var(--radius);
+            overflow: hidden; margin-bottom: 26px;
         }
-
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
+        .kpi { background: var(--surface); padding: 18px 20px; }
+        .kpi .label {
+            font-size: 11.5px; font-weight: 500; color: var(--ink-soft);
+            text-transform: uppercase; letter-spacing: .06em; margin-bottom: 10px;
         }
+        .kpi .value { font-family: var(--mono); font-size: 30px; font-weight: 600; letter-spacing: -.02em; }
+        .kpi .value.alert { color: var(--rust); }
+        .kpi .foot { font-size: 11.5px; color: var(--ink-faint); margin-top: 4px; }
 
-        .stat-card {
-            background: rgba(15, 23, 42, 0.6);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(100, 116, 139, 0.2);
-            border-radius: 12px;
-            padding: 20px;
-            transition: all 0.3s ease;
+        /* ---- Panels ----------------------------------------------- */
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+
+        .panel {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius); overflow: hidden;
+            display: flex; flex-direction: column;
         }
-
-        .stat-card:hover {
-            border-color: rgba(100, 116, 139, 0.4);
-            background: rgba(15, 23, 42, 0.8);
+        .panel-head {
+            display: flex; align-items: center; gap: 9px;
+            padding: 14px 18px; border-bottom: 1px solid var(--border);
+            background: var(--surface-2);
         }
-
-        .stat-label {
-            font-size: 12px;
-            color: #94a3b8;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-bottom: 8px;
+        .panel-head .ico { width: 17px; height: 17px; color: var(--ink-soft); flex-shrink: 0; }
+        .panel-head h2 { font-size: 14px; font-weight: 600; letter-spacing: -.005em; }
+        .panel-head .tally {
+            margin-left: auto; font-family: var(--mono); font-size: 12px;
+            color: var(--ink-soft); background: var(--bg);
+            border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px;
         }
+        .feed { padding: 8px; overflow-y: auto; max-height: 430px; }
+        .feed.tall { max-height: 560px; }
 
-        .stat-value {
-            font-size: 28px;
-            font-weight: 700;
-            color: #f1f5f9;
+        /* ---- Event rows ------------------------------------------- */
+        .row {
+            display: grid; grid-template-columns: auto 1fr auto;
+            align-items: center; gap: 13px;
+            padding: 12px 12px; border-radius: var(--radius-sm);
+            cursor: pointer; transition: background .14s ease;
+            animation: rise .26s cubic-bezier(.16,1,.3,1);
         }
+        .row:hover { background: var(--surface-2); }
+        .row + .row { border-top: 1px solid var(--border); }
+        @keyframes rise { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+        @media (prefers-reduced-motion: reduce) { .row { animation: none; } }
 
-        .stat-value.high-risk {
-            color: #ef4444;
+        .swatch {
+            width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0;
+            display: grid; place-items: center;
         }
+        .swatch svg { width: 17px; height: 17px; }
+        .swatch.health { background: var(--clay-wash); color: var(--clay-deep); }
+        .swatch.security { background: var(--rust-wash); color: var(--rust); }
 
-        .events-section {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 24px;
-            margin-bottom: 24px;
+        .row .body { min-width: 0; }
+        .row .target {
+            font-size: 13.5px; font-weight: 550; color: var(--ink);
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
-
-        .events-panel {
-            background: rgba(15, 23, 42, 0.6);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(100, 116, 139, 0.2);
-            border-radius: 12px;
-            overflow: hidden;
+        .row .meta {
+            display: flex; align-items: center; gap: 8px; margin-top: 3px;
+            font-size: 12px; color: var(--ink-soft);
         }
-
-        .panel-header {
-            background: rgba(30, 41, 59, 0.8);
-            border-bottom: 1px solid rgba(100, 116, 139, 0.2);
-            padding: 16px;
-            font-weight: 600;
-            color: #f1f5f9;
+        .row .meta .tag {
+            font-family: var(--mono); font-size: 11px;
+            color: var(--ink-soft); background: var(--bg);
+            border: 1px solid var(--border); padding: 1px 7px; border-radius: 5px;
+            white-space: nowrap;
         }
+        .row .meta .time { font-variant-numeric: tabular-nums; color: var(--ink-faint); }
 
-        .events-list {
-            max-height: 400px;
-            overflow-y: auto;
-            padding: 16px;
+        .right { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+        .pill {
+            font-family: var(--mono); font-size: 12px; font-weight: 600;
+            padding: 3px 9px; border-radius: 999px; white-space: nowrap;
         }
+        .pill.low    { background: var(--sage-wash);  color: var(--sage); }
+        .pill.medium { background: var(--amber-wash); color: var(--amber); }
+        .pill.high   { background: var(--rust-wash);  color: var(--rust); }
+        .bar { width: 64px; height: 4px; border-radius: 999px; background: var(--border); overflow: hidden; }
+        .bar > i { display: block; height: 100%; border-radius: 999px; }
+        .bar > i.low { background: var(--sage); }
+        .bar > i.medium { background: var(--amber); }
+        .bar > i.high { background: var(--rust); }
 
-        .event-item {
-            background: rgba(51, 65, 85, 0.3);
-            border-left: 3px solid #3b82f6;
-            padding: 12px;
-            margin-bottom: 12px;
-            border-radius: 4px;
-            font-size: 12px;
-            animation: slideIn 0.3s ease;
+        /* ---- Empty / loading -------------------------------------- */
+        .empty { text-align: center; padding: 46px 20px; color: var(--ink-faint); }
+        .empty svg { width: 30px; height: 30px; opacity: .5; margin-bottom: 12px; }
+        .empty p { font-size: 13.5px; }
+        .empty .hint { font-size: 12px; margin-top: 5px; color: var(--ink-faint); }
+        .skel { padding: 12px; }
+        .skel .line {
+            height: 46px; border-radius: var(--radius-sm); margin-bottom: 8px;
+            background: linear-gradient(90deg, var(--surface-2) 25%, var(--bg) 37%, var(--surface-2) 63%);
+            background-size: 400% 100%; animation: shimmer 1.4s ease infinite;
         }
+        @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+        @media (prefers-reduced-motion: reduce) { .skel .line { animation: none; } }
 
-        .event-item.security {
-            border-left-color: #ef4444;
+        /* ---- Timeline (full width) -------------------------------- */
+        .timeline .feed { max-height: 540px; }
+
+        /* ---- Scrollbar -------------------------------------------- */
+        ::-webkit-scrollbar { width: 9px; height: 9px; }
+        ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 6px; border: 2px solid var(--surface); }
+        ::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); }
+
+        @media (max-width: 1024px) {
+            .kpis { grid-template-columns: repeat(2, 1fr); }
+            .grid-2 { grid-template-columns: 1fr; }
         }
-
-        .event-item.high-risk {
-            background: rgba(239, 68, 68, 0.1);
-            border-left-color: #dc2626;
-        }
-
-        @keyframes slideIn {
-            from {
-                opacity: 0;
-                transform: translateX(-10px);
-            }
-            to {
-                opacity: 1;
-                transform: translateX(0);
-            }
-        }
-
-        .event-header {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 6px;
-        }
-
-        .event-id {
-            color: #60a5fa;
-            font-weight: 500;
-        }
-
-        .event-risk {
-            font-weight: 600;
-        }
-
-        .event-risk.high {
-            color: #ef4444;
-        }
-
-        .event-risk.medium {
-            color: #f59e0b;
-        }
-
-        .event-risk.low {
-            color: #10b981;
-        }
-
-        .event-target {
-            color: #cbd5e1;
-            margin-top: 4px;
-        }
-
-        .event-time {
-            color: #64748b;
-            font-size: 10px;
-            margin-top: 4px;
-        }
-
-        .combined-events {
-            background: rgba(15, 23, 42, 0.6);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(100, 116, 139, 0.2);
-            border-radius: 12px;
-            overflow: hidden;
-        }
-
-        .combined-list {
-            max-height: 600px;
-            overflow-y: auto;
-        }
-
-        .combined-item {
-            border-bottom: 1px solid rgba(100, 116, 139, 0.1);
-            padding: 16px;
-            display: flex;
-            gap: 12px;
-            transition: background 0.2s;
-        }
-
-        .combined-item:hover {
-            background: rgba(30, 41, 59, 0.5);
-        }
-
-        .combined-badge {
-            width: 40px;
-            height: 40px;
-            border-radius: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 18px;
-            font-weight: 700;
-            flex-shrink: 0;
-        }
-
-        .combined-badge.health {
-            background: rgba(59, 130, 246, 0.2);
-            color: #60a5fa;
-        }
-
-        .combined-badge.security {
-            background: rgba(239, 68, 68, 0.2);
-            color: #ef4444;
-        }
-
-        .combined-content {
-            flex: 1;
-        }
-
-        .combined-target {
-            font-weight: 500;
-            margin-bottom: 4px;
-        }
-
-        .combined-details {
-            display: flex;
-            gap: 16px;
-            font-size: 12px;
-            color: #94a3b8;
-        }
-
-        .combined-score {
-            font-weight: 600;
-        }
-
-        .empty-state {
-            text-align: center;
-            padding: 40px 20px;
-            color: #64748b;
-        }
-
-        .empty-state-icon {
-            font-size: 48px;
-            margin-bottom: 12px;
-            opacity: 0.5;
-        }
-
-        /* Scrollbar styling */
-        ::-webkit-scrollbar {
-            width: 8px;
-        }
-
-        ::-webkit-scrollbar-track {
-            background: rgba(51, 65, 85, 0.2);
-        }
-
-        ::-webkit-scrollbar-thumb {
-            background: rgba(100, 116, 139, 0.4);
-            border-radius: 4px;
-        }
-
-        ::-webkit-scrollbar-thumb:hover {
-            background: rgba(100, 116, 139, 0.6);
-        }
-
-        @media (max-width: 1200px) {
-            .events-section {
-                grid-template-columns: 1fr;
-            }
-        }
-
-        .connection-status {
-            font-size: 12px;
-            color: #94a3b8;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #10b981;
-            animation: pulse 2s infinite;
-        }
-
-        .status-dot.disconnected {
-            background: #ef4444;
-            animation: none;
+        @media (max-width: 560px) {
+            .wrap { padding: 18px 16px 48px; }
+            .kpis { grid-template-columns: 1fr; }
+            .conn .label-text { display: none; }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <div class="header-title">
-                <h1>🛡️ KubeHeal Dashboard</h1>
-                <div class="status-indicator" id="statusIndicator"></div>
+    <div class="wrap">
+        <header class="topbar">
+            <div class="brand">
+                <span class="mark" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 2.5 4 6v5.5c0 4.5 3.2 8.3 8 9.8 4.8-1.5 8-5.3 8-9.8V6l-8-3.5Z"/>
+                        <path d="M9 12.2 11.2 14.4 15.2 9.6"/>
+                    </svg>
+                </span>
+                <div>
+                    <h1>KubeHeal</h1>
+                    <div class="sub">Autonomous health &amp; security remediation</div>
+                </div>
             </div>
-            <div class="connection-status">
-                <div class="status-dot" id="connectionDot"></div>
-                <span id="connectionText">Connecting...</span>
+            <div class="conn" role="status" aria-live="polite">
+                <span class="dot" id="connectionDot"></span>
+                <span class="label-text" id="connectionText">Connecting</span>
+                <span class="status-indicator" id="statusIndicator" hidden></span>
             </div>
         </header>
 
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-label">Health Events</div>
-                <div class="stat-value" id="healthEventCount">0</div>
+        <section class="kpis" aria-label="Summary metrics">
+            <div class="kpi">
+                <div class="label">Health assessments</div>
+                <div class="value" id="healthEventCount">0</div>
+                <div class="foot">drift &amp; degradation</div>
             </div>
-            <div class="stat-card">
-                <div class="stat-label">Security Events</div>
-                <div class="stat-value" id="securityEventCount">0</div>
+            <div class="kpi">
+                <div class="label">Security events</div>
+                <div class="value" id="securityEventCount">0</div>
+                <div class="foot">syscall &amp; entropy</div>
             </div>
-            <div class="stat-card">
-                <div class="stat-label">High Risk (Health)</div>
-                <div class="stat-value high-risk" id="highRiskHealth">0</div>
+            <div class="kpi">
+                <div class="label">High-risk · health</div>
+                <div class="value alert" id="highRiskHealth">0</div>
+                <div class="foot">risk &gt; 70%</div>
             </div>
-            <div class="stat-card">
-                <div class="stat-label">High Risk (Security)</div>
-                <div class="stat-value high-risk" id="highRiskSecurity">0</div>
+            <div class="kpi">
+                <div class="label">High-risk · security</div>
+                <div class="value alert" id="highRiskSecurity">0</div>
+                <div class="foot">risk &gt; 70%</div>
             </div>
+        </section>
+
+        <div class="grid-2">
+            <section class="panel">
+                <div class="panel-head">
+                    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5 7 5-14L17 12h4"/></svg>
+                    <h2>Health assessments</h2>
+                    <span class="tally" id="healthTally">0</span>
+                </div>
+                <div class="feed" id="healthEvents"></div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-head">
+                    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+                    <h2>Security events</h2>
+                    <span class="tally" id="securityTally">0</span>
+                </div>
+                <div class="feed" id="securityEvents"></div>
+            </section>
         </div>
 
-        <div class="events-section">
-            <div class="events-panel">
-                <div class="panel-header">Health Assessments</div>
-                <div class="events-list" id="healthEvents">
-                    <div class="empty-state">
-                        <div class="empty-state-icon">📊</div>
-                        <p>No health events yet</p>
-                    </div>
-                </div>
+        <section class="panel timeline">
+            <div class="panel-head">
+                <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18V6M4 14l5-5 4 3 7-7"/></svg>
+                <h2>Unified timeline</h2>
+                <span class="tally" id="combinedTally">0</span>
             </div>
-
-            <div class="events-panel">
-                <div class="panel-header">Security Events</div>
-                <div class="events-list" id="securityEvents">
-                    <div class="empty-state">
-                        <div class="empty-state-icon">🔒</div>
-                        <p>No security events yet</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="combined-events">
-            <div class="panel-header">All Events Timeline</div>
-            <div class="combined-list" id="combinedEvents">
-                <div class="empty-state">
-                    <div class="empty-state-icon">📈</div>
-                    <p>No events to display</p>
-                </div>
-            </div>
-        </div>
+            <div class="feed" id="combinedEvents"></div>
+        </section>
     </div>
 
     <script>
-        let ws = null;
-        let reconnectAttempts = 0;
+        let ws = null, reconnectAttempts = 0;
         const maxReconnectAttempts = 10;
 
-        function formatRiskScore(score) {
-            const percent = Math.round(score * 100);
-            return `${percent}%`;
+        const ICON = {
+            pulse: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5 7 5-14L17 12h4"/></svg>',
+            lock:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>',
+            quiet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5 11 15l4.5-5.5"/></svg>'
+        };
+
+        const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        const pct = s => `${Math.round((s || 0) * 100)}%`;
+        const riskClass = s => s > 0.7 ? 'high' : s > 0.4 ? 'medium' : 'low';
+        const prettyLabel = l => esc(String(l || '').replace(/_/g, ' '));
+        function fmtTime(iso) {
+            try { return new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+            catch { return '--:--:--'; }
+        }
+        function targetText(t) {
+            if (!t) return 'unknown';
+            const ns = t.namespace || t.ns || '';
+            const name = t.name || t.pod || t.deployment || '';
+            return ns ? `${esc(ns)}/${esc(name)}` : esc(name || 'unknown');
+        }
+        function skeleton() {
+            return '<div class="skel">' + '<div class="line"></div>'.repeat(4) + '</div>';
+        }
+        function emptyState(icon, msg, hint) {
+            return `<div class="empty">${ICON[icon]}<p>${esc(msg)}</p>${hint ? `<div class="hint">${esc(hint)}</div>` : ''}</div>`;
         }
 
-        function getRiskClass(score) {
-            if (score > 0.7) return 'high';
-            if (score > 0.4) return 'medium';
-            return 'low';
-        }
-
-        function formatTime(isoString) {
-            try {
-                const date = new Date(isoString);
-                return date.toLocaleTimeString('en-US', { 
-                    hour: '2-digit', 
-                    minute: '2-digit',
-                    second: '2-digit'
-                });
-            } catch {
-                return 'Unknown';
-            }
+        function eventRow(ev, kind) {
+            const rc = riskClass(ev.risk_score);
+            const label = ev.label || ev.severity || (kind === 'health' ? 'assessment' : 'event');
+            return `
+                <div class="row" tabindex="0" role="button" onclick="openEventDetails('${esc(ev.event_id)}')"
+                     onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openEventDetails('${esc(ev.event_id)}')}">
+                    <span class="swatch ${kind}">${kind === 'health' ? ICON.pulse : ICON.lock}</span>
+                    <div class="body">
+                        <div class="target">${targetText(ev.target)}</div>
+                        <div class="meta">
+                            <span class="tag">${prettyLabel(label)}</span>
+                            <span class="time">${fmtTime(ev.timestamp)}</span>
+                        </div>
+                    </div>
+                    <div class="right">
+                        <span class="pill ${rc}">${pct(ev.risk_score)}</span>
+                        <span class="bar"><i class="${rc}" style="width:${Math.max(6, Math.round((ev.risk_score||0)*100))}%"></i></span>
+                    </div>
+                </div>`;
         }
 
         async function fetchStats() {
             try {
-                const response = await fetch('/api/stats');
-                const stats = await response.json();
-                
-                document.getElementById('healthEventCount').textContent = stats.total_health_events;
-                document.getElementById('securityEventCount').textContent = stats.total_security_events;
-                document.getElementById('highRiskHealth').textContent = stats.high_risk_health_events;
-                document.getElementById('highRiskSecurity').textContent = stats.high_risk_security_events;
-            } catch (error) {
-                console.error('Error fetching stats:', error);
-            }
+                const s = await (await fetch('/api/stats')).json();
+                document.getElementById('healthEventCount').textContent = s.total_health_events ?? 0;
+                document.getElementById('securityEventCount').textContent = s.total_security_events ?? 0;
+                document.getElementById('highRiskHealth').textContent = s.high_risk_health_events ?? 0;
+                document.getElementById('highRiskSecurity').textContent = s.high_risk_security_events ?? 0;
+            } catch (e) { console.error('stats', e); }
         }
 
         async function fetchEvents() {
             try {
-                const [healthRes, securityRes, combinedRes] = await Promise.all([
-                    fetch('/api/health-events?limit=10'),
-                    fetch('/api/security-events?limit=10'),
-                    fetch('/api/combined-events?limit=20')
+                const [h, sec, comb] = await Promise.all([
+                    fetch('/api/health-events?limit=12').then(r => r.json()),
+                    fetch('/api/security-events?limit=12').then(r => r.json()),
+                    fetch('/api/combined-events?limit=24').then(r => r.json())
                 ]);
-
-                const health = await healthRes.json();
-                const security = await securityRes.json();
-                const combined = await combinedRes.json();
-
-                updateHealthEvents(health.events);
-                updateSecurityEvents(security.events);
-                updateCombinedEvents(combined.events);
-            } catch (error) {
-                console.error('Error fetching events:', error);
-            }
+                renderHealth(h.events || []);
+                renderSecurity(sec.events || []);
+                renderCombined(comb.events || []);
+            } catch (e) { console.error('events', e); }
         }
 
-        function updateHealthEvents(events) {
-            const container = document.getElementById('healthEvents');
-            if (events.length === 0) {
-                container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><p>No health events yet</p></div>';
-                return;
-            }
-
-            container.innerHTML = events.slice(-5).reverse().map(event => `
-                <div class="event-item ${event.risk_score > 0.7 ? 'high-risk' : ''}" style="cursor: pointer;" onclick="openEventDetails('${event.event_id}')">
-                    <div class="event-header">
-                        <span class="event-id">${event.event_id.substring(0, 20)}...</span>
-                        <span class="event-risk ${getRiskClass(event.risk_score)}">${formatRiskScore(event.risk_score)}</span>
-                    </div>
-                    <div class="event-target">${event.target.namespace}/${event.target.name}</div>
-                    <div class="event-time">${formatTime(event.timestamp)}</div>
-                </div>
-            `).join('');
+        function renderHealth(events) {
+            document.getElementById('healthTally').textContent = events.length;
+            const el = document.getElementById('healthEvents');
+            el.innerHTML = events.length
+                ? events.slice(-8).reverse().map(e => eventRow(e, 'health')).join('')
+                : emptyState('quiet', 'No health assessments yet', 'Inject config drift to populate');
+        }
+        function renderSecurity(events) {
+            document.getElementById('securityTally').textContent = events.length;
+            const el = document.getElementById('securityEvents');
+            el.innerHTML = events.length
+                ? events.slice(-8).reverse().map(e => eventRow(e, 'security')).join('')
+                : emptyState('quiet', 'No security events yet', 'Run the ransomware scenario to populate');
+        }
+        function renderCombined(events) {
+            document.getElementById('combinedTally').textContent = events.length;
+            const el = document.getElementById('combinedEvents');
+            el.innerHTML = events.length
+                ? events.slice(0, 24).map(e => eventRow(e, e.type === 'security' ? 'security' : 'health')).join('')
+                : emptyState('quiet', 'Timeline is clear', 'Health and security events land here as they happen');
         }
 
-        function updateSecurityEvents(events) {
-            const container = document.getElementById('securityEvents');
-            if (events.length === 0) {
-                container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔒</div><p>No security events yet</p></div>';
-                return;
-            }
-
-            container.innerHTML = events.slice(-5).reverse().map(event => `
-                <div class="event-item security ${event.risk_score > 0.7 ? 'high-risk' : ''}" style="cursor: pointer;" onclick="openEventDetails('${event.event_id}')">
-                    <div class="event-header">
-                        <span class="event-id">${event.event_id.substring(0, 20)}...</span>
-                        <span class="event-risk ${getRiskClass(event.risk_score)}">${formatRiskScore(event.risk_score)}</span>
-                    </div>
-                    <div class="event-target">${event.target.namespace || 'N/A'}/${event.target.pod || event.target.name}</div>
-                    <div class="event-time">${formatTime(event.timestamp)}</div>
-                </div>
-            `).join('');
-        }
-
-        function updateCombinedEvents(events) {
-            const container = document.getElementById('combinedEvents');
-            if (events.length === 0) {
-                container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📈</div><p>No events to display</p></div>';
-                return;
-            }
-
-            container.innerHTML = events.slice(-20).map(event => {
-                const isHealth = event.type === 'health';
-                const badge = isHealth ? '📊' : '🔒';
-                const badgeClass = isHealth ? 'health' : 'security';
-                const label = isHealth ? 'Health' : 'Security';
-                
-                return `
-                    <div class="combined-item" style="cursor: pointer;" onclick="openEventDetails('${event.event_id}')">
-                        <div class="combined-badge ${badgeClass}">${badge}</div>
-                        <div class="combined-content">
-                            <div class="combined-target">${event.target.namespace || 'N/A'}/${event.target.name || event.target.pod}</div>
-                            <div class="combined-details">
-                                <span>${label}</span>
-                                <span class="combined-score ${getRiskClass(event.risk_score)}">Risk: ${formatRiskScore(event.risk_score)}</span>
-                                <span>${formatTime(event.timestamp)}</span>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }).join('');
+        function setConn(state, text) {
+            const dot = document.getElementById('connectionDot');
+            dot.classList.toggle('disconnected', state !== 'ok');
+            document.getElementById('connectionText').textContent = text;
         }
 
         function connectWebSocket() {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-
-            ws.onopen = () => {
-                console.log('WebSocket connected');
-                document.getElementById('connectionDot').classList.remove('disconnected');
-                document.getElementById('connectionText').textContent = 'Connected';
-                reconnectAttempts = 0;
-                fetchStats();
-                fetchEvents();
-            };
-
-            ws.onmessage = (event) => {
-                const message = JSON.parse(event.data);
-                console.log('Received:', message.type);
-
-                if (message.type === 'stats') {
-                    const stats = message.data;
-                    document.getElementById('healthEventCount').textContent = stats.total_health_events;
-                    document.getElementById('securityEventCount').textContent = stats.total_security_events;
-                    document.getElementById('highRiskHealth').textContent = stats.high_risk_health_events;
-                    document.getElementById('highRiskSecurity').textContent = stats.high_risk_security_events;
-                } else if (message.type === 'health_event' || message.type === 'security_event') {
-                    fetchEvents(); // Refresh events on new ones
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${proto}//${location.host}/ws`);
+            ws.onopen = () => { setConn('ok', 'Live'); reconnectAttempts = 0; fetchStats(); fetchEvents(); };
+            ws.onmessage = (m) => {
+                const msg = JSON.parse(m.data);
+                if (msg.type === 'stats') {
+                    const s = msg.data;
+                    document.getElementById('healthEventCount').textContent = s.total_health_events ?? 0;
+                    document.getElementById('securityEventCount').textContent = s.total_security_events ?? 0;
+                    document.getElementById('highRiskHealth').textContent = s.high_risk_health_events ?? 0;
+                    document.getElementById('highRiskSecurity').textContent = s.high_risk_security_events ?? 0;
+                } else if (msg.type === 'health_event' || msg.type === 'security_event') {
+                    fetchEvents();
                 }
             };
-
-            ws.onerror = (error) => {
-                console.error('WebSocket error:', error);
-                document.getElementById('connectionDot').classList.add('disconnected');
-                document.getElementById('connectionText').textContent = 'Error';
-            };
-
+            ws.onerror = () => setConn('err', 'Error');
             ws.onclose = () => {
-                console.log('WebSocket disconnected');
-                document.getElementById('connectionDot').classList.add('disconnected');
-                document.getElementById('connectionText').textContent = 'Disconnected';
-
+                setConn('err', 'Reconnecting');
                 if (reconnectAttempts < maxReconnectAttempts) {
-                    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
-                    setTimeout(() => {
-                        reconnectAttempts++;
-                        connectWebSocket();
-                    }, delay);
-                }
+                    const delay = Math.min(1000 * 2 ** reconnectAttempts, 30000);
+                    setTimeout(() => { reconnectAttempts++; connectWebSocket(); }, delay);
+                } else { setConn('err', 'Disconnected'); }
             };
         }
 
-        // Initial load
+        // loading skeletons
+        ['healthEvents', 'securityEvents', 'combinedEvents'].forEach(id => {
+            document.getElementById(id).innerHTML = skeleton();
+        });
         fetchStats();
         fetchEvents();
-
-        // Connect WebSocket
         connectWebSocket();
-
-        // Periodic refresh
         setInterval(fetchStats, 10000);
         setInterval(fetchEvents, 15000);
     </script>

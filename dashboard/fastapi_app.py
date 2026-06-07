@@ -35,6 +35,39 @@ def _normalize_v4(d: dict, kind: str) -> None:
     if kind == "security" and not d.get("label"):
         d["label"] = d.get("sec_label")
 
+    def _json(src):
+        raw = d.get(src)
+        if isinstance(raw, (dict, list)):
+            return raw
+        try:
+            return json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            return {}
+
+    # Map the v4 *_json hash fields onto the EventDetails shape so the modal's
+    # Analysis / Remediation tabs populate (agents write *_json, not these keys).
+    if kind == "health":
+        if not d.get("explainability"):
+            d["explainability"] = _json("field_attribution_json")
+        if not d.get("patch_proposal"):
+            d["patch_proposal"] = _json("patch_proposal_json") or None
+    if kind == "security":
+        if not d.get("early_signals"):
+            d["early_signals"] = _json("early_signals_json")
+        if d.get("entropy") and isinstance(d.get("entropy"), str):
+            try:
+                d["entropy"] = float(d["entropy"])
+            except (TypeError, ValueError):
+                d["entropy"] = None
+
+    # Surface the model so the modal's model-comparison box has values.
+    if not d.get("model_used"):
+        d["model_used"] = "health_model_v4" if kind == "health" else "security_model_v4"
+    if d.get("model_score") in (None, "") and d.get("risk_score") is not None:
+        d["model_score"] = d["risk_score"]
+    if not d.get("inference_method"):
+        d["inference_method"] = d["model_used"]
+
 
 class HealthAssessment(BaseModel):
     model_config = ConfigDict(protected_namespaces=())  # allow model_* fields
@@ -440,8 +473,8 @@ class KubeHealDashboard:
                 _normalize_v4(decoded, kind="health")
                 return decoded
 
-            # Try security event key pattern
-            security_key = f"kubeheal.security.{event_id}"
+            # Try security event key pattern (agents write colon-delimited keys)
+            security_key = f"kubeheal:security:{event_id}"
             event_data = await self.redis.hgetall(security_key)
 
             if event_data:
@@ -638,10 +671,10 @@ async def get_combined_events(limit: int = 20):
             }
         )
 
-    # Sort by timestamp descending
+    # Sort by timestamp descending (newest first), then keep the newest `limit`
     combined.sort(key=lambda x: x["timestamp"], reverse=True)
 
-    return {"events": combined[-limit:] if limit else combined, "count": len(combined)}
+    return {"events": combined[:limit] if limit else combined, "count": len(combined)}
 
 
 @app.get("/api/events/{event_id}", response_model=EventDetails)
