@@ -36,8 +36,15 @@ minikube status >/dev/null 2>&1 || die "minikube is not running — run: minikub
 ok "minikube up"
 
 kubectl get ns $KH >/dev/null 2>&1 || die "namespace/$KH missing — run ./scripts/install.sh first"
-notready=$(kubectl get pods -n $KH --no-headers 2>/dev/null | grep -vc "1/1" || true)
-[ "$notready" = "0" ] && ok "all $KH pods ready" || warn "$notready $KH pod(s) not ready (demo may lag)"
+# After `minikube start` the pods cold-restart (torch load takes 1-2 min). Wait
+# for them so the demo isn't run against a half-booted pipeline.
+echo "  waiting for $KH pods to be ready (up to 3 min after a fresh start)..."
+for i in $(seq 1 36); do
+  notready=$(kubectl get pods -n $KH --no-headers 2>/dev/null | grep -vc "1/1" || true)
+  [ "$notready" = "0" ] && break
+  sleep 5
+done
+[ "$notready" = "0" ] && ok "all $KH pods ready" || warn "$notready $KH pod(s) still not ready (demo may lag)"
 
 kubectl get deploy victim-app -n $NS >/dev/null 2>&1 || die "demo/victim-app missing — run ./scripts/install.sh"
 lbl=$(kubectl get deploy victim-app -n $NS -o jsonpath='{.metadata.labels.kubeheal\.io/watch}' 2>/dev/null)
@@ -69,8 +76,20 @@ echo -e "\n${c_b}>> Open http://localhost:5000 on the projector now.${c_0}\n"
 # ---- Demo A: config drift ---------------------------------------------------
 read -rp "ENTER to run Demo A — config drift (CPU limit 500m -> 50m on victim-app)..."
 say "Injecting CPU drift on demo/victim-app ..."
-kubectl patch deployment victim-app -n $NS --type=merge \
-  -p '{"spec":{"template":{"spec":{"containers":[{"name":"app","resources":{"limits":{"cpu":"50m"}}}]}}}}'
+# Clear the health-agent cooldown so the drift is always processed fresh (the
+# agent throttles re-assessment of the same target for 5 min).
+kubectl exec -n $KH redis-master-0 -- redis-cli DEL kubeheal:cooldown:${NS}:victim-app >/dev/null 2>&1 || true
+# Reset to a clean 500m baseline first so the drift is always visible, whatever
+# state a previous run left behind.
+kubectl set resources deployment victim-app -n $NS -c app \
+  --limits=cpu=500m,memory=512Mi --requests=cpu=250m,memory=256Mi >/dev/null 2>&1 || true
+sleep 3
+kubectl exec -n $KH redis-master-0 -- redis-cli DEL kubeheal:cooldown:${NS}:victim-app >/dev/null 2>&1 || true
+# strategic merge: merges the container by name (keeps image); a json merge patch
+# would replace the whole containers array and drop the required image. Lower the
+# request too, else k8s rejects it (request must be <= limit).
+kubectl patch deployment victim-app -n $NS --type=strategic \
+  -p '{"spec":{"template":{"spec":{"containers":[{"name":"app","resources":{"limits":{"cpu":"50m"},"requests":{"cpu":"50m"}}}]}}}}'
 ok "patched. Watch the dashboard:"
 echo "   - Health assessment for demo/victim-app, risk rises"
 echo "   - top field = containers[0].resources.limits.cpu"

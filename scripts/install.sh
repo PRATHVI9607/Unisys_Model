@@ -27,7 +27,12 @@ kubectl create namespace monitoring>/dev/null 2>&1 || true
 # take 60-70s to reload on restart, exceeding the probe timeout → CrashLoop.
 # Standalone with no persistence starts instantly and never accumulates AOF.
 helm install redis bitnami/redis --set architecture=standalone \
-  --set auth.enabled=false --set master.persistence.enabled=false -n kubeheal 2>/dev/null || true
+  --set auth.enabled=false --set master.persistence.enabled=false \
+  --set master.startupProbe.enabled=true --set master.startupProbe.failureThreshold=40 \
+  --set master.startupProbe.periodSeconds=10 \
+  --set master.livenessProbe.timeoutSeconds=8 --set master.livenessProbe.failureThreshold=8 \
+  --set master.livenessProbe.periodSeconds=10 \
+  -n kubeheal 2>/dev/null || true
 helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring 2>/dev/null || true
 # Falco — real syscall detection. Writes KubeHeal rule output as JSON to a
 # hostPath the Security Agent tails. (Optional: skip if no eBPF on the node;

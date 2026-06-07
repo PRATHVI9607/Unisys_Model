@@ -194,8 +194,10 @@ class KubeHealDashboard:
         while self.running:
             try:
                 if not self.redis:
-                    await asyncio.sleep(1)
-                    continue
+                    await self.connect_redis()   # auto-reconnect after a redis blip
+                    if not self.redis:
+                        await asyncio.sleep(2)
+                        continue
 
                 messages = await self.redis.xread(
                     {"kubeheal.health.events": last_id}, count=5, block=1000
@@ -262,6 +264,7 @@ class KubeHealDashboard:
 
             except Exception as e:
                 logger.error(f"Health listener error: {e}")
+                self.redis = None   # force reconnect on the next iteration
                 await asyncio.sleep(1)
 
     async def _listen_security_events(self) -> None:
@@ -270,8 +273,10 @@ class KubeHealDashboard:
         while self.running:
             try:
                 if not self.redis:
-                    await asyncio.sleep(1)
-                    continue
+                    await self.connect_redis()   # auto-reconnect after a redis blip
+                    if not self.redis:
+                        await asyncio.sleep(2)
+                        continue
 
                 messages = await self.redis.xread(
                     {"kubeheal.security.events": last_id}, count=5, block=1000
@@ -330,6 +335,7 @@ class KubeHealDashboard:
 
             except Exception as e:
                 logger.error(f"Security listener error: {e}")
+                self.redis = None   # force reconnect on the next iteration
                 await asyncio.sleep(1)
 
     async def _broadcast_stats(self) -> None:
