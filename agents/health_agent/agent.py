@@ -227,6 +227,18 @@ class HealthAgent:
             new_spec = deployment.spec.to_dict() if deployment.spec else {}
             await self._save_spec(namespace, name, new_spec)
 
+            # Only assess when the spec ACTUALLY changed. The health model scores
+            # absolute state (spec tokens + metrics), so scoring a steady-state or
+            # status-only event makes it read normal config as high risk. First
+            # sight just establishes the baseline; an unchanged spec is not drift.
+            if old_spec is None:
+                logger.info(f"Baseline established for {namespace}/{name}; no drift to assess")
+                return
+            if old_spec == new_spec:
+                logger.info(f"No spec change for {namespace}/{name}; skipping assessment")
+                return
+            logger.info(f"Spec drift detected for {namespace}/{name}; assessing")
+
             # v4: poll for fresh 60×15 Prometheus window (shared cache, backoff)
             # — replaces the v3 hard-coded sleep(15) + single-metric fetch.
             from agents.health_agent.prometheus_client import wait_for_fresh_metrics
