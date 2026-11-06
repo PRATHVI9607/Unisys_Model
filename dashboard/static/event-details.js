@@ -1,796 +1,170 @@
-/**
- * Event Details Modal
- * Handles opening, closing, and displaying detailed event information with model comparison
- */
+/* Event detail modal. Fetches /api/events/{kind}/{id} and renders the contract fields as they are:
+   a missing value shows "—", never a made-up default. Exposes window.openEventDetails(kind, id). */
+(() => {
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const isNum = v => typeof v === 'number' && Number.isFinite(v);
+    const dash = v => (v === null || v === undefined || v === '') ? '—' : v;
+    const pct = v => isNum(v) ? `${(v * 100).toFixed(1)}%` : '—';
+    const riskClass = v => !isNum(v) ? '' : v >= 0.7 ? 'risk-high' : v >= 0.4 ? 'risk-medium' : 'risk-low';
+    const pretty = s => s ? String(s).replace(/_/g, ' ') : '—';
+    const yesNo = v => v === true ? 'yes' : v === false ? 'no' : '—';
+    const when = ms => isNum(ms) && ms > 0 ? new Date(ms).toLocaleString() : '—';
+    const TITLE = { action: 'Action', health: 'Health assessment', security: 'Security event' };
 
-class EventDetailsModal {
-    constructor() {
-        this.backdrop = null;
-        this.dialog = null;
-        this.currentEventId = null;
-        this.currentEventType = null;
-        this.isLoading = false;
-        this.init();
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    const dialog = document.createElement('div');
+    dialog.className = 'modal-dialog';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-labelledby', 'modalTitle');
+    document.body.append(backdrop, dialog);
+
+    let seq = 0;          // bumps on every open/close; a response for an older request is dropped
+    let returnFocus = null;
+
+    function close() {
+        seq++;
+        backdrop.classList.remove('active');
+        dialog.classList.remove('active');
+        dialog.innerHTML = '';
+        returnFocus?.focus?.();
     }
 
-    /**
-     * Initialize modal DOM elements and event listeners
-     */
-    init() {
-        this.createModalElements();
-        this.attachEventListeners();
+    function switchTab(name) {
+        dialog.querySelectorAll('.modal-tab-button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+        dialog.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.dataset.pane === name));
     }
 
-    /**
-     * Create the modal HTML structure
-     */
-    createModalElements() {
-        // Create backdrop
-        this.backdrop = document.createElement('div');
-        this.backdrop.className = 'modal-backdrop';
-        this.backdrop.id = 'eventDetailsBackdrop';
-        this.backdrop.addEventListener('click', (e) => {
-            if (e.target === this.backdrop) {
-                this.close();
-            }
-        });
+    const pane = name => dialog.querySelector(`.tab-pane[data-pane="${name}"]`);
 
-        // Create modal dialog
-        this.dialog = document.createElement('div');
-        this.dialog.className = 'modal-dialog';
-        this.dialog.id = 'eventDetailsDialog';
+    backdrop.addEventListener('click', close);
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && dialog.classList.contains('active')) close();
+    });
+    dialog.addEventListener('click', e => {
+        if (e.target.closest('.modal-close')) return close();
+        const tab = e.target.closest('.modal-tab-button');
+        if (tab) return switchTab(tab.dataset.tab);
+        const link = e.target.closest('[data-open-id]');
+        if (link) open(link.dataset.openKind, link.dataset.openId);
+    });
 
-        // Store tab panes reference for later use
-        this._tabPanesCreated = false;
+    const item = (label, value, cls = '') => `
+        <div class="summary-item">
+            <div class="summary-label">${esc(label)}</div>
+            <div class="summary-value ${cls}">${esc(dash(value))}</div>
+        </div>`;
+    const section = (title, body) => `<div class="analysis-section"><div class="analysis-title">${esc(title)}</div>${body}</div>`;
+    const textBox = (title, text) => `
+        <div class="remediation-box"><div class="remediation-title">${esc(title)}</div>
+        <div class="remediation-text">${esc(dash(text))}</div></div>`;
+    const bar = (label, widthPct, valueText, cls = '') => `
+        <div class="score-bar">
+            <span class="score-label" title="${esc(label)}">${esc(label)}</span>
+            <div class="score-visual"><div class="score-fill ${cls}" style="width:${Math.max(0, Math.min(100, Math.round(widthPct)))}%"></div></div>
+            <span class="score-percent">${esc(valueText)}</span>
+        </div>`;
 
-        document.body.appendChild(this.backdrop);
-        document.body.appendChild(this.dialog);
+    function eventSummary(e) {
+        const win = e.window_end_ms - e.window_start_ms;
+        return '<div class="summary-grid">' + [
+            item('Target', `${dash(e.namespace)}/${dash(e.workload)}`),
+            e.kind === 'security' ? item('Pod', e.pod) : '',
+            item('Label', pretty(e.label)),
+            item('Risk', pct(e.risk), riskClass(e.risk)),
+            item('Uncertain', e.uncertain ? 'yes (conformal set has more than one label)' : yesNo(e.uncertain)),
+            item('Model version', e.model_version),
+            item('Time', when(e.timestamp_ms), 'timestamp'),
+            ...(e.kind === 'health' ? [
+                item('Spec changed', yesNo(e.spec_changed)),
+                item('Restore baseline', e.has_baseline ? 'available' : e.has_baseline === false ? 'none' : '—'),
+                item('Rollback rule', (e.failure_reasons || []).length ? e.failure_reasons.join(', ') : 'no'),
+            ] : [
+                item('Syscall events', e.n_events),
+                item('Window', e.window_start_ms > 0 && isNum(win) ? `${(win / 1000).toFixed(0)}s from ${when(e.window_start_ms)}` : '—'),
+            ]),
+        ].join('') + '</div>';
     }
 
-     /**
-     * Attach event listeners to modal elements
-     * Uses event delegation to avoid duplicate listeners
-     */
-    attachEventListeners() {
-        // Only attach if not already attached
-        if (this._listenersAttached) return;
-        this._listenersAttached = true;
-
-        // Close button - delegate from dialog
-        this.dialog.addEventListener('click', (e) => {
-            if (e.target.id === 'modalCloseBtn' || e.target.closest('#modalCloseBtn')) {
-                this.close();
-            }
-        });
-
-        // Tab buttons - delegate from dialog
-        this.dialog.addEventListener('click', (e) => {
-            const btn = e.target.closest('.modal-tab-button');
-            if (btn) {
-                this.switchTab(btn.dataset.tab);
-            }
-        });
-
-        // Close on Escape key
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && this.backdrop.classList.contains('active')) {
-                this.close();
-            }
-        });
-    }
-
-     /**
-      * Open modal with event details
-      * @param {string} eventId - The event ID to display
-      */
-    async open(eventId) {
-        this.currentEventId = eventId;
-        
-        // Render dialog content first (creates tab elements)
-        this.renderDialogContent();
-        
-        this.backdrop.classList.add('active');
-        this.dialog.classList.add('active');
-
-        // Show loading state
-        this.showLoading();
-
-        try {
-            // Fetch event details from API
-            const response = await fetch(`/api/events/${eventId}`);
-            if (!response.ok) {
-                throw new Error(`Failed to fetch event: ${response.statusText}`);
-            }
-
-            const eventData = await response.json();
-            this.currentEventType = eventData.event_type;
-
-            // Update modal with event data
-            this.populateModal(eventData);
-        } catch (error) {
-            console.error('Error fetching event details:', error);
-            this.showError(`Failed to load event details: ${error.message}`);
+    function eventAnalysis(e) {
+        let html = '';
+        const factors = Array.isArray(e.top_factors) ? e.top_factors : [];
+        if (factors.length) {
+            const max = Math.max(...factors.map(f => Math.abs(f.contribution) || 0), 1e-9);
+            html += section('Top factors (contribution to predicted label)', factors.map(f => bar(
+                isNum(f.value) ? `${f.feature} = ${+f.value.toFixed(4)}` : `${f.feature} = —`,
+                Math.abs(f.contribution) / max * 100,
+                `${f.contribution >= 0 ? '+' : ''}${(+f.contribution).toFixed(3)}`,
+                f.contribution < 0 ? 'neg' : '')).join(''));
         }
+        const probs = Object.entries(e.probabilities || {}).sort((a, b) => b[1] - a[1]);
+        if (probs.length) html += section('Class probabilities', probs.map(([l, p]) => bar(pretty(l), p * 100, pct(p))).join(''));
+        if (e.kind === 'health' && (e.changed_fields || []).length) {
+            html += section('Changed fields', '<div class="explainability-fields">' +
+                e.changed_fields.map(f => `<div class="field-item"><span class="field-name">${esc(f)}</span></div>`).join('') + '</div>');
+        }
+        return html || '<div class="empty-section"><p class="empty-section-text">No factors, probabilities or changed fields on this event.</p></div>';
     }
 
-     /**
-      * Close modal
-      */
-    close() {
-        this.backdrop.classList.remove('active');
-        this.dialog.classList.remove('active');
-        this.currentEventId = null;
-        this.currentEventType = null;
-        this._tabPanesCreated = false;
-        // Clear content to avoid stale elements on next open
-        this.dialog.innerHTML = '';
+    function actionSummary(a) {
+        return '<div class="summary-grid">' + [
+            item('Decision', pretty(a.decision)),
+            item('Mode', a.mode === 'observe' ? 'dry-run (observe)' : a.mode),
+            item('Outcome', pretty(a.outcome)),
+            item('Score', pct(a.score), riskClass(a.score)),
+            item('Compound score', pct(a.compound_score)),
+            item('Target', `${dash(a.namespace)}/${dash(a.workload)}`),
+            item('Pod', a.pod),
+            item('Time', when(a.timestamp_ms), 'timestamp'),
+        ].join('') + '</div><div style="margin-top:16px">' + textBox('Fusion summary', a.summary) + '</div>';
     }
 
-    /**
-     * Render dialog content (called when modal opens)
-     */
-    renderDialogContent() {
-        if (this._tabPanesCreated) return;
+    function actionRationale(a) {
+        const link = (kind, id) => id
+            ? `<button class="field-item event-link" data-open-kind="${kind}" data-open-id="${esc(id)}">
+                   <span class="field-name">${esc(TITLE[kind])}</span><span class="field-weight">${esc(id)}</span></button>`
+            : `<div class="field-item"><span class="field-name">${esc(TITLE[kind])}</span><span class="field-weight">—</span></div>`;
+        return '<div class="remediation-content">' + textBox('Rationale', a.rationale) +
+            section('Linked events', '<div class="explainability-fields">' +
+                link('health', a.health_event_id) + link('security', a.security_event_id) + '</div>') + '</div>';
+    }
 
-        this.dialog.innerHTML = `
+    async function open(kind, id) {
+        const req = ++seq;
+        if (!dialog.classList.contains('active')) returnFocus = document.activeElement;
+        dialog.innerHTML = `
             <div class="modal-header">
-                <div class="modal-title">
-                    <span>Event Details</span>
-                    <span class="modal-event-id" id="modalEventId"></span>
-                </div>
-                <button class="modal-close" id="modalCloseBtn">&times;</button>
+                <div class="modal-title"><span id="modalTitle">${esc(TITLE[kind] || 'Event')}</span>
+                    <span class="modal-event-id">${esc(id)}</span></div>
+                <button class="modal-close" aria-label="Close">&times;</button>
             </div>
-
             <div class="modal-tabs">
                 <button class="modal-tab-button active" data-tab="summary">Summary</button>
-                <button class="modal-tab-button" data-tab="analysis">Analysis</button>
-                <button class="modal-tab-button" data-tab="remediation">Remediation</button>
+                <button class="modal-tab-button" data-tab="analysis">${kind === 'action' ? 'Rationale' : 'Analysis'}</button>
             </div>
+            <div class="modal-content">
+                <div class="tab-pane active" data-pane="summary">
+                    <div class="modal-loading"><div class="modal-spinner"></div><span>Loading…</span></div></div>
+                <div class="tab-pane" data-pane="analysis"></div>
+            </div>`;
+        backdrop.classList.add('active');
+        dialog.classList.add('active');
+        dialog.querySelector('.modal-close').focus();
 
-            <div class="modal-content" id="modalContent">
-                <div class="tab-pane active" id="summaryTab"></div>
-                <div class="tab-pane" id="analysisTab"></div>
-                <div class="tab-pane" id="remediationTab"></div>
-            </div>
-        `;
-
-        this._tabPanesCreated = true;
-        this.attachEventListeners();
-    }
-
-     /**
-      * Show loading state in modal
-      */
-    showLoading() {
-        const summaryTab = document.getElementById('summaryTab');
-        
-        if (summaryTab) {
-            summaryTab.innerHTML = `
-                <div class="modal-loading">
-                    <div class="modal-spinner"></div>
-                    <span>Loading event details...</span>
-                </div>
-            `;
-        }
-        this.isLoading = true;
-    }
-
-    /**
-     * Show error state in modal
-     * @param {string} message - Error message to display
-     */
-    showError(message) {
-        const summaryTab = document.getElementById('summaryTab');
-        
-        if (summaryTab) {
-            summaryTab.innerHTML = `
-                <div class="modal-error">
-                    <div class="empty-section-icon">⚠️</div>
-                    <p>${message}</p>
-                </div>
-            `;
-        }
-        this.isLoading = false;
-    }
-
-    /**
-     * Check if tab elements exist
-     */
-    hasTabElements() {
-        return document.getElementById('summaryTab') !== null;
-    }
-
-    /**
-     * Populate modal with event data
-     * @param {Object} eventData - Complete event details from API
-     */
-    populateModal(eventData) {
-        const modalEventId = document.getElementById('modalEventId');
-        const summaryTab = document.getElementById('summaryTab');
-        const analysisTab = document.getElementById('analysisTab');
-        const remediationTab = document.getElementById('remediationTab');
-        
-        if (!modalEventId || !summaryTab) {
-            console.error('Modal elements not found');
+        let ev;
+        try {
+            const r = await fetch(`/api/events/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`);
+            if (!r.ok) throw new Error(r.status === 404 ? 'Event not found (it may have expired).' : `Request failed (HTTP ${r.status}).`);
+            ev = await r.json();
+        } catch (err) {
+            if (req === seq) pane('summary').innerHTML = `<div class="modal-error"><p>${esc(err.message)}</p></div>`;
             return;
         }
-
-        modalEventId.textContent = eventData.event_id;
-
-        // Reset tab content
-        summaryTab.innerHTML = '';
-        if (analysisTab) analysisTab.innerHTML = '';
-        if (remediationTab) remediationTab.innerHTML = '';
-
-        // Reset tab buttons
-        document.querySelectorAll('.modal-tab-button').forEach(btn => {
-            btn.classList.remove('active');
-            if (btn.dataset.tab === 'summary') {
-                btn.classList.add('active');
-            }
-        });
-
-        // Populate tabs
-        this.populateSummaryTab(eventData);
-        this.populateAnalysisTab(eventData);
-        this.populateRemediationTab(eventData);
-
-        // Show summary tab by default
-        this.switchTab('summary');
-        this.isLoading = false;
+        if (req !== seq) return;
+        pane('summary').innerHTML = kind === 'action' ? actionSummary(ev) : eventSummary(ev);
+        pane('analysis').innerHTML = kind === 'action' ? actionRationale(ev) : eventAnalysis(ev);
     }
 
-    /**
-     * Populate summary tab with basic event information
-     * @param {Object} eventData - Event details
-     */
-    populateSummaryTab(eventData) {
-        const summaryTab = document.getElementById('summaryTab');
-        const isHealth = eventData.event_type === 'health';
-
-        let html = '<div class="summary-grid">';
-
-        // Event ID
-        html += `
-            <div class="summary-item">
-                <div class="summary-label">Event ID</div>
-                <div class="summary-value" style="font-size: 11px;">${this.escapeHtml(eventData.event_id)}</div>
-            </div>
-        `;
-
-        // Target
-        const targetStr = this.formatTarget(eventData.target);
-        html += `
-            <div class="summary-item">
-                <div class="summary-label">Target</div>
-                <div class="summary-value">${this.escapeHtml(targetStr)}</div>
-            </div>
-        `;
-
-        // Risk Score
-        const riskClass = this.getRiskClass(eventData.risk_score);
-        html += `
-            <div class="summary-item">
-                <div class="summary-label">Risk Score</div>
-                <div class="summary-value risk-${riskClass}">${(eventData.risk_score * 100).toFixed(1)}%</div>
-            </div>
-        `;
-
-        // Timestamp
-        html += `
-            <div class="summary-item">
-                <div class="summary-label">Timestamp</div>
-                <div class="summary-value timestamp">${this.formatDateTime(eventData.timestamp)}</div>
-            </div>
-        `;
-
-        // Health-specific fields
-        if (isHealth) {
-            if (eventData.severity) {
-                html += `
-                    <div class="summary-item">
-                        <div class="summary-label">Severity</div>
-                        <div class="summary-value">${this.escapeHtml(eventData.severity)}</div>
-                    </div>
-                `;
-            }
-
-            if (eventData.blast_radius) {
-                html += `
-                    <div class="summary-item">
-                        <div class="summary-label">Blast Radius</div>
-                        <div class="summary-value">${this.escapeHtml(eventData.blast_radius)}</div>
-                    </div>
-                `;
-            }
-        }
-
-        // Security-specific fields
-        if (!isHealth) {
-            if (eventData.label) {
-                html += `
-                    <div class="summary-item">
-                        <div class="summary-label">Label</div>
-                        <div class="summary-value">${this.escapeHtml(eventData.label)}</div>
-                    </div>
-                `;
-            }
-
-            if (eventData.pid_target) {
-                html += `
-                    <div class="summary-item">
-                        <div class="summary-label">PID Target</div>
-                        <div class="summary-value">${this.escapeHtml(eventData.pid_target)}</div>
-                    </div>
-                `;
-            }
-
-            if (eventData.entropy !== null && eventData.entropy !== undefined) {
-                html += `
-                    <div class="summary-item">
-                        <div class="summary-label">Entropy</div>
-                        <div class="summary-value">${eventData.entropy.toFixed(4)}</div>
-                    </div>
-                `;
-            }
-        }
-
-        html += '</div>';
-        summaryTab.innerHTML = html;
-    }
-
-    /**
-     * Populate analysis tab with model comparison and explainability data
-     * @param {Object} eventData - Event details
-     */
-    populateAnalysisTab(eventData) {
-        const analysisTab = document.getElementById('analysisTab');
-        let html = '';
-
-        // Model Comparison Section
-        if (eventData.model_score !== null || eventData.heuristic_score !== null) {
-            html += this.createModelComparison(eventData);
-        }
-
-        // Explainability Section
-        if (eventData.explainability && Object.keys(eventData.explainability).length > 0) {
-            html += this.createExplainabilitySection(eventData.explainability);
-        }
-
-        // Early Signals (for security events)
-        if (eventData.early_signals && Object.keys(eventData.early_signals).length > 0) {
-            html += this.createEarlySignalsSection(eventData.early_signals);
-        }
-
-        if (!html) {
-            html = `
-                <div class="empty-section">
-                    <div class="empty-section-icon">📊</div>
-                    <p class="empty-section-text">No analysis data available</p>
-                </div>
-            `;
-        }
-
-        analysisTab.innerHTML = html;
-    }
-
-    /**
-     * Create model comparison section
-     * @param {Object} eventData - Event details
-     * @returns {string} HTML for model comparison
-     */
-    createModelComparison(eventData) {
-        const modelScore = eventData.model_score !== null ? eventData.model_score : 0;
-        const heuristicScore = eventData.heuristic_score !== null ? eventData.heuristic_score : 0;
-        const modelUsed = eventData.model_used || 'Unknown';
-        const isModelUsed = (eventData.inference_method === 'model' || 
-                            (modelScore > heuristicScore && modelScore > 0));
-
-        let html = `
-            <div class="analysis-section">
-                <div class="analysis-title">🤖 Model Comparison</div>
-                <div class="model-comparison">
-        `;
-
-        // Model Box
-        html += `
-            <div class="comparison-box ${isModelUsed ? 'active' : ''}">
-                <div class="comparison-header">
-                    <div class="comparison-title">Model</div>
-                    ${isModelUsed ? '<span class="comparison-used-badge">✓ USED</span>' : ''}
-                </div>
-                <div class="comparison-items">
-                    <div class="comparison-item">
-                        <span class="comparison-item-label">Model</span>
-                        <span class="comparison-item-value">${this.escapeHtml(modelUsed)}</span>
-                    </div>
-                    <div class="comparison-item">
-                        <span class="comparison-item-label">Score</span>
-                        <span class="comparison-item-value">${(modelScore * 100).toFixed(1)}%</span>
-                    </div>
-                    ${eventData.confidence_interval !== null ? `
-                        <div class="comparison-item">
-                            <span class="comparison-item-label">Confidence</span>
-                            <span class="comparison-item-value">${(eventData.confidence_interval * 100).toFixed(1)}%</span>
-                        </div>
-                    ` : ''}
-                    <div class="score-bar">
-                        <span class="score-label">Probability</span>
-                        <div class="score-visual">
-                            <div class="score-fill" style="width: ${modelScore * 100}%"></div>
-                        </div>
-                        <span class="score-percent">${(modelScore * 100).toFixed(0)}%</span>
-                    </div>
-                </div>
-            </div>
-        `;
-
-        // Heuristic Box
-        html += `
-            <div class="comparison-box ${!isModelUsed ? 'active' : ''}">
-                <div class="comparison-header">
-                    <div class="comparison-title">Heuristic</div>
-                    ${!isModelUsed ? '<span class="comparison-used-badge">✓ USED</span>' : ''}
-                </div>
-                <div class="comparison-items">
-                    <div class="comparison-item">
-                        <span class="comparison-item-label">Method</span>
-                        <span class="comparison-item-value">Rule-Based</span>
-                    </div>
-                    <div class="comparison-item">
-                        <span class="comparison-item-label">Score</span>
-                        <span class="comparison-item-value">${(heuristicScore * 100).toFixed(1)}%</span>
-                    </div>
-                    <div class="score-bar">
-                        <span class="score-label">Probability</span>
-                        <div class="score-visual">
-                            <div class="score-fill" style="width: ${heuristicScore * 100}%"></div>
-                        </div>
-                        <span class="score-percent">${(heuristicScore * 100).toFixed(0)}%</span>
-                    </div>
-                </div>
-            </div>
-        `;
-
-        html += '</div></div>';
-        return html;
-    }
-
-    /**
-     * Create explainability section showing changed fields and attention weights
-     * @param {Object} explainability - Explainability data
-     * @returns {string} HTML for explainability section
-     */
-    createExplainabilitySection(explainability) {
-        let html = `
-            <div class="analysis-section">
-                <div class="analysis-title">📋 Explainability</div>
-        `;
-
-        // Changed Fields
-        if (explainability.changed_fields && Object.keys(explainability.changed_fields).length > 0) {
-            html += `
-                <div class="explainability-section">
-                    <div class="explainability-title">Changed Fields</div>
-                    <div class="explainability-fields">
-            `;
-
-            Object.entries(explainability.changed_fields).forEach(([field, value]) => {
-                const displayValue = typeof value === 'object' 
-                    ? JSON.stringify(value).substring(0, 50) 
-                    : String(value).substring(0, 50);
-                html += `
-                    <div class="field-item">
-                        <span class="field-name">${this.escapeHtml(field)}</span>
-                        <span class="field-weight">${this.escapeHtml(displayValue)}</span>
-                    </div>
-                `;
-            });
-
-            html += '</div></div>';
-        }
-
-        // Attention Weights
-        if (explainability.attention_weights && Object.keys(explainability.attention_weights).length > 0) {
-            html += `
-                <div class="explainability-section">
-                    <div class="explainability-title">Attention Weights</div>
-                    <div class="explainability-fields">
-            `;
-
-            Object.entries(explainability.attention_weights)
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 10)
-                .forEach(([field, weight]) => {
-                    const percentage = (weight * 100).toFixed(1);
-                    html += `
-                        <div class="field-item">
-                            <span class="field-name">${this.escapeHtml(field)}</span>
-                            <span class="field-weight">${percentage}%</span>
-                        </div>
-                    `;
-                });
-
-            html += '</div></div>';
-        }
-
-        html += '</div>';
-        return html;
-    }
-
-    /**
-     * Create early signals section for security events
-     * @param {Object} earlySignals - Early signals data
-     * @returns {string} HTML for early signals section
-     */
-    createEarlySignalsSection(earlySignals) {
-        let html = `
-            <div class="analysis-section">
-                <div class="analysis-title">⚡ Early Signals</div>
-                <div class="early-signals">
-        `;
-
-        Object.entries(earlySignals).forEach(([signalName, signalData]) => {
-            if (typeof signalData === 'object' && signalData !== null) {
-                const severity = signalData.severity || 'medium';
-                const value = signalData.value !== undefined ? signalData.value : signalData;
-                const displayValue = typeof value === 'object' 
-                    ? JSON.stringify(value).substring(0, 100)
-                    : String(value).substring(0, 100);
-
-                html += `
-                    <div class="signal-item ${severity}">
-                        <div class="signal-name">${this.escapeHtml(signalName)}</div>
-                        <div class="signal-value">${this.escapeHtml(displayValue)}</div>
-                    </div>
-                `;
-            } else {
-                html += `
-                    <div class="signal-item">
-                        <div class="signal-name">${this.escapeHtml(signalName)}</div>
-                        <div class="signal-value">${this.escapeHtml(String(signalData))}</div>
-                    </div>
-                `;
-            }
-        });
-
-        html += '</div></div>';
-        return html;
-    }
-
-    /**
-     * Populate remediation tab with patch proposals and recommended actions
-     * @param {Object} eventData - Event details
-     */
-    populateRemediationTab(eventData) {
-        const remediationTab = document.getElementById('remediationTab');
-        const isHealth = eventData.event_type === 'health';
-        let html = '<div class="remediation-content">';
-
-        // Health-specific remediation
-        if (isHealth) {
-            if (eventData.patch_proposal) {
-                html += `
-                    <div class="remediation-box">
-                        <div class="remediation-title">🔧 Patch Proposal</div>
-                        <div class="patch-proposal">
-                            <pre class="remediation-text">${this.escapeHtml(this.formatJson(eventData.patch_proposal))}</pre>
-                        </div>
-                    </div>
-                `;
-            }
-            
-            // Generate default remediation based on severity
-            const severity = eventData.severity || 'benign';
-            const riskScore = eventData.risk_score || 0;
-            
-            if (severity === 'critical' || riskScore > 0.85) {
-                html += `
-                    <div class="remediation-box high-risk">
-                        <div class="remediation-title">🚨 Immediate Action Required</div>
-                        <div class="remediation-text">
-                            <p><strong>Severity:</strong> ${this.escapeHtml(severity.toUpperCase())}</p>
-                            <p><strong>Risk Score:</strong> ${(riskScore * 100).toFixed(1)}%</p>
-                            <p><strong>Recommended Actions:</strong></p>
-                            <ul>
-                                <li>Restart affected pods immediately</li>
-                                <li>Check resource limits and allocations</li>
-                                <li>Review recent deployments for changes</li>
-                                <li>Scale up replicas if needed</li>
-                            </ul>
-                        </div>
-                    </div>
-                `;
-            } else if (severity === 'high' || riskScore > 0.7) {
-                html += `
-                    <div class="remediation-box">
-                        <div class="remediation-title">⚠️ Action Recommended</div>
-                        <div class="remediation-text">
-                            <p><strong>Severity:</strong> ${this.escapeHtml(severity.toUpperCase())}</p>
-                            <p><strong>Recommended Actions:</strong></p>
-                            <ul>
-                                <li>Monitor resource usage closely</li>
-                                <li>Prepare for potential restart</li>
-                                <li>Check application logs</li>
-                                <li>Consider scaling up if traffic related</li>
-                            </ul>
-                        </div>
-                    </div>
-                `;
-            } else if (severity === 'medium' || riskScore > 0.5) {
-                html += `
-                    <div class="remediation-box">
-                        <div class="remediation-title">👀 Monitor</div>
-                        <div class="remediation-text">
-                            <p><strong>Severity:</strong> ${this.escapeHtml(severity.toUpperCase())}</p>
-                            <p><strong>Recommended Actions:</strong></p>
-                            <ul>
-                                <li>Continue monitoring for changes</li>
-                                <li>Review blast radius impact</li>
-                                <li>Prepare but don't act unless escalating</li>
-                            </ul>
-                        </div>
-                    </div>
-                `;
-            }
-        }
-
-        // Security-specific remediation
-        if (!isHealth) {
-            // Get action from event (may be in event_data or from pid_target context)
-            const action = eventData.action || 'direct_kill';
-            const pid = eventData.pid_target || 'unknown';
-            
-            html += `
-                <div class="remediation-box">
-                    <div class="remediation-title">🔒 Recommended Security Action</div>
-                    <div class="remediation-text">
-                        <p><strong>Action:</strong> ${this.escapeHtml(action)}</p>
-                        <p><strong>Target PID:</strong> ${this.escapeHtml(String(pid))}</p>
-                        ${eventData.risk_score > 0.7 ? '<p class="high-severity">⚠️ High-risk threat detected - immediate action recommended</p>' : ''}
-                    </div>
-                </div>
-            `;
-            
-            if (eventData.entropy && eventData.entropy > 5.0) {
-                html += `
-                    <div class="remediation-box">
-                        <div class="remediation-title">📊 High Entropy Alert</div>
-                        <div class="remediation-text">
-                            <p>File entropy (${eventData.entropy.toFixed(2)}) indicates potential encryption/ransomware activity.</p>
-                            <p><strong>Recommendation:</strong> Isolate affected process and preserve evidence.</p>
-                        </div>
-                    </div>
-                `;
-            }
-        }
-
-        html += '</div>';
-
-        if (html === '<div class="remediation-content"></div>') {
-            html = `
-                <div class="empty-section">
-                    <div class="empty-section-icon">🛠️</div>
-                    <p class="empty-section-text">No remediation data available</p>
-                </div>
-            `;
-        }
-
-        remediationTab.innerHTML = html;
-    }
-
-    /**
-     * Switch between tabs
-     * @param {string} tabName - Name of tab to switch to
-     */
-    switchTab(tabName) {
-        // Update tab buttons
-        document.querySelectorAll('.modal-tab-button').forEach(btn => {
-            btn.classList.toggle('active', btn.dataset.tab === tabName);
-        });
-
-        // Update tab content
-        document.querySelectorAll('.tab-pane').forEach(pane => {
-            pane.classList.remove('active');
-        });
-        
-        const tabPane = document.getElementById(`${tabName}Tab`);
-        if (tabPane) {
-            tabPane.classList.add('active');
-        }
-    }
-
-    /**
-     * Format target object to readable string
-     * @param {Object} target - Target object
-     * @returns {string} Formatted target string
-     */
-    formatTarget(target) {
-        if (!target) return 'Unknown';
-        
-        if (target.namespace && target.name) {
-            return `${target.namespace}/${target.name}`;
-        }
-        if (target.namespace && target.pod) {
-            return `${target.namespace}/${target.pod}`;
-        }
-        if (target.name) return target.name;
-        if (target.pod) return target.pod;
-        
-        return JSON.stringify(target);
-    }
-
-    /**
-     * Format JSON data for display
-     * @param {any} data - Data to format
-     * @returns {string} Formatted JSON
-     */
-    formatJson(data) {
-        try {
-            return JSON.stringify(data, null, 2);
-        } catch {
-            return String(data);
-        }
-    }
-
-    /**
-     * Format datetime string
-     * @param {string} isoString - ISO datetime string
-     * @returns {string} Formatted datetime
-     */
-    formatDateTime(isoString) {
-        try {
-            const date = new Date(isoString);
-            return date.toLocaleString('en-US', {
-                year: 'numeric',
-                month: '2-digit',
-                day: '2-digit',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit'
-            });
-        } catch {
-            return 'Invalid date';
-        }
-    }
-
-    /**
-     * Determine risk class based on score
-     * @param {number} score - Risk score (0-1)
-     * @returns {string} Risk class: 'high', 'medium', or 'low'
-     */
-    getRiskClass(score) {
-        if (score > 0.7) return 'high';
-        if (score > 0.4) return 'medium';
-        return 'low';
-    }
-
-    /**
-     * Escape HTML special characters
-     * @param {string} text - Text to escape
-     * @returns {string} Escaped text
-     */
-    escapeHtml(text) {
-        if (typeof text !== 'string') return '';
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
-}
-
-// Initialize modal when DOM is ready
-let eventDetailsModal = null;
-
-document.addEventListener('DOMContentLoaded', () => {
-    eventDetailsModal = new EventDetailsModal();
-});
-
-/**
- * Open event details modal from event row click
- * @param {string} eventId - Event ID to display
- */
-function openEventDetails(eventId) {
-    if (eventDetailsModal) {
-        eventDetailsModal.open(eventId);
-    }
-}
+    window.openEventDetails = open;
+})();
