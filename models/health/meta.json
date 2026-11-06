@@ -1,0 +1,269 @@
+{
+  "alpha": 0.1,
+  "class_risk": [
+    0.05,
+    0.6,
+    0.95
+  ],
+  "conformal_q": 0.8361043814338568,
+  "created_at": "2026-10-17T05:47:36+00:00",
+  "data": {
+    "groups": 48,
+    "rows": 4247,
+    "sha256": "7dde234776ecfb4558b459ba95add7c6db45465f885bcdb5c038b7c8dca8e06d",
+    "source": "training/data/health_drift.csv",
+    "synthetic": false
+  },
+  "features": [
+    "cpu_limit_ratio",
+    "cpu_request_ratio",
+    "mem_limit_ratio",
+    "mem_request_ratio",
+    "cpu_limit_removed",
+    "mem_limit_removed",
+    "replicas_ratio",
+    "replicas_to_zero",
+    "image_changed",
+    "image_unpinned",
+    "privileged_added",
+    "root_user_added",
+    "capabilities_added",
+    "host_namespace_added",
+    "host_path_added",
+    "probe_changed",
+    "probe_removed",
+    "env_count_delta",
+    "env_values_changed",
+    "volume_mounts_removed",
+    "containers_delta",
+    "command_changed",
+    "n_changed_fields",
+    "spec_changed",
+    "cpu_util_mean",
+    "cpu_util_max",
+    "cpu_throttle_mean",
+    "mem_util_mean",
+    "mem_util_max",
+    "latency_p99_mean_s",
+    "latency_p99_max_s",
+    "latency_trend",
+    "error_ratio",
+    "request_rate_log",
+    "restarts_delta",
+    "ready_ratio"
+  ],
+  "labels": [
+    "benign",
+    "degradation",
+    "critical"
+  ],
+  "metrics": {
+    "best_iteration": 21,
+    "conformal": {
+      "alpha": 0.1,
+      "calibrated_on": "5-fold grouped out-of-fold probabilities, non-test groups, serving rows",
+      "q": 0.836104
+    },
+    "cv5_grouped": {
+      "accuracy": 0.8905,
+      "confusion_matrix": [
+        [
+          2891,
+          195,
+          89
+        ],
+        [
+          16,
+          152,
+          32
+        ],
+        [
+          5,
+          52,
+          122
+        ]
+      ],
+      "coverage": 0.9733,
+      "macro_f1": 0.6785,
+      "mean_set_size": 1.321,
+      "n": 3554,
+      "per_class": {
+        "benign": {
+          "f1": 0.9499,
+          "precision": 0.9928,
+          "recall": 0.9106,
+          "support": 3175
+        },
+        "critical": {
+          "f1": 0.5782,
+          "precision": 0.5021,
+          "recall": 0.6816,
+          "support": 179
+        },
+        "degradation": {
+          "f1": 0.5075,
+          "precision": 0.381,
+          "recall": 0.76,
+          "support": 200
+        }
+      },
+      "weighted_f1": 0.9063
+    },
+    "cv5_grouped_spec_changed": {
+      "accuracy": 0.6087,
+      "confusion_matrix": [
+        [
+          331,
+          195,
+          89
+        ],
+        [
+          16,
+          152,
+          32
+        ],
+        [
+          5,
+          52,
+          122
+        ]
+      ],
+      "coverage": 0.9044,
+      "macro_f1": 0.5901,
+      "mean_set_size": 2.1187,
+      "n": 994,
+      "per_class": {
+        "benign": {
+          "f1": 0.6846,
+          "precision": 0.9403,
+          "recall": 0.5382,
+          "support": 615
+        },
+        "critical": {
+          "f1": 0.5782,
+          "precision": 0.5021,
+          "recall": 0.6816,
+          "support": 179
+        },
+        "degradation": {
+          "f1": 0.5075,
+          "precision": 0.381,
+          "recall": 0.76,
+          "support": 200
+        }
+      },
+      "weighted_f1": 0.6298
+    },
+    "latency_ms": {
+      "note": "single-row bundle.predict incl. TreeSHAP, num_threads=1",
+      "p50": 0.342,
+      "p99": 0.431
+    },
+    "split": {
+      "test": {
+        "groups": 5,
+        "rows": 693
+      },
+      "train": {
+        "groups": 38,
+        "rows": 3241
+      },
+      "val": {
+        "groups": 5,
+        "rows": 313
+      }
+    },
+    "test": {
+      "accuracy": 0.7518,
+      "confusion_matrix": [
+        [
+          493,
+          103,
+          20
+        ],
+        [
+          21,
+          20,
+          9
+        ],
+        [
+          12,
+          7,
+          8
+        ]
+      ],
+      "coverage": 0.974,
+      "macro_f1": 0.4452,
+      "mean_set_size": 1.7071,
+      "n": 693,
+      "per_class": {
+        "benign": {
+          "f1": 0.8634,
+          "precision": 0.9373,
+          "recall": 0.8003,
+          "support": 616
+        },
+        "critical": {
+          "f1": 0.25,
+          "precision": 0.2162,
+          "recall": 0.2963,
+          "support": 27
+        },
+        "degradation": {
+          "f1": 0.2222,
+          "precision": 0.1538,
+          "recall": 0.4,
+          "support": 50
+        }
+      },
+      "weighted_f1": 0.7932
+    },
+    "test_spec_changed": {
+      "accuracy": 0.5127,
+      "confusion_matrix": [
+        [
+          153,
+          103,
+          20
+        ],
+        [
+          21,
+          20,
+          9
+        ],
+        [
+          12,
+          7,
+          8
+        ]
+      ],
+      "coverage": 0.949,
+      "macro_f1": 0.3782,
+      "mean_set_size": 2.3881,
+      "n": 353,
+      "per_class": {
+        "benign": {
+          "f1": 0.6623,
+          "precision": 0.8226,
+          "recall": 0.5543,
+          "support": 276
+        },
+        "critical": {
+          "f1": 0.25,
+          "precision": 0.2162,
+          "recall": 0.2963,
+          "support": 27
+        },
+        "degradation": {
+          "f1": 0.2222,
+          "precision": 0.1538,
+          "recall": 0.4,
+          "support": 50
+        }
+      },
+      "weighted_f1": 0.5685
+    }
+  },
+  "task": "health",
+  "version": "health-5.0.0-7dde2347"
+}
