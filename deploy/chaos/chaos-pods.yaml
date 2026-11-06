@@ -1,0 +1,48 @@
+# Demo chaos: non-destructive detection-test workload writing high-entropy files
+# into the victim's volume to exercise the security agent.
+# Config drift is injected by deploy/scripts/demo.sh with `kubectl patch` (no pod needed).
+# The initContainer marks /data as a sandbox so the workload will run; without
+# that marker it refuses (see deploy/chaos/detection-test-workload.py).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: detection-test-workload
+  namespace: demo
+  labels:
+    app: detection-test-workload
+    kubeheal.io/chaos: "true"
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  initContainers:
+    - name: mark-sandbox
+      image: kubeheal/chaos:v5
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "touch /data/.kubeheal-sandbox"]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  containers:
+    - name: workload
+      image: kubeheal/chaos:v5
+      imagePullPolicy: IfNotPresent
+      args: ["--sandbox", "/data", "--num-files", "400", "--rate", "20", "--duration", "60"]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {cpu: "1", memory: 512Mi}
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: victim-data

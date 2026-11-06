@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubeheal-fusion-agent
+  namespace: kubeheal
+  labels: {app: kubeheal-fusion-agent, kubeheal.io/metrics: "true"}
+spec:
+  selector: {app: kubeheal-fusion-agent}
+  ports:
+    - {name: http, port: 8080, targetPort: 8080}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubeheal-fusion-agent
+  namespace: kubeheal
+  labels: {app: kubeheal-fusion-agent}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}   # single consumer-group owner; no overlap on rollout
+  selector: {matchLabels: {app: kubeheal-fusion-agent}}
+  template:
+    metadata:
+      labels: {app: kubeheal-fusion-agent, kubeheal.io/metrics: "true"}
+    spec:
+      serviceAccountName: kubeheal-fusion
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: agent
+          image: kubeheal/agents:v5
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "agents.fusion_agent.agent"]
+          ports: [{containerPort: 8080, name: http}]
+          env:
+            - {name: REDIS_URL, value: "redis://redis-master.kubeheal.svc:6379/0"}
+            - {name: KUBEHEAL_MODE, value: "enforce"}   # "observe" = dry-run: decide and publish, change nothing
+            - {name: MAX_KILLS_PER_HOUR, value: "3"}
+            - {name: MAX_PATCHES_PER_HOUR, value: "5"}
+            - {name: LOG_LEVEL, value: "INFO"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          # Sized from kubectl top under lab load (2026-10-17, training/collect/ run): cpu 5m, mem 83Mi peak.
+          # requests ~ p95; limits >= 2x requests and >= 1.5x peak; 500m CPU limit keeps Python startup fast.
+          resources:
+            requests: {cpu: 10m, memory: 96Mi}
+            limits: {cpu: 500m, memory: 192Mi}
+          startupProbe:          # /healthz is served only after Redis answers; give Redis time to start
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 10

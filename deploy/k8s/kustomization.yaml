@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Default (dev / demo / lab) install: `kubectl apply -k deploy/k8s/` = base/ as is (dashboard,
+# 1 inference replica). Production: `kubectl apply -k deploy/k8s/overlays/production`.
+# The manifests live in base/ because kustomize refuses an overlay nested inside the root it builds.
+resources:
+  - base

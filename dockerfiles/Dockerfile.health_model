@@ -1,9 +1,0 @@
-# Build base first:  docker build -t kubeheal/base:v4 -f dockerfiles/Dockerfile.base .
-FROM kubeheal/base:v4
-WORKDIR /app
-# Only the code + checkpoints the server needs (data/_archive_v3/csv excluded via .dockerignore)
-COPY models/ /app/models/
-COPY services/ /app/services/
-ENV PORT=8001
-EXPOSE 8001
-CMD ["python", "services/health_model_server/main.py"]

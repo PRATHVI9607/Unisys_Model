@@ -1,0 +1,69 @@
+# Redis Streams broker for KubeHeal: one ephemeral instance (no persistence, no AOF).
+# Service name redis-master keeps REDIS_URL stable. Anyone who can write to these
+# streams can make fusion act, so only pods in the kubeheal namespace may connect.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-master
+  namespace: kubeheal
+  labels: {app.kubernetes.io/name: redis}
+spec:
+  selector: {app.kubernetes.io/name: redis}
+  ports:
+    - {name: redis, port: 6379, targetPort: 6379}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: kubeheal
+  labels: {app.kubernetes.io/name: redis}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app.kubernetes.io/name: redis}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: redis}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: redis
+          image: redis:7.4.2-alpine
+          args: ["--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+          ports: [{containerPort: 6379, name: redis}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          # Sized from kubectl top under lab load (2026-10-17, training/collect/ run): cpu 34m, mem 43Mi peak (used_memory <= 38M).
+          # requests ~ p95; memory limit stays above --maxmemory 256mb (noeviction) + overhead.
+          resources:
+            requests: {cpu: 40m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 320Mi}
+          readinessProbe:
+            exec: {command: ["redis-cli", "ping"]}
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: {port: 6379}
+            periodSeconds: 10
+          volumeMounts: [{name: data, mountPath: /data}]
+      volumes:
+        - {name: data, emptyDir: {}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-kubeheal-only
+  namespace: kubeheal
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: redis}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{podSelector: {}}]     # same namespace only
+      ports: [{port: 6379}]

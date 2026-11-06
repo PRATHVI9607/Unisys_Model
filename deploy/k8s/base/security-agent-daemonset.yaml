@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubeheal-security-agent
+  namespace: kubeheal
+  labels: {app: kubeheal-security-agent, kubeheal.io/metrics: "true"}
+spec:
+  selector: {app: kubeheal-security-agent}
+  clusterIP: None            # headless: per-node DaemonSet pods, scraped individually
+  ports:
+    - {name: http, port: 8080, targetPort: 8080}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kubeheal-security-agent
+  namespace: kubeheal
+  labels: {app: kubeheal-security-agent}
+spec:
+  selector: {matchLabels: {app: kubeheal-security-agent}}
+  template:
+    metadata:
+      labels: {app: kubeheal-security-agent, kubeheal.io/metrics: "true"}
+    spec:
+      serviceAccountName: kubeheal-security
+      hostPID: true           # see host PIDs so /proc/<pid> resolves other pods' processes
+      # No pod-level runAsNonRoot: the agent must read /proc/<pid>/root of
+      # processes owned by other UIDs across container boundaries, which needs
+      # uid 0 plus DAC_READ_SEARCH. It never kills — fusion is the only actor.
+      securityContext:
+        runAsUser: 0
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: agent
+          image: kubeheal/agents:v5
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "agents.security_agent.agent"]
+          ports: [{containerPort: 8080, name: http}]
+          env:
+            - {name: REDIS_URL, value: "redis://redis-master.kubeheal.svc:6379/0"}
+            - {name: INFERENCE_URL, value: "http://kubeheal-inference.kubeheal.svc:8000"}
+            - {name: FALCO_EVENTS_PATH, value: "/var/run/falco/events.jsonl"}
+            - {name: PROC_ROOT, value: "/host/proc"}
+            - {name: EVAL_INTERVAL_S, value: "2"}
+            # "1" also XADDs every scored window to kubeheal.security.capture (lab data collection only;
+            # training/collect/run_lab.sh turns it on for a run and back to "0" on exit)
+            - {name: KUBEHEAL_CAPTURE, value: "0"}
+            - {name: LOG_LEVEL, value: "INFO"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              # SYS_PTRACE: read /proc/<pid>/root and mem for entropy sampling.
+              # DAC_READ_SEARCH: read files across container/UID boundaries.
+              add: ["SYS_PTRACE", "DAC_READ_SEARCH"]
+          # Sized from kubectl top under lab load (2026-10-17, training/collect/ run): cpu 126m, mem 119Mi peak (Falco event parsing).
+          # requests ~ p95; limits >= 2x requests and >= 1.5x peak; 500m CPU limit keeps Python startup fast.
+          resources:
+            requests: {cpu: 150m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          startupProbe:          # /healthz is served only after Redis answers; give Redis time to start
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 10
+          volumeMounts:
+            # writable: the agent punches holes over consumed events so Falco's file (tmpfs = node RAM)
+            # stays bounded (agents/security_agent/falco.py FalcoTail)
+            - {name: falco-events, mountPath: /var/run/falco}
+            - {name: host-proc, mountPath: /host/proc, readOnly: true}
+      volumes:
+        - name: falco-events
+          hostPath: {path: /var/run/falco, type: DirectoryOrCreate}
+        - name: host-proc
+          hostPath: {path: /proc, type: Directory}

@@ -1,0 +1,118 @@
+# Least-privilege RBAC: one ServiceAccount + ClusterRole per component.
+# Only fusion can change anything (and only pods, deployments, networkpolicies).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubeheal
+  labels:
+    kubeheal.io/enabled: "true"
+---
+# ── health agent: watch Deployments ──────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubeheal-health
+  namespace: kubeheal
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeheal-health
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]                  # failed-rollout evidence (ImagePullBackOff, CrashLoopBackOff, OOMKilled)
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeheal-health
+subjects:
+  - kind: ServiceAccount
+    name: kubeheal-health
+    namespace: kubeheal
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubeheal-health
+---
+# ── security agent: resolve pod → ReplicaSet → Deployment ────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubeheal-security
+  namespace: kubeheal
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeheal-security
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]           # the ReplicaSet's ownerReference names the Deployment
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeheal-security
+subjects:
+  - kind: ServiceAccount
+    name: kubeheal-security
+    namespace: kubeheal
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubeheal-security
+---
+# ── fusion agent: quarantine + delete pods, restore deployment templates ─────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubeheal-fusion
+  namespace: kubeheal
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeheal-fusion
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["namespaces"]          # read the kubeheal.io/namespace-tier label
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeheal-fusion
+subjects:
+  - kind: ServiceAccount
+    name: kubeheal-fusion
+    namespace: kubeheal
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubeheal-fusion
+---
+# ── dashboard: reads Redis only, no Kubernetes API access ────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubeheal-dashboard
+  namespace: kubeheal
+automountServiceAccountToken: false

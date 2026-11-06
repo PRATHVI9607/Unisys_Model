@@ -1,0 +1,60 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Production: `kubectl apply -k deploy/k8s/overlays/production`. Same control plane and safety
+# settings as deploy/k8s (dev/lab), minus the dashboard, plus inference HA/autoscaling and a
+# PriorityClass so the security components are not the first evicted under node pressure.
+# The HPA needs metrics-server (metrics.k8s.io).
+resources:
+  - ../../base
+  - priorityclass.yaml
+  - inference-hpa-pdb.yaml
+
+patches:
+  # No dashboard in production: its Deployment, Service and ServiceAccount are dropped.
+  - patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: kubeheal-dashboard, namespace: kubeheal}
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata: {name: kubeheal-dashboard, namespace: kubeheal}
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata: {name: kubeheal-dashboard, namespace: kubeheal}
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: kubeheal-inference, namespace: kubeheal}
+      spec:
+        replicas: 2   # HPA minReplicas; the HPA owns the count after the first apply
+        template:
+          spec:
+            containers:
+              - name: inference
+                # HPA targets 70% of the request: at the dev request (10m) idle load (~8m) would
+                # already scale out. 100m ≈ one security batch of 64 rows (~51 ms) per node every 2 s
+                # for ~3 nodes, so scaling tracks real cluster size, not idle noise.
+                resources: {requests: {cpu: 100m}}
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: kubeheal-fusion-agent, namespace: kubeheal}
+      spec:
+        template:
+          spec: {priorityClassName: kubeheal-security}
+  - patch: |-
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata: {name: kubeheal-security-agent, namespace: kubeheal}
+      spec:
+        updateStrategy:
+          type: RollingUpdate
+          rollingUpdate: {maxUnavailable: 10%}   # roll ~10% of nodes at a time on large clusters
+        template:
+          spec: {priorityClassName: kubeheal-security}

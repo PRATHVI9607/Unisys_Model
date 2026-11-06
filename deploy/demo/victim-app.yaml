@@ -1,0 +1,110 @@
+# Lab / demo workload: podinfo (exports http_requests_total{status} and
+# http_request_duration_seconds_bucket on :9898/metrics, scraped via the
+# kubeheal.io/scrape PodMonitor in deploy/k8s/base/prometheus-config.yaml) plus a steady
+# load generator, so the health agent's request/error/latency features are real.
+# The PVC is the sandbox the detection-test workload (deploy/chaos/) writes into.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  labels:
+    # The demo app stands in for a production service. Without this label the tier comes from the
+    # name ("demo" → dev, x0.7), and dev-tier scores can never reach the AUTO_* thresholds.
+    kubeheal.io/namespace-tier: prod
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: victim-data
+  namespace: demo
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests: {storage: 1Gi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victim-app
+  namespace: demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: victim}
+  template:
+    metadata:
+      labels: {app: victim, kubeheal.io/scrape: "true"}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: app
+          image: ghcr.io/stefanprodan/podinfo:6.14.1
+          command: ["./podinfo", "--port=9898", "--level=info"]
+          ports: [{containerPort: 9898, name: http}]
+          # requests stay small so drift_lab's limit cuts (down to 50m / 32Mi) remain valid specs
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          livenessProbe:
+            httpGet: {path: /healthz, port: 9898}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /readyz, port: 9898}
+            periodSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victim-app
+  namespace: demo
+spec:
+  selector: {app: victim}
+  ports:
+    - {name: http, port: 80, targetPort: 9898}
+---
+# ~40 req/s of ordinary traffic: 4 loops, one request every ~100 ms each.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: loadgen}
+  template:
+    metadata:
+      labels: {app: loadgen}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: loadgen
+          image: busybox:1.37.0
+          command: ["sh", "-c"]
+          args:
+            - |
+              for i in 1 2 3 4; do
+                (while true; do
+                   wget -q -T 5 -O /dev/null http://victim-app.demo.svc/ 2>/dev/null
+                   wget -q -T 5 -O /dev/null http://victim-app.demo.svc/api/info 2>/dev/null
+                   usleep 100000
+                 done) &
+              done
+              wait
+          resources:
+            requests: {cpu: 20m, memory: 16Mi}
+            limits: {cpu: 200m, memory: 32Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}

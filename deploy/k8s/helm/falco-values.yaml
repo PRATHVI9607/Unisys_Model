@@ -1,0 +1,56 @@
+# Falco for KubeHeal: modern eBPF driver (CO-RE, needs kernel BTF; works under
+# minikube's docker driver because the node container is privileged and shares
+# the host kernel). Only the KubeHeal rules are loaded (customRules, passed by
+# deploy/scripts/install.sh with --set-file), and every alert is appended as one JSON
+# line to /var/run/falco/events.jsonl on the node, which the security-agent
+# DaemonSet tails (FALCO_EVENTS_PATH). Nothing rotates the file: the agent deallocates
+# (hole-punches) what it has consumed, so it holds only the unread tail in RAM.
+# 0.45.0's modern probe is rejected by the kernel 7.x BPF verifier (prog signal_deliver,
+# "invalid mem access 'scalar'"); 0.45.1-rc1 loads. Move to 0.45.1 when it is released.
+image:
+  tag: 0.45.1-rc1
+driver:
+  kind: modern_ebpf
+collectors:
+  kubernetes: {enabled: false}   # k8s.ns.name / k8s.pod.name come from the container plugin (CRI labels)
+  containerEngine:
+    engines:                     # minikube/kind/most clusters: CRI (containerd) only
+      docker: {enabled: false}
+      podman: {enabled: false}
+mounts:
+  volumes:
+    - name: kubeheal-events
+      hostPath: {path: /var/run/falco, type: DirectoryOrCreate}
+  volumeMounts:
+    - {name: kubeheal-events, mountPath: /var/run/falco}
+resources:
+  requests: {cpu: 100m, memory: 256Mi}
+  # 1 CPU was too little under lab load (training/collect/): alerts queued faster than they were written,
+  # the agent saw them minutes late and the unbounded queue OOMKilled Falco. See outputs_queue below.
+  limits: {cpu: "2", memory: 1Gi}
+falco:
+  rules_files: [/etc/falco/rules.d]    # KubeHeal rules only; the default set floods pod windows with noise
+  json_output: true
+  json_include_output_property: true
+  json_include_output_fields_property: true   # output_fields{evt.type, proc.pid, fd.name, k8s.*} the agent reads
+  file_output:
+    enabled: true
+    keep_alive: true
+    filename: /var/run/falco/events.jsonl
+  stdout_output: {enabled: false}
+  outputs_queue: {capacity: 100000}   # bounded: overload drops (logged) alerts instead of OOM-looping Falco
+  base_syscalls:
+    all: true      # write/pwrite are "ignored" I/O events unless this is set; the rules need them
+    # Trace only what the one KubeHeal rule needs instead of Falco's verbose default state set
+    # (sinsp_state_sc_set: sockets, connect/accept, bind, setuid*, ...). With a custom_set, all:true
+    # only stops read/write being dropped; it does not enable every syscall.
+    # Lines 1-3 = the rule's evt.type list (falco-kubeheal-rules.yaml, keep in sync); line 4 = state:
+    # process lifecycle so container.id/k8s.* resolve for new processes, close*/dup*/fcntl
+    # for the fd table (fd.name), chdir/fchdir for relative openat paths. repair adds anything else
+    # libsinsp needs (capset, setuid*, prctl, procexit...). 87 -> 50 traced syscalls
+    # (falco --dry-run -o log_level=debug). Dropped: socket/accept/connect/bind, epoll, eventfd, pipe, mount...
+    custom_set: [read, pread, readv, preadv, write, pwrite, writev, pwritev, open, openat, openat2, creat,
+                 rename, renameat, renameat2, unlink, unlinkat, truncate, ftruncate,
+                 chmod, fchmod, fchmodat, chown, fchown, fchownat, lchown,
+                 clone, clone3, fork, vfork, execve, execveat, close, close_range, dup, dup2, dup3, fcntl, chdir, fchdir]
+    repair: true

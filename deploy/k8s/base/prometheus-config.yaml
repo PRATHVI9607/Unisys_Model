@@ -1,0 +1,40 @@
+# Scrape /metrics on every KubeHeal service labelled kubeheal.io/metrics=true:
+# inference :8000 and the three agents :8080 (dashboard emits no metrics).
+# Requires the Prometheus Operator (kube-prometheus-stack); deploy/k8s/helm/monitoring-values.yaml
+# makes it select every ServiceMonitor/PodMonitor. Each service names its scrape port "http".
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kubeheal
+  namespace: monitoring
+spec:
+  namespaceSelector:
+    matchNames: [kubeheal]
+  selector:
+    matchLabels:
+      kubeheal.io/metrics: "true"
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+# Application metrics for the health agent (http_requests_total,
+# http_request_duration_seconds_bucket): scrape port "http" /metrics on any pod
+# labelled kubeheal.io/scrape=true, in any namespace. The operator adds the
+# namespace + pod target labels the agent's PromQL selects on.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kubeheal-apps
+  namespace: monitoring
+spec:
+  namespaceSelector: {any: true}
+  selector:
+    matchLabels:
+      kubeheal.io/scrape: "true"
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      metricRelabelings:   # only what agents/health_agent/prometheus.py queries (lab pods churn)
+        - {sourceLabels: [__name__], action: keep, regex: "http_requests_total|http_request_duration_seconds_bucket"}
