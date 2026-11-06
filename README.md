@@ -1,188 +1,160 @@
-# KubeHeal v4.0
+# KubeHeal
 
-**Autonomous Configuration & Security Drift Correction in Kubernetes**
+**Autonomous configuration-drift and ransomware remediation for Kubernetes.**
 
-RVCE · Unisys "Agents Unleashed" · UIP · Mentor: Dr. Mohana
-Team: Ryan Dave Fernandes · P Koti Darshan · Rakshak S
+KubeHeal watches every real Deployment spec change and every pod's file activity, scores them with two
+small LightGBM models (with conformal uncertainty and exact TreeSHAP explanations), correlates the two
+signals per workload, and a single fusion agent acts: it quarantines and deletes a pod that behaves
+like ransomware, rolls a drifted Deployment back to its last known-good template, or hands the case
+to a person. Every decision is published to a live dashboard with a plain-English rationale.
 
----
+```mermaid
+flowchart LR
+  subgraph sources["Cluster signals"]
+    direction TB
+    API["kube-apiserver<br/>Deployments · Pods"]
+    PROM["Prometheus<br/>cAdvisor · kube-state-metrics · app /metrics"]
+    FALCO["Falco DaemonSet (modern eBPF)<br/>KubeHeal rule → events.jsonl on the node"]
+    PROC["Node /proc<br/>written files · pod cgroup io.stat · pod net/dev"]
+  end
 
-KubeHeal detects and autonomously heals two simultaneous production crises in
-Kubernetes — **configuration drift** (a CPU limit silently set to 50m instead
-of 500m) and **container ransomware** (high-entropy mass file encryption on a
-PersistentVolume) — and acts in **<8s** for critical threats.
+  subgraph kh["namespace kubeheal"]
+    direction TB
+    HA["health-agent<br/>Deployment ×1"]
+    SA["security-agent<br/>DaemonSet, one per node"]
+    INF["inference :8000<br/>LightGBM · split-conformal · TreeSHAP"]
+    R[("Redis 7 streams + keys<br/>kubeheal.health.events<br/>kubeheal.security.events<br/>kubeheal.actions · kubeheal.deadletter<br/>kubeheal:spec / baseline / lock / cb")]
+    FU["fusion-agent ×1<br/>correlation · decision policy · actions"]
+    DB["dashboard :8080<br/>read-only console"]
+  end
 
-v4 splits the v3 DIT-Sec monolith into **two specialized models + a Dependency
-Correlation Module (DCM) + an Interpretation Layer**.
-
-![architecture](docs/architecture-flow.png)
-
-> Full layer-by-layer walkthrough: **[docs/architecture-flow.md](docs/architecture-flow.md)**
-
----
-
-## The v4 architecture
-
-```
-YAML diff + Prom metrics ─► HEALTH MODEL  (GATv2 + BiLSTM)   ─► health_risk + 128-dim emb ┐
-Falco syscalls + entropy ─► SECURITY MODEL (Transformer + Conv1D-SE) ─► sec_risk + 64-dim ┤
-                                       both embeddings ─► DCM ─► correlation_score ────────┤
-                                       all signals ─► INTERPRETATION ─► SHAP + NL summary  │
-                                       all signals ─► FUSION AGENT (3-signal policy) ◄──────┘
-                                                       └► AUTO-KILL / AUTO-PATCH / HUMAN / OBSERVE / BENIGN
-```
-
-| Model | Inputs | Encoders | Output |
-|-------|--------|----------|--------|
-| **Health** (`models/health_model/`) | YAML diff + 60×15 metrics | GATv2 (3L×8h) + BiLSTM (2L) → cross-attn | `health_risk`, 4-class label, field attribution, conformal CI, 128-dim emb |
-| **Security** (`models/security_model/`) | ≤256 syscalls + 30-step entropy | Transformer (4h×2L, Pre-LN, CLS) + Conv1D-SE (k=3·7·15) → cross-attn | `sec_risk`, 5-class label, syscall attribution, entropy spike, CI, 64-dim emb |
-| **DCM** (`models/dcm/`) | both embeddings | bidirectional cross-modal attention | `correlation_score`, `compound_flag`, causal chain |
-
----
-
-## Decision policy (Fusion Agent v4)
-
-`agents/fusion_agent/decision_policy.py` — pure, fully unit-tested function.
-
-| Condition | Action |
-|-----------|--------|
-| compound + `sec_adj ≥ 0.85` | **AUTO-KILL** (compound) |
-| `sec_adj ≥ 0.85` (security only) | **AUTO-KILL** |
-| `health_adj ≥ 0.85` and `sec_risk < 0.4` | **AUTO-PATCH** (canary) |
-| `max(adj) ≥ 0.65` | **HUMAN** approval |
-| `max(adj) ≥ 0.40` | **OBSERVE** |
-| else | **BENIGN** |
-
-`adj = risk × tier(prod 1.20 / staging 1.00 / dev 0.70) × (compound? 1.15 : 1)`.
-Wide conformal CI (>0.15) or a tripped circuit breaker routes to human.
-Burn-in mode raises thresholds until 2000 metric samples exist.
-
----
-
-## Project structure
-
-```
-agents/
-  health_agent/    agent.py · prometheus_client.py (fresh-metric cache)
-  security_agent/  agent.py · proc_scanner.py (cgroups v1/v2 + LRU)
-  fusion_agent/    agent.py (3-signal) · decision_policy.py · incident_lock.py (heartbeat)
-models/
-  health_model/    yaml_gat_encoder · metric_bilstm_encoder · health_fusion_attention
-                   · health_output_head · health_model · health_conformal
-                   · dit-merged-complete.csv (real training data) · checkpoints/
-  security_model/  falco_transformer_encoder · entropy_conv1d_encoder
-                   · security_fusion_attention · security_output_head · security_model · checkpoints/
-  dcm/             cross_modal_attention · causal_chain_builder · correlation_head · checkpoints/
-  interpretation/  shap_explainer · field_name_mapper · nl_summary_generator
-  train_health_model.py · train_security_model.py · train_dcm.py
-  generate_security_training_data.py
-services/
-  health_model_server/  (FastAPI :8001)
-  security_model_server/ (FastAPI :8002)
-  dcm_server/            (FastAPI :8003)
-k8s/   health-model · security-model · dcm deployments · secrets template · rbac · crds
-tests/ test_decision_policy.py (25) · test_cgroups_compatibility.py · test_encoders.py
-docs/  architecture-flow.mmd · .md · .png
+  API -- "watch Deployments,<br/>list pods" --> HA
+  PROM -- "query_range<br/>[change, change + 120 s]" --> HA
+  FALCO -- "tail JSON lines" --> SA
+  PROC -- "entropy · bytes written · bytes out" --> SA
+  HA -- "POST /v1/health/predict" --> INF
+  SA -- "POST /v1/security/predict" --> INF
+  HA -- "HealthEvent · spec + baseline" --> R
+  SA -- "SecurityEvent (risk ≥ 0.4)" --> R
+  R -- "XREADGROUP fusion" --> FU
+  FU -- "ActionEvent" --> R
+  FU == "AUTO_KILL: label · deny-all NetworkPolicy · delete pod<br/>AUTO_PATCH: restore baseline /spec/template" ==> API
+  R -- "XREAD + WebSocket" --> DB
 ```
 
----
+## Capabilities
 
-## Quick start (local)
+| | What it does |
+|---|---|
+| **Config-drift detection** | The health agent assesses a Deployment 120 s after a real spec change: 24 spec-diff features plus 12 features of the post-change Prometheus window (CPU/memory utilisation, throttling, p99 latency, 5xx ratio, restarts, ready ratio). |
+| **Rule-based rollback** | Hard rollout failures after a change trigger AUTO_PATCH by rule, at any tier and any model confidence. These are pods created after the change stuck in `ImagePullBackOff`, `ErrImagePull`, `InvalidImageName`, `CrashLoopBackOff`, `CreateContainer*Error`, `RunContainerError` or `OOMKilled`, and `ProgressDeadlineExceeded` on the rollout. The model handles subtle drift: throttling, latency, memory pressure. |
+| **Ransomware-like behaviour** | The security agent tails Falco file syscalls on data volumes, samples the entropy of files the pod wrote, measures the pod's write and network-out bytes, and scores a per-pod 60 s window every 5 s. |
+| **Correlation** | A deterministic score joins a health and a security event of the same workload within 120 s. A compound incident raises both scores by ×1.15. |
+| **Explanations** | Every event carries class probabilities, the conformal prediction set and the top 5 TreeSHAP factors. Every action carries a rationale and a summary. |
+| **Remediation** | AUTO_KILL: label the pod `kubeheal.io/quarantined`, create a deny-all NetworkPolicy owned by the pod, delete it. AUTO_PATCH: JSON-patch `/spec/template` (and `/spec/replicas` if it changed) back to the stored baseline. |
+
+### Safety rails
+
+These are always on:
+
+- **One actor.** Only the fusion agent can change the cluster. Its RBAC covers pods (get, patch, delete), Deployments (get, patch), NetworkPolicies (create) and nothing else.
+- **Observe by default.** In code, `KUBEHEAL_MODE` defaults to `observe` (decide and publish `would_*`, change nothing). The shipped manifest sets `enforce`.
+- **Protected scope.** KubeHeal never acts in `kube-system`, `kube-public`, `kube-node-lease`, `kubeheal`, any namespace in `EXTRA_PROTECTED_NAMESPACES`, or on objects labelled `kubeheal.io/protected=true`.
+- **Confidence gates.** A model-driven AUTO_* decision needs an adjusted score of at least 0.85 and a single-label conformal set. Dev-tier namespaces (×0.7) can never reach that score, so only the rollback rule acts there.
+- **Blast radius.** Quarantine is per pod and is garbage-collected with the pod. A per-workload incident lock prevents overlapping actions, and per-workload hourly circuit breakers apply (3 kills, 5 patches).
+- **No invented data.** No action is taken without a real event, a pod or a stored baseline. A missing pod or baseline escalates to HUMAN.
+
+## Quickstart (minikube)
+
+You need `uv`, `kubectl`, `helm` and `minikube` (or `docker` plus any cluster). The lab runs were
+measured on an 8 CPU / 8 GB minikube.
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt          # torch, torch-geometric, shap, fastapi …
+minikube start --cpus=8 --memory=8g
+uv sync --all-extras                 # Python 3.13 env from pyproject.toml + uv.lock
+uv run --all-extras pytest && uv run --all-extras ruff check . # tests + lint
 
-# run the three model servers (loads trained checkpoints if present, else random weights)
-PYTHONPATH=. python services/health_model_server/main.py     # :8001
-PYTHONPATH=. python services/security_model_server/main.py   # :8002
-PYTHONPATH=. python services/dcm_server/main.py              # :8003
-
-# run the test suite
-PYTHONPATH=. pytest tests/ -q
+./deploy/scripts/install.sh   # builds 4 images, installs Prometheus + Falco (Helm), kubectl apply -k deploy/k8s/, demo app
+./deploy/scripts/demo.sh      # A) CPU-limit drift → health → decision   B) detection-test workload → AUTO_KILL
+./deploy/scripts/reset.sh     # back to a clean demo baseline (streams, keys, circuit breakers, victim app)
 ```
 
-Kubernetes deploy: `./scripts/install.sh` (Minikube + Redis + Prometheus +
-Falco + agents + the 3 model servers).
+To open the dashboard, run `kubectl -n kubeheal port-forward svc/kubeheal-dashboard 8080:8080` and go
+to <http://localhost:8080>. `demo.sh` starts this port-forward for you.
 
----
+The fusion agent ships in **enforce** mode, so the demo really patches and kills inside the `demo`
+namespace. Install, demo, dashboard, lab collection and troubleshooting are covered in
+[docs/operations.md](docs/operations.md).
 
-## Training the models — run these (do NOT auto-run; GPU strongly preferred)
+## Repository layout
 
-> Real ransomware traces need a live Falco cluster; the security generator
-> synthesises behaviorally-faithful samples for offline training. The health
-> model trains on the **real** drift CSV already in the repo.
+| Path | What |
+|---|---|
+| `kubeheal/contracts.py` | The single source of truth: stream names, Redis keys, labels, event models |
+| `kubeheal/features/` | Feature code shared by training and the live agents (train/serve parity) |
+| `kubeheal/ml/` | `ModelBundle`: LightGBM + split-conformal + TreeSHAP |
+| `kubeheal/correlation.py` | Deterministic compound-incident score |
+| `kubeheal/inference/app.py` | FastAPI inference service (:8000) |
+| `agents/{health,security,fusion}_agent/`, `agents/common.py` | The agents. Fusion owns every cluster mutation |
+| `dashboard/` | Read-only FastAPI + JS console (:8080) |
+| `training/` | `train.py`, dataset adapters, synthetic security generator, lab collectors (`collect/`) |
+| `models/{health,security}/` | Trained bundles (`model.txt` + `meta.json`) baked into the inference image |
+| `deploy/k8s/` | Kustomize: `base/` manifests + RBAC (default dev install), `overlays/production` (no dashboard, inference HPA/PDB, PriorityClass); Falco rule, Helm values for Prometheus and Falco |
+| `deploy/docker/` | 4 images: `inference`, `agents` (all three agents), `dashboard`, `chaos` |
+| `deploy/scripts/` | `install.sh`, `demo.sh`, `reset.sh`, `seed_demo.sh` |
+| `deploy/chaos/`, `deploy/demo/` | Non-destructive detection-test workload; demo app (podinfo + load generator) |
+| `tests/` | pytest suite, including the train/serve contract tests |
 
-```bash
-# 0. (Windows GPU) install CUDA torch first:
-#    pip install torch==2.2.0 --index-url https://download.pytorch.org/whl/cu121
-#    pip install torch-geometric torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.2.0+cu121.html
+## Configuration
 
-# 1. Health Model — real data (models/health_model/dit-merged-complete.csv)
-PYTHONPATH=. python -u models/train_health_model.py \
-    --epochs 30 --batch-size 16 --patience 6
+These are the main settings. The full per-component table is in
+[docs/architecture.md](docs/architecture.md#runtime-configuration).
 
-# 2. Security training data (synthetic, fast)
-PYTHONPATH=. python models/generate_security_training_data.py \
-    --output data/security_training.jsonl
+| Env var | Default | Effect |
+|---|---|---|
+| `KUBEHEAL_MODE` | `observe` (manifest: `enforce`) | `observe` publishes `would_*` decisions and changes nothing |
+| `MAX_KILLS_PER_HOUR` / `MAX_PATCHES_PER_HOUR` | `3` / `5` | Per-workload circuit breakers |
+| `EXTRA_PROTECTED_NAMESPACES` | empty | Namespaces added to the built-in protected set |
+| `WATCH_NAMESPACES` | empty (all) | Limits the health and security agents to these namespaces |
+| `ASSESS_DELAY_S` | `120` | Length of the post-change metric window before a health assessment |
+| `KUBEHEAL_CAPTURE` | `0` | `1` makes the security agent record every scored window (lab collection only) |
 
-# 3. Security Model
-PYTHONPATH=. python -u models/train_security_model.py \
-    --data data/security_training.jsonl --epochs 25 --batch-size 32 --patience 5
+The namespace label `kubeheal.io/namespace-tier: prod|staging|dev` sets the tier multiplier. Without
+the label, the tier is guessed from the namespace name.
 
-# 4. DCM — staged, AFTER 1 & 3 (freezes both base models)
-PYTHONPATH=. python -u models/train_dcm.py --epochs 25 --batch-size 32
+## Results
 
-# 5. (optional) recalibrate conformal on a held-out set
-PYTHONPATH=. python models/calibrate_conformal.py --coverage 0.90
+<!-- RESULTS: fill after retraining -->
 
-# 6. validate promotion gates (F1 / AUROC; latency advisory)
-PYTHONPATH=. python models/validate_all_models.py
+| | Health | Security |
+|---|---|---|
+| Training data (rows / groups) | <!-- RESULTS --> | <!-- RESULTS --> |
+| Grouped-CV macro-F1 | <!-- RESULTS --> | <!-- RESULTS --> |
+| Held-out test macro-F1 | <!-- RESULTS --> | <!-- RESULTS --> |
+| Held-out-family macro-F1 (pooled) | <!-- RESULTS --> | <!-- RESULTS --> |
+| Conformal coverage / mean set size (α = 0.1) | <!-- RESULTS --> | <!-- RESULTS --> |
+| Inference latency p50 / p99 (incl. TreeSHAP) | <!-- RESULTS --> | <!-- RESULTS --> |
 
-# 7. export for serving — security/DCM → FP16 ONNX, health → torch bundle
-PYTHONPATH=. python models/export_security_model.py --quantize fp16
-PYTHONPATH=. python models/export_dcm.py --quantize fp16
-PYTHONPATH=. python models/export_health_model.py
+| End-to-end (demo, minikube) | Time |
+|---|---|
+| Detection-test workload start → pod killed | <!-- RESULTS --> |
+| Spec change → AUTO_PATCH (rule path) | <!-- RESULTS --> |
+| Spec change → AUTO_PATCH (model path) | <!-- RESULTS --> |
 
-# 8. (optional) push to the MinIO model registry
-PYTHONPATH=. python models/upload_to_registry.py --version v4.0.0
-```
+How the models are trained and evaluated is described in
+[docs/models-and-data.md](docs/models-and-data.md).
 
-Outputs land in `models/<model>/checkpoints/best_*.pt` + `*_conformal.json` +
-`*_report.json`. The servers auto-load the checkpoints on startup.
+## Limitations
 
-> ONNX note: all three models export to ONNX. The health GATv2 export is
-> **numerically parity-checked** against torch (it ships ONNX only if
-> max|Δlogits| ≤ 1e-3, else a validated torch bundle). DCM exports to true
-> **FP16**; security/health revert to validated **FP32** when transformer/GAT
-> Cast nodes reject FP16 (~2 MB models — marginal). A working, validated
-> artifact is produced in every case.
-
-**GPU note:** GATv2 builds one graph per sample in Python — CPU runs ~minutes
-per epoch; a GPU (RTX 3060+) finishes each model in minutes.
-
----
-
-## API contracts (Section 13)
-
-| Server | Endpoint | Returns |
-|--------|----------|---------|
-| Health :8001 | `POST /health/score` | risk, label, label_probabilities, ci, field_attention_weights, top_field/metric, **health_embedding[128]** |
-| Security :8002 | `POST /security/score` | risk, label, ci, syscall_attention_weights, top_syscall, entropy_spike, **security_embedding[64]** |
-| DCM :8003 | `POST /dcm/correlate` | correlation_score, compound_flag, causal_chain, nl_summary |
-
-All three expose `GET /health` for K8s probes.
-
----
-
-## Re-render the architecture diagram
-
-```bash
-npx -y @mermaid-js/mermaid-cli -i docs/architecture-flow.mmd -o docs/architecture-flow.png -s 2 -b transparent
-```
-
----
+- **Exfiltration is unvalidated.** The `exfiltration` class (and `suspicious`) is trained only on synthetic windows. The serve-time byte counters are real, but no real exfiltration was ever observed.
+- **One workload and one node.** Health lab data comes from one workload type (podinfo) on a single-node minikube. Effects on a multi-node cluster under real traffic can differ.
+- **Simulated ransomware.** Ransomware windows come from one parameterised, non-destructive simulator, not from real malware families.
+- **120 s window.** Health is judged on the first 120 s after a change. Harm that appears later (slow leaks) is missed.
+- **Pre-existing drift.** The first spec the health agent sees is assumed good and becomes the baseline, so drift that predates the agent is not detected.
+- **Redis is a single point of failure.** It runs without persistence. On a restart the streams and baselines are lost, and baselines are re-learned on first sight.
 
 ## License
 
-RVCE · Unisys UIP · Confidential
+RVCE · Unisys UIP. Built for Unisys "Agents Unleashed".
+
+Team: Ryan Dave Fernandes · P Koti Darshan · Rakshak S. Mentor: Dr. Mohana.
