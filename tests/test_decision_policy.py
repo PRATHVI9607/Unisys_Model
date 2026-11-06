@@ -1,150 +1,115 @@
-"""
-Decision policy unit tests — KubeHeal v4 (PRD Section 07 mandates 20+ cases,
-full branch coverage over thresholds, tiers, compound, burn-in, circuit breakers).
-Run: PYTHONPATH=. pytest tests/test_decision_policy.py -q
-"""
+"""Decision policy table (docs/architecture.md, "Decision policy"). Thresholds live in decision_policy.py."""
 
-import sys
-from pathlib import Path
+import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from agents.fusion_agent.decision_policy import adjusted_score, decide
+from kubeheal.contracts import Decision, HealthEvent, SecurityEvent
 
-from agents.fusion_agent.decision_policy import (
-    make_decision, DecisionInput, Decision,
-    Thresholds, TIER_MULTIPLIERS, COMPOUND_ESCALATION,
-    CB_KILL_LIMIT_PER_HOUR, CB_PATCH_LIMIT_PER_HOUR,
-)
+D = Decision
 
 
-def D(**kw):
-    return make_decision(DecisionInput(**kw))
+def h(risk, label="critical", ns="staging", uncertain=False, has_baseline=True, failures=(), spec_changed=True):
+    return HealthEvent(event_id="h1", namespace=ns, workload="web", label=label, risk=risk,
+                       uncertain=uncertain, has_baseline=has_baseline, failure_reasons=list(failures),
+                       spec_changed=spec_changed)
 
 
-# ── BENIGN / OBSERVE ────────────────────────────────────────
-def test_benign_all_low():
-    assert D(health_risk=0.1, sec_risk=0.1).decision == Decision.BENIGN
-
-def test_observe_low_band():
-    o = D(health_risk=0.45, sec_risk=0.0, namespace_tier="staging")
-    assert o.decision == Decision.OBSERVE
-
-def test_benign_boundary_just_under_observe():
-    assert D(health_risk=0.39, sec_risk=0.0).decision == Decision.BENIGN
+F = ("ImagePullBackOff",)
+P = ("policy:privileged_added",)
 
 
-# ── HUMAN APPROVAL ZONE ─────────────────────────────────────
-def test_human_zone_health_leaning():
-    o = D(health_risk=0.70, sec_risk=0.0, namespace_tier="staging")
-    assert o.decision == Decision.HUMAN_PATCH
-
-def test_human_zone_security_leaning():
-    o = D(health_risk=0.0, sec_risk=0.70, namespace_tier="staging")
-    assert o.decision == Decision.HUMAN_KILL
+def s(risk, label="ransomware", ns="staging", uncertain=False):
+    return SecurityEvent(event_id="s1", namespace=ns, workload="web", pod="web-1", label=label, risk=risk,
+                         uncertain=uncertain)
 
 
-# ── HEALTH-ONLY AUTO-PATCH ──────────────────────────────────
-def test_health_auto_patch_prod():
-    o = D(health_risk=0.79, sec_risk=0.11, namespace_tier="prod", health_field_top="cpu")
-    assert o.decision == Decision.AUTO_PATCH
-    assert o.action_params.get("patch_field") == "cpu"
-
-def test_health_no_autopatch_when_sec_elevated():
-    # sec_risk >= 0.4 blocks the health-only path → falls to human zone
-    o = D(health_risk=0.95, sec_risk=0.45, namespace_tier="prod")
-    assert o.decision in (Decision.HUMAN_PATCH, Decision.HUMAN_KILL)
-
-def test_health_patch_cb_limit_escalates():
-    o = D(health_risk=0.95, sec_risk=0.0, namespace_tier="prod",
-          circuit_breaker_patches=CB_PATCH_LIMIT_PER_HOUR)
-    assert o.decision == Decision.HUMAN_PATCH
-
-def test_health_patch_wide_ci_escalates():
-    o = D(health_risk=0.95, sec_risk=0.0, namespace_tier="prod", health_ci_width=0.2)
-    assert o.decision == Decision.HUMAN_PATCH
-
-
-# ── SECURITY-ONLY AUTO-KILL ─────────────────────────────────
-def test_security_auto_kill():
-    o = D(sec_risk=0.90, namespace_tier="staging")
-    assert o.decision == Decision.AUTO_KILL
-    assert o.action_params.get("compound") is False
-
-def test_security_kill_cb_limit_escalates():
-    o = D(sec_risk=0.95, namespace_tier="prod", circuit_breaker_kills=CB_KILL_LIMIT_PER_HOUR)
-    assert o.decision == Decision.HUMAN_KILL
-
-def test_security_kill_wide_ci_escalates():
-    o = D(sec_risk=0.95, namespace_tier="prod", sec_ci_width=0.3)
-    assert o.decision == Decision.HUMAN_KILL
-
-
-# ── COMPOUND ────────────────────────────────────────────────
-def test_compound_auto_kill():
-    o = D(health_risk=0.88, sec_risk=0.93, correlation_score=0.84,
-          compound_flag=True, namespace_tier="prod")
-    assert o.decision == Decision.AUTO_KILL
-    assert o.action_params.get("compound") is True
-    # 0.93 * 1.20 * 1.15 ≈ 1.28
-    assert o.adjusted_score > 1.2
-
-def test_compound_escalation_applied():
-    base = D(sec_risk=0.80, namespace_tier="staging", compound_flag=False)
-    comp = D(sec_risk=0.80, namespace_tier="staging", compound_flag=True, correlation_score=0.7)
-    assert comp.adjusted_score > base.adjusted_score
-
-def test_compound_wide_ci_human():
-    o = D(health_risk=0.88, sec_risk=0.93, compound_flag=True,
-          correlation_score=0.84, namespace_tier="prod", sec_ci_width=0.25)
-    assert o.decision == Decision.HUMAN_KILL
-
-def test_compound_cb_limit_human():
-    o = D(health_risk=0.88, sec_risk=0.93, compound_flag=True, correlation_score=0.84,
-          namespace_tier="prod", circuit_breaker_kills=CB_KILL_LIMIT_PER_HOUR)
-    assert o.decision == Decision.HUMAN_KILL
+@pytest.mark.parametrize("health,security,compound,expected", [
+    # AUTO_KILL
+    (None, s(0.85), False, D.AUTO_KILL),                                  # boundary: adj == 0.85
+    (None, s(0.80, ns="prod-shop"), False, D.AUTO_KILL),                  # tier prod 0.8*1.2 = 0.96
+    (None, s(0.90, label="exfiltration"), False, D.AUTO_KILL),
+    (h(0.9), s(0.80), True, D.AUTO_KILL),                                 # compound 0.8*1.15 = 0.92
+    (None, s(0.80), False, D.HUMAN),                                      # same without compound
+    (None, s(0.95, uncertain=True), False, D.HUMAN),                      # uncertain never auto-kills
+    (None, s(0.95, label="suspicious"), False, D.HUMAN),                  # label not kill-eligible
+    (None, s(0.95, ns="dev"), False, D.HUMAN),                            # tier dev 0.95*0.7 = 0.665
+    # AUTO_PATCH
+    (h(0.90), None, False, D.AUTO_PATCH),
+    (h(0.90), s(0.30, label="benign"), False, D.AUTO_PATCH),              # security risk < 0.4
+    (h(0.90), s(0.50, label="suspicious"), False, D.HUMAN),               # security risk >= 0.4 blocks patch
+    (h(0.90, has_baseline=False), None, False, D.HUMAN),                  # nothing to restore
+    (h(0.90, uncertain=True), None, False, D.HUMAN),
+    (h(0.90, label="benign"), None, False, D.HUMAN),
+    # AUTO_PATCH by rule: failed rollout, any tier, any model certainty/label
+    (h(0.10, label="benign", ns="dev", failures=F), None, False, D.AUTO_PATCH),
+    (h(0.50, uncertain=True, ns="default", failures=F), None, False, D.AUTO_PATCH),
+    (h(0.30, ns="prod-shop", failures=F), s(0.39, label="benign"), False, D.AUTO_PATCH),
+    (h(0.30, failures=F), s(0.40, label="suspicious"), False, D.OBSERVE),   # security risk >= 0.4 blocks
+    (h(0.30, failures=F, has_baseline=False), None, False, D.BENIGN),         # nothing to restore
+    (h(0.30, failures=F, spec_changed=False), None, False, D.BENIGN),         # not caused by a change
+    (h(0.90, failures=F), s(0.95), False, D.AUTO_KILL),                       # kill still wins
+    # AUTO_PATCH by rule: posture policy violation, same rails as a failed rollout
+    (h(0.05, label="benign", ns="dev", failures=P), None, False, D.AUTO_PATCH),
+    (h(0.50, uncertain=True, ns="prod-shop", failures=P), None, False, D.AUTO_PATCH),
+    (h(0.30, failures=P), s(0.40, label="suspicious"), False, D.OBSERVE),   # security risk >= 0.4 blocks
+    (h(0.30, failures=P, has_baseline=False), None, False, D.BENIGN),         # nothing to restore
+    (h(0.30, failures=P, spec_changed=False), None, False, D.BENIGN),         # not caused by a change
+    (h(0.30, failures=P), s(0.95), False, D.AUTO_KILL),                       # kill still wins
+    # HUMAN / OBSERVE / BENIGN
+    (h(0.70, label="degradation"), None, False, D.HUMAN),                 # >= 0.65
+    (h(0.50, label="degradation", uncertain=True), None, False, D.HUMAN),  # uncertain and >= 0.4
+    (h(0.30, label="degradation", uncertain=True), None, False, D.BENIGN),  # uncertain but < 0.4
+    (h(0.50, label="degradation"), None, False, D.OBSERVE),
+    (None, s(0.45, label="suspicious"), False, D.OBSERVE),
+    (h(0.10, label="benign"), s(0.05, label="benign"), False, D.BENIGN),
+])
+def test_policy_table(health, security, compound, expected):
+    r = decide(health, security, compound=compound)
+    assert r.decision is expected, r.rationale
+    assert r.rationale.startswith(expected.value + ":")
+    assert 0.0 <= r.score <= 1.0
 
 
-# ── TIER MULTIPLIERS ────────────────────────────────────────
-def test_dev_tier_dampens():
-    o = D(health_risk=0.72, sec_risk=0.0, namespace_tier="dev")
-    # 0.72 * 0.70 = 0.504 → observe, not auto-patch
-    assert o.decision == Decision.OBSERVE
-
-def test_prod_tier_amplifies_to_autokill():
-    # 0.72 * 1.20 = 0.864 ≥ 0.85 auto-kill
-    o = D(sec_risk=0.72, namespace_tier="prod")
-    assert o.decision == Decision.AUTO_KILL
-
-def test_unknown_tier_defaults_to_1x():
-    o = D(sec_risk=0.86, namespace_tier="weird")
-    assert o.decision == Decision.AUTO_KILL
+def test_score_capped_at_one():
+    assert adjusted_score(0.95, "prod", compound=True) == 1.0          # 0.95*1.2*1.15 = 1.31
+    assert decide(None, s(0.95, ns="prod"), compound=True).score == 1.0
 
 
-# ── BURN-IN MODE ────────────────────────────────────────────
-def test_burn_in_raises_kill_threshold():
-    # 0.90 * 1.0 = 0.90 < 0.95 burn-in kill threshold → not auto-kill
-    o = D(sec_risk=0.90, namespace_tier="staging", burn_in_mode=True)
-    assert o.decision != Decision.AUTO_KILL
-
-def test_burn_in_kill_above_threshold():
-    o = D(sec_risk=0.97, namespace_tier="staging", burn_in_mode=True)
-    assert o.decision == Decision.AUTO_KILL
-
-def test_burn_in_patch_threshold():
-    # 0.88 < 0.90 burn-in patch threshold
-    o = D(health_risk=0.88, sec_risk=0.0, namespace_tier="staging", burn_in_mode=True)
-    assert o.decision != Decision.AUTO_PATCH
+def test_tier_multipliers():
+    assert adjusted_score(0.5, "prod-eu", False) == pytest.approx(0.6)
+    assert adjusted_score(0.5, "staging", False) == pytest.approx(0.5)
+    assert adjusted_score(0.5, "default", False) == pytest.approx(0.35)
 
 
-# ── RATIONALE + LOCK FLAGS ──────────────────────────────────
-def test_rationale_present_everywhere():
-    for kw in [dict(health_risk=0.1, sec_risk=0.1),
-               dict(sec_risk=0.9),
-               dict(health_risk=0.9, sec_risk=0.0),
-               dict(health_risk=0.5)]:
-        assert make_decision(DecisionInput(**kw)).rationale
+def test_tier_override_beats_the_name():
+    assert decide(None, s(0.95, ns="demo")).decision is D.HUMAN                      # name → dev, 0.665
+    r = decide(None, s(0.95, ns="demo"), tier="prod")                                # labelled prod
+    assert r.decision is D.AUTO_KILL and "tier prod" in r.rationale
 
-def test_autokill_requires_lock():
-    assert D(sec_risk=0.9).requires_incident_lock is True
 
-def test_observe_no_lock():
-    assert D(health_risk=0.45).requires_incident_lock is False
+def test_rationale_explains_branch():
+    r = decide(h(0.5, label="degradation", uncertain=True), None)
+    assert "uncertain" in r.rationale and "0.4" in r.rationale
+    r = decide(h(0.9), s(0.8), compound=True)
+    assert "compound x1.15" in r.rationale and "tier staging" in r.rationale
+
+
+def test_failed_rollout_rationale_names_the_reasons():
+    r = decide(h(0.2, label="benign", uncertain=True, failures=("CrashLoopBackOff", "OOMKilled")), None)
+    assert r.rationale.startswith("AUTO_PATCH: rule: failed rollout (CrashLoopBackOff, OOMKilled)")
+
+
+@pytest.mark.parametrize("failures,expected", [
+    (("policy:privileged_added", "policy:host_path_added"),
+     "AUTO_PATCH: rule: policy violation (privileged_added, host_path_added), "),
+    (("OOMKilled", "policy:root_user_added"),
+     "AUTO_PATCH: rule: failed rollout (OOMKilled) + policy violation (root_user_added), "),
+])
+def test_policy_violation_rationale_says_policy_not_failed_rollout(failures, expected):
+    assert decide(h(0.1, label="benign", failures=failures), None).rationale.startswith(expected)
+
+
+def test_needs_an_event():
+    with pytest.raises(ValueError):
+        decide(None, None)
+
