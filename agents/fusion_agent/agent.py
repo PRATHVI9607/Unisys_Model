@@ -1,330 +1,409 @@
-"""
-Fusion Agent v4 — Three-Signal Decision Engine (PRD Section 07 / 09).
-=====================================================================
-Consumes kubeheal.health.events + kubeheal.security.events via a Redis
-consumer group (each event handled by exactly one replica). Correlates the
-two signals through the DCM, runs the pure decision policy, executes under a
-heartbeat incident lock, and writes kubeheal.dcm.events + kubeheal.actions.
+"""Fusion agent: the single decision point of KubeHeal (docs/architecture.md, "Decision policy").
+
+Consumes health + security events (Redis consumer group, single replica),
+pairs them per workload by event time, scores the pair with
+kubeheal.correlation, runs the pure decision policy, executes (enforce) or
+records what it would do (observe, the default), and publishes every decision
+to STREAM_ACTIONS.
+
+Run: python -m agents.fusion_agent.agent
 """
 
+from __future__ import annotations
+
 import asyncio
-import base64
 import json
 import logging
 import os
 import socket
 import time
-import uuid
-from datetime import datetime
-from typing import Dict, Optional
 
-import aiohttp
-import numpy as np
 import redis.asyncio as aioredis
-import kubernetes_asyncio
-from kubernetes_asyncio import client, config
+from kubernetes_asyncio import client
+from kubernetes_asyncio.client.exceptions import ApiException
+from prometheus_client import Counter
 
-from agents.fusion_agent.decision_policy import (
-    make_decision, DecisionInput, Decision,
+from agents.common import (
+    connect_redis,
+    load_kube_config,
+    protected_namespaces,
+    publish_event,
+    run,
+    setup_logging,
+    start_http,
 )
-from agents.fusion_agent.incident_lock import acquire_incident_lock
+from agents.fusion_agent.decision_policy import decide
+from agents.fusion_agent.incident_lock import circuit_allows, incident_lock
+from kubeheal.contracts import (
+    PROTECTED_LABEL,
+    PROTECTED_NAMESPACES,
+    QUARANTINE_LABEL,
+    STREAM_ACTIONS,
+    STREAM_DEADLETTER,
+    STREAM_HEALTH,
+    STREAM_MAXLEN,
+    STREAM_SECURITY,
+    TIER_LABEL,
+    TIERS,
+    ActionEvent,
+    Decision,
+    HealthEvent,
+    SecurityEvent,
+    key_baseline,
+    key_circuit,
+    key_lock,
+    new_event_id,
+    now_ms,
+    workload_key,
+)
+from kubeheal.correlation import COMPOUND_THRESHOLD, CORRELATION_WINDOW_S, compound_score
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+log = logging.getLogger("fusion")
 
 GROUP = "fusion"
-HEALTH_STREAM = "kubeheal.health.events"
-SEC_STREAM = "kubeheal.security.events"
-DCM_STREAM = "kubeheal.dcm.events"
-ACTIONS_STREAM = "kubeheal.actions"
+STREAMS = (STREAM_HEALTH, STREAM_SECURITY)
+BATCH = 10
+BLOCK_MS = 1000
+CLAIM_MIN_IDLE_MS = 60_000
+MAX_DELIVERIES = 3
+MAX_EVENT_AGE_S = 300
+KUBE_TIMEOUT_S = 10.0
+LIVENESS_STALE_S = 30
+TIER_TTL_S = 300
+
+DECISIONS = Counter("kubeheal_fusion_decisions_total", "Decisions made", ["decision"])
+OUTCOMES = Counter("kubeheal_fusion_outcomes_total", "Decision outcomes", ["outcome"])
+DEADLETTERED = Counter("kubeheal_fusion_deadlettered_total", "Events moved to the dead-letter stream")
+SKIPPED_STALE = Counter("kubeheal_fusion_stale_events_total", "Events skipped as older than MAX_EVENT_AGE_S")
+
+Event = HealthEvent | SecurityEvent
+AUTOMATIC = (Decision.AUTO_KILL, Decision.AUTO_PATCH)
 
 
-def _b64_to_vec(b64: str):
-    if not b64:
-        return None
-    return np.frombuffer(base64.b64decode(b64), dtype=np.float32).tolist()
+class PairBuffer:
+    """Unpaired events per workload (with the decision taken on them alone), waiting for a partner.
+
+    shortcut: in memory, so a restart forgets unpaired events (they were already
+    decided alone); move to Redis if fusion ever runs more than one replica.
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[tuple[str, type], tuple[Event, Decision]] = {}
+
+    def partner(self, ev: Event) -> tuple[Event, Decision] | tuple[None, None]:
+        other = SecurityEvent if isinstance(ev, HealthEvent) else HealthEvent
+        hit = self._pending.get((workload_key(ev.namespace, ev.workload), other))
+        if hit and abs(hit[0].timestamp_ms - ev.timestamp_ms) <= CORRELATION_WINDOW_S * 1000:
+            return hit
+        return None, None
+
+    def commit(self, ev: Event, decision: Decision, partner: Event | None) -> None:
+        """After a successful decision: a pair is consumed, a lone event waits for a partner."""
+        key = workload_key(ev.namespace, ev.workload)
+        if partner is not None:
+            self._pending.pop((key, type(partner)), None)
+        else:
+            self._pending[(key, type(ev))] = (ev, decision)
+        cutoff = now_ms() - (MAX_EVENT_AGE_S + CORRELATION_WINDOW_S) * 1000
+        for k in [k for k, (e, _) in self._pending.items() if e.timestamp_ms < cutoff]:
+            del self._pending[k]
 
 
-class FusionAgentV4:
-    # Only correlate a health+security pair if both arrived within this window
-    # (else they are independent events that happen to share a pod name).
-    CORRELATION_WINDOW_S = 30.0
+def summarize(health: HealthEvent | None, security: SecurityEvent | None,
+              cscore: float, reasons: list[str]) -> str:
+    """1-3 plain sentences built only from the events (no LLM, nothing invented)."""
+    def factors(ev: Event) -> str:
+        names = [f.feature for f in ev.top_factors[:3]]
+        return f"; top factors: {', '.join(names)}" if names else ""
 
-    def __init__(self):
-        self.redis_url = os.environ.get("REDIS_URL", "redis://redis-master:6379")
-        self.dcm_url = os.environ.get("DCM_URL", "http://kubeheal-dcm:8003")
-        self.burn_in = os.environ.get("BURN_IN_MODE", "false").lower() == "true"
-        self.redis: Optional[aioredis.Redis] = None
-        self.core_api: Optional[client.CoreV1Api] = None
-        self.apps_api: Optional[client.AppsV1Api] = None
-        self.networking_api: Optional[client.NetworkingV1Api] = None
-        self.consumer = os.environ.get("HOSTNAME") or f"fusion-{uuid.uuid4().hex[:6]}"
-        self.running = False
-        # short-term correlation buffer: pod → (event_fields, recv_monotonic)
-        self.pending_health: Dict[str, tuple] = {}
-        self.pending_sec: Dict[str, tuple] = {}
+    parts = []
+    if security:
+        parts.append(f"Security model rated pod {security.pod or '(unknown)'} of "
+                     f"{security.namespace}/{security.workload} {security.label} "
+                     f"(risk {security.risk:.2f}){factors(security)}.")
+    if health:
+        changed = f", changed {', '.join(health.changed_fields[:3])}" if health.changed_fields else ""
+        parts.append(f"Health model rated the spec change of {health.namespace}/{health.workload} "
+                     f"{health.label} (risk {health.risk:.2f}{changed}){factors(health)}.")
+    if health and security:
+        if cscore >= COMPOUND_THRESHOLD:
+            parts.append(f"Correlated as one incident (score {cscore:.2f}): {'; '.join(reasons)}.")
+        else:
+            parts.append(f"Not treated as one incident (correlation {cscore:.2f} < {COMPOUND_THRESHOLD}).")
+    return " ".join(parts)
 
-    async def start(self):
-        # Kubernetes clients — required to actually execute kill/patch actions.
-        try:
-            config.load_incluster_config()
-            logger.info("Loaded in-cluster config")
-        except Exception:
-            try:
-                await config.load_kube_config()
-                logger.info("Loaded kubeconfig")
-            except Exception as e:
-                logger.warning(f"No kube config ({e}); actions will be dry-run only")
-        try:
-            self.core_api = client.CoreV1Api()
-            self.apps_api = client.AppsV1Api()
-            self.networking_api = client.NetworkingV1Api()
-        except Exception as e:
-            logger.warning(f"Kube client init failed: {e}")
 
-        self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
-        for stream in (HEALTH_STREAM, SEC_STREAM):
-            try:
-                await self.redis.xgroup_create(stream, GROUP, id="0", mkstream=True)
-            except Exception as e:
+def quarantine_policy(pod) -> dict:
+    """Deny all ingress+egress for quarantined pods; GC'd together with the pod it is owned by."""
+    return {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+            "name": f"kubeheal-quarantine-{pod.metadata.name}"[:253],
+            "labels": {"app.kubernetes.io/managed-by": "kubeheal"},
+            "ownerReferences": [{"apiVersion": "v1", "kind": "Pod", "name": pod.metadata.name,
+                                 "uid": pod.metadata.uid}],
+        },
+        "spec": {"podSelector": {"matchLabels": {QUARANTINE_LABEL: "true"}},
+                 "policyTypes": ["Ingress", "Egress"]},
+    }
+
+
+def _labels(obj) -> dict:
+    return (obj.metadata.labels or {}) if obj is not None else {}
+
+
+class FusionAgent:
+    def __init__(self, redis, core, apps, net, *, mode: str = "observe", protected: frozenset = PROTECTED_NAMESPACES,
+                 max_kills: int = 3, max_patches: int = 5, consumer: str = "fusion") -> None:
+        self.redis, self.core, self.apps, self.net = redis, core, apps, net
+        self.mode = mode
+        self.protected = protected
+        self.max_kills, self.max_patches = max_kills, max_patches
+        self.consumer = consumer
+        self.pairs = PairBuffer()
+        self.last_poll = time.monotonic()
+        self.tiers: dict[str, tuple[float, str | None]] = {}   # namespace → (expiry, TIER_LABEL value)
+
+    # ── stream plumbing ─────────────────────────────────────────────────────
+    async def ensure_groups(self) -> None:
+        for stream in STREAMS:
+            try:   # "$": a fresh deploy starts at new events, never replays history
+                await self.redis.xgroup_create(stream, GROUP, id="$", mkstream=True)
+            except aioredis.ResponseError as e:
                 if "BUSYGROUP" not in str(e):
-                    logger.warning(f"xgroup_create {stream}: {e}")
-        logger.info(f"Fusion Agent v4 started (consumer={self.consumer}, burn_in={self.burn_in})")
-        self.running = True
-        await self._consume()
+                    raise
+            # Each pod is a new consumer (HOSTNAME); drop earlier ones with nothing pending so the group
+            # does not grow per restart. Their unacked entries, if any, stay for XAUTOCLAIM.
+            for c in await self.redis.xinfo_consumers(stream, GROUP):
+                if c["name"] != self.consumer and c["pending"] == 0:
+                    await self.redis.xgroup_delconsumer(stream, GROUP, c["name"])
 
-    async def stop(self):
-        self.running = False
-        if self.redis:
-            await self.redis.aclose()
+    async def poll_once(self, block_ms: int = BLOCK_MS) -> None:
+        self.last_poll = time.monotonic()
+        for stream in STREAMS:   # retry entries another delivery left unacked
+            _, claimed, _ = await self.redis.xautoclaim(stream, GROUP, self.consumer, CLAIM_MIN_IDLE_MS,
+                                                        start_id="0-0", count=BATCH)
+            for msg_id, fields in claimed:
+                info = await self.redis.xpending_range(stream, GROUP, min=msg_id, max=msg_id, count=1)
+                await self.process(stream, msg_id, fields, info[0]["times_delivered"] if info else MAX_DELIVERIES)
+        resp = await self.redis.xreadgroup(GROUP, self.consumer, {s: ">" for s in STREAMS},
+                                           count=BATCH, block=block_ms)
+        for stream, entries in resp or []:
+            for msg_id, fields in entries:
+                await self.process(stream, msg_id, fields, 1)
 
-    async def _consume(self):
-        while self.running:
+    async def process(self, stream: str, msg_id: str, fields: dict, deliveries: int) -> None:
+        """Ack only after successful handling; dead-letter malformed or repeatedly failing entries."""
+        try:
+            ev = (HealthEvent if stream == STREAM_HEALTH else SecurityEvent).from_fields(fields)
+        except ValueError as e:   # pydantic ValidationError and bad JSON are ValueErrors
+            log.error("malformed event %s on %s: %s", msg_id, stream, e)
+            await self.deadletter(stream, msg_id, fields, f"malformed: {e}")
+            return
+        try:
+            await self.handle(ev)
+        except Exception as e:
+            log.exception("handling %s on %s failed (delivery %d)", msg_id, stream, deliveries)
+            if deliveries >= MAX_DELIVERIES:
+                await self.deadletter(stream, msg_id, fields, repr(e))
+            return
+        await self.redis.xack(stream, GROUP, msg_id)
+
+    async def deadletter(self, stream: str, msg_id: str, fields: dict, error: str) -> None:
+        await self.redis.xadd(STREAM_DEADLETTER,
+                              {**fields, "_stream": stream, "_id": msg_id, "_error": error[:500]},
+                              maxlen=STREAM_MAXLEN, approximate=True)
+        await self.redis.xack(stream, GROUP, msg_id)
+        DEADLETTERED.inc()
+
+    # ── decision ────────────────────────────────────────────────────────────
+    async def handle(self, ev: Event) -> ActionEvent | None:
+        if now_ms() - ev.timestamp_ms > MAX_EVENT_AGE_S * 1000:
+            log.info("skipping stale %s (%.0f s old)", ev.event_id, (now_ms() - ev.timestamp_ms) / 1000)
+            SKIPPED_STALE.inc()
+            return None
+        partner, partner_decision = self.pairs.partner(ev)
+        health, security = (ev, partner) if isinstance(ev, HealthEvent) else (partner, ev)
+        cscore, reasons = compound_score(health, security) if health and security else (0.0, [])
+        result = decide(health, security, compound=cscore >= COMPOUND_THRESHOLD, tier=await self.tier(ev.namespace))
+        if result.decision is partner_decision and partner_decision in AUTOMATIC:
+            # Same action on the same pod/workload was already taken when the partner was decided alone.
+            decision, outcome = result.decision, "already_handled"
+        else:
+            decision, outcome = await self.act(result.decision, health, security)
+        action = ActionEvent(
+            event_id=new_event_id("act"), namespace=ev.namespace, workload=ev.workload,
+            pod=security.pod if security else "", decision=decision, mode=self.mode, outcome=outcome,
+            score=result.score, compound_score=round(cscore, 4), rationale=result.rationale,
+            summary=summarize(health, security, cscore, reasons),
+            health_event_id=health.event_id if health else "",
+            security_event_id=security.event_id if security else "",
+        )
+        await publish_event(self.redis, STREAM_ACTIONS, "action", action)
+        self.pairs.commit(ev, decision, partner)
+        DECISIONS.labels(decision.value).inc()
+        OUTCOMES.labels(outcome.split(":")[0]).inc()
+        level = logging.WARNING if decision in AUTOMATIC else logging.INFO
+        log.log(level, "%s %s/%s pod=%s outcome=%s :: %s", decision.value, ev.namespace, ev.workload,
+                action.pod or "-", outcome, result.rationale)
+        return action
+
+    # ── actions ─────────────────────────────────────────────────────────────
+    async def act(self, decision: Decision, health: HealthEvent | None,
+                  security: SecurityEvent | None) -> tuple[Decision, str]:
+        if decision not in AUTOMATIC:
+            return decision, "none"
+        ev = security if decision is Decision.AUTO_KILL else health
+        ns, wl = ev.namespace, ev.workload
+        if ns in self.protected:
+            return decision, "skipped_protected"
+        try:
+            if decision is Decision.AUTO_KILL:
+                if not security.pod:
+                    return Decision.HUMAN, "escalated_no_pod"
+                return decision, await self.kill(ns, wl, security.pod)
             try:
-                msgs = await self.redis.xreadgroup(
-                    GROUP, self.consumer,
-                    {HEALTH_STREAM: ">", SEC_STREAM: ">"}, count=10, block=1000,
-                )
-                for stream, entries in msgs or []:
-                    for msg_id, fields in entries:
-                        try:
-                            if stream == HEALTH_STREAM:
-                                await self._on_health(fields)
-                            else:
-                                await self._on_security(fields)
-                        finally:
-                            await self.redis.xack(stream, GROUP, msg_id)
-                await asyncio.sleep(0.05)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.debug(f"consume error: {e}")
+                baseline = json.loads(await self.redis.get(key_baseline(ns, wl)))
+                template = baseline["template"]
+            except (TypeError, ValueError, KeyError):   # missing or unreadable baseline
+                template = None
+            if not template:
+                return Decision.HUMAN, "escalated_no_baseline"
+            ops = [{"op": "replace", "path": "/spec/template", "value": template}]
+            if "replicas" in health.changed_fields:     # the drift scaled it (e.g. to 0): restore that too
+                ops.append({"op": "replace", "path": "/spec/replicas", "value": baseline.get("replicas", 1)})
+            return decision, await self.patch(ns, wl, ops)
+        except TimeoutError:
+            return decision, "failed:kube_timeout"
+        except ApiException as e:
+            return decision, f"failed:api_{e.status}_{e.reason}"
+
+    async def tier(self, ns: str) -> str | None:
+        """The namespace's TIER_LABEL (cached); None → the policy falls back to the name heuristic."""
+        now = time.monotonic()
+        if (hit := self.tiers.get(ns)) and hit[0] > now:
+            return hit[1]
+        try:
+            label = _labels(await self._kube(self.core.read_namespace(ns))).get(TIER_LABEL)
+        except (ApiException, TimeoutError) as e:
+            log.warning("tier lookup for namespace %s failed (%s); using its name", ns, getattr(e, "status", e))
+            return None
+        if label is not None and label not in TIERS:
+            log.warning("namespace %s has invalid %s=%r; using its name", ns, TIER_LABEL, label)
+            label = None
+        self.tiers[ns] = (now + TIER_TTL_S, label)
+        return label
+
+    async def _kube(self, coro):
+        return await asyncio.wait_for(coro, KUBE_TIMEOUT_S)
+
+    async def _deployment(self, ns: str, wl: str):
+        try:
+            return await self._kube(self.apps.read_namespaced_deployment(wl, ns))
+        except ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
+    async def kill(self, ns: str, wl: str, pod_name: str) -> str:
+        try:
+            pod = await self._kube(self.core.read_namespaced_pod(pod_name, ns))
+        except ApiException as e:
+            if e.status == 404:
+                return "pod_already_gone"
+            raise
+        if "true" in (_labels(pod).get(PROTECTED_LABEL), _labels(await self._deployment(ns, wl)).get(PROTECTED_LABEL)):
+            return "skipped_protected"
+        if self.mode != "enforce":
+            return "would_kill"
+        async with incident_lock(self.redis, key_lock(ns, wl)) as held:
+            if not held:
+                return "skipped_locked"
+            if not await circuit_allows(self.redis, key_circuit("kill", ns, wl), self.max_kills):
+                return "skipped_circuit_open"
+            try:
+                await self._kube(self.core.patch_namespaced_pod(
+                    pod_name, ns, {"metadata": {"labels": {QUARANTINE_LABEL: "true"}}}))
+                try:
+                    await self._kube(self.net.create_namespaced_network_policy(ns, quarantine_policy(pod)))
+                except ApiException as e:
+                    if e.status != 409:   # 409: policy from an earlier attempt already exists
+                        raise
+                await self._kube(self.core.delete_namespaced_pod(pod_name, ns, grace_period_seconds=0))
+            except ApiException as e:
+                if e.status == 404:
+                    return "pod_already_gone"
+                raise
+        return "pod_killed"
+
+    async def patch(self, ns: str, wl: str, ops: list[dict]) -> str:
+        dep = await self._deployment(ns, wl)
+        if dep is None:
+            return "workload_gone"
+        if _labels(dep).get(PROTECTED_LABEL) == "true":
+            return "skipped_protected"
+        if self.mode != "enforce":
+            return "would_patch"
+        async with incident_lock(self.redis, key_lock(ns, wl)) as held:
+            if not held:
+                return "skipped_locked"
+            if not await circuit_allows(self.redis, key_circuit("patch", ns, wl), self.max_patches):
+                return "skipped_circuit_open"
+            try:
+                await self._kube(self.apps.patch_namespaced_deployment(
+                    wl, ns, ops, _content_type="application/json-patch+json"))
+            except ApiException as e:
+                if e.status == 404:
+                    return "workload_gone"
+                raise
+        return "patched"
+
+    # ── process ─────────────────────────────────────────────────────────────
+    def alive(self) -> bool:
+        return time.monotonic() - self.last_poll < LIVENESS_STALE_S
+
+    async def run(self) -> None:
+        await self.ensure_groups()
+        log.info("fusion started mode=%s consumer=%s protected=%s", self.mode, self.consumer, sorted(self.protected))
+        while True:
+            try:
+                await self.poll_once()
+            except aioredis.ResponseError as e:
+                if "NOGROUP" not in str(e):
+                    raise
+                # Redis restarted (no persistence) or the streams were deleted: recreate, keep consuming.
+                log.warning("consumer group missing (%s); recreating", e)
+                await self.ensure_groups()
+            except aioredis.RedisError:
+                log.exception("redis error in consumer loop; retrying in 1 s")
                 await asyncio.sleep(1)
 
-    def _key(self, fields: Dict) -> str:
-        return f"{fields.get('namespace','default')}:{fields.get('pod_name','unknown')}"
 
-    def _fresh(self, entry) -> Optional[Dict]:
-        """Return the paired event only if it arrived within the correlation
-        window — otherwise it's an independent event, not a compound one."""
-        if not entry:
-            return None
-        fields, ts = entry
-        return fields if (time.monotonic() - ts) <= self.CORRELATION_WINDOW_S else None
-
-    def _prune(self):
-        now = time.monotonic()
-        for d in (self.pending_health, self.pending_sec):
-            for k in [k for k, (_, ts) in d.items() if now - ts > self.CORRELATION_WINDOW_S]:
-                d.pop(k, None)
-
-    async def _on_health(self, f: Dict):
-        key = self._key(f)
-        self.pending_health[key] = (f, time.monotonic())
-        sec = self._fresh(self.pending_sec.get(key))
-        await self._decide(key, f, sec)
-        self._prune()
-
-    async def _on_security(self, f: Dict):
-        key = self._key(f)
-        self.pending_sec[key] = (f, time.monotonic())
-        health = self._fresh(self.pending_health.get(key))
-        await self._decide(key, health, f)
-        self._prune()
-
-    async def _decide(self, key: str, health: Optional[Dict], sec: Optional[Dict]):
-        namespace = key.split(":")[0]
-        pod = key.split(":", 1)[1]
-        health = health or {}
-        sec = sec or {}
-
-        health_risk = float(health.get("health_risk", 0) or 0)
-        sec_risk = float(sec.get("sec_risk", 0) or 0)
-
-        # ── DCM correlation (only when both signals present) ──
-        correlation, compound, causal_chain, nl = 0.0, False, [], None
-        h_emb = _b64_to_vec(health.get("health_embedding_b64", ""))
-        s_emb = _b64_to_vec(sec.get("security_embedding_b64", ""))
-        if h_emb and s_emb:
-            corr = await self._call_dcm(h_emb, s_emb, health, sec)
-            correlation = corr.get("correlation_score", 0.0)
-            compound = corr.get("compound_flag", False)
-            causal_chain = corr.get("causal_chain", [])
-            nl = corr.get("nl_summary")
-            await self._publish_dcm(namespace, pod, corr, health, sec)
-
-        inp = DecisionInput(
-            health_risk=health_risk,
-            health_label=health.get("health_label", "benign"),
-            health_ci_width=float(health.get("health_ci_width", 0) or 0),
-            health_field_top=health.get("top_field", ""),
-            sec_risk=sec_risk,
-            sec_label=sec.get("sec_label", "benign"),
-            sec_ci_width=float(sec.get("sec_ci_width", 0) or 0),
-            sec_syscall_top=sec.get("top_syscall", ""),
-            correlation_score=correlation,
-            compound_flag=compound,
-            namespace_tier=(health.get("namespace_tier") or sec.get("namespace_tier") or "staging"),
-            circuit_breaker_kills=await self._cb_count(f"kubeheal:cb:kill:{namespace}"),
-            circuit_breaker_patches=await self._cb_count(f"kubeheal:cb:patch:{namespace}:{pod}"),
-            burn_in_mode=self.burn_in,
-            nl_summary=nl,
-        )
-        out = make_decision(inp)
-
-        if out.requires_incident_lock:
-            async with acquire_incident_lock(self.redis, namespace, pod) as got:
-                if not got:
-                    logger.debug(f"lock held for {key}; skipping")
-                    return
-                await self._execute(namespace, pod, out, inp, causal_chain)
-        else:
-            await self._execute(namespace, pod, out, inp, causal_chain)
-        # Note: pending entries are NOT popped here — they're kept for the
-        # correlation window so a partner event arriving within 30s can still
-        # form a compound incident. _prune() expires them; the incident lock +
-        # circuit breakers prevent duplicate actions on the same pod.
-
-    async def _execute(self, namespace, pod, out, inp, causal_chain):
-        logger.info(f"DECISION {out.decision.value} {namespace}/{pod} "
-                    f"score={out.adjusted_score:.2f} :: {out.rationale}")
-        outcome = "logged"
-        if out.decision == Decision.AUTO_KILL:
-            await self._cb_incr(f"kubeheal:cb:kill:{namespace}")
-            outcome = await self._execute_kill(namespace, pod)
-        elif out.decision == Decision.AUTO_PATCH:
-            await self._cb_incr(f"kubeheal:cb:patch:{namespace}:{pod}")
-            outcome = await self._execute_patch(namespace, pod, inp.health_field_top)
-        await self.redis.xadd(ACTIONS_STREAM, {
-            "action_type": out.decision.value,
-            "target": json.dumps({"namespace": namespace, "pod": pod}),
-            "confidence": f"{out.adjusted_score:.4f}",
-            "rationale": out.rationale,
-            "compound": str(out.action_params.get("compound", False)),
-            "nl_summary": out.action_params.get("nl_summary") or "",
-            "causal_chain": json.dumps(causal_chain),
-            "outcome": outcome,
-            "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
-        })
-
-    async def _execute_kill(self, namespace: str, pod: str) -> str:
-        """AUTO-KILL: quarantine the namespace (egress NetworkPolicy) then
-        delete the offending pod immediately."""
-        if not self.core_api:
-            logger.warning("No kube client — kill is dry-run")
-            return "dry_run_no_kube"
-        # 1) egress quarantine so any C2 channel is cut before the kill
-        np = {
-            "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
-            "metadata": {"name": "kubeheal-quarantine"},
-            "spec": {"podSelector": {}, "policyTypes": ["Egress"],
-                     "egress": [{"to": [{"podSelector": {}}]}]},
-        }
-        try:
-            await self.networking_api.create_namespaced_network_policy(namespace, np)
-        except Exception as e:
-            if "already exists" not in str(e).lower() and "conflict" not in str(e).lower():
-                logger.debug(f"quarantine policy: {e}")
-        # 2) delete the pod (grace 0 = immediate)
-        try:
-            await self.core_api.delete_namespaced_pod(
-                pod, namespace, grace_period_seconds=0)
-            logger.warning(f"AUTO-KILL: deleted pod {namespace}/{pod}")
-            return "pod_killed+quarantined"
-        except Exception as e:
-            logger.error(f"AUTO-KILL failed for {namespace}/{pod}: {e}")
-            return f"kill_failed:{e}"
-
-    async def _execute_patch(self, namespace: str, pod: str, top_field: str) -> str:
-        """AUTO-PATCH: restore the highest-attribution field to its recorded
-        baseline. Baseline spec is stored by the Health Agent in Redis."""
-        if not self.apps_api:
-            logger.warning("No kube client — patch is dry-run")
-            return "dry_run_no_kube"
-        # owning Deployment name = pod_name minus the replicaset/pod hash suffixes
-        dep = "-".join(pod.split("-")[:-2]) if pod.count("-") >= 2 else pod
-        baseline_raw = await self.redis.get(f"kubeheal:baseline:{namespace}:{dep}")
-        if not baseline_raw:
-            logger.info(f"No baseline for {namespace}/{dep}; escalating patch to human")
-            return "no_baseline_escalated"
-        try:
-            baseline = json.loads(baseline_raw)
-            # restore full template spec to the recorded golden baseline (canary-safe:
-            # K8s rolls the Deployment; readiness probes gate the rollout)
-            body = {"spec": {"template": baseline.get("template", baseline)}}
-            await self.apps_api.patch_namespaced_deployment(dep, namespace, body)
-            logger.info(f"AUTO-PATCH: restored {namespace}/{dep} to baseline")
-            return "patched_to_baseline"
-        except Exception as e:
-            logger.error(f"AUTO-PATCH failed for {namespace}/{dep}: {e}")
-            return f"patch_failed:{e}"
-
-    async def _call_dcm(self, h_emb, s_emb, health, sec) -> Dict:
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(f"{self.dcm_url}/dcm/correlate", json={
-                    "health_embedding": h_emb, "security_embedding": s_emb,
-                    "health_assessment": health, "security_event": sec,
-                    "want_nl_summary": True,
-                }, timeout=aiohttp.ClientTimeout(total=5)) as r:
-                    if r.status == 200:
-                        return await r.json()
-        except Exception as e:
-            logger.debug(f"DCM call failed: {e}")
-        return {"correlation_score": 0.0, "compound_flag": False, "causal_chain": []}
-
-    async def _publish_dcm(self, namespace, pod, corr, health, sec):
-        await self.redis.xadd(DCM_STREAM, {
-            "namespace": namespace, "pod_name": pod,
-            "correlation_score": f"{corr.get('correlation_score',0):.4f}",
-            "compound_flag": str(corr.get("compound_flag", False)),
-            "causal_chain_json": json.dumps(corr.get("causal_chain", [])),
-            "correlation_confidence": f"{corr.get('correlation_confidence',0):.4f}",
-            "nl_summary": corr.get("nl_summary") or "",
-            "health_event_id": health.get("event_id", ""),
-            "security_event_id": sec.get("event_id", ""),
-            "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
-        })
-
-    async def _cb_count(self, key: str) -> int:
-        v = await self.redis.get(key)
-        return int(v) if v else 0
-
-    async def _cb_incr(self, key: str):
-        c = await self.redis.incr(key)
-        if c == 1:
-            await self.redis.expire(key, 3600)
-
-
-async def main():
-    agent = FusionAgentV4()
+async def main() -> None:
+    setup_logging()
+    mode = os.environ.get("KUBEHEAL_MODE", "observe").strip().lower()
+    if mode not in ("observe", "enforce"):
+        log.warning("unknown KUBEHEAL_MODE=%r; using observe", mode)
+        mode = "observe"
+    await load_kube_config()
+    api = client.ApiClient()
+    redis = await connect_redis()
+    agent = FusionAgent(
+        redis, client.CoreV1Api(api), client.AppsV1Api(api), client.NetworkingV1Api(api), mode=mode,
+        protected=protected_namespaces(),
+        max_kills=int(os.environ.get("MAX_KILLS_PER_HOUR", "3")),
+        max_patches=int(os.environ.get("MAX_PATCHES_PER_HOUR", "5")),
+        consumer=os.environ.get("HOSTNAME") or socket.gethostname(),
+    )
+    runner = await start_http(agent.alive)
     try:
-        await agent.start()
-    except KeyboardInterrupt:
-        pass
+        await agent.run()
     finally:
-        await agent.stop()
+        await runner.cleanup()
+        await redis.aclose()
+        await api.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run(main)

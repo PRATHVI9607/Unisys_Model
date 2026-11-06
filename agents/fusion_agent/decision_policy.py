@@ -1,138 +1,96 @@
-"""
-Fusion Agent v4 — Three-Signal Decision Policy (PRD Section 07)
-===============================================================
-Pure function: (health_risk, sec_risk, correlation_score, context) → Decision.
-No side effects, no I/O — fully testable and auditable. Single source of truth
-for every KubeHeal action.
+"""Fusion decision policy (docs/architecture.md, "Decision policy"). Pure: no I/O, no env.
+
+Every threshold is a module constant; change them here and in
+tests/test_decision_policy.py together.
 """
 
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Optional
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from kubeheal.contracts import POLICY_REASON_PREFIX, Decision, HealthEvent, SecurityEvent, namespace_tier
+
+TIER_MULTIPLIER = {"prod": 1.2, "staging": 1.0, "dev": 0.7}
+COMPOUND_MULTIPLIER = 1.15
+KILL_MIN_SCORE = 0.85
+KILL_LABELS = frozenset({"ransomware", "exfiltration"})
+PATCH_MIN_SCORE = 0.85
+PATCH_MAX_SECURITY_RISK = 0.4
+HUMAN_MIN_SCORE = 0.65
+UNCERTAIN_HUMAN_MIN_SCORE = 0.4
+OBSERVE_MIN_SCORE = 0.4
 
 
-class Decision(Enum):
-    AUTO_KILL = "auto_kill"
-    AUTO_PATCH = "auto_patch"
-    HUMAN_KILL = "human_kill"
-    HUMAN_PATCH = "human_patch"
-    OBSERVE = "observe"
-    BENIGN = "benign"
-
-
-@dataclass
-class DecisionInput:
-    health_risk: float = 0.0
-    health_label: str = "benign"
-    health_ci_width: float = 0.0
-    health_field_top: str = ""
-
-    sec_risk: float = 0.0
-    sec_label: str = "benign"
-    sec_ci_width: float = 0.0
-    sec_syscall_top: str = ""
-
-    correlation_score: float = 0.0
-    compound_flag: bool = False
-
-    namespace_tier: str = "staging"
-    circuit_breaker_kills: int = 0
-    circuit_breaker_patches: int = 0
-
-    burn_in_mode: bool = False
-    nl_summary: Optional[str] = None
-
-
-@dataclass
-class DecisionOutput:
+@dataclass(frozen=True)
+class PolicyResult:
     decision: Decision
-    adjusted_score: float
+    score: float          # adjusted score that drove the decision, ≤ 1.0
     rationale: str
-    requires_incident_lock: bool
-    action_params: dict = field(default_factory=dict)
 
 
-TIER_MULTIPLIERS = {"prod": 1.20, "staging": 1.00, "dev": 0.70}
-COMPOUND_ESCALATION = 1.15
-CB_KILL_LIMIT_PER_HOUR = 3
-CB_PATCH_LIMIT_PER_HOUR = 10
+def adjusted_score(risk: float, namespace: str, compound: bool, tier: str | None = None) -> float:
+    mult = TIER_MULTIPLIER[tier or namespace_tier(namespace)] * (COMPOUND_MULTIPLIER if compound else 1.0)
+    return min(1.0, risk * mult)
 
 
-class Thresholds:
-    RANSOMWARE_DIRECT_KILL = 0.98
-    AUTO_KILL = 0.85
-    AUTO_PATCH = 0.85
-    HUMAN_APPROVAL = 0.65
-    OBSERVE = 0.40
-    BURN_IN_AUTO_KILL = 0.95
-    BURN_IN_AUTO_PATCH = 0.90
+def _describe(kind: str, ev, adj: float) -> str:
+    flags = " uncertain" if ev.uncertain else ""
+    if isinstance(ev, HealthEvent) and not ev.has_baseline:
+        flags += " no-baseline"
+    return f"{kind} {ev.label} risk {ev.risk:.2f} adj {adj:.2f}{flags}"
 
 
-def make_decision(inp: DecisionInput) -> DecisionOutput:
-    t = Thresholds()
-    tier_mult = TIER_MULTIPLIERS.get(inp.namespace_tier, 1.00)
+def decide(health: HealthEvent | None, security: SecurityEvent | None, compound: bool = False,
+           tier: str | None = None) -> PolicyResult:
+    """Decide on one event, or on a health+security pair of the same workload.
 
-    health_adjusted = inp.health_risk * tier_mult
-    sec_adjusted = inp.sec_risk * tier_mult
+    tier: the namespace's tier when the caller knows it (namespace label); default: from the name.
+    """
+    if health is None and security is None:
+        raise ValueError("decide() needs at least one event")
+    ns = (health or security).namespace
+    tier = tier or namespace_tier(ns)
+    h_adj = adjusted_score(health.risk, ns, compound, tier) if health else 0.0
+    s_adj = adjusted_score(security.risk, ns, compound, tier) if security else 0.0
+    score = max(h_adj, s_adj)
+    uncertain = any(e.uncertain for e in (health, security) if e is not None)
 
-    if inp.compound_flag:
-        health_adjusted *= COMPOUND_ESCALATION
-        sec_adjusted *= COMPOUND_ESCALATION
+    signals = [_describe(k, e, a) for k, e, a in (("security", security, s_adj), ("health", health, h_adj)) if e]
+    context = f"{'; '.join(signals)}; tier {tier} x{TIER_MULTIPLIER[tier]}"
+    if compound:
+        context += f", compound x{COMPOUND_MULTIPLIER}"
 
-    auto_kill_t = t.BURN_IN_AUTO_KILL if inp.burn_in_mode else t.AUTO_KILL
-    auto_patch_t = t.BURN_IN_AUTO_PATCH if inp.burn_in_mode else t.AUTO_PATCH
+    def result(decision: Decision, s: float, why: str) -> PolicyResult:
+        return PolicyResult(decision, round(s, 4), f"{decision.value}: {why} ({context})")
 
-    ci_uncertain = (inp.health_ci_width > 0.15 or inp.sec_ci_width > 0.15)
-    params = {"nl_summary": inp.nl_summary}
-
-    # ── COMPOUND INCIDENT ───────────────────────────────────
-    if inp.compound_flag and sec_adjusted >= auto_kill_t:
-        if ci_uncertain:
-            return DecisionOutput(Decision.HUMAN_KILL, sec_adjusted,
-                f"Compound incident but CI too wide (health_ci={inp.health_ci_width:.2f}, "
-                f"sec_ci={inp.sec_ci_width:.2f}). Human approval required.", True, params)
-        if inp.circuit_breaker_kills >= CB_KILL_LIMIT_PER_HOUR:
-            return DecisionOutput(Decision.HUMAN_KILL, sec_adjusted,
-                f"Compound incident. Circuit breaker: {inp.circuit_breaker_kills} kills this "
-                f"hour, limit {CB_KILL_LIMIT_PER_HOUR}. Human approval required.", True, params)
-        return DecisionOutput(Decision.AUTO_KILL, sec_adjusted,
-            f"Compound incident (DCM corr={inp.correlation_score:.2f}): "
-            f"sec_risk={inp.sec_risk:.2f}, health_risk={inp.health_risk:.2f}. "
-            f"Tier={inp.namespace_tier}. AUTO-KILL.", True,
-            {"compound": True, "nl_summary": inp.nl_summary})
-
-    # ── SECURITY-ONLY ───────────────────────────────────────
-    if sec_adjusted >= auto_kill_t and not inp.compound_flag:
-        if ci_uncertain or inp.circuit_breaker_kills >= CB_KILL_LIMIT_PER_HOUR:
-            return DecisionOutput(Decision.HUMAN_KILL, sec_adjusted,
-                "Security incident. CI uncertainty or CB limit. Human approval.", True, params)
-        return DecisionOutput(Decision.AUTO_KILL, sec_adjusted,
-            f"Security incident. sec_risk={inp.sec_risk:.2f}, label={inp.sec_label}. AUTO-KILL.",
-            True, {"compound": False, "nl_summary": inp.nl_summary})
-
-    # ── HEALTH-ONLY (security calm) ─────────────────────────
-    if health_adjusted >= auto_patch_t and inp.sec_risk < 0.4:
-        if ci_uncertain or inp.circuit_breaker_patches >= CB_PATCH_LIMIT_PER_HOUR:
-            return DecisionOutput(Decision.HUMAN_PATCH, health_adjusted,
-                "Health incident. CI uncertainty or CB limit. Human approval.", True, params)
-        return DecisionOutput(Decision.AUTO_PATCH, health_adjusted,
-            f"Health incident. health_risk={inp.health_risk:.2f}, "
-            f"top_field={inp.health_field_top}. AUTO-PATCH.", True,
-            {"patch_field": inp.health_field_top, "nl_summary": inp.nl_summary})
-
-    # ── HUMAN APPROVAL ZONE ─────────────────────────────────
-    if max(health_adjusted, sec_adjusted) >= t.HUMAN_APPROVAL:
-        dec = Decision.HUMAN_PATCH if health_adjusted > sec_adjusted else Decision.HUMAN_KILL
-        return DecisionOutput(dec, max(health_adjusted, sec_adjusted),
-            f"Medium confidence. health_adj={health_adjusted:.2f}, "
-            f"sec_adj={sec_adjusted:.2f}. Human approval.", False, params)
-
-    # ── OBSERVE ─────────────────────────────────────────────
-    if max(health_adjusted, sec_adjusted) >= t.OBSERVE:
-        return DecisionOutput(Decision.OBSERVE, max(health_adjusted, sec_adjusted),
-            f"Low signal. Increasing monitoring x3. health_adj={health_adjusted:.2f}, "
-            f"sec_adj={sec_adjusted:.2f}.", False, {})
-
-    # ── BENIGN ──────────────────────────────────────────────
-    return DecisionOutput(Decision.BENIGN, max(health_adjusted, sec_adjusted),
-        "Benign signal. XACK and continue.", False, {})
+    if security and s_adj >= KILL_MIN_SCORE and security.label in KILL_LABELS and not security.uncertain:
+        return result(Decision.AUTO_KILL, s_adj,
+                      f"certain {security.label} with security adj {s_adj:.2f} >= {KILL_MIN_SCORE}")
+    sec_risk = security.risk if security else 0.0
+    # Kubernetes itself says the new spec cannot run, or the spec newly weakens security posture:
+    # roll back in every tier, whatever the model's certainty.
+    if (health and health.failure_reasons and health.spec_changed and health.has_baseline
+            and sec_risk < PATCH_MAX_SECURITY_RISK):
+        policy = [r.removeprefix(POLICY_REASON_PREFIX) for r in health.failure_reasons
+                  if r.startswith(POLICY_REASON_PREFIX)]
+        failed = [r for r in health.failure_reasons if not r.startswith(POLICY_REASON_PREFIX)]
+        why = [f"{kind} ({', '.join(rs)})" for kind, rs in (("failed rollout", failed), ("policy violation", policy))
+               if rs]
+        return result(Decision.AUTO_PATCH, h_adj,
+                      f"rule: {' + '.join(why)}, "
+                      f"security risk {sec_risk:.2f} < {PATCH_MAX_SECURITY_RISK}, baseline available")
+    if (health and h_adj >= PATCH_MIN_SCORE and health.label != "benign" and not health.uncertain
+            and sec_risk < PATCH_MAX_SECURITY_RISK and health.has_baseline):
+        return result(Decision.AUTO_PATCH, h_adj,
+                      f"certain {health.label} drift with health adj {h_adj:.2f} >= {PATCH_MIN_SCORE}, "
+                      f"security risk {sec_risk:.2f} < {PATCH_MAX_SECURITY_RISK}, baseline available")
+    if score >= HUMAN_MIN_SCORE:
+        return result(Decision.HUMAN, score,
+                      f"max adj {score:.2f} >= {HUMAN_MIN_SCORE} but automatic-action conditions not met")
+    if uncertain and score >= UNCERTAIN_HUMAN_MIN_SCORE:
+        return result(Decision.HUMAN, score,
+                      f"model uncertain (conformal set is not one label) with max adj {score:.2f} "
+                      f">= {UNCERTAIN_HUMAN_MIN_SCORE}")
+    if score >= OBSERVE_MIN_SCORE:
+        return result(Decision.OBSERVE, score, f"max adj {score:.2f} >= {OBSERVE_MIN_SCORE}")
+    return result(Decision.BENIGN, score, f"max adj {score:.2f} < {OBSERVE_MIN_SCORE}")
