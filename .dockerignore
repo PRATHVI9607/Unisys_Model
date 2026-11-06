@@ -1,40 +1,20 @@
-# Git
+# Build context excludes — keep images small and builds deterministic.
 .git
 .gitignore
+.venv
+.codegraph
+.claude
+.github
+.mcp.json
+.ruff_cache
 
-# Python
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
-.Python
-venv/
-.venv/
-env/
-.env/
 *.egg-info/
-*.egg
-dist/
-build/
-*.whl
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.mypy_cache/
+# Tests, docs, assets — never needed in a runtime image.
 tests/
-
-# Docs / assets (never needed in an image)
 docs/
 *.md
 *.docx
@@ -42,18 +22,10 @@ docs/
 *.jpg
 Screenshot*
 
-# Logs
-*.log
-
-# Archived v3 code (30M) — not part of v4 images
-models/_archive_v3/
-
-# Training data (only needed at train time, not at serve time)
+# Training data (only needed at train time).
+training/data/
 data/
 *.csv
 *.jsonl
 
-# Large legacy model binaries at models/ root (checkpoints under
-# models/*/checkpoints/ ARE kept so images are shareable/self-contained)
-models/*.pt
-models/*.onnx
+*.log

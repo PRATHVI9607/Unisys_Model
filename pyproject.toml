@@ -1,0 +1,68 @@
+[project]
+name = "kubeheal"
+version = "5.0.0"
+description = "Autonomous configuration-drift and ransomware remediation for Kubernetes"
+requires-python = ">=3.13"
+# Core: the shared contract + feature code every component imports.
+dependencies = [
+    "pydantic>=2.10",
+    "numpy>=2.2",
+]
+
+[project.optional-dependencies]
+# One extra per container image; Dockerfiles install exactly one of these.
+inference = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "lightgbm>=4.6",
+    "prometheus-client>=0.21",
+]
+agents = [
+    "redis>=5.2",
+    "aiohttp>=3.11",
+    "kubernetes-asyncio>=32.0",
+    "prometheus-client>=0.21",
+    "orjson>=3.13.0",
+]
+dashboard = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",   # [standard] brings websockets for /ws
+    "redis>=5.2",
+]
+training = [
+    "lightgbm>=4.6",
+    "scikit-learn>=1.6",          # metrics + grouped splits only
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "httpx>=0.28",
+    "fakeredis>=2.26",
+    "ruff>=0.9",
+]
+
+[tool.uv]
+package = false                   # run from the repo root: `uv run python -m agents.fusion_agent.agent`
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q -p no:cacheprovider"
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+extend-exclude = [".codegraph"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "S"]
+ignore = ["E501", "S101", "S104", "S311"]   # asserts in tests, 0.0.0.0 bind in containers, non-crypto random
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S"]
+"training/*" = ["S"]
