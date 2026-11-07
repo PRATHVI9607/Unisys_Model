@@ -343,7 +343,10 @@ def observe_pods(pods: list[dict], before: dict[str, int], obs: dict) -> None:
             st, last = cs.get("state") or {}, cs.get("lastState") or {}
             if (reason := (st.get("waiting") or {}).get("reason")) in BAD_WAITING:
                 obs["waiting"].add(reason)
-            if "OOMKilled" in ((st.get("terminated") or {}).get("reason"), (last.get("terminated") or {}).get("reason")):
+            grew = cs.get("restartCount", 0) > before.get(uid, 0)
+            # only kills since t0: a pod already there counts once its restartCount moved past the baseline
+            if (uid not in before or grew) and "OOMKilled" in (
+                    (st.get("terminated") or {}).get("reason"), (last.get("terminated") or {}).get("reason")):
                 obs["oom"] = True
             obs["restarts"] = max(obs["restarts"], cs.get("restartCount", 0) - before.get(uid, 0))
 
@@ -433,7 +436,7 @@ class DriftLab:
         end = t0 + ASSESS_DELAY_S + SYNC_GRACE_S
         while True:
             observe_pods(await self.pods(name), before, obs)
-            if time.time() >= t0 + ASSESS_DELAY_S and await self.agent_spec_hash(name) == want:
+            if await self.agent_spec_hash(name) == want:      # the agent may assess early on hard evidence
                 break
             if time.time() > end:
                 raise RuntimeError(f"{name}: health agent did not assess the change within {end - t0:.0f}s")
@@ -453,12 +456,12 @@ class DriftLab:
 
     async def change(self, name: str, spec: dict, ops: list[dict], meta: dict) -> dict | None:
         """Apply spec, observe, and write the labelled record if the agent published an event."""
-        before = {p["metadata"]["uid"]: max([cs.get("restartCount", 0) for cs in (p.get("status") or {})
-                                             .get("containerStatuses") or []] or [0]) for p in await self.pods(name)}
         if (wait := settle_wait_s((await self.read_spec(name))[0], time.time())) > 0:
             await asyncio.sleep(wait)
         pre = await self.pre_p99(name, time.time())
-        t0 = time.time()
+        before = {p["metadata"]["uid"]: max([cs.get("restartCount", 0) for cs in (p.get("status") or {})
+                                             .get("containerStatuses") or []] or [0]) for p in await self.pods(name)}
+        t0 = time.time()   # baseline taken after the settle wait, right before the change
         want = await self.set_spec(name, spec)
         obs, ev = await self.observe(name, t0, want, before)
         if ev is None:
@@ -469,7 +472,9 @@ class DriftLab:
                "label_reasons": reasons, "features": ev.features, "changed_fields": ev.changed_fields,
                "agent": {"label": ev.label, "risk": ev.risk, "uncertain": ev.uncertain,
                          "model_version": ev.model_version},
-               "obs": obs, "pre_p99_s": pre, "t_change_ms": int(t0 * 1000), "t_event_ms": ev.timestamp_ms}
+               "obs": obs, "pre_p99_s": pre, "t_change_ms": int(t0 * 1000), "t_event_ms": ev.timestamp_ms,
+               # the agent assesses at <= ASSESS_DELAY_S (earlier on hard evidence); legacy records are ~120
+               "assess_delay_s": round(ev.timestamp_ms / 1000 - t0, 1)}
         self.out.write(rec)
         log.info("%s %-40s -> %-11s %s (agent: %s %.2f)", name, meta["scenario"][:40], label, reasons,
                  ev.label, ev.risk)

@@ -23,6 +23,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -n "$HOURS" ]] || { echo "--hours is required" >&2; exit 2; }
+[[ $HEALTH_SLOTS -gt 0 || $SECURITY_SLOTS -gt 0 ]] || { echo "nothing to collect: both slot counts are 0" >&2; exit 2; }
+# Lab only: this script rewrites deployments and deletes namespaces. Override with KUBEHEAL_LAB_CONTEXT=<current context>.
+WANT_CTX="${KUBEHEAL_LAB_CONTEXT:-minikube}"
+CTX="$(kubectl config current-context)"
+[[ "$CTX" == "$WANT_CTX" ]] || { echo "refusing: kubectl context is '$CTX', expected '$WANT_CTX' (set KUBEHEAL_LAB_CONTEXT to override)" >&2; exit 2; }
 
 OUT="$ROOT/training/data/collected"
 mkdir -p "$OUT"
@@ -34,10 +39,11 @@ PIDS=() PF=() CLEANED=0
 cleanup() {
   [[ $CLEANED == 1 ]] && return
   CLEANED=1
+  trap '' INT TERM   # a second signal must not interrupt the restore
   set +e
   log "cleanup: stopping collectors, restoring capture=0"
   for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done
-  wait "${PIDS[@]}" 2>/dev/null
+  [[ ${#PIDS[@]} -gt 0 ]] && wait "${PIDS[@]}" 2>/dev/null   # bare `wait` would block on the forward loops
   kubectl delete namespace "$LAB_NS" --wait=false --ignore-not-found
   kubectl -n kubeheal set env "$DS" KUBEHEAL_CAPTURE=0 && kubectl -n kubeheal rollout status "$DS" --timeout=300s
   [[ "$(kubectl -n kubeheal get "$DS" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="KUBEHEAL_CAPTURE")].value}')" == 0 ]] \
@@ -88,7 +94,6 @@ fi
 if [[ $SECURITY_SLOTS -gt 0 ]]; then
   uv run --all-extras python -m training.collect.security_lab --hours "$HOURS" --slots "$SECURITY_SLOTS" >>"$OUT/security.log" 2>&1 & PIDS+=($!)
 fi
-[[ ${#PIDS[@]} -gt 0 ]] || { echo "nothing to collect: both slot counts are 0" >&2; exit 2; }
 
 # Resource log (node, Prometheus, Redis, Falco events file + queue drops) once a minute while collecting.
 resources() {

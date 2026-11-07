@@ -37,6 +37,16 @@ def test_observe_pods_counts_restarts_since_t0_and_bad_waits():
     assert obs == {"waiting": {"CrashLoopBackOff"}, "oom": True, "restarts": 2}
 
 
+def test_observe_pods_ignores_oom_that_predates_t0():
+    old = {"metadata": {"uid": "a"}, "status": {"containerStatuses": [
+        {"restartCount": 2, "state": {}, "lastState": {"terminated": {"reason": "OOMKilled"}}}]}}
+    obs = {"waiting": set(), "oom": False, "restarts": 0}
+    drift_lab.observe_pods([old], {"a": 2}, obs)             # same restartCount as the baseline: older OOM
+    assert not obs["oom"]
+    drift_lab.observe_pods([{**old, "metadata": {"uid": "new"}}], {"a": 2}, obs)   # pod created after t0
+    assert obs["oom"]
+
+
 def test_pick_ops_always_changes_the_base():
     import random
     base = drift_lab.canonical_spec(drift_lab.deployment("lab-00", drift_lab.variant(random.Random(1))))
@@ -72,3 +82,28 @@ def test_absolute_limit_targets_and_requests_clamped():
     r = random.Random(0)
     assert {drift_lab.FAMILIES["cpu_throttle"](r)["m"] for _ in range(200)} <= {5, 8, 10, 12, 15, 18, 22}
     assert {drift_lab.FAMILIES["mem_pressure"](r)["mi"] for _ in range(200)} <= {30, 32, 34}
+
+
+async def test_change_record_carries_the_agents_assess_delay(monkeypatch):
+    from types import SimpleNamespace
+    ev = SimpleNamespace(event_id="e", features={}, changed_fields=[], label="benign", risk=0.1, uncertain=False,
+                         model_version="v", timestamp_ms=1_000_000 + 4_000)
+    lab = drift_lab.DriftLab.__new__(drift_lab.DriftLab)
+    recs = []
+    lab.out = SimpleNamespace(write=recs.append)
+
+    async def ret(v):
+        return v
+    lab.pods = lambda name: ret([])
+    lab.read_spec = lambda name: ret(({}, {}))
+    lab.set_spec = lambda name, spec: ret("h")
+    lab.pre_p99 = lambda name, t: ret(None)
+    lab.observe = lambda *a: _obs(ev)
+    monkeypatch.setattr(drift_lab, "settle_wait_s", lambda *_: 0)
+    monkeypatch.setattr(drift_lab.time, "time", lambda: 1000.0)
+    rec = await lab.change("lab-00", {}, [], {"scenario": "s"})
+    assert rec["assess_delay_s"] == 4.0 and recs == [rec]
+
+
+async def _obs(ev):
+    return OK, ev

@@ -63,3 +63,33 @@ def test_caught_up_waits_for_the_lagging_agent(monkeypatch):
         assert lb.watermark_ms == 2_000
         await task
     asyncio.run(go())
+
+
+def test_read_capture_retries_dropped_connection_and_keeps_position(monkeypatch):
+    import asyncio
+
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    class FakeRedis:
+        def __init__(self):
+            self.calls = []
+
+        async def xread(self, streams, block, count):
+            self.calls.append(dict(streams))
+            if len(self.calls) == 1:
+                raise RedisConnectionError("port-forward dropped")
+            if len(self.calls) == 2:
+                return [(lab.STREAM_CAPTURE, [("5-0", window(1, 2).to_fields())])]
+            raise asyncio.CancelledError
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr(lab.asyncio, "sleep", no_sleep)
+    r = FakeRedis()
+    L = lab.Lab(type("A", (), {"seed": 0}), None, None, r, None)
+    try:
+        asyncio.run(L.read_capture())
+    except asyncio.CancelledError:
+        pass
+    assert [c[lab.STREAM_CAPTURE] for c in r.calls] == ["$", "$", "5-0"] and L.watermark_ms == 2

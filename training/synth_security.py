@@ -43,10 +43,13 @@ from kubeheal.features.security import (
     CAPTURED_GROUPS,
     MAX_ENTROPY_SAMPLES,
     MAX_WINDOW_EVENTS,
+    OPEN_SYSCALLS,
     SYSCALL_GROUPS,
     window_seconds,
 )
 
+_READ_CALLS = frozenset({"read", "pread", "pread64", "readv", "preadv", "preadv2"})
+_WRITE_CALLS = frozenset({"write", "pwrite", "pwrite64", "writev", "pwritev", "pwritev2"})
 CAPTURED = frozenset().union(*(SYSCALL_GROUPS[g] for g in CAPTURED_GROUPS))
 
 ROOTS = ["/data", "/var/lib/app", "/srv/files", "/home/app", "/mnt/volume", "/app/uploads", "/opt/svc/store",
@@ -80,6 +83,12 @@ class _W:
         self.net = 0.0
 
     def ev(self, syscall: str, path: str, new_path: str | None = None, n: int = 1) -> None:
+        # The live capture sees one open per file, not each read()/write(): n calls collapse to one open_r/open_w
+        # (n=0 stays "no read"), explicit opens are implied by those.
+        if syscall in OPEN_SYSCALLS:
+            return
+        if syscall in _READ_CALLS or syscall in _WRITE_CALLS:
+            syscall, n = "open_r" if syscall in _READ_CALLS else "open_w", min(n, 1)
         for _ in range(n):
             self.events.append({"syscall": syscall, "path": path} | ({"new_path": new_path} if new_path else {}))
 
@@ -112,10 +121,14 @@ def web_serve(w: _W, budget: int) -> None:
 
 def db_workload(w: _W, budget: int) -> None:
     files = [w.file([""], "/base/16384") for _ in range(int(w.rng.integers(2, 8)))]
+    opened = set()   # the capture emits one open_r/open_w per file per window, however many preads/pwrites follow
     while len(w.events) < budget:
         f = w.rng.choice(files)
-        w.ev(w.rng.choice(["pread64", "pwrite64", "mmap", "pread64", "fsync"]), f)
-        if w.events[-1]["syscall"] == "pwrite64":
+        sc = w.rng.choice(["pread64", "pwrite64", "mmap", "pread64", "fsync"])
+        if sc not in ("pread64", "pwrite64") or (f, sc) not in opened:
+            w.ev(sc, f)
+        opened.add((f, sc))
+        if sc == "pwrite64":
             w.wrote((8, 64))
             w.ent(STRUCT)
 
@@ -208,8 +221,7 @@ def _drop_binary(w: _W) -> None:
     dropped = f"/tmp/{w.rng.choice(['.', ''])}{w.rng.integers(1000, 99999)}{w.rng.choice(['', '.sh', '.bin'])}"
     w.ev("write", dropped)
     w.ev("chmod", dropped)
-    w.wrote((5, 500))
-    w.ent(BINARY)
+    w.wrote((5, 500))   # bytes count pod-wide; no entropy sample: /tmp is outside the scenario root, so no write is captured
 
 
 def _connect(w: _W) -> None:
@@ -373,12 +385,25 @@ def _window(rng: np.random.Generator, ctx: dict, gen, slow: bool) -> dict | None
     w = _W(rng, ctx)
     total = int(rng.integers(10, 513))
     noise = rng.uniform(0.5, 0.8) if slow else rng.uniform(0.0, 0.6)
-    gen(w, max(1, int(total * (1 - noise))))
-    for _ in range(max(0, total - len(w.events))):
+    budget = max(1, int(total * (1 - noise)))
+    if gen.__name__.startswith("ransomware") and rng.random() < 0.5:   # setup phase: low-entropy file creates, then the attack
+        for _ in range(int(budget * rng.uniform(0.2, 0.7))):
+            w.ev("write", w.file())
+            w.wrote()
+            w.ent(TEXT)
+        budget += len(w.events)
+    gen(w, budget)
+    scenario = w.events
+    w.events = []
+    for _ in range(max(0, total - len(scenario))):
         w.ev(str(rng.choice(BACKGROUND)), str(rng.choice(BG_PATHS)))
-    events = [w.events[i] for i in rng.permutation(len(w.events))]
+    # Background noise lands at random times, but the scenario keeps its order (setup, then attack): the agent's
+    # newest-64 recent_* features depend on it.
+    is_scenario = rng.permutation([True] * len(scenario) + [False] * len(w.events))
+    scen, bg = iter(scenario), iter(w.events)
+    events = [next(scen) if s else next(bg) for s in is_scenario]
     root = ctx["root"] + "/"
-    events = [e for e in events if e["syscall"] in CAPTURED and e["path"].startswith(root)][:MAX_WINDOW_EVENTS]
+    events = [e for e in events if e["syscall"] in CAPTURED and e["path"].startswith(root)][-MAX_WINDOW_EVENTS:]
     if not events:      # nothing the Falco rules would have emitted: the agent never sees this window
         return None
     # Event span; the agent also scores bursts early (BURST_EVENTS new events), so short spans occur too.

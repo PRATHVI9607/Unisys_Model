@@ -94,7 +94,8 @@ def family(task: str, rec: dict) -> str:
 
 def lab_rows(task: str, path: Path | None = None) -> list[dict]:
     return [{"features": r["features"], "label": r["label"], "group": f"lab:{r['group']}",
-             "family": family(task, r), "source": "lab"} for r in read(task, path)]
+             "family": family(task, r), "source": "lab",
+             "assess_delay_s": r.get("assess_delay_s")} for r in read(task, path)]
 
 
 def health_rows(legacy_csv: str | None = None) -> tuple[list[dict], dict]:
@@ -129,7 +130,8 @@ def security_rows(n_scenarios: int, seed: int) -> tuple[list[dict], dict]:
     return rows, {"sources": {"lab": _rel(source_path("security")),
                               "synthetic": f"training/synth_security.py n_scenarios={n_scenarios} seed={seed}"
                                            f" ({', '.join(SYNTH_ONLY)} only)"},
-                  "class_source": class_source, "synthetic": bool(synth)}
+                  "class_source": class_source, "synthetic": bool(synth),
+                  "synthetic_classes": list(SYNTH_ONLY), "synthetic_fraction": round(len(synth) / len(rows), 4)}
 
 
 # ── export ───────────────────────────────────────────────────────────────────

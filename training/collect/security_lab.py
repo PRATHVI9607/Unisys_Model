@@ -28,6 +28,8 @@ from datetime import datetime
 
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client.exceptions import ApiException
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from agents.security_agent.agent import WINDOW_S
 from kubeheal.contracts import STREAM_CAPTURE, SecurityEvent
@@ -48,6 +50,7 @@ log = logging.getLogger("kubeheal.lab.security")
 CHAOS_IMAGE = "kubeheal/chaos:v5"
 POD_DEADLINE_S = 420
 TRAILING_S = 15            # windows for the last seconds arrive after the pod exits (agent evaluates every 5 s)
+XREAD_RETRIES, XREAD_BACKOFF_S = 8, 2.0   # a dropped port-forward heals in seconds; ~8 min of backoff then fail loud
 CATCHUP_MAX_S = 600        # the agent lags behind real time when Falco is busy; wait at most this for it
 DETECTION_SHARE = 0.4      # fraction of pods running the detection-test workload
 SINK_NAME, SINK_PORT = "lab-sink", 9000   # in-cluster upload target for the backup_upload profile
@@ -231,11 +234,23 @@ class Lab:
         self.dropped = 0
         self.late = 0          # lab windows that arrived after their pod's sample was closed (lost)
         self.watermark_ms = 0  # newest window end the agent has captured (any pod): how far it has caught up
+        self.abort = False     # capture reader died: samples can no longer be labelled, slots stop
 
     async def read_capture(self) -> None:
-        last = "$"
+        last, failures = "$", 0
         while True:
-            for _, entries in await self.redis.xread({STREAM_CAPTURE: last}, block=2000, count=500) or []:
+            try:
+                batches = await self.redis.xread({STREAM_CAPTURE: last}, block=2000, count=500) or []
+                failures = 0
+            except (RedisConnectionError, RedisTimeoutError, ConnectionError, TimeoutError) as e:
+                failures += 1
+                if failures > XREAD_RETRIES:
+                    raise
+                delay = min(XREAD_BACKOFF_S * 2 ** (failures - 1), 120)
+                log.warning("capture read failed (%s); retry %d/%d in %.0fs", e, failures, XREAD_RETRIES, delay)
+                await asyncio.sleep(delay)
+                continue
+            for _, entries in batches:
                 for entry_id, fields in entries:
                     last = entry_id
                     try:
@@ -306,7 +321,7 @@ class Lab:
         return "Timeout"
 
     async def slot(self, until: float) -> None:
-        while time.monotonic() < until:
+        while time.monotonic() < until and not self.abort:
             await wait_for_memory(self.api, self.args.max_node_mem_gib * 2**30, "security slot")
             try:
                 await self.run_one()
@@ -325,6 +340,12 @@ async def run(args) -> None:
         out = Output("security")
         lab = Lab(args, core, api, redis, out)
         reader = asyncio.create_task(lab.read_capture())
+
+        def reader_done(t: asyncio.Task) -> None:
+            if not t.cancelled() and t.exception():
+                log.error("capture reader died, stopping the run: %r", t.exception())
+                lab.abort = True
+        reader.add_done_callback(reader_done)
         until = time.monotonic() + args.hours * 3600
 
         async def report():

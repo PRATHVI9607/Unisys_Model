@@ -45,3 +45,24 @@ async def test_predict_batch_round_trip_and_failures(monkeypatch):
         assert await common.predict_batch(s, "security", [{}, {}]) is None
         reply.update(n=None, status=503)
         assert await common.predict_batch(s, "security", [{}]) is None
+
+
+def test_ensure_namespace_patches_labels_when_it_exists():
+    import asyncio
+
+    from kubernetes_asyncio.client.exceptions import ApiException
+
+    from training.collect import common
+
+    class Core:
+        patched = None
+
+        async def create_namespace(self, body):
+            raise ApiException(status=409)
+
+        async def patch_namespace(self, name, body):
+            self.patched = (name, body)
+
+    core = Core()
+    asyncio.run(common.ensure_namespace(core))
+    assert core.patched[0] == common.NS and core.patched[1]["metadata"]["labels"]["kubeheal.io/lab"] == "true"

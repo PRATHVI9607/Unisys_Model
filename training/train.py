@@ -56,6 +56,8 @@ def load(task: str, args) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarra
 
         recs, data = (collected.health_rows(args.data if args.with_legacy else None) if task == "health"
                       else collected.security_rows(args.n_scenarios, args.seed))
+        if task == "health" and args.new_only:   # rows from the 120 s window era carry no assess_delay_s
+            recs = [r for r in recs if r.get("assess_delay_s") is not None]
         rows = [r["features"] for r in recs]
         source = data.pop("sources")
         # Recorded by the agents of the day: a renamed/added feature would otherwise train as an all-NaN column.
@@ -84,13 +86,28 @@ def load(task: str, args) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarra
     return x, y, groups, families, data
 
 
-def heldout_families(x, y, families, names, labels, seed, rounds) -> dict:
+def metric_dropout(x, y, groups, families, names, seed, frac=1.0):
+    """Health: copies of a random `frac` of rows with every metric feature unknown (Prometheus down / no app metrics).
+
+    The copy keeps its label, group and family (so grouped CV and held-out-family splits keep it with its source), so the model learns what the spec change alone predicts (uncertain unless the spec is
+    decisive) rather than an arbitrary extrapolation for all-missing metrics.
+    """
+    from kubeheal.features.health import METRIC_FEATURES
+
+    pick = np.flatnonzero(np.random.default_rng(seed).random(len(y)) < frac)
+    xs = x[pick].copy()
+    xs[:, [names.index(f) for f in METRIC_FEATURES]] = np.nan
+    return (np.vstack([x, xs]), np.concatenate([y, y[pick]]), np.concatenate([groups, groups[pick]]),
+            np.concatenate([families, families[pick]]))
+
+
+def heldout_families(x, y, families, names, labels, seed, rounds, orig) -> dict:
     """Leave-one-scenario-family-out: train on every other row, test on the family never seen in training."""
     k = len(labels)
     per, ys, ps = {}, [], []
     for fam in sorted(set(families) - {""}):
-        te = families == fam
-        probs = fit(x[~te], y[~te], names, k, seed, rounds).predict(x[te])
+        te = (families == fam) & orig   # test on real rows only; every row of the family (copies too) leaves training
+        probs = fit(x[families != fam], y[families != fam], names, k, seed, rounds).predict(x[te])
         present = sorted(set(y[te]))
         per[fam] = {"n": int(te.sum()), "labels": {labels[i]: int((y[te] == i).sum()) for i in present},
                     "accuracy": round(float((probs.argmax(1) == y[te]).mean()), 4),
@@ -163,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="train on lab data (training/datasets/collected.py); security adds synthetic rows only "
                          "for the classes the lab cannot produce")
     ap.add_argument("--with-legacy", action="store_true", help="health --collected: also the legacy CSV (--data)")
+    ap.add_argument("--new-only", action="store_true", help="health --collected: drop rows without assess_delay_s")
     ap.add_argument("--n-scenarios", type=int, default=3000, help="security synthetic scenario instances")
     ap.add_argument("--out", help="bundle dir (default models/<task>)")
     ap.add_argument("--alpha", type=float, default=0.1, help="conformal miscoverage")
@@ -176,7 +194,12 @@ def main(argv: list[str] | None = None) -> int:
     gate = args.min_macro_f1 if args.min_macro_f1 is not None else DEFAULT_MIN_MACRO_F1[task]
 
     x, y, groups, families, data = load(task, args)
+    if task == "health" and args.collected:
+        x, y, groups, families = metric_dropout(x, y, groups, families, names, args.seed)
+        data["metric_dropout_rows"] = len(y) - data["rows"]
+        data["sha256"] = hashlib.sha256(x.tobytes() + y.tobytes()).hexdigest()
     print(f"{task}: {data['rows']} rows, {data['groups']} groups, class counts {np.bincount(y, minlength=k).tolist()}")
+    orig = np.arange(len(y)) < data["rows"]   # metric_dropout copies are appended after the real rows: fit-only
     m = split_groups(groups, y, args.seed)
     for name, mask in m.items():
         if len(set(y[mask])) < k:
@@ -188,27 +211,31 @@ def main(argv: list[str] | None = None) -> int:
     # Health is only ever asked about real spec changes (the agent skips no-op updates), so conformal
     # calibration and the gate use that population; unchanged "pre" rows would make both look better.
     serving = x[:, names.index("spec_changed")] == 1 if task == "health" else np.ones(len(y), bool)
+    real = orig & serving
     dev = ~m["test"]
     oof = np.zeros((len(y), k))
     for tr, te in GroupKFold(n_splits=5).split(x[dev], y[dev], groups[dev]):
         tr, te = np.flatnonzero(dev)[tr], np.flatnonzero(dev)[te]
         oof[te] = fit(x[tr], y[tr], names, k, args.seed, rounds).predict(x[te])
-    q = calibrate(oof[dev & serving], y[dev & serving], args.alpha)
+    q = calibrate(oof[dev & real], y[dev & real], args.alpha)
 
     test_probs = booster.predict(x[m["test"]])
     report = {
         "split": {n: {"rows": int(v.sum()), "groups": len(set(groups[v]))} for n, v in m.items()},
         "best_iteration": rounds,
         "conformal": {"alpha": args.alpha, "q": round(q, 6),
-                      "calibrated_on": "5-fold grouped out-of-fold probabilities, non-test groups, serving rows"},
-        "cv5_grouped": scores(y[dev], oof[dev], labels, q),
-        "test": scores(y[m["test"]], test_probs, labels, q),
+                      "calibrated_on": "5-fold grouped out-of-fold probabilities, non-test groups, real serving rows"},
+        "cv5_grouped": scores(y[dev & orig], oof[dev & orig], labels, q),
+        "test": scores(y[m["test"] & orig], test_probs[orig[m["test"]]], labels, q),
     }
     if families.any():
-        report["heldout_family"] = heldout_families(x, y, families, names, labels, args.seed, rounds)
+        report["heldout_family"] = heldout_families(x, y, families, names, labels, args.seed, rounds, orig)
     if task == "health":
-        report["cv5_grouped_spec_changed"] = scores(y[dev & serving], oof[dev & serving], labels, q)
-        report["test_spec_changed"] = scores(y[m["test"] & serving], booster.predict(x[m["test"] & serving]), labels, q)
+        report["cv5_grouped_spec_changed"] = scores(y[dev & real], oof[dev & real], labels, q)
+        report["test_spec_changed"] = scores(y[m["test"] & real], booster.predict(x[m["test"] & real]), labels, q)
+    if not orig.all():
+        report["metric_dropout_copies"] = {"note": "fit-only rows, not in calibration or the gate; own metrics",
+                                           "cv5_grouped": scores(y[dev & ~orig], oof[dev & ~orig], labels, q)}
 
     bundle = ModelBundle(booster, {
         "task": task, "version": f"{task}-{__version__}-{data['sha256'][:8]}", "labels": labels,

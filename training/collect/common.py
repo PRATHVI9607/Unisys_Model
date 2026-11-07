@@ -40,6 +40,7 @@ async def ensure_namespace(core: client.CoreV1Api) -> None:
     except ApiException as e:
         if e.status != 409:
             raise
+        await core.patch_namespace(NS, {"metadata": {"labels": body["metadata"]["labels"]}})   # reconcile an older namespace
 
 
 async def raw(coro) -> dict:
