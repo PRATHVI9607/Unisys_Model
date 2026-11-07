@@ -50,7 +50,8 @@ DEFAULT_MIN_MACRO_F1 = {"health": 0.55, "security": 0.80}
 
 def load(task: str, args) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     """Feature matrix, label indices, groups, scenario families ("" = not held out) and data provenance."""
-    names, labels = (HEALTH_FEATURES, HEALTH_LABELS) if task == "health" else (SECURITY_FEATURES, SECURITY_LABELS)
+    full, labels = (HEALTH_FEATURES, HEALTH_LABELS) if task == "health" else (SECURITY_FEATURES, SECURITY_LABELS)
+    names = [f for f in full if f not in args.drop_features]   # the bundle's feature list; rows carry all of `full`
     if args.collected:
         from training.datasets import collected
 
@@ -61,7 +62,7 @@ def load(task: str, args) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarra
         rows = [r["features"] for r in recs]
         source = data.pop("sources")
         # Recorded by the agents of the day: a renamed/added feature would otherwise train as an all-NaN column.
-        stale = next((set(r) ^ set(names) for r in rows if set(r) != set(names)), None)
+        stale = next((set(r) ^ set(full) for r in rows if set(r) != set(full)), None)
         if stale:
             raise ValueError(f"collected {task} features differ from {task} features: {sorted(stale)}")
     elif task == "health":
@@ -181,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
                          "for the classes the lab cannot produce")
     ap.add_argument("--with-legacy", action="store_true", help="health --collected: also the legacy CSV (--data)")
     ap.add_argument("--new-only", action="store_true", help="health --collected: drop rows without assess_delay_s")
+    ap.add_argument("--drop-features", type=lambda v: [f for f in v.split(",") if f], default=[],
+                    help="comma-separated features left out of the bundle (the agents still compute them)")
     ap.add_argument("--n-scenarios", type=int, default=3000, help="security synthetic scenario instances")
     ap.add_argument("--out", help="bundle dir (default models/<task>)")
     ap.add_argument("--alpha", type=float, default=0.1, help="conformal miscoverage")
@@ -189,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     task = args.task
     labels, risk = (HEALTH_LABELS, HEALTH_CLASS_RISK) if task == "health" else (SECURITY_LABELS, SECURITY_CLASS_RISK)
-    names = HEALTH_FEATURES if task == "health" else SECURITY_FEATURES
+    names = [f for f in (HEALTH_FEATURES if task == "health" else SECURITY_FEATURES) if f not in args.drop_features]
     k = len(labels)
     gate = args.min_macro_f1 if args.min_macro_f1 is not None else DEFAULT_MIN_MACRO_F1[task]
 

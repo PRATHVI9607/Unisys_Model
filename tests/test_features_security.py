@@ -9,7 +9,7 @@ from kubeheal.features.security import (
     security_features,
     shannon_entropy,
 )
-from training.synth_security import generate
+from training.synth_security import HARD_NEGATIVES, generate
 
 
 def test_shannon_entropy():
@@ -98,13 +98,16 @@ def test_synthetic_byte_counters_separate_the_synthetic_only_classes():
         assert all(v is None or v >= 0 for v in vals)
 
     def median_rate(key, **match):
-        rates = [r[key] / r["window_s"] for r in recs if r[key] is not None
+        out = match.pop("scenario_not", ())
+        rates = [r[key] / r["window_s"] for r in recs if r[key] is not None and r["scenario"] not in out
                  and all(r[k] == v for k, v in match.items())]
         return float(np.median(rates))
+    hard = {g.__name__ for g in HARD_NEGATIVES}     # rename-heavy benign families are deliberately ransomware-like
     benign_net = median_rate("net_bytes_out", label="benign")
     assert median_rate("net_bytes_out", label="exfiltration") > 20 * benign_net
     assert median_rate("net_bytes_out", scenario="backup_upload") > 20 * benign_net    # benign hard negative
-    assert median_rate("bytes_written", label="ransomware") > 10 * median_rate("bytes_written", label="benign")
+    plain = median_rate("bytes_written", label="benign", scenario_not=hard)
+    assert median_rate("bytes_written", label="ransomware") > 10 * plain
     assert median_rate("bytes_written", scenario="backup_compress") > median_rate("bytes_written", label="suspicious")
     assert median_rate("bytes_written", label="exfiltration") < median_rate("bytes_written", label="ransomware")
 
@@ -155,5 +158,14 @@ def test_synthetic_windows_carry_recent_features_in_attack_order():
     assert all(f["recent_frac_write"] is not None for _, f in rows)
     # ransomware: the tail is mostly write/rename work; benign windows' tails are not
     ran = np.mean([f["recent_frac_write"] + f["recent_frac_rename"] for lbl, f in rows if lbl == "ransomware"])
-    ben = np.mean([f["recent_frac_write"] + f["recent_frac_rename"] for lbl, f in rows if lbl == "benign"])
+    ben = np.mean([f["recent_frac_write"] + f["recent_frac_rename"] for (lbl, f), r in zip(rows, recs, strict=True)
+                   if lbl == "benign" and r["scenario"] not in {g.__name__ for g in HARD_NEGATIVES}])
     assert ran > ben
+
+
+def test_hard_negative_families_are_benign_and_rename_heavy():
+    recs = generate(400, seed=2)
+    for gen in HARD_NEGATIVES:
+        mine = [r for r in recs if r["scenario"] == gen.__name__]
+        assert mine and {r["label"] for r in mine} == {"benign"}
+        assert any(e["syscall"] == "rename" for r in mine for e in r["events"])

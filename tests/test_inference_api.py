@@ -72,10 +72,10 @@ def test_empty_model_dir_is_503_never_random_weights(monkeypatch, tmp_path):
 ])
 def test_committed_bundles_match_the_feature_and_label_lists(task, features, labels, risk):
     meta = ModelBundle.load(MODELS / task).meta     # what the agents send == what the model was trained on
-    if task == "security":      # a bundle from before recent_* is still served (the service ignores them)
-        features = [f for f in features if f in meta["features"]] if meta["features"] != features else features
-        assert features == meta["features"][:len(features)] and set(SECURITY_FEATURES) - set(features) <= set(RECENT_FEATURES)
-    assert (meta["features"], meta["labels"], meta["class_risk"]) == (features, labels, risk)
+    assert (meta["labels"], meta["class_risk"]) == (labels, risk)
+    # A security bundle may leave out recent_* features (the agent computes them, inference drops them); nothing else.
+    kept = [f for f in features if f in meta["features"]]
+    assert meta["features"] == kept and not {f for f in features if f not in kept and not f.startswith("recent_")}
 
 
 def test_oversized_body_is_413(client):
@@ -120,7 +120,10 @@ def test_security_explains_only_publishable_rows(client):
                   "frac_rename": 0.131, "unique_paths": 59.0, "unique_dirs": 1.0, "files_written_per_s": 2.16,
                   "rename_ext_change_ratio": 1.0, "suspicious_ext_ratio": 0.0, "ransom_note": 0.0,
                   "n_entropy_samples": 0.0, "write_bytes_per_s": 3.47e6, "net_out_bytes_per_s": 1.2e4}
-    rows = [{"n_events": 3.0, "frac_read": 1.0}, ransomware]
+    quiet = {"n_events": 216.0, "events_per_s": 10.1, "frac_read": 0.514, "frac_write": 0.486, "unique_paths": 37.0,
+             "unique_dirs": 3.0, "files_written_per_s": 1.64, "entropy_mean": 3.83, "entropy_max": 7.1,
+             "n_entropy_samples": 7.0, "write_bytes_per_s": 2.7e4, "net_out_bytes_per_s": 1.7e3}   # a lab benign window
+    rows = [quiet, ransomware]
     preds = client.post("/v1/security/predict_batch", json={"items": [{"features": f} for f in rows]}).json()
     bundle = ModelBundle.load(MODELS / "security")
     for row, p in zip(rows, preds, strict=True):
@@ -145,7 +148,6 @@ def test_old_bundle_ignores_recent_features(client):
     import lightgbm as lgb
     import numpy as np
 
-    from kubeheal.features.security import RECENT_FEATURES
     from kubeheal.ml.conformal import calibrate
     names = [f for f in SECURITY_FEATURES if f not in RECENT_FEATURES][:3]
     rng = np.random.default_rng(0)

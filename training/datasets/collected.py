@@ -114,16 +114,18 @@ def health_rows(legacy_csv: str | None = None) -> tuple[list[dict], dict]:
 
 def security_rows(n_scenarios: int, seed: int) -> tuple[list[dict], dict]:
     from kubeheal.features.security import security_features
-    from training.synth_security import generate
+    from training.synth_security import HARD_NEGATIVES, generate
 
     rows = [r for r in lab_rows("security") if r["label"] not in SYNTH_ONLY]
     # Pre-telemetry captures (training/data/collected/pre-telemetry/) have no byte counters at all; never train on them.
     if rows and all(r["features"].get("write_bytes_per_s") is None for r in rows):
         raise ValueError(f"{source_path('security')}: no byte telemetry in any window (pre-telemetry data?)")
-    synth = [r for r in generate(n_scenarios, seed) if r["label"] in SYNTH_ONLY]
+    hard = {g.__name__ for g in HARD_NEGATIVES}   # benign families the lab under-covers (rename-heavy, high entropy)
+    synth = [r for r in generate(n_scenarios, seed) if r["label"] in SYNTH_ONLY or r["scenario"] in hard]
     rows += [{"features": security_features(r["events"], r["entropy"], r["window_s"], r["bytes_written"],
                                             r["net_bytes_out"]),
-              "label": r["label"], "group": f"synth:{r['group']}", "family": "", "source": "synthetic"}
+              "label": r["label"], "group": f"synth:{r['group']}", "family": "",
+              "source": "synthetic_hard_negative" if r["scenario"] in hard else "synthetic"}
              for r in synth]
     class_source = {lbl: sorted({r["source"] for r in rows if r["label"] == lbl}) for lbl in
                     dict.fromkeys(r["label"] for r in rows)}
@@ -131,7 +133,11 @@ def security_rows(n_scenarios: int, seed: int) -> tuple[list[dict], dict]:
                               "synthetic": f"training/synth_security.py n_scenarios={n_scenarios} seed={seed}"
                                            f" ({', '.join(SYNTH_ONLY)} only)"},
                   "class_source": class_source, "synthetic": bool(synth),
-                  "synthetic_classes": list(SYNTH_ONLY), "synthetic_fraction": round(len(synth) / len(rows), 4)}
+                  "synthetic_classes": list(SYNTH_ONLY), "synthetic_fraction": round(len(synth) / len(rows), 4),
+                  "synthetic_fraction_by_class": {lbl: round(sum(r["source"] != "lab" for r in rows if r["label"] == lbl)
+                                                             / sum(r["label"] == lbl for r in rows), 4)
+                                                  for lbl in class_source},
+                  "synthetic_hard_negatives": sorted(hard)}
 
 
 # ── export ───────────────────────────────────────────────────────────────────

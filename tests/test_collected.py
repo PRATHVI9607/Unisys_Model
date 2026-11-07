@@ -36,7 +36,10 @@ def test_security_rows_take_only_unobservable_classes_from_synthetic(tmp_path, m
          "features": {"n_events": 3, "write_bytes_per_s": 0.0}}) + "\n")
     rows, meta = collected.security_rows(60, 1)
     assert {r["label"] for r in rows if r["source"] == "synthetic"} <= set(collected.SYNTH_ONLY)
-    assert meta["class_source"]["benign"] == ["lab"] and meta["class_source"]["exfiltration"] == ["synthetic"]
+    assert {r["label"] for r in rows if r["source"] == "synthetic_hard_negative"} == {"benign"}
+    assert meta["class_source"]["benign"] == ["lab", "synthetic_hard_negative"]
+    assert meta["class_source"]["exfiltration"] == ["synthetic"]
+    assert meta["synthetic_fraction_by_class"]["exfiltration"] == 1.0 and 0 < meta["synthetic_fraction_by_class"]["benign"] < 1
 
 
 def test_train_collected_health_reports_heldout_families(tmp_path, monkeypatch, capsys):

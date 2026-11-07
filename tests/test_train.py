@@ -38,7 +38,7 @@ def test_new_only_with_legacy_does_not_keyerror(monkeypatch):
     recs = [{"features": feats, "label": "benign", "group": "lab:a", "family": "f", "assess_delay_s": 5},
             {"features": feats, "label": "benign", "group": "legacy:b", "family": ""}]   # legacy rows lack the key
     monkeypatch.setattr(collected, "health_rows", lambda path: (recs, {"sources": {}, "synthetic": False}))
-    args = SimpleNamespace(collected=True, with_legacy=True, new_only=True, data="x", n_scenarios=0, seed=1)
+    args = SimpleNamespace(collected=True, with_legacy=True, new_only=True, data="x", n_scenarios=0, seed=1, drop_features=[])
     assert train.load("health", args)[4]["rows"] == 1
 
 

@@ -81,6 +81,8 @@ class _W:
         self.entropy: list[float] = []
         self.bytes = 0.0
         self.net = 0.0
+        self.rate: float | None = None   # files/s of a hard-negative scenario (sets the event span); None = random span
+        self.files = 0
 
     def ev(self, syscall: str, path: str, new_path: str | None = None, n: int = 1) -> None:
         # The live capture sees one open per file, not each read()/write(): n calls collapse to one open_r/open_w
@@ -268,6 +270,116 @@ def encrypted_store(w: _W, budget: int) -> None:
             w.wrote((1024, 16384))
 
 
+# ── hard-negative benign families (training-side only; lab rows cannot be recollected cheaply) ───────────────────
+# Rename-heavy and high-entropy benign work that the lab covers only in part: the model must not learn "rename that
+# changes the extension (or a high-entropy .gz next to a rename)" = ransomware. Rates 20-400 files/s.
+CONTENT = [(TEXT, 0.45), (STRUCT, 0.25), (BINARY, 0.15), (COMPRESSED, 0.10), (ENCRYPTED, 0.05)]
+
+
+def _rate(w: _W) -> None:
+    w.rate = float(np.exp(w.rng.uniform(np.log(20), np.log(400))))
+
+
+def _content(w: _W) -> tuple[float, float]:
+    return CONTENT[w.rng.choice(len(CONTENT), p=[p for _, p in CONTENT])][0]
+
+
+def _setup(w: _W, budget: int) -> None:
+    """Half the windows start with plain low-entropy creates (the workload's setup phase) before the main loop."""
+    if w.rng.random() < 0.5:
+        for _ in range(int(budget * w.rng.uniform(0.1, 0.5))):
+            w.ev("write", w.file())
+            w.wrote()
+            w.ent(TEXT)
+            w.files += 1
+
+
+def atomic_rename(w: _W, budget: int) -> None:
+    """Atomic writes: temp file (.name.tmpNNN / name~) fsynced and renamed onto an existing name; editor saves."""
+    _rate(w)
+    _setup(w, budget)
+    targets = [w.file() for _ in range(1 if w.rng.random() < 0.4 else int(w.rng.integers(2, 40)))]
+    style = str(w.rng.choice(["dottmp", "tilde", "swp"]))
+    while len(w.events) < budget:
+        final = str(w.rng.choice(targets))
+        d, name = final.rsplit("/", 1)
+        content = _content(w)
+        if style == "swp":        # editor save: .swp while editing, old content kept as name~, new content under the name
+            w.ev("write", f"{d}/.{name}.swp")
+            w.ev("rename", final, final + "~")
+            w.ev("write", final)
+            w.ev("unlink", f"{d}/.{name}.swp")
+        else:
+            tmp = f"{d}/.{name}.tmp{w.rng.integers(1000, 999999)}" if style == "dottmp" else final + "~"
+            w.ev("write", tmp)
+            w.ev("rename", tmp, final)
+        w.wrote((0.5, 64))
+        w.ent(content)
+        w.files += 1
+
+
+def logrotate_gz(w: _W, budget: int) -> None:
+    """logrotate with compress: x.log → x.log.1, new x.log, then x.log.1.gz written (high entropy) and x.log.1 removed."""
+    _rate(w)
+    _setup(w, budget)
+    logs = [f"{w.ctx['root']}/logs/{w.rng.choice(WORDS)}{i}.log" for i in range(int(w.rng.integers(1, 20)))]
+    while len(w.events) < budget:
+        base = str(w.rng.choice(logs))
+        w.ev("rename", base, f"{base}.1")
+        w.ev("write", base)
+        w.ev("write", f"{base}.1.gz")
+        w.ev("unlink", f"{base}.1")
+        if w.rng.random() < 0.5:   # older generations are compressed too (rename keeps the .gz)
+            w.ev("rename", f"{base}.1.gz", f"{base}.2.gz")
+        w.wrote((10, 4096))
+        w.ent(COMPRESSED)
+        w.files += 1
+
+
+def dpkg_install(w: _W, budget: int) -> None:
+    """dpkg/rpm unpack: path.dpkg-new written next to each file, renamed over the old one, across many directories."""
+    _rate(w)
+    _setup(w, budget)
+    dirs = [f"/usr/{w.rng.choice(['lib', 'share', 'bin'])}/{w.rng.choice(WORDS)}{i}" for i in range(int(w.rng.integers(3, 40)))]
+    while len(w.events) < budget:
+        final = w.file([".so", ".py", "", ".h", ".conf", ".mo", ".1.gz"], str(w.rng.choice(dirs)))
+        w.ev("write", final + ".dpkg-new")
+        if w.rng.random() < 0.4:
+            w.ev("chmod", final + ".dpkg-new")
+        w.ev("rename", final + ".dpkg-new", final)
+        w.wrote((1, 3000))
+        w.ent(COMPRESSED if final.endswith(".gz") else _content(w) if w.rng.random() < 0.3 else BINARY)
+        w.files += 1
+
+
+def git_npm(w: _W, budget: int) -> None:
+    """git checkout (many plain writes, index.lock rename) or npm install (staged dir renames, tarballs)."""
+    _rate(w)
+    _setup(w, budget)
+    npm = w.rng.random() < 0.5
+    dirs = [f"/{w.rng.choice(WORDS)}{i}" for i in range(int(w.rng.integers(5, 60)))]
+    while len(w.events) < budget:
+        f = w.file([".js", ".json", ".py", ".md", ".ts", ""], str(w.rng.choice(dirs)))
+        if npm and w.rng.random() < 0.3:
+            pkg = f.rsplit("/", 1)[0]
+            w.ev("write", pkg + ".tgz")
+            w.ent(COMPRESSED)
+            w.ev("rename", pkg + "-staging", pkg)
+        w.ev("write", f)
+        if not npm and w.rng.random() < 0.2:
+            w.ev("unlink", f + ".orig")
+        if w.rng.random() < 0.1:
+            lock = f"{w.ctx['root']}/.git/index"
+            w.ev("write", lock + ".lock")
+            w.ev("rename", lock + ".lock", lock)
+        w.wrote((0.5, 200))
+        w.ent(_content(w) if w.rng.random() < 0.2 else TEXT if f.endswith((".js", ".py", ".md", ".ts", ".json")) else STRUCT)
+        w.files += 1
+
+
+HARD_NEGATIVES = (atomic_rename, logrotate_gz, dpkg_install, git_npm)
+
+
 # ── suspicious ───────────────────────────────────────────────────────────────
 def recon(w: _W, budget: int) -> None:
     secrets = ["/etc/passwd", "/etc/shadow", "/proc/1/environ", "/var/run/secrets/kubernetes.io/serviceaccount/token",
@@ -372,6 +484,8 @@ SCENARIOS = [  # (label, generator, weight)
     ("benign", media_process, 1.0), ("benign", log_rotate, 0.8), ("benign", atomic_writes, 1.0),
     ("benign", package_install, 0.8), ("benign", backup_upload, 0.8), ("benign", maintenance_script, 1.0),
     ("benign", encrypted_store, 0.8),
+    ("benign", atomic_rename, 1.0), ("benign", logrotate_gz, 1.0), ("benign", dpkg_install, 1.0),
+    ("benign", git_npm, 1.0),
     ("suspicious", recon, 1.0), ("suspicious", file_enumeration, 1.0), ("suspicious", permission_tamper, 0.6),
     ("ransomware", ransomware_rename, 0.8), ("ransomware", ransomware_inplace, 0.8),
     ("ransomware", ransomware_copy_delete, 0.6), ("ransomware", ransomware_intermittent, 0.7),
@@ -408,6 +522,8 @@ def _window(rng: np.random.Generator, ctx: dict, gen, slow: bool) -> dict | None
         return None
     # Event span; the agent also scores bursts early (BURST_EVENTS new events), so short spans occur too.
     span_s = float(rng.uniform(30, 60) if slow else rng.uniform(0.5, 60))
+    if w.rate:   # hard negatives run at a stated files/s
+        span_s = max(w.files * len(events) / max(len(scenario), 1), 1) / w.rate
     t0 = int(rng.integers(1_700_000_000_000, 1_800_000_000_000))
     for i, e in enumerate(events):
         e["ts_ms"] = t0 + int(i * span_s * 1000 / len(events))
