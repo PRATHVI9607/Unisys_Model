@@ -5,8 +5,8 @@ Generates the file-I/O pattern of ransomware — a burst of high-entropy writes
 followed by renames with a new extension — so the security model's detection
 path can be exercised end to end. It is deliberately harmless:
 
-  * It only ever touches files it created itself in this run (tracked by path);
-    it never opens, reads, modifies, or deletes any pre-existing file. (It reads
+  * It only ever touches files it created itself in this run (O_EXCL|O_NOFOLLOW,
+    recorded in a ledger); it never opens, reads, modifies, or deletes any pre-existing file. (It reads
     back its own placeholder files before overwriting them, like real ransomware
     reads plaintext, so the I/O pattern is realistic.)
   * There is no cryptography and no key material; "encryption" is just
@@ -17,13 +17,15 @@ Safety gate (refuses to run otherwise):
   * DIR must already contain a ``.kubeheal-sandbox`` marker file.
 
 The loop is bounded by ``--max-files`` and ``--duration``. ``--cleanup`` removes
-everything this tool created (its generated files and the test note) and exits.
+what this tool created and exits: only files listed in its ``.kubeheal-created`` ledger.
+Every file is created O_EXCL|O_NOFOLLOW, so a planted file or symlink is skipped, never written through.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import stat
 import sys
 import time
 from pathlib import Path
@@ -50,16 +52,41 @@ def require_sandbox(path: Path) -> None:
         )
 
 
+LEDGER = ".kubeheal-created"    # names of the files this run created; --cleanup deletes only these
+
+
+def _open(p: Path, flags: int) -> int:
+    """Open without following a symlink; O_CREAT always means O_EXCL (never touch an existing file)."""
+    if flags & os.O_CREAT:
+        flags |= os.O_EXCL
+    return os.open(p, flags | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+
+
+def _create(p: Path, data: bytes, ledger: int) -> None:
+    os.write(ledger, p.name.encode() + b"\n")       # ledger first: a crash after create still gets cleaned
+    with os.fdopen(_open(p, os.O_WRONLY | os.O_CREAT), "wb") as f:
+        f.write(data)
+
+
 def cleanup(path: Path) -> int:
-    """Delete only the files this tool creates (its own prefix + note)."""
+    """Delete only regular files listed in the ledger (never a glob, never a symlink)."""
+    try:
+        with os.fdopen(_open(path / LEDGER, os.O_RDONLY)) as f:
+            names = f.read().splitlines()
+    except OSError:
+        return 0
     removed = 0
-    for p in list(path.glob(f"{PREFIX}*{PLAIN_EXT}")) + list(path.glob(f"{PREFIX}*{ENCRYPTED_EXT}")):
-        p.unlink(missing_ok=True)
-        removed += 1
-    note = path / NOTE_NAME
-    if note.exists():
-        note.unlink()
-        removed += 1
+    for name in names:
+        if not name or name != os.path.basename(name) or name in (".", ".."):
+            continue
+        p = path / name
+        try:
+            if stat.S_ISREG(os.lstat(p).st_mode):
+                p.unlink()
+                removed += 1
+        except FileNotFoundError:
+            pass
+    (path / LEDGER).unlink()
     return removed
 
 
@@ -79,26 +106,52 @@ def run(path: Path, num_files: int, max_files: int, duration_s: float, rate: flo
         rename: bool = True, partial: float = 1.0, delay_s: float = 0.0) -> int:
     """Create our own files, then high-entropy-overwrite (+ optionally rename) each one."""
     n = min(num_files, max_files)
-    created = [path / f"{PREFIX}{i:04d}{PLAIN_EXT}" for i in range(n)]
     placeholder = (PLACEHOLDER * (file_size // len(PLACEHOLDER) + 1))[:max(file_size, 1)]
-    for f in created:
-        f.write_bytes(placeholder)
-    print(f"created {len(created)} files in {path}", flush=True)
-    time.sleep(delay_s)                      # quiet gap: separates the setup from the overwrite phase
+    try:
+        ledger = _open(path / LEDGER, os.O_WRONLY | os.O_CREAT)
+    except FileExistsError:
+        sys.exit(f"refusing to run: {path / LEDGER} exists - run --cleanup first")
+    with os.fdopen(ledger, "wb", buffering=0):
+        created = []
+        for i in range(n):
+            f = path / f"{PREFIX}{i:04d}{PLAIN_EXT}"
+            try:
+                _create(f, placeholder, ledger)
+            except FileExistsError:
+                print(f"skipped {f.name}: already exists (not ours)", flush=True)
+                continue
+            created.append(f)
+        print(f"created {len(created)} files in {path}", flush=True)
+        time.sleep(delay_s)                  # quiet gap: separates the setup from the overwrite phase
 
-    deadline = time.monotonic() + duration_s
-    delay = 1.0 / rate if rate > 0 else 0.0
-    touched = 0
-    for src in created:                      # only files we just created
-        if time.monotonic() >= deadline:
-            break
-        src.write_bytes(overwrite(src.read_bytes(), partial))    # read our own placeholder first, as ransomware does
-        if rename:
-            src.rename(src.with_name(src.stem + ENCRYPTED_EXT))
-        touched += 1
-        if delay:
-            time.sleep(delay)
-    (path / NOTE_NAME).write_text(NOTE_TEXT)
+        print(f"overwrite_start_ms={time.time_ns() // 1_000_000}", flush=True)    # bench.sh: first malicious op
+        deadline = time.monotonic() + duration_s
+        delay = 1.0 / rate if rate > 0 else 0.0
+        touched = 0
+        for src in created:                  # only files we just created
+            if time.monotonic() >= deadline:
+                break
+            try:
+                with os.fdopen(_open(src, os.O_RDONLY), "rb") as f:    # read our own placeholder first, as ransomware does
+                    data = f.read()
+                with os.fdopen(_open(src, os.O_WRONLY | os.O_TRUNC), "wb") as f:
+                    f.write(overwrite(data, partial))
+                if rename:
+                    dst = src.with_name(src.stem + ENCRYPTED_EXT)
+                    if os.path.lexists(dst):         # shortcut: check-then-rename race, fine inside a private sandbox
+                        raise FileExistsError(dst)
+                    os.write(ledger, dst.name.encode() + b"\n")
+                    src.rename(dst)
+            except OSError as e:
+                print(f"skipped {src.name}: {e}", flush=True)
+                continue
+            touched += 1
+            if delay:
+                time.sleep(delay)
+        try:
+            _create(path / NOTE_NAME, NOTE_TEXT.encode(), ledger)
+        except FileExistsError:
+            print(f"skipped {NOTE_NAME}: already exists (not ours)", flush=True)
     return touched
 
 
