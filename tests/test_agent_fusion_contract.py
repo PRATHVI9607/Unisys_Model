@@ -37,8 +37,9 @@ TEMPLATE = {"metadata": {"labels": {"app": "web"}}, "spec": {"containers": [{"na
 class FakeKube:
     """Stands in for CoreV1Api, AppsV1Api and NetworkingV1Api at once."""
 
-    def __init__(self, pod_labels=None, dep_labels=None, errors=None, ns_labels=None):
+    def __init__(self, pod_labels=None, dep_labels=None, errors=None, ns_labels=None, owners=None, pod_uid="uid-123"):
         self.calls, self.pod_labels, self.dep_labels, self.ns_labels = [], pod_labels, dep_labels, ns_labels
+        self.owners, self.pod_uid = owners, pod_uid     # owners: Deployment name the pod's ReplicaSet belongs to
         self.errors = errors or {}     # method name -> HTTP status to raise
 
     def _rec(self, name, *args, **kwargs):
@@ -53,7 +54,14 @@ class FakeKube:
 
     async def read_namespaced_pod(self, name, ns):
         self._rec("read_namespaced_pod", name, ns)
-        return SimpleNamespace(metadata=SimpleNamespace(name=name, uid="uid-123", labels=self.pod_labels))
+        refs = [SimpleNamespace(kind="ReplicaSet", name="web-7d9f")] if self.owners else []
+        return SimpleNamespace(metadata=SimpleNamespace(name=name, uid=self.pod_uid, labels=self.pod_labels,
+                                                        owner_references=refs))
+
+    async def read_namespaced_replica_set(self, name, ns):
+        self._rec("read_namespaced_replica_set", name, ns)
+        return SimpleNamespace(metadata=SimpleNamespace(
+            owner_references=[SimpleNamespace(kind="Deployment", name=self.owners)]))
 
     async def read_namespaced_deployment(self, name, ns):
         self._rec("read_namespaced_deployment", name, ns)
@@ -131,7 +139,7 @@ async def test_enforce_kill_sequence(redis):
     a = await agent.handle(ransomware())
     assert (a.decision, a.outcome) == (Decision.AUTO_KILL, "pod_killed")
     assert kube.names == ["read_namespaced_pod", "read_namespaced_deployment", "patch_namespaced_pod",
-                          "create_namespaced_network_policy", "delete_namespaced_pod"]
+                          "create_namespaced_network_policy", "delete_namespaced_pod"]   # quarantine before delete
     label_body = kube.calls[2][1][2]
     assert label_body == {"metadata": {"labels": {"kubeheal.io/quarantined": "true"}}}
     ns, policy = kube.calls[3][1]
@@ -368,3 +376,89 @@ async def test_lost_consumer_group_is_recreated(redis, monkeypatch):
         await agent.run()
     for stream in (STREAM_HEALTH, STREAM_SECURITY):
         assert [g["name"] for g in await redis.xinfo_groups(stream)] == [fa.GROUP]
+
+
+# ── review fixes ────────────────────────────────────────────────────────────
+class OwnerKube(FakeKube):
+    """Only the real Deployment exists; a Deployment named after the pod is a 404."""
+
+    async def read_namespaced_deployment(self, name, ns):
+        if name != "web":
+            self._rec("read_namespaced_deployment", name, ns)
+            raise ApiException(status=404, reason="NotFound")
+        return await super().read_namespaced_deployment(name, ns)
+
+
+async def test_protected_deployment_found_via_owner_when_event_workload_is_the_pod_name(redis):
+    kube = OwnerKube(dep_labels={"kubeheal.io/protected": "true"}, owners="web")
+    agent, _ = make(redis, kube, mode="enforce")
+    ev = ransomware()
+    ev.workload = ev.pod                        # security agent's owner lookup failed
+    assert (await agent.handle(ev)).outcome == "skipped_protected"
+    assert not MUTATING & set(kube.names)
+
+
+async def test_lock_and_circuit_keyed_on_resolved_deployment(redis):
+    agent, kube = make(redis, OwnerKube(owners="web"), mode="enforce")
+    ev = ransomware()
+    ev.workload = ev.pod
+    assert (await agent.handle(ev)).outcome == "pod_killed"
+    assert await redis.get(fa.key_circuit("kill", "prod-shop", "web")) == "1"
+
+
+async def test_stale_pod_uid_is_not_deleted(redis):
+    agent, kube = make(redis, FakeKube(pod_uid="new-uid"), mode="enforce")
+    ev = ransomware()
+    ev.pod_uid = "old-uid"
+    assert (await agent.handle(ev)).outcome == "skipped_stale_pod"
+    assert not MUTATING & set(kube.names)
+
+
+async def test_delete_carries_uid_precondition_when_known(redis):
+    agent, kube = make(redis, mode="enforce")
+    ev = ransomware()
+    ev.pod_uid = "uid-123"
+    assert (await agent.handle(ev)).outcome == "pod_killed"
+    opts = kube.calls[-1][2]["body"]
+    assert opts.preconditions.uid == "uid-123"
+
+
+async def test_partner_not_handled_after_a_failed_or_skipped_outcome(redis, monkeypatch):
+    agent, kube = make(redis, mode="enforce", max_kills=5)
+    t = now_ms()
+    monkeypatch.setattr(fa, "incident_lock", lock_stub(False))
+    assert (await agent.handle(ransomware(eid="s1", ts=t))).outcome == "skipped_locked"
+    monkeypatch.setattr(fa, "incident_lock", lock_stub(True))
+    paired = await agent.handle(drift(eid="h1", ts=t + 1000))      # same AUTO_KILL, but nothing was killed yet
+    assert paired.outcome == "pod_killed"
+
+
+async def test_failed_tier_lookup_is_cached(redis):
+    kube = FakeKube(errors={"read_namespace": 500})
+    agent, _ = make(redis, kube)
+    reads = []
+    orig = kube.read_namespace
+    kube.read_namespace = lambda n: reads.append(n) or orig(n)
+    assert await agent.tier("demo") is None and await agent.tier("demo") is None
+    assert len(reads) == 1
+
+
+async def test_connection_error_becomes_failed_outcome(redis):
+    import aiohttp
+    kube = FakeKube()
+
+    async def boom(*a, **k):
+        raise aiohttp.ClientConnectionError("down")
+    kube.read_namespaced_pod = boom
+    agent, _ = make(redis, kube, mode="enforce")
+    assert (await agent.handle(ransomware())).outcome == "failed:kube_ClientConnectionError"
+
+
+async def test_recreated_group_replays_events_published_during_the_loss(redis, monkeypatch):
+    agent, kube = make(redis, mode="enforce")
+    await agent.ensure_groups()
+    await redis.delete(STREAM_HEALTH, STREAM_SECURITY)
+    await redis.xadd(STREAM_SECURITY, ransomware().to_fields())   # published before fusion noticed
+    await agent.ensure_groups("0")
+    await agent.poll_once(block_ms=1)
+    assert kube.names.count("delete_namespaced_pod") == 1

@@ -9,6 +9,8 @@ from datetime import datetime
 
 import orjson
 
+from kubeheal.features.security import open_syscall
+
 log = logging.getLogger("kubeheal.security.falco")
 
 READ_CHUNK = 1 << 20     # bytes per read() call, bounds memory per poll
@@ -73,7 +75,7 @@ def parse_line(line: str | bytes) -> dict | None:
         "pid": pid if pid and pid > 0 else None,
         "container_id": _field(f, "container.id") or "",
         "pod_uid": _field(f, "k8s.pod.uid") or "",
-        "syscall": syscall,
+        "syscall": open_syscall(syscall, _field(f, "evt.arg.flags")),   # opens → open_r / open_w by flags
         # path-based calls have no fd: Falco resolves unlink/chmod paths into fs.path.name and
         # rename old/new paths into fs.path.source / fs.path.target
         "path": _field(f, "fd.name") or _field(f, "fs.path.name") or _field(f, "fs.path.source") or "",

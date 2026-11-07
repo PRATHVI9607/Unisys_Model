@@ -18,6 +18,7 @@ import os
 import socket
 import time
 
+import aiohttp
 import redis.asyncio as aioredis
 from kubernetes_asyncio import client
 from kubernetes_asyncio.client.exceptions import ApiException
@@ -70,6 +71,9 @@ MAX_EVENT_AGE_S = 300
 KUBE_TIMEOUT_S = 10.0
 LIVENESS_STALE_S = 30
 TIER_TTL_S = 300
+TIER_FAIL_TTL_S = 30
+# outcomes after which the same automatic decision on the partner event must not act again
+HANDLED = frozenset({"pod_killed", "pod_already_gone", "patched", "would_kill", "would_patch"})
 
 DECISIONS = Counter("kubeheal_fusion_decisions_total", "Decisions made", ["decision"])
 OUTCOMES = Counter("kubeheal_fusion_outcomes_total", "Decision outcomes", ["outcome"])
@@ -81,31 +85,31 @@ AUTOMATIC = (Decision.AUTO_KILL, Decision.AUTO_PATCH)
 
 
 class PairBuffer:
-    """Unpaired events per workload (with the decision taken on them alone), waiting for a partner.
+    """Unpaired events per workload (with the decision and outcome taken on them alone), waiting for a partner.
 
     shortcut: in memory, so a restart forgets unpaired events (they were already
     decided alone); move to Redis if fusion ever runs more than one replica.
     """
 
     def __init__(self) -> None:
-        self._pending: dict[tuple[str, type], tuple[Event, Decision]] = {}
+        self._pending: dict[tuple[str, type], tuple[Event, Decision, str]] = {}
 
-    def partner(self, ev: Event) -> tuple[Event, Decision] | tuple[None, None]:
+    def partner(self, ev: Event) -> tuple[Event, Decision, str] | tuple[None, None, None]:
         other = SecurityEvent if isinstance(ev, HealthEvent) else HealthEvent
         hit = self._pending.get((workload_key(ev.namespace, ev.workload), other))
         if hit and abs(hit[0].timestamp_ms - ev.timestamp_ms) <= CORRELATION_WINDOW_S * 1000:
             return hit
-        return None, None
+        return None, None, None
 
-    def commit(self, ev: Event, decision: Decision, partner: Event | None) -> None:
+    def commit(self, ev: Event, decision: Decision, outcome: str, partner: Event | None) -> None:
         """After a successful decision: a pair is consumed, a lone event waits for a partner."""
         key = workload_key(ev.namespace, ev.workload)
         if partner is not None:
             self._pending.pop((key, type(partner)), None)
         else:
-            self._pending[(key, type(ev))] = (ev, decision)
+            self._pending[(key, type(ev))] = (ev, decision, outcome)
         cutoff = now_ms() - (MAX_EVENT_AGE_S + CORRELATION_WINDOW_S) * 1000
-        for k in [k for k, (e, _) in self._pending.items() if e.timestamp_ms < cutoff]:
+        for k in [k for k, (e, _, _) in self._pending.items() if e.timestamp_ms < cutoff]:
             del self._pending[k]
 
 
@@ -166,10 +170,10 @@ class FusionAgent:
         self.tiers: dict[str, tuple[float, str | None]] = {}   # namespace → (expiry, TIER_LABEL value)
 
     # ── stream plumbing ─────────────────────────────────────────────────────
-    async def ensure_groups(self) -> None:
+    async def ensure_groups(self, start: str = "$") -> None:
         for stream in STREAMS:
-            try:   # "$": a fresh deploy starts at new events, never replays history
-                await self.redis.xgroup_create(stream, GROUP, id="$", mkstream=True)
+            try:   # "$": a fresh deploy starts at new events, never replays history; "0" after the group was lost
+                await self.redis.xgroup_create(stream, GROUP, id=start, mkstream=True)
             except aioredis.ResponseError as e:
                 if "BUSYGROUP" not in str(e):
                     raise
@@ -223,11 +227,11 @@ class FusionAgent:
             log.info("skipping stale %s (%.0f s old)", ev.event_id, (now_ms() - ev.timestamp_ms) / 1000)
             SKIPPED_STALE.inc()
             return None
-        partner, partner_decision = self.pairs.partner(ev)
+        partner, partner_decision, partner_outcome = self.pairs.partner(ev)
         health, security = (ev, partner) if isinstance(ev, HealthEvent) else (partner, ev)
         cscore, reasons = compound_score(health, security) if health and security else (0.0, [])
         result = decide(health, security, compound=cscore >= COMPOUND_THRESHOLD, tier=await self.tier(ev.namespace))
-        if result.decision is partner_decision and partner_decision in AUTOMATIC:
+        if result.decision is partner_decision and partner_decision in AUTOMATIC and partner_outcome in HANDLED:
             # Same action on the same pod/workload was already taken when the partner was decided alone.
             decision, outcome = result.decision, "already_handled"
         else:
@@ -241,7 +245,7 @@ class FusionAgent:
             security_event_id=security.event_id if security else "",
         )
         await publish_event(self.redis, STREAM_ACTIONS, "action", action)
-        self.pairs.commit(ev, decision, partner)
+        self.pairs.commit(ev, decision, outcome, partner)
         DECISIONS.labels(decision.value).inc()
         OUTCOMES.labels(outcome.split(":")[0]).inc()
         level = logging.WARNING if decision in AUTOMATIC else logging.INFO
@@ -262,7 +266,7 @@ class FusionAgent:
             if decision is Decision.AUTO_KILL:
                 if not security.pod:
                     return Decision.HUMAN, "escalated_no_pod"
-                return decision, await self.kill(ns, wl, security.pod)
+                return decision, await self.kill(ns, wl, security.pod, security.pod_uid)
             try:
                 baseline = json.loads(await self.redis.get(key_baseline(ns, wl)))
                 template = baseline["template"]
@@ -276,6 +280,8 @@ class FusionAgent:
             return decision, await self.patch(ns, wl, ops)
         except TimeoutError:
             return decision, "failed:kube_timeout"
+        except aiohttp.ClientError as e:
+            return decision, f"failed:kube_{type(e).__name__}"
         except ApiException as e:
             return decision, f"failed:api_{e.status}_{e.reason}"
 
@@ -286,8 +292,9 @@ class FusionAgent:
             return hit[1]
         try:
             label = _labels(await self._kube(self.core.read_namespace(ns))).get(TIER_LABEL)
-        except (ApiException, TimeoutError) as e:
+        except (ApiException, TimeoutError, aiohttp.ClientError) as e:
             log.warning("tier lookup for namespace %s failed (%s); using its name", ns, getattr(e, "status", e))
+            self.tiers[ns] = (now + TIER_FAIL_TTL_S, None)   # do not hammer a failing API on every event
             return None
         if label is not None and label not in TIERS:
             log.warning("namespace %s has invalid %s=%r; using its name", ns, TIER_LABEL, label)
@@ -306,36 +313,65 @@ class FusionAgent:
                 return None
             raise
 
-    async def kill(self, ns: str, wl: str, pod_name: str) -> str:
+    async def _owner_deployment(self, ns: str, pod, wl: str) -> str:
+        """Deployment owning the pod (pod → ReplicaSet → Deployment); wl when the chain cannot be resolved."""
+        rs = next((r for r in pod.metadata.owner_references or [] if r.kind == "ReplicaSet"), None)
+        if rs is None:
+            return wl
+        try:
+            owner = await self._kube(self.apps.read_namespaced_replica_set(rs.name, ns))
+        except ApiException as e:
+            if e.status == 404:
+                return wl
+            raise
+        dep = next((r for r in owner.metadata.owner_references or [] if r.kind == "Deployment"), None)
+        return dep.name if dep else wl
+
+    async def kill(self, ns: str, wl: str, pod_name: str, pod_uid: str = "") -> str:
         try:
             pod = await self._kube(self.core.read_namespaced_pod(pod_name, ns))
         except ApiException as e:
             if e.status == 404:
                 return "pod_already_gone"
             raise
-        if "true" in (_labels(pod).get(PROTECTED_LABEL), _labels(await self._deployment(ns, wl)).get(PROTECTED_LABEL)):
+        if pod_uid and pod.metadata.uid != pod_uid:
+            return "skipped_stale_pod"      # the name now belongs to a different pod
+        # The event's workload is the pod name when the owner lookup failed upstream: resolve the real
+        # Deployment from the pod itself, check the protected label on it and on the event's workload.
+        dep_name = await self._owner_deployment(ns, pod, wl)
+        deps = await asyncio.gather(*(self._deployment(ns, n) for n in dict.fromkeys((dep_name, wl))))
+        if "true" in (_labels(pod).get(PROTECTED_LABEL), *(_labels(d).get(PROTECTED_LABEL) for d in deps)):
             return "skipped_protected"
         if self.mode != "enforce":
             return "would_kill"
-        async with incident_lock(self.redis, key_lock(ns, wl)) as held:
+        async with incident_lock(self.redis, key_lock(ns, dep_name)) as held:
             if not held:
                 return "skipped_locked"
-            if not await circuit_allows(self.redis, key_circuit("kill", ns, wl), self.max_kills):
+            if not await circuit_allows(self.redis, key_circuit("kill", ns, dep_name), self.max_kills):
                 return "skipped_circuit_open"
-            try:
-                await self._kube(self.core.patch_namespaced_pod(
-                    pod_name, ns, {"metadata": {"labels": {QUARANTINE_LABEL: "true"}}}))
-                try:
-                    await self._kube(self.net.create_namespaced_network_policy(ns, quarantine_policy(pod)))
-                except ApiException as e:
-                    if e.status != 409:   # 409: policy from an earlier attempt already exists
-                        raise
-                await self._kube(self.core.delete_namespaced_pod(pod_name, ns, grace_period_seconds=0))
+            try:   # quarantine (label + deny-all policy, concurrently) strictly before the delete
+                await asyncio.gather(
+                    self._kube(self.core.patch_namespaced_pod(
+                        pod_name, ns, {"metadata": {"labels": {QUARANTINE_LABEL: "true"}}})),
+                    self._create_quarantine_policy(ns, pod))
+                opts = {"grace_period_seconds": 0}
+                if pod_uid:                 # never delete a successor that reuses the name
+                    opts["body"] = client.V1DeleteOptions(preconditions=client.V1Preconditions(uid=pod_uid))
+                await self._kube(self.core.delete_namespaced_pod(pod_name, ns, **opts))
             except ApiException as e:
                 if e.status == 404:
                     return "pod_already_gone"
+                if e.status == 409 and pod_uid:
+                    return "skipped_stale_pod"      # UID precondition failed
                 raise
         return "pod_killed"
+
+    async def _create_quarantine_policy(self, ns: str, pod) -> None:
+        try:
+            await self._kube(self.net.create_namespaced_network_policy(ns, quarantine_policy(pod)))
+        except ApiException as e:
+            if e.status != 409:   # 409: policy from an earlier attempt already exists
+                raise
 
     async def patch(self, ns: str, wl: str, ops: list[dict]) -> str:
         dep = await self._deployment(ns, wl)
@@ -374,7 +410,7 @@ class FusionAgent:
                     raise
                 # Redis restarted (no persistence) or the streams were deleted: recreate, keep consuming.
                 log.warning("consumer group missing (%s); recreating", e)
-                await self.ensure_groups()
+                await self.ensure_groups("0")   # "$" would drop what was published since the loss
             except aioredis.RedisError:
                 log.exception("redis error in consumer loop; retrying in 1 s")
                 await asyncio.sleep(1)

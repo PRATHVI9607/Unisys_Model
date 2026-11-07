@@ -39,6 +39,7 @@ from kubeheal.contracts import (
     new_event_id,
 )
 from kubeheal.features.health import (
+    METRIC_FEATURES,
     canonical_spec,
     changed_paths,
     health_features,
@@ -49,9 +50,11 @@ from kubeheal.features.health import (
 log = logging.getLogger("kubeheal.health")
 
 PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://prometheus-operated.monitoring.svc:9090").rstrip("/")
-# Assess this long after a change, on the metric window [change, change + delay]. drift_lab uses the same
-# delay and fetch_window, so training windows are exactly the windows the agent scores.
-ASSESS_DELAY_S = float(os.environ.get("ASSESS_DELAY_S", "120"))
+# Latest assessment time after a change: the metric window is [change, min(assess time, change + delay)].
+# Hard evidence (posture violation, failed rollout) assesses earlier; drift_lab reads the agent's own events
+# (and records their delay), so training windows are exactly the windows the agent scores.
+ASSESS_DELAY_S = float(os.environ.get("ASSESS_DELAY_S", "60"))
+POLL_S = 2.0                  # failed-rollout polling period while a change is pending
 RETRY_DELAY_S = 60.0          # re-assess after inference / Redis failures
 MAX_CONCURRENT = 8            # assessments in flight
 WATCH_TIMEOUT_S = 300         # server-side watch timeout; the loop reconnects (and proves liveness) after it
@@ -128,6 +131,9 @@ class HealthAgent:
         self.rolled_out: dict[Key, bool] = {}       # latest watch status: rollout of the current spec done
         self.stalled: dict[Key, bool] = {}          # latest watch status: ProgressDeadlineExceeded
         self.timers: dict[Key, asyncio.TimerHandle] = {}
+        self.pollers: dict[Key, asyncio.Task] = {}  # early-evidence watcher per pending change
+        self.assessing: dict[Key, str] = {}         # spec hash being assessed now: one spec publishes once
+        self.pending_promo: dict[Key, tuple[str, str]] = {}   # assessed benign+certain, rollout not done: (hash, blob)
         self.tasks: set[asyncio.Task] = set()
         self.sem = asyncio.Semaphore(MAX_CONCURRENT)
         self.alive: dict[str, float] = {}           # watch scope → last loop activity (monotonic)
@@ -146,12 +152,48 @@ class HealthAgent:
         self.stalled[key] = progress_deadline_exceeded(dep)
         spec = canonical_spec(dep)
         h = spec_hash(spec)
+        if self.rolled_out[key] and not self.stalled[key] and self.pending_promo.get(key, ("",))[0] == h:
+            self._spawn(self._promote(key, *self.pending_promo.pop(key)))
         if self.seen_hash.get(key) == h:      # status-only update: nothing to assess
             return
         self.seen_hash[key] = h
+        self.pending_promo.pop(key, None)
         self.latest[key] = spec
         self.changed_at[key] = time.time()
         self.schedule(key, self.delay_s)
+        if t := self.pollers.pop(key, None):
+            t.cancel()
+        self.pollers[key] = asyncio.create_task(self._poll(key, spec, self.changed_at[key]))
+
+    async def _poll(self, key: Key, spec: dict, t0: float) -> None:
+        """Assess now (instead of at the delay) once the pending change has posture or failed-rollout evidence."""
+        try:
+            raw = await self.redis.get(key_spec(*key))
+            if raw is None:                     # first sight: nothing to judge against
+                return
+            h = spec_hash(spec)
+            if spec_hash(json.loads(raw)) == h:   # restart replay / no real change: nothing pending
+                if self.latest.get(key) is spec and (t := self.timers.pop(key, None)):
+                    t.cancel()
+                return
+            base_raw = await self.redis.get(key_baseline(*key))
+            if base_raw is not None and spec_hash(json.loads(base_raw)) == h:
+                return                          # back at the baseline: the timer records it
+            early = bool(policy_violations(json.loads(base_raw or raw), spec))
+            seen: set[str] = set()
+            while not early and time.time() + POLL_S < t0 + self.delay_s:
+                await asyncio.sleep(POLL_S)
+                async with self.sem:
+                    now = set(await self.failure_reasons(key, spec, t0)) if self.latest.get(key) is spec else set()
+                if self.latest.get(key) is not spec:
+                    return
+                early = bool(now & seen)        # a transient (one ErrImagePull) waits for the deadline or a repeat
+                seen = now
+        except aioredis.RedisError as e:
+            log.warning("early-evidence check for %s/%s failed: %s; waiting for the timer", *key, e)
+            return
+        if early and self.latest.get(key) is spec:
+            self._fire(key)
 
     def schedule(self, key: Key, delay: float) -> None:
         """(Re)start the per-workload debounce timer."""
@@ -160,7 +202,10 @@ class HealthAgent:
         self.timers[key] = asyncio.get_running_loop().call_later(delay, self._fire, key)
 
     def _fire(self, key: Key) -> None:
-        self.timers.pop(key, None)
+        if t := self.timers.pop(key, None):
+            t.cancel()
+        if (p := self.pollers.pop(key, None)) and p is not asyncio.current_task():
+            p.cancel()                          # the assessment starts now; a late poller must not start another
         self._spawn(self.assess(key))
 
     def _spawn(self, coro) -> None:
@@ -169,8 +214,10 @@ class HealthAgent:
         t.add_done_callback(self.tasks.discard)
 
     def _forget(self, key: Key) -> None:
-        if t := self.timers.pop(key, None):
-            t.cancel()
+        for t in (self.timers.pop(key, None), self.pollers.pop(key, None)):
+            if t:
+                t.cancel()
+        self.pending_promo.pop(key, None)
         self.latest.pop(key, None)
         self.seen_hash.pop(key, None)
         self.changed_at.pop(key, None)
@@ -189,6 +236,10 @@ class HealthAgent:
             spec = self.latest.get(key)
             if spec is None:                    # deleted meanwhile
                 return
+            h = spec_hash(spec)
+            if self.assessing.get(key) == h:    # same spec already in flight
+                return
+            self.assessing[key] = h
             try:
                 outcome = await self._assess(key, spec)
             except aioredis.RedisError as e:
@@ -197,6 +248,8 @@ class HealthAgent:
             except Exception:
                 log.exception("assessment of %s/%s failed", *key)
                 outcome = "error"
+            finally:
+                self.assessing.pop(key, None)
             ASSESSMENTS.labels(outcome).inc()
             if outcome == "retry" and key in self.latest and key not in self.timers:
                 self.schedule(key, RETRY_DELAY_S)
@@ -221,9 +274,12 @@ class HealthAgent:
             return "baseline_restored"
 
         t0 = self.changed_at.get(key, time.time() - self.delay_s)
-        window = await fetch_window(self.session, PROMETHEUS_URL, ns, name, t0, t0 + self.delay_s)
+        window = await fetch_window(self.session, PROMETHEUS_URL, ns, name, t0, min(time.time(), t0 + self.delay_s))
         features = health_features(old, spec, window)
         pred = await predict(self.session, "health", features)
+        # No metric at all (Prometheus down, app without metrics): the model only saw the spec diff, so its
+        # verdict is not actionable. failure_reasons (rules) are unaffected.
+        no_metrics = all(features[k] is None for k in METRIC_FEATURES)
         if pred is None:                        # no fake assessment; spec stays unsaved → re-assessed
             log.warning("inference unavailable; %s/%s will be re-assessed in %.0fs", ns, name, RETRY_DELAY_S)
             return "retry"
@@ -235,7 +291,7 @@ class HealthAgent:
         event = HealthEvent(
             event_id=new_event_id("health"), namespace=ns, workload=name,
             model_version=pred.model_version, label=pred.label, risk=pred.risk,
-            uncertain=pred.uncertain, probabilities=pred.probabilities, top_factors=pred.top_factors,
+            uncertain=pred.uncertain or no_metrics, probabilities=pred.probabilities, top_factors=pred.top_factors,
             features=features, spec_changed=True, changed_fields=changed_paths(old, spec),
             has_baseline=base_raw is not None, failure_reasons=reasons,
         )
@@ -244,18 +300,29 @@ class HealthAgent:
         await self.redis.set(key_spec(ns, name), blob)        # only after a successful publish
         # Known-good needs evidence and no rule hit: a spec that failed its rollout or violates posture
         # is never promoted, whatever the model says (no extra inference call either).
-        if reasons or not self.rolled_out.get(key, False):
-            vs_base = None
-        else:
+        vs_base = None
+        if not reasons and not no_metrics:
             # Promote against the baseline, not the previous spec: a harmless change stacked on
             # unfixed drift must never become the AUTO_PATCH restore target.
             vs_base = pred if spec_hash(base) == spec_hash(old) else await predict(
                 self.session, "health", health_features(base, spec, window))
         if vs_base is not None and vs_base.label == "benign" and not vs_base.uncertain:
-            await self.redis.set(key_baseline(ns, name), blob)
+            if self.rolled_out.get(key, False):
+                await self.redis.set(key_baseline(ns, name), blob)
+            else:                               # slow rollout: promote when the watch reports it complete
+                self.pending_promo[key] = (spec_hash(spec), blob)
         log.info("assessed %s/%s: %s risk=%.2f uncertain=%s changed=%s failures=%s", ns, name, pred.label,
                  pred.risk, pred.uncertain, event.changed_fields[:5], event.failure_reasons)
         return "published"
+
+    async def _promote(self, key: Key, h: str, blob: str) -> None:
+        """A rollout that finished after its assessment: the benign verdict can now become the baseline."""
+        try:
+            if await self.redis.get(key_spec(*key)) == blob and spec_hash(self.latest.get(key) or {}) == h:
+                await self.redis.set(key_baseline(*key), blob)
+                log.info("%s/%s rollout completed; spec promoted to baseline", *key)
+        except aioredis.RedisError as e:
+            log.warning("could not promote %s/%s to baseline: %s", *key, e)
 
     async def failure_reasons(self, key: Key, spec: dict, since_s: float) -> list[str]:
         """Authoritative failed-rollout evidence for the new spec; a pod-listing error only loses pod evidence."""

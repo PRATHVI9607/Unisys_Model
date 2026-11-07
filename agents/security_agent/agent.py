@@ -59,11 +59,11 @@ log = logging.getLogger("kubeheal.security")
 
 FALCO_EVENTS_PATH = os.environ.get("FALCO_EVENTS_PATH", "/var/run/falco/events.jsonl")
 PROC_ROOT = os.environ.get("PROC_ROOT", "/proc")
-EVAL_INTERVAL_S = float(os.environ.get("EVAL_INTERVAL_S", "2"))   # timer for pods below the burst threshold
+EVAL_INTERVAL_S = float(os.environ.get("EVAL_INTERVAL_S", "1"))   # timer for pods below the burst threshold
 CAPTURE = os.environ.get("KUBEHEAL_CAPTURE", "0") == "1"   # lab data collection: also XADD every scored window
 
 MAX_EVENTS = MAX_WINDOW_EVENTS   # per-pod window; events older than WINDOW_S (vs the newest) leave it
-BURST_EVENTS = 64          # a pod with this many new events is scored at once, not at the next timer tick
+BURST_EVENTS = 32          # a pod with this many new events is scored at once, not at the next timer tick
 MIN_TICK_S = 0.25          # pause between evaluation rounds: bounds burst re-scoring under a flood
 MAX_BATCH = 256            # inference service's predict_batch cap
 IDLE_EVICT_S = 300.0       # forget pods with no events for this long
@@ -74,7 +74,8 @@ COOLDOWN_S = 60.0          # per pod; a label change still publishes
 OWNER_TTL_S = 300.0
 KUBE_TIMEOUT_S = 10        # owner lookups run inside an evaluation; never let one stall the eval loop
 MAX_CONCURRENT = 8
-MAX_SAMPLES = 32           # per-pod counter samples (one per evaluation, trimmed to the event window)
+SAMPLE_EVERY_S = 1.0       # counter samples are >= this far apart: a burst of re-scoring must not flush the window
+MAX_SAMPLES = int(WINDOW_S) + 2   # one per SAMPLE_EVERY_S across the whole event window
 POD_UID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 WRITE_SYSCALLS = SYSCALL_GROUPS["write"] | SYSCALL_GROUPS["truncate"]
@@ -89,11 +90,12 @@ Key = tuple[str, str]   # (namespace, pod)
 @dataclass
 class PodWindow:
     events: deque = field(default_factory=lambda: deque(maxlen=MAX_EVENTS))
-    written: OrderedDict = field(default_factory=OrderedDict)   # container path → (pid, container id), oldest first
+    written: OrderedDict = field(default_factory=OrderedDict)   # container path → (pid, container id, ts_ms), oldest first
     new: int = 0
     last_seen: float = field(default_factory=time.monotonic)
     last_publish: float = float("-inf")
     last_label: str = ""
+    last_uncertain: bool = False
     pod_uid: str = ""
     proc: tuple[int, str] = (0, "")                            # (Falco pid, container id) of the latest event
     samples: deque = field(default_factory=lambda: deque(maxlen=MAX_SAMPLES))  # (ts_ms, net tx, cgroup wbytes)
@@ -225,6 +227,14 @@ def counter_delta(samples, i: int) -> float | None:
     return samples[-1][i] - samples[0][i]
 
 
+def counter_total(samples, i: int, window_s: float) -> float | None:
+    """counter_delta rescaled so that delta / window_s is the rate over the samples' own time span."""
+    delta = counter_delta(samples, i)
+    if delta is None:
+        return None
+    return delta * window_s / window_seconds(samples[0][0], samples[-1][0])
+
+
 def sample_entropy(proc_root: str, files: list[tuple[str, tuple[int, str]]],
                    pids: dict[str, int] | None = None, cache: OrderedDict | None = None) -> list[float]:
     """Blocking; run in a thread. Unreadable / vanished / empty files are skipped; cache: see file_entropy."""
@@ -298,7 +308,7 @@ class SecurityAgent:
         target = path if sc in WRITE_SYSCALLS else new_path if sc in RENAME_SYSCALLS else ""
         if pid and target.startswith("/"):
             w.written.pop(target, None)
-            w.written[target] = (pid, cid)
+            w.written[target] = (pid, cid, ev["ts_ms"])
             if len(w.written) > MAX_WRITTEN:
                 w.written.popitem(last=False)
         w.new += 1
@@ -314,6 +324,8 @@ class SecurityAgent:
         for key, w in list(self.windows.items()):
             if now - w.last_seen > IDLE_EVICT_S:
                 del self.windows[key]
+                for cid in {w.proc[1], *(v[1] for v in w.written.values())}:
+                    self.pids.pop(cid, None)
             elif w.new >= (BURST_EVENTS if burst_only else 1):
                 w.new = 0
                 due.append((key, w))
@@ -327,6 +339,10 @@ class SecurityAgent:
         if not windows:
             return
         preds = await predict_batch(self.session, "security", [f[0] for _, _, f in windows])
+        if preds or self.capture:   # owner lookups for the whole batch at once, not one by one in the publish loop
+            await asyncio.gather(*(self.owners.resolve(*key) for (key, _, _), p in zip(
+                windows, preds or [None] * len(windows), strict=True)
+                if self.capture or (p and p.risk >= SECURITY_PUBLISH_RISK)))
         for i, (key, w, f) in enumerate(windows):
             pred = preds[i] if preds else None
             if pred is None:
@@ -359,14 +375,18 @@ class SecurityAgent:
         events = list(w.events)
         start_ms = min(e["ts_ms"] for e in events)
         window_s = window_seconds(start_ms, newest)
-        files = list(w.written.items())[-MAX_ENTROPY_SAMPLES:]
+        cutoff = newest - WINDOW_S * 1000
+        for path in [p for p, v in w.written.items() if v[2] < cutoff]:   # same window as the events
+            del w.written[path]
+        files = [(p, v[:2]) for p, v in w.written.items()][-MAX_ENTROPY_SAMPLES:]
         entropy = await asyncio.to_thread(sample_entropy, self.proc_root, files, self.pids, w.entropy_cache)
-        w.samples.append((now_ms(), *await asyncio.to_thread(pod_counters, self.proc_root, w.proc, w.pod_uid,
-                                                            self.pids)))
+        counters = await asyncio.to_thread(pod_counters, self.proc_root, w.proc, w.pod_uid, self.pids)
+        if not w.samples or now_ms() - w.samples[-1][0] >= SAMPLE_EVERY_S * 1000:
+            w.samples.append((now_ms(), *counters))
         while w.samples and w.samples[0][0] < start_ms:
             w.samples.popleft()
-        features = security_features(events, entropy, window_s, counter_delta(w.samples, 2),
-                                     counter_delta(w.samples, 1))
+        features = security_features(events, entropy, window_s, counter_total(w.samples, 2, window_s),
+                                     counter_total(w.samples, 1, window_s))
         return features, events, start_ms, newest, len(entropy)
 
     async def _publish(self, key: Key, w: PodWindow, pred, features: dict, events: list[dict], start_ms: int,
@@ -378,7 +398,7 @@ class SecurityAgent:
                 event_id=new_event_id("security"), namespace=ns, workload=await self.owners.resolve(ns, pod),
                 pod=pod, model_version=pred.model_version, label=pred.label, risk=pred.risk,
                 uncertain=pred.uncertain, probabilities=pred.probabilities, top_factors=pred.top_factors,
-                features=features, window_start_ms=start_ms, window_end_ms=newest, n_events=len(events),
+                features=features, pod_uid=w.pod_uid, window_start_ms=start_ms, window_end_ms=newest, n_events=len(events),
             )
 
         if self.capture:
@@ -386,11 +406,13 @@ class SecurityAgent:
                                   approximate=True)
         if pred.risk < SECURITY_PUBLISH_RISK:
             return "below_threshold"
-        if time.monotonic() - w.last_publish < COOLDOWN_S and pred.label == w.last_label:
+        # a certain verdict after an uncertain one is news (fusion never auto-acts on uncertain): not cooled down
+        if (time.monotonic() - w.last_publish < COOLDOWN_S and pred.label == w.last_label
+                and not (w.last_uncertain and not pred.uncertain)):
             return "cooldown"
         event = await build()
         await publish_event(self.redis, STREAM_SECURITY, "security", event)
-        w.last_publish, w.last_label = time.monotonic(), pred.label
+        w.last_publish, w.last_label, w.last_uncertain = time.monotonic(), pred.label, pred.uncertain
         log.info("published %s for %s/%s (%s): risk=%.2f events=%d entropy_samples=%d", pred.label, ns,
                  pod, event.workload, pred.risk, len(events), n_entropy)
         return "published"

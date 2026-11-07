@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import logging
+import time
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -63,7 +64,7 @@ def agent(redis):
 @pytest.fixture
 def no_prometheus(monkeypatch):
     async def fake_window(*_):
-        return {"cpu_usage_cores": [0.1, 0.2]}
+        return {"cpu_usage_cores": [0.1, 0.2], "replicas_desired": [2.0], "replicas_ready": [2.0]}
     monkeypatch.setattr(ha, "fetch_window", fake_window)
 
 
@@ -164,6 +165,7 @@ async def test_window_starts_at_change_and_spans_the_assess_delay(agent, redis, 
     monkeypatch.setattr(ha.time, "time", lambda: 9999.0)      # assessed late (e.g. a retry): same window
     await agent.assess(("shop", "web"))
     agent.timers.pop(("shop", "web")).cancel()
+    agent.pollers.pop(("shop", "web")).cancel()
     assert spans == [(5000.0, 5000.0 + agent.delay_s)]
 
 
@@ -183,6 +185,7 @@ async def test_benign_certain_updates_baseline_uncertain_does_not(agent, redis, 
     agent.on_event("MODIFIED", rolled_out(deployment(replicas=5)))
     await agent.assess(key)
     agent.timers.pop(key).cancel()
+    agent.pollers.pop(key).cancel()
     assert json.loads(await redis.get(key_baseline(*key))) == canonical_spec(deployment(replicas=5))
     assert await redis.xlen(STREAM_HEALTH) == 3
 
@@ -280,6 +283,7 @@ async def test_posture_violation_is_reported_and_never_promoted(agent, redis, mo
     priv = posture(deployment(), container_sc={"privileged": True})
     agent.on_event("MODIFIED", rolled_out(priv))
     agent.timers.pop(key).cancel()
+    agent.pollers.pop(key).cancel()
     await agent.assess(key)
     ev = HealthEvent.from_fields((await redis.xrange(STREAM_HEALTH))[0][1])
     assert ev.failure_reasons == ["policy:privileged_added"] and ev.has_baseline
@@ -290,6 +294,7 @@ async def test_posture_violation_is_reported_and_never_promoted(agent, redis, mo
     priv["spec"]["replicas"] = 3
     agent.on_event("MODIFIED", rolled_out(priv))
     agent.timers.pop(key).cancel()
+    agent.pollers.pop(key).cancel()
     await agent.assess(key)
     ev = HealthEvent.from_fields((await redis.xrange(STREAM_HEALTH))[-1][1])
     assert ev.failure_reasons == ["policy:privileged_added"]
@@ -488,6 +493,7 @@ async def test_failed_rollout_reasons_are_published(redis, monkeypatch, no_prome
     dep["metadata"]["generation"], dep["status"]["observedGeneration"] = 2, 2
     agent.on_event("MODIFIED", dep)
     agent.timers.pop(key).cancel()
+    agent.pollers.pop(key).cancel()
     await agent.assess(key)
     ev = HealthEvent.from_fields((await redis.xrange(STREAM_HEALTH))[0][1])
     assert ev.failure_reasons == ["ImagePullBackOff", "ProgressDeadlineExceeded"]
@@ -499,3 +505,172 @@ async def test_pod_listing_error_loses_only_pod_evidence(redis):
     assert await agent.failure_reasons(("shop", "web"), canonical_spec(deployment()), 0.0) == []
     agent.core = None                                                            # no core API: no listing at all
     assert await agent.failure_reasons(("shop", "web"), canonical_spec(deployment()), 0.0) == []
+
+
+# ── early assessment ─────────────────────────────────────────────────────────
+async def pending_agent(redis, monkeypatch, core=None, delay=0.5, poll=0.02, **dep):
+    """Agent with a stored good spec and a recorded assess() trigger time; change applied now."""
+    monkeypatch.setattr(ha, "POLL_S", poll)
+    agent = ha.HealthAgent(redis, session=None, delay_s=delay, protected=frozenset(), core=core)
+    good = json.dumps(canonical_spec(deployment()))
+    await redis.set(key_spec("shop", "web"), good)
+    await redis.set(key_baseline("shop", "web"), good)
+    fired = []
+
+    async def fake_assess(key):
+        fired.append(time.monotonic() - start)
+    monkeypatch.setattr(agent, "assess", fake_assess)
+    start = time.monotonic()
+    agent.on_event("MODIFIED", dep.get("dep") or deployment(cpu="50m"))
+    return agent, fired
+
+
+async def test_posture_violation_is_assessed_immediately(redis, monkeypatch):
+    priv = posture(deployment(cpu="50m"), container_sc={"privileged": True})
+    agent, fired = await pending_agent(redis, monkeypatch, dep=priv, delay=5)
+    await asyncio.sleep(0.15)
+    assert len(fired) == 1 and fired[0] < 0.15
+    assert ("shop", "web") not in agent.timers                       # the deadline timer is cancelled
+
+
+async def test_failed_rollout_appearing_mid_wait_is_assessed_then(redis, monkeypatch):
+    core = FakeCore()
+    agent, fired = await pending_agent(redis, monkeypatch, core=core, delay=5)
+    await asyncio.sleep(0.1)
+    assert fired == [] and core.selectors                                  # polling, nothing yet
+    core.items = [pod("2999-01-01T00:00:00Z", waiting="ContainerCreating")]  # normal start-up: not a failure
+    await asyncio.sleep(0.1)
+    assert fired == []
+    core.items = [pod("2999-01-01T00:00:00Z", waiting="ImagePullBackOff")]
+    await asyncio.sleep(0.15)
+    assert len(fired) == 1 and fired[0] < 1
+
+
+async def test_healthy_rollout_is_assessed_at_the_deadline_and_polling_stops(redis, monkeypatch):
+    core = FakeCore([pod("2999-01-01T00:00:00Z", waiting="ContainerCreating")])
+    agent, fired = await pending_agent(redis, monkeypatch, core=core, delay=0.3)
+    await asyncio.sleep(0.5)
+    assert len(fired) == 1 and 0.28 < fired[0] < 0.45
+    n = len(core.selectors)
+    assert 3 <= n <= 16
+    await asyncio.sleep(0.1)
+    assert len(core.selectors) == n
+
+
+async def test_delete_stops_polling(redis, monkeypatch):
+    core = FakeCore()
+    agent, fired = await pending_agent(redis, monkeypatch, core=core, delay=5)
+    await asyncio.sleep(0.1)
+    agent.on_event("DELETED", deployment(cpu="50m"))
+    await asyncio.sleep(0.05)
+    n = len(core.selectors)
+    core.items = [pod("2999-01-01T00:00:00Z", waiting="ImagePullBackOff")]
+    await asyncio.sleep(0.1)
+    assert len(core.selectors) == n and fired == [] and not agent.pollers
+
+
+async def test_early_window_ends_at_assess_time(agent, redis, monkeypatch):
+    spans = []
+
+    async def fake_window(session, url, ns, name, start, end):
+        spans.append((start, end))
+        return {}
+    monkeypatch.setattr(ha, "fetch_window", fake_window)
+    stub_predict(monkeypatch, prediction())
+    await redis.set(key_spec("shop", "web"), json.dumps(canonical_spec(deployment())))
+    agent.delay_s = 60
+    monkeypatch.setattr(ha.time, "time", lambda: 5000.0)
+    agent.on_event("MODIFIED", deployment(cpu="50m"))
+    monkeypatch.setattr(ha.time, "time", lambda: 5004.0)
+    await agent.assess(("shop", "web"))
+    agent.timers.pop(("shop", "web")).cancel()
+    agent.pollers.pop(("shop", "web")).cancel()
+    assert spans == [(5000.0, 5004.0)]
+
+
+# ── review fixes ─────────────────────────────────────────────────────────────
+class SlowCore(FakeCore):
+    async def list_namespaced_pod(self, ns, label_selector, **kw):
+        await asyncio.sleep(0.4)
+        return await super().list_namespaced_pod(ns, label_selector, **kw)
+
+
+async def test_deadline_timer_cancels_a_slow_poller_so_one_event_is_published(redis, monkeypatch, no_prometheus):
+    monkeypatch.setattr(ha, "POLL_S", 0.02)
+    core = SlowCore([pod("2999-01-01T00:00:00Z", waiting="ImagePullBackOff")])
+    agent = ha.HealthAgent(redis, session=None, delay_s=0.2, protected=frozenset(), core=core)
+    good = json.dumps(canonical_spec(deployment()))
+    await redis.mset({key_spec("shop", "web"): good, key_baseline("shop", "web"): good})
+    stub_predict(monkeypatch, prediction("degradation", 0.7))
+    agent.on_event("MODIFIED", deployment(cpu="50m"))
+    await asyncio.sleep(1.2)
+    assert await redis.xlen(STREAM_HEALTH) == 1 and not agent.pollers
+
+
+async def test_same_spec_is_not_assessed_twice_concurrently(agent, redis, monkeypatch, no_prometheus):
+    key = ("shop", "web")
+    good = json.dumps(canonical_spec(deployment()))
+    await redis.mset({key_spec(*key): good, key_baseline(*key): good})
+    stub_predict(monkeypatch, prediction("degradation", 0.7))
+    agent.latest[key] = canonical_spec(deployment(cpu="50m"))
+    await asyncio.gather(agent.assess(key), agent.assess(key))
+    assert await redis.xlen(STREAM_HEALTH) == 1
+
+
+async def test_replayed_unchanged_spec_neither_polls_nor_keeps_a_timer(redis, monkeypatch):
+    core = FakeCore()
+    agent = ha.HealthAgent(redis, session=None, delay_s=5, protected=frozenset(), core=core)
+    await redis.set(key_spec("shop", "web"), json.dumps(canonical_spec(deployment())))
+    agent.on_event("ADDED", deployment())
+    await asyncio.sleep(0.1)
+    assert core.selectors == [] and not agent.timers
+
+
+class ScriptedCore(FakeCore):
+    def __init__(self, script):
+        super().__init__()
+        self.script = list(script)
+
+    async def list_namespaced_pod(self, ns, label_selector, **kw):
+        self.items = self.script.pop(0) if len(self.script) > 1 else self.script[0]
+        return await super().list_namespaced_pod(ns, label_selector, **kw)
+
+
+async def test_transient_failure_needs_two_consecutive_polls(redis, monkeypatch):
+    bad = [pod("2999-01-01T00:00:00Z", waiting="ErrImagePull")]
+    core = ScriptedCore([bad, [], bad, [], []])
+    agent, fired = await pending_agent(redis, monkeypatch, core=core, delay=5)
+    await asyncio.sleep(0.25)
+    assert fired == []                                          # never two in a row
+    core.script = [bad]
+    await asyncio.sleep(0.15)
+    assert len(fired) == 1
+
+
+async def test_slow_rollout_is_promoted_when_it_completes(agent, redis, monkeypatch, no_prometheus):
+    key = ("shop", "web")
+    good = json.dumps(canonical_spec(deployment()))
+    await redis.mset({key_spec(*key): good, key_baseline(*key): good})
+    stub_predict(monkeypatch, prediction("benign", 0.05))
+    agent.on_event("MODIFIED", deployment(cpu="50m"))            # rollout still in progress
+    await asyncio.sleep(0.2)
+    assert await redis.xlen(STREAM_HEALTH) == 1 and await redis.get(key_baseline(*key)) == good
+    agent.on_event("MODIFIED", rolled_out(deployment(cpu="50m")))
+    await asyncio.sleep(0.1)
+    assert json.loads(await redis.get(key_baseline(*key))) == canonical_spec(deployment(cpu="50m"))
+
+
+async def test_no_metrics_makes_the_model_verdict_uncertain_and_blocks_promotion(agent, redis, monkeypatch):
+    async def empty(*_):
+        return {}
+    monkeypatch.setattr(ha, "fetch_window", empty)
+    key = ("shop", "web")
+    good = json.dumps(canonical_spec(deployment()))
+    await redis.mset({key_spec(*key): good, key_baseline(*key): good})
+    stub_predict(monkeypatch, prediction("benign", 0.05))
+    agent.latest[key] = canonical_spec(deployment(cpu="50m"))
+    agent.rolled_out[key] = True
+    await agent.assess(key)
+    (_, fields), = await redis.xrange(STREAM_HEALTH)
+    assert HealthEvent.from_fields(fields).uncertain is True
+    assert await redis.get(key_baseline(*key)) == good and key not in agent.pending_promo
