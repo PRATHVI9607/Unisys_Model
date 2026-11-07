@@ -124,24 +124,42 @@ the label, the tier is guessed from the namespace name.
 
 ## Results
 
-<!-- RESULTS: fill after retraining -->
+Measured on 2026-11-07 on minikube (8 CPU / 8 GB, one node); bundles `health-5.0.0-37c9309f` and
+`security-5.0.0-ca2438d3`. The ransomware data comes from **one simulator** (`deploy/chaos/`), and the security
+data is **partly synthetic**: `suspicious` and `exfiltration` windows are generated, so those two classes are
+unvalidated on real traffic. Treat the near-perfect security scores as "separable in the lab", not as field accuracy.
 
 | | Health | Security |
 |---|---|---|
-| Training data (rows / groups) | <!-- RESULTS --> | <!-- RESULTS --> |
-| Grouped-CV macro-F1 | <!-- RESULTS --> | <!-- RESULTS --> |
-| Held-out test macro-F1 | <!-- RESULTS --> | <!-- RESULTS --> |
-| Held-out-family macro-F1 (pooled) | <!-- RESULTS --> | <!-- RESULTS --> |
-| Conformal coverage / mean set size (α = 0.1) | <!-- RESULTS --> | <!-- RESULTS --> |
-| Inference latency p50 / p99 (incl. TreeSHAP) | <!-- RESULTS --> | <!-- RESULTS --> |
+| Training data (rows / groups) | 2,519 lab rows / 237 groups (+2,519 metric-dropout copies, fit only) | 40,286 rows / 1,663 groups: 37,406 lab windows (benign, ransomware) + 2,880 synthetic (7.2 %: suspicious and exfiltration, plus 1,369 benign hard-negative windows = 3.9 % of benign) |
+| Grouped-CV macro-F1 | 0.922 (spec-changed rows, n = 2,279) | 0.9996 (n = 36,355) |
+| Held-out test macro-F1 | 0.939 (n = 240) | 1.000 (n = 3,931) |
+| Held-out-family macro-F1 (pooled) | 0.851 | 0.999 over benign + ransomware (meta.json shows 0.50: it scores the two synthetic-only classes as 0). Pod level: no benign lab family is killed when held out, see [limitations](docs/models-and-data.md#known-limitations) |
+| Conformal coverage / mean set size (α = 0.1) | 0.900 / 0.93 | 1.000 / 1.00 |
+| Inference latency p50 / p99 (incl. TreeSHAP) | 1.9 / 2.3 ms | 10.4 / 12.6 ms |
 
-| End-to-end (demo, minikube) | Time |
+| End-to-end (demo, minikube, enforce mode) | Time |
 |---|---|
-| Detection-test workload start → pod killed | <!-- RESULTS --> |
-| Spec change → AUTO_PATCH (rule path) | <!-- RESULTS --> |
-| Spec change → AUTO_PATCH (model path) | <!-- RESULTS --> |
+| Detection-test workload first overwrite → pod killed, 20 files/s created then encrypted at once (5 runs) | median 8.85 s (8.73 to 8.96 s); 2.25 s before the hard-negative hardening |
+| Same, default 180 files/s (3 runs) | median 1.33 s (1.17 to 1.34 s); 0.67 s before the hardening |
+| Same, 20 files/s after a 65 s quiet gap, as in the lab data (2 runs, measured with `a49c7ed8`) | 0.26 s and 0.75 s |
+| Spec change → AUTO_PATCH (rule path: bad image, `ErrImagePull`) | 6 s |
+| Spec change → AUTO_PATCH (model path: CPU limit 500m → 20m) | not reached: HUMAN after 62 s (degradation risk 0.60, adjusted 0.72 < 0.85) |
 
-Tier 1 capture (no `read`/`write` hooks) cut Falco to 53m CPU p50 (was 1985m) and 209 Mi memory p50 (was 565 Mi) under a 300 s heavy-I/O load; kill-time numbers follow the security retrain on lab data. Details in [docs/architecture.md](docs/architecture.md#resources).
+Resources and kill latency under the 300 s heavy-I/O load (`deploy/scripts/bench.sh`, 5 runs; kill time is
+measured from the workload's first malicious operation):
+
+| | Previous bench (interim security model) | This bench |
+|---|---|---|
+| Falco CPU p50 / max | 60m / 135m | 49m / 49m |
+| Falco memory p50 | 212 Mi | 195 Mi |
+| Security agent CPU p50 / max | 10m / 26m | 8m / 9m |
+| Security agent memory p50 | 88 Mi | 84 Mi |
+| Inference CPU p50 / max (total) | 6m / 15m | 6m / 6m |
+| Falco events file growth | 8.0 KB/s | 8.9 KB/s |
+| Kills / kill time median (20 files/s) | 5 / 9.5 s | 5 / 8.85 s |
+
+Tier 1 capture (no `read`/`write` hooks) cut Falco from 1985m CPU p50 and 565 Mi to the numbers above under the same load. Details in [docs/architecture.md](docs/architecture.md#resources).
 
 How the models are trained and evaluated is described in
 [docs/models-and-data.md](docs/models-and-data.md).

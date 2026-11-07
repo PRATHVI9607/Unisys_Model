@@ -134,7 +134,7 @@ changed fields. Missing values render as `—`.
 Run it against the deployed stack in enforce mode (about 15 min with the defaults). Phase 1 runs a
 protected, benign heavy-I/O pod for `--duration` seconds and samples `kubectl top` (Falco, security
 agent, inference) and the Falco events file size every 15 s. Phase 2 runs the detection-test workload
-`--runs` times and times container start to pod deletion. Results go to `--out` (default
+`--runs` times (20 files/s, created then encrypted at once) and times the first malicious operation (logged by the workload) to the AUTO_KILL action. Results go to `--out` (default
 `training/data/collected/bench-<ts>.json`). On exit the script deletes the `kubeheal-bench` namespace and
 its circuit-breaker keys. Results are in [architecture.md](architecture.md#resources).
 

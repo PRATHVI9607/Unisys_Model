@@ -391,10 +391,36 @@ Measured with `deploy/scripts/bench.sh` (same bench, minikube 8 CPU / 8 GB, 300 
 | Security agent memory p50 | 94 Mi | 83 Mi |
 
 Before, Falco was saturated under that load and dropped events; kills arrived a median ~144 s after the
-workload started. After Tier 1 the pipeline publishes a window ~5 s after pod start with no drops, but
-the interim security model (synthetic-only, retrained for the new features) did not yet reach AUTO_KILL
-confidence on the real workload. The security model is being retrained on real lab data; kill-time
-numbers will be added after that.
+workload started. After Tier 1 the pipeline publishes a window ~5 s after pod start with no drops.
+
+Final bench before the hard-negative hardening (security model `security-5.0.0-a49c7ed8`, 300 s load, 5 runs; kill time counts from the
+workload's first malicious operation, which the workload logs):
+
+| | previous bench (interim model) | final bench |
+|---|---|---|
+| Falco CPU p50 / max | 60m / 135m | 49m / 49m |
+| Falco memory p50 | 212 Mi | 195 Mi |
+| Security agent CPU p50 / max | 10m / 26m | 8m / 9m |
+| Security agent memory p50 | 88 Mi | 84 Mi |
+| Inference CPU p50 / max (total) | 6m / 15m | 6m / 6m |
+| Falco events file growth / unread backlog | 8.0 KB/s / 3.1 MB | 8.9 KB/s / 2.7 MB |
+| Kill time at 20 files/s, per run | 9.6, 8.8, 8.8, 9.5, 9.5 s | 2.26, 2.23, 2.12, 2.34, 2.25 s |
+| Kill time at 180 files/s (default), 3 runs | not measured | 0.65, 0.67, 0.72 s |
+
+At 20 files/s the first security event arrives 2.1 to 2.3 s after the first overwrite and the kill follows
+45 to 65 ms later, so the latency is the time to the first confident event. The workload creates its files
+and starts encrypting at once, so setup events fill the pod window and the model needs its 64-event recent
+tail to fill with encryption events. With the lab's 65 s quiet gap before encryption the same 20 files/s workload is killed in
+0.26 s and 0.75 s (2 runs). Lowering the latency for the no-gap case needs a model or feature change (more lab
+runs without a quiet gap, or a shorter `RECENT_EVENTS`), not a policy change.
+
+Bench of the shipped bundle `security-5.0.0-ca2438d3` (hard-negative training, `recent_frac_rename` dropped;
+120 s load, 5 runs at 20 files/s, 3 runs at 180 files/s): kill time 8.96, 8.94, 8.85, 8.76, 8.73 s at 20 files/s
+and 1.33, 1.34, 1.17 s at 180 files/s, against 2.2 s and 0.65 to 0.72 s with `a49c7ed8`. Falco CPU p50 49m, security
+agent CPU p50 9m and 88 Mi, inference CPU p50 7m. In exchange, three benign pods rewriting config files through
+temp-file + rename (about 80 per second each, 60 s, prod-tier namespace, not protected) produced no security
+event above benign and no AUTO_KILL. See the variant table in
+[docs/models-and-data.md](models-and-data.md#known-limitations).
 
 ### Scaling
 
