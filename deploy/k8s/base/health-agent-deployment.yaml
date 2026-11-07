@@ -37,7 +37,8 @@ spec:
             - {name: REDIS_URL, value: "redis://redis-master.kubeheal.svc:6379/0"}
             - {name: INFERENCE_URL, value: "http://kubeheal-inference.kubeheal.svc:8000"}
             - {name: PROMETHEUS_URL, value: "http://prometheus-operated.monitoring.svc:9090"}
-            - {name: ASSESS_DELAY_S, value: "120"}
+            - {name: ASSESS_DELAY_S, value: "60"}
+            - {name: EXTRA_PROTECTED_NAMESPACES, value: "falco,monitoring"}   # the cluster's Falco and Prometheus namespaces
             - {name: LOG_LEVEL, value: "INFO"}
           securityContext:
             allowPrivilegeEscalation: false

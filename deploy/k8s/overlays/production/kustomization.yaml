@@ -5,6 +5,14 @@ kind: Kustomization
 # settings as deploy/k8s (dev/lab), minus the dashboard, plus inference HA/autoscaling and a
 # PriorityClass so the security components are not the first evicted under node pressure.
 # The HPA needs metrics-server (metrics.k8s.io).
+# Images fail closed: `kubeheal/*` would resolve to Docker Hub, which is not our registry, so they
+# point at the reserved .invalid TLD and pods ImagePullBackOff until install.sh --production --registry
+# <host/path> rewrites them (a temp kustomization on top of this overlay). Applying this overlay
+# directly without that is deliberately unusable. (The dashboard is dropped here, so it is not listed.)
+images:
+  - {name: kubeheal/inference, newName: registry.invalid/kubeheal/inference}
+  - {name: kubeheal/agents, newName: registry.invalid/kubeheal/agents}
+
 resources:
   - ../../base
   - priorityclass.yaml
@@ -32,7 +40,7 @@ patches:
       kind: Deployment
       metadata: {name: kubeheal-inference, namespace: kubeheal}
       spec:
-        replicas: 2   # HPA minReplicas; the HPA owns the count after the first apply
+        # no `replicas`: the HPA (minReplicas 2) owns the count, so a re-apply never fights it
         template:
           spec:
             containers:

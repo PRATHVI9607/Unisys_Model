@@ -34,5 +34,5 @@ kubectl rollout status deploy/kubeheal-health-agent -n "$KH" --timeout=180s
 kubectl rollout status ds/kubeheal-security-agent -n "$KH" --timeout=180s
 DELAY=$(kubectl get deploy kubeheal-health-agent -n "$KH" \
   -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="ASSESS_DELAY_S")].value}')
-echo "Reset complete. The health agent stores baselines ${DELAY:-120}s after start; wait that long before"
+echo "Reset complete. The health agent stores baselines ${DELAY:-60}s after start; wait that long before"
 echo "./deploy/scripts/demo.sh. (Leftover khtest_* files on the PVC are harmless test artifacts.)"

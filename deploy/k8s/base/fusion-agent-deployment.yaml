@@ -39,6 +39,7 @@ spec:
             - {name: KUBEHEAL_MODE, value: "enforce"}   # "observe" = dry-run: decide and publish, change nothing
             - {name: MAX_KILLS_PER_HOUR, value: "3"}
             - {name: MAX_PATCHES_PER_HOUR, value: "5"}
+            - {name: EXTRA_PROTECTED_NAMESPACES, value: "falco,monitoring"}   # the cluster's Falco and Prometheus namespaces
             - {name: LOG_LEVEL, value: "INFO"}
           securityContext:
             allowPrivilegeEscalation: false

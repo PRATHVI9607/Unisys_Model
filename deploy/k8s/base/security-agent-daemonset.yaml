@@ -41,10 +41,11 @@ spec:
             - {name: INFERENCE_URL, value: "http://kubeheal-inference.kubeheal.svc:8000"}
             - {name: FALCO_EVENTS_PATH, value: "/var/run/falco/events.jsonl"}
             - {name: PROC_ROOT, value: "/host/proc"}
-            - {name: EVAL_INTERVAL_S, value: "2"}
+            - {name: EVAL_INTERVAL_S, value: "1"}
             # "1" also XADDs every scored window to kubeheal.security.capture (lab data collection only;
             # training/collect/run_lab.sh turns it on for a run and back to "0" on exit)
             - {name: KUBEHEAL_CAPTURE, value: "0"}
+            - {name: EXTRA_PROTECTED_NAMESPACES, value: "falco,monitoring"}   # the cluster's Falco and Prometheus namespaces
             - {name: LOG_LEVEL, value: "INFO"}
           securityContext:
             allowPrivilegeEscalation: false

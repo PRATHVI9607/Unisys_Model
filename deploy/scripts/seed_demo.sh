@@ -1,35 +1,36 @@
 #!/usr/bin/env bash
 # Seed the dashboard with a handful of contract-valid events so it is never
-# blank in a demo. Publishes HealthEvent / SecurityEvent / ActionEvent built
-# from kubeheal.contracts straight onto the Redis streams the dashboard reads.
+# blank in a demo. Publishes ActionEvents (built from kubeheal.contracts) onto
+# kubeheal.actions and writes the Health/Security detail hashes they link to.
+# It never writes kubeheal.health.events / kubeheal.security.events: fusion
+# consumes those, and in enforce mode fake events there could patch or kill.
 # Runs on the host via `uv run` against a port-forwarded Redis.
 #   ./deploy/scripts/seed_demo.sh            # seed the standard story
-#   ./deploy/scripts/seed_demo.sh --clear    # wipe the streams first, then seed
+#   ./deploy/scripts/seed_demo.sh --clear    # wipe the actions stream + action details first, then seed
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 command -v kubectl >/dev/null || { echo "need kubectl"; exit 1; }
 
-kubectl port-forward -n kubeheal svc/redis-master 6379:6379 >/tmp/kh-redis-pf.log 2>&1 &
+PORT=16379   # not 6379: never hit a local Redis by accident
+kubectl port-forward -n kubeheal svc/redis-master "$PORT:6379" >/tmp/kh-redis-pf.log 2>&1 &
 PF=$!; trap 'kill $PF 2>/dev/null || true' EXIT
-for _ in $(seq 1 20); do (exec 3<>/dev/tcp/127.0.0.1/6379) 2>/dev/null && break; sleep 0.5; done
+for _ in $(seq 1 20); do (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break; sleep 0.5; done
+kill -0 "$PF" 2>/dev/null || { echo "port-forward failed:"; cat /tmp/kh-redis-pf.log; exit 1; }
 
-REDIS_URL="redis://127.0.0.1:6379/0" CLEAR="${1:-}" uv run --extra dashboard python - <<'PY'
+REDIS_URL="redis://127.0.0.1:$PORT/0" CLEAR="${1:-}" uv run --extra dashboard python - <<'PY'
 import os, redis
 from kubeheal import contracts as c
 
 r = redis.from_url(os.environ["REDIS_URL"])
 if os.environ.get("CLEAR") == "--clear":
-    r.delete(c.STREAM_HEALTH, c.STREAM_SECURITY, c.STREAM_ACTIONS)
-    for k in r.scan_iter("kubeheal:health:*"): r.delete(k)
-    for k in r.scan_iter("kubeheal:security:*"): r.delete(k)
+    r.delete(c.STREAM_ACTIONS)
     for k in r.scan_iter("kubeheal:action:*"): r.delete(k)
-    print("cleared streams + detail hashes")
+    print("cleared actions stream + action detail hashes")
 
 now = c.now_ms()
-def publish(stream, kind, ev):
+def detail(kind, ev):  # detail hash only: no stream entry, so fusion never sees it
     fields = ev.to_fields()
-    r.xadd(stream, fields, maxlen=c.STREAM_MAXLEN, approximate=True)
     r.hset(c.key_event(kind, ev.event_id), mapping=fields)
     r.expire(c.key_event(kind, ev.event_id), 86400)
 
@@ -46,9 +47,9 @@ s_ransom = c.SecurityEvent(event_id=c.new_event_id("sec"), namespace="demo", wor
     risk=0.94, probabilities={"benign":0.02,"suspicious":0.04,"ransomware":0.9,"exfiltration":0.04},
     window_start_ms=now-20000, window_end_ms=now-10000, n_events=640)
 
-publish(c.STREAM_HEALTH, "health", h_benign)
-publish(c.STREAM_HEALTH, "health", h_degr)
-publish(c.STREAM_SECURITY, "security", s_ransom)
+detail("health", h_benign)
+detail("health", h_degr)
+detail("security", s_ransom)
 
 a1 = c.ActionEvent(event_id=c.new_event_id("act"), namespace="demo", workload="victim-app",
     decision=c.Decision.OBSERVE, mode="observe", outcome="would_patch", score=0.78, compound_score=0.0,
@@ -66,7 +67,7 @@ for a in (a1, a2):
     r.xadd(c.STREAM_ACTIONS, f, maxlen=c.STREAM_MAXLEN, approximate=True)
     r.hset(c.key_event("action", a.event_id), mapping=f); r.expire(c.key_event("action", a.event_id), 86400)
 
-print(f"seeded: health={r.xlen(c.STREAM_HEALTH)} security={r.xlen(c.STREAM_SECURITY)} actions={r.xlen(c.STREAM_ACTIONS)}")
+print(f"seeded: actions={r.xlen(c.STREAM_ACTIONS)}")
 PY
 
 echo "Done. If the dashboard caches the stream at startup, restart it:"

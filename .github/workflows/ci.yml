@@ -16,6 +16,11 @@ jobs:
       - run: uv sync --frozen --all-extras   # tests import every component
       - run: uv run --all-extras ruff check .
       - run: uv run --all-extras pytest
+      - name: Manifests build and scripts parse
+        run: |
+          kubectl kustomize deploy/k8s >/dev/null
+          kubectl kustomize deploy/k8s/overlays/production >/dev/null
+          bash -n deploy/scripts/*.sh training/collect/run_lab.sh
 
   images:
     runs-on: ubuntu-latest
