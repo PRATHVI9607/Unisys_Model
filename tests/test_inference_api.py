@@ -73,11 +73,9 @@ def test_empty_model_dir_is_503_never_random_weights(monkeypatch, tmp_path):
 def test_committed_bundles_match_the_feature_and_label_lists(task, features, labels, risk):
     meta = ModelBundle.load(MODELS / task).meta     # what the agents send == what the model was trained on
     assert (meta["labels"], meta["class_risk"]) == (labels, risk)
-    # A security bundle may leave out recent_* / rename-kind features (older bundles) and may list the two retired
-    # rename_ext_change names (the inference service sends them as missing); nothing else.
-    retired = {"rename_ext_change_ratio", "recent_ext_change_frac"}
+    # A security bundle may leave out recent_* / rename-kind features (older bundles); nothing else.
     new_names = ("recent_", "frac_rename_", "rename_ext_added")
-    assert set(meta["features"]) <= set(features) | (retired if task == "security" else set())
+    assert set(meta["features"]) <= set(features)
     assert not {f for f in features if f not in meta["features"] and not f.startswith(new_names)}
 
 
@@ -121,7 +119,7 @@ def test_security_explains_only_publishable_rows(client):
     from kubeheal.contracts import SECURITY_PUBLISH_RISK
     ransomware = {"n_events": 451.0, "events_per_s": 8.26, "frac_read": 0.333, "frac_write": 0.313, "frac_open": 0.224,
                   "frac_rename": 0.131, "unique_paths": 59.0, "unique_dirs": 1.0, "files_written_per_s": 2.16,
-                  "rename_ext_change_ratio": 1.0, "suspicious_ext_ratio": 0.0, "ransom_note": 0.0,
+                  "frac_rename_suffix_added": 1.0, "suspicious_ext_ratio": 0.0, "ransom_note": 0.0,
                   "n_entropy_samples": 0.0, "write_bytes_per_s": 3.47e6, "net_out_bytes_per_s": 1.2e4}
     quiet = {"n_events": 216.0, "events_per_s": 10.1, "frac_read": 0.514, "frac_write": 0.486, "unique_paths": 37.0,
              "unique_dirs": 3.0, "files_written_per_s": 1.64, "entropy_mean": 3.83, "entropy_max": 7.1,

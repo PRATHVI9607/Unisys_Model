@@ -414,19 +414,12 @@ tail to fill with encryption events. With the lab's 65 s quiet gap before encryp
 0.26 s and 0.75 s (2 runs). Lowering the latency for the no-gap case needs a model or feature change (more lab
 runs without a quiet gap, or a shorter `RECENT_EVENTS`), not a policy change.
 
-Bench of the shipped bundle `security-5.0.0-ca2438d3` (hard-negative training, `recent_frac_rename` dropped;
-120 s load, 5 runs at 20 files/s, 3 runs at 180 files/s): kill time 8.96, 8.94, 8.85, 8.76, 8.73 s at 20 files/s
-and 1.33, 1.34, 1.17 s at 180 files/s, against 2.2 s and 0.65 to 0.72 s with `a49c7ed8`. Falco CPU p50 49m, security
-agent CPU p50 9m and 88 Mi, inference CPU p50 7m. In exchange, three benign pods rewriting config files through
-temp-file + rename (about 80 per second each, 60 s, prod-tier namespace, not protected) produced no security
-event above benign and no AUTO_KILL. See the variant table in
-[docs/models-and-data.md](models-and-data.md#known-limitations).
-
-Bench of the rename-kind candidate `security-5.0.0-064782d7` (new lab data with gaps of 0 to 80 s, hard negatives, all features;
-not shipped, 120 s load, 5 runs at 20 files/s, 3 at 180 files/s): kill time 1.04, 0.69, 0.64, 0.53, 0.76 s at 20 files/s and
-0.58, 0.70, 0.53 s at 180 files/s, with Falco CPU p50 43m, security agent 6m, inference 4m. It was removed again because three
-benign gzip-rotation pods were killed (the shipped bundle leaves them alone); the speed comes with that gap in the negatives, not
-from policy. Details in [docs/models-and-data.md](models-and-data.md#rename-kind-features-variants-a-to-d).
+Bench of the shipped bundle `security-5.0.0-c6fa12d8` (new lab data with gaps of 0 to 80 s, rename-kind features, hard negatives including
+start-up bursts; 120 s load, 5 runs at 20 files/s, 3 runs at 180 files/s): kill time 0.46, 0.70, 0.56, 0.55, 0.47 s at 20 files/s and 0.75, 0.55, 0.64 s
+at 180 files/s (previous bundle `ca2438d3`: 8.7 to 9.0 s and 1.17 to 1.34 s). The back-to-back no-gap case is no longer slow, so the paragraph above
+describes the previous bundle. Three benign pods rewriting config through temp-file + rename (about 80 per second each) and three benign pods
+rotating logs with gzip (60 s, prod-tier namespace, not protected) produced no AUTO_KILL. Details and the variant table in
+[docs/models-and-data.md](models-and-data.md#rename-kind-features-variants-a-to-d).
 
 ### Scaling
 

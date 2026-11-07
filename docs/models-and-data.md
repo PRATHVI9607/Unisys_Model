@@ -253,17 +253,17 @@ Values from `models/{health,security}/meta.json`, plus my own nested evaluation 
 
 | | Health | Security |
 |---|---|---|
-| Bundle version | `health-5.0.0-421cec83` | `security-5.0.0-ca2438d3` |
-| Rows / groups / sources | 2,998 / 277 / lab (`collected/health.jsonl`) | 40,286 / 1,663 / lab 37,406 (benign + ransomware) + synthetic 2,880 (7.2 %): suspicious and exfiltration (1,511, 100 % of those classes) and benign hard negatives (1,369, 3.9 % of benign); ransomware is 0 % synthetic. `meta.json` has `synthetic_fraction_by_class` |
-| Grouped-CV macro-F1 (gate) | 0.933 | 0.9996 |
-| Test macro-F1 | 0.948 (n = 275) | 1.000 (n = 3,931) |
+| Bundle version | `health-5.0.0-421cec83` | `security-5.0.0-c6fa12d8` |
+| Rows / groups / sources | 2,998 / 277 / lab (`collected/health.jsonl`) | 49,964 / 1,954 / lab 46,606 (benign + ransomware) + synthetic 3,358 (6.7 %): suspicious and exfiltration (1,296, 100 % of those classes) and benign hard negatives (2,062, 4.6 % of benign); ransomware is 0 % synthetic. `meta.json` has `synthetic_fraction_by_class` |
+| Grouped-CV macro-F1 (gate) | 0.933 | 0.9994 |
+| Test macro-F1 | 0.948 (n = 275) | 1.000 (n = 4,512) |
 | Held-out-family macro-F1 (pooled) | 0.858 (23 families) | 0.999 over benign + ransomware (meta.json: 0.50, because exfiltration and suspicious do not occur in lab families) |
-| Per-class F1 (grouped CV) | benign 0.966, critical 0.885, degradation 0.948 | benign 1.000, ransomware 0.9998, suspicious 0.9994, exfiltration 0.9991 |
-| Conformal q / coverage / mean set size | 0.349 / 0.901 / 0.93 | 4.4e-6 (serving floors it at 0.05) / 1.000 / 1.00 |
-| Latency p50 / p99 (ms) | 2.6 / 4.0 | 10.4 / 12.6 |
-| Eval: pod-level ransomware recall, prod tier (5-fold by pod, bundle q) | | 217 / 217 (`a49c7ed8` and the no-recent variants: 217 / 217) |
-| Eval: benign pods falsely killed (305 pods; prod and dev) | | 0 / 305 (interim: 0 / 305); dev never kills, its 0.7 multiplier caps risk at 0.7 < 0.85 |
-| Eval: first overwrite to first kill-eligible window, median / p90 | | 0.23 s / 0.65 s (interim: 0.27 s / 0.88 s) |
+| Per-class F1 (grouped CV) | benign 0.966, critical 0.885, degradation 0.948 | benign 1.000, ransomware 0.9995, suspicious 0.9993, exfiltration 0.9990 |
+| Conformal q / coverage / mean set size | 0.349 / 0.901 / 0.93 | 3.9e-6 (serving floors it at 0.05) / 1.000 / 1.00 |
+| Latency p50 / p99 (ms) | 2.6 / 4.0 | 13.0 / 15.7 |
+| Eval: pod-level ransomware recall, prod tier (5-fold by pod, bundle q) | | 177 / 178 (one partial in-place run missed; same in leave-one-family-out) |
+| Eval: benign pods falsely killed (418 pods; prod and dev) | | 0 / 418 in 5-fold CV and 0 / 418 leaving each benign family out; dev never kills, its 0.7 multiplier caps risk at 0.7 < 0.85 |
+| Eval: first overwrite to first kill-eligible window, median / p90 (CV latency proxy, floor about 2 s) | | 2.21 s / 2.72 s |
 | Eval: health, same grouped held-out groups, 5 seeds | 0.926 +/- 0.014 on all 2,998 rows, 0.920 +/- 0.017 on the 2,519 rows the previous bundle saw | |
 
 Health: against the previous bundle (`health-5.0.0-37c9309f`, 2,519 rows), the extra 479 rows leave macro-F1 within
@@ -330,10 +330,12 @@ Live (only the candidate that passed LOFO and CV, A; B to D fail LOFO with 1 to 
 | Kill time, 20 files/s back-to-back (5 runs) | 0.53, 0.64, 0.69, 0.76, 1.04 s | 8.73 to 8.96 s |
 | 3 benign atomic-write pods (about 80 renames per second, 60 s) | 0 killed | 0 killed |
 | 3 benign gzip-rotation pods (60 s) | **3 killed** | 0 killed |
+| E. A plus start-up burst negatives, without directory/read/entropy variety (`3cdb205c`) | 3 gzip-rotation pods killed again (0.97) | |
+| F. A plus start-up burst negatives (`c6fa12d8`, **shipped**) | kills 0.46 to 0.70 s (20 files/s, 5 runs), 0.55 to 0.75 s (180 files/s, 3 runs); atomic-write pods 0 killed; gzip-rotation pods 0 killed | |
 
 Outcome. The rename-kind features and the new gap mix deliver the speed (kills at 20 files/s drop from 8.9 s to 0.7 s) and keep the
 atomic-write result with hard negatives, but the model does not use `frac_rename_rotate`, and gzip rotation in a pod's first window is
-classified `ransomware`. The bundle was not promoted; `ca2438d3` stays deployed. Removing the hard negatives (B, D) breaks the lab hold-outs, so
+classified `ransomware`. `064782d7` was not promoted. Variant F adds small-window start-up bursts (see Known limitations) and replaces it: same lab results as A (LOFO 0 / 418 benign pods killed, 177 / 178 ransomware; CV the same), live 0 benign pods killed. The first try, E, still killed the rotation pods: the real window had two directories, reads and a mix of low-entropy `.log` and `.gz` entropy samples, which the first generator lacked. Removing the hard negatives (B, D) breaks the lab hold-outs, so
 they are needed, and dropping `recent_frac_rename` (C) is no longer a clear gain with the new data.
 
 ## Known limitations
@@ -343,8 +345,7 @@ they are needed, and dropping `recent_frac_rename` (C) is no longer a clear gain
 - **One ransomware simulator.** It is non-destructive and randomised (rate, size, rename, partial overwrite), but it is not real malware.
 - **Short window.** Health labels and features cover the first 60 s after a change (the assess delay; shorter on an early assessment). Slow leaks are judged by what was visible within that time.
 - **Conformal assumptions.** The coverage guarantee assumes exchangeability. A shift from the lab to production weakens it, and the set size is the signal to watch.
-- **Safety was bought with kill speed (security).** The shipped bundle holds out every benign lab family with 0 pod kills, and three live pods that write a temp file and rename it over the target about 80 times a second for 60 s were not touched. The price: the back-to-back detection workload is now killed after a median 1.33 s at 180 files/s (was 0.67 s) and 8.85 s at 20 files/s (was 2.25 s), because the synthetic hard-negative families move the first confident window later. The fast model without them (`d1eb7c81`, kept out of the repo) kills that atomic-write workload. A rename-heavy benign family unlike `atomic_rename`, `logrotate_gz`, `dpkg_install`, `git_npm` and the lab families may still be killed. The redefinition was tried, see the next section: it gives the speed and keeps the atomic-write result, but a new benign pattern (gzip rotation of a freshly started pod) is killed, so the shipped bundle is unchanged. Kills stay behind the protected namespaces, the `kubeheal.io/protected` label, the circuit breakers and the prod-only 0.85 gate.
-- **Back-to-back create-then-encrypt is slower to kill (shipped bundle).** The shipped bundle was trained when the lab had a quiet gap (65 to 80 s) between setup and encryption. Without a gap, the setup events fill the window and the model waits for the recent-event tail to fill with encryption: 8.85 s median at 20 files/s versus 1.33 s at 180 files/s. The candidate trained on lab data with gaps of 0 to 80 s kills in 0.69 s and 0.58 s, but is not shipped (see below).
+- **Safety rests on synthetic hard negatives (security).** The shipped bundle holds out every benign lab family with 0 pod kills, and live pods that rewrite config through temp-file + rename (about 80 per second) or rotate logs with gzip were not touched. Without the synthetic hard-negative families the model kills those workloads (variants B and D). A rename-heavy benign family unlike `atomic_rename`, `logrotate_gz`, `dpkg_install`, `git_npm`, `logrotate_start`, `archive_burst` and the lab families may still be killed. Kills stay behind the protected namespaces, the `kubeheal.io/protected` label, the circuit breakers and the prod-only 0.85 gate.
 - **Gap mix and one simulator.** The new lab runs use gaps of 0 to 3 s, 5 to 20 s and 30 to 80 s from the same simulator (`deploy/chaos/`; append rename in 70 % of runs, swap in 30 %). A ransomware that renames in a way the simulator never does, or that encrypts slowly without renames, is not covered. The per-gap and per-style recalls below come from this one tool.
-- **Synthetic parts of the security data.** `suspicious` and `exfiltration` (all rows) and the benign hard negatives (`atomic_rename`, `logrotate_gz`, `dpkg_install`, `git_npm`) are generated. Benign windows of 60 events or fewer with `frac_rename_rotate >= 0.5` exist only as synthetic hard negatives (61 rows); the lab has none.
-- **Open: gzip rotation at pod start.** Three live pods that rotate logs with gzip (`x.log` renamed to `x.log.1`, `x.log.1.gz` written, about 25 rotations per second, 60 s, prod-tier namespace, not protected) are killed by the rename-kind candidate `064782d7` on their first 33-event window, 0.4 s after start (`ransomware` 0.97; `frac_rename_rotate` is 1.0, the feature has no gain in the model). The shipped `ca2438d3` leaves the same pods alone (0 / 3). The fix is more small-window rotation and compression negatives (lab or synthetic), or a minimum-events rule in the agent; neither is in the repo.
+- **Synthetic parts of the security data.** `suspicious` and `exfiltration` (all rows) and the benign hard negatives (`atomic_rename`, `logrotate_gz`, `dpkg_install`, `git_npm`, `logrotate_start`, `archive_burst`) are generated.
+- **Start-up bursts rest on synthetic negatives.** Benign windows of 64 events or fewer with `frac_rename_rotate >= 0.5` (a pod's first window of gzip log rotation, or tar/zip creation) are covered by synthetic `logrotate_start` and `archive_burst` windows (about 820 of the 2,062 hard-negative rows; 60 % are a pod's first 20 to 64 events); the lab has none. Live, three gzip-rotation pods and three atomic-write pods are left alone. A different benign start-up pattern may still be killed on its first window; `frac_rename_rotate` has little gain (0.2 %), the model keys on the surrounding features.

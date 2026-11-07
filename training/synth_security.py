@@ -83,6 +83,7 @@ class _W:
         self.net = 0.0
         self.rate: float | None = None   # files/s of a hard-negative scenario (sets the event span); None = random span
         self.files = 0
+        self.first = False   # the pod's first 20-64 events (no setup phase, no background noise): see START_BURSTS
 
     def ev(self, syscall: str, path: str, new_path: str | None = None, n: int = 1) -> None:
         # The live capture sees one open per file, not each read()/write(): n calls collapse to one open_r/open_w
@@ -377,7 +378,54 @@ def git_npm(w: _W, budget: int) -> None:
         w.files += 1
 
 
-HARD_NEGATIVES = (atomic_rename, logrotate_gz, dpkg_install, git_npm)
+def logrotate_start(w: _W, budget: int) -> None:
+    """A logrotate/shell loop's start-up burst: write x.log (low entropy), rename x.log→x.log.1, gzip it into
+    x.log.1.gz (entropy of a small .gz, 6.6-7.6); logs sit in 1-3 directories, gzip reads the rotated file."""
+    _rate(w)
+    w.rate = min(w.rate, float(np.exp(w.rng.uniform(np.log(5), np.log(150)))))
+    if not w.first:
+        _setup(w, budget)
+    dirs = [f"{w.ctx['root']}{w.rng.choice(['', '/log', '/logs', '/var/log'])}" for _ in range(int(w.rng.integers(1, 4)))]
+    logs = [f"{w.rng.choice(dirs)}/{w.rng.choice(WORDS)}{i}.log" for i in range(int(w.rng.integers(1, 12)))]
+    while len(w.events) < budget:
+        base = str(w.rng.choice(logs))
+        w.ev("write", base)
+        w.ent(TEXT)
+        w.ev("rename", base, f"{base}.1")
+        if w.rng.random() < 0.3:
+            w.ev("read", f"{base}.1")
+        w.ev("write", f"{base}.1.gz")
+        w.ent((6.6, 7.6))
+        if w.rng.random() < 0.3:
+            w.ev("unlink", f"{base}.1")
+        if w.rng.random() < 0.3:
+            w.ev("rename", f"{base}.1.gz", f"{base}.2.gz")
+        w.wrote((0.1, 4096))
+        w.files += 1
+
+
+def archive_burst(w: _W, budget: int) -> None:
+    """tar/zip creation: read a few sources, write one high-entropy archive (sometimes via .tmp + rename)."""
+    _rate(w)
+    w.rate = min(w.rate, float(np.exp(w.rng.uniform(np.log(5), np.log(150)))))
+    if not w.first:
+        _setup(w, budget)
+    while len(w.events) < budget:
+        arc = w.file([".tar.gz", ".zip", ".tgz", ".tar.zst"], "/backup")
+        for _ in range(int(w.rng.integers(0, 6))):
+            w.ev("read", w.file())
+        if w.rng.random() < 0.4:
+            w.ev("write", arc + ".tmp")
+            w.ev("rename", arc + ".tmp", arc)
+        else:
+            w.ev("write", arc)
+        w.wrote((10, 8192))
+        w.ent(COMPRESSED)
+        w.files += 1
+
+
+START_BURSTS = (logrotate_start, archive_burst)
+HARD_NEGATIVES = (atomic_rename, logrotate_gz, dpkg_install, git_npm) + START_BURSTS
 
 
 # ── suspicious ───────────────────────────────────────────────────────────────
@@ -486,6 +534,7 @@ SCENARIOS = [  # (label, generator, weight)
     ("benign", encrypted_store, 0.8),
     ("benign", atomic_rename, 1.0), ("benign", logrotate_gz, 1.0), ("benign", dpkg_install, 1.0),
     ("benign", git_npm, 1.0),
+    ("benign", logrotate_start, 1.5), ("benign", archive_burst, 1.5),
     ("suspicious", recon, 1.0), ("suspicious", file_enumeration, 1.0), ("suspicious", permission_tamper, 0.6),
     ("ransomware", ransomware_rename, 0.8), ("ransomware", ransomware_inplace, 0.8),
     ("ransomware", ransomware_copy_delete, 0.6), ("ransomware", ransomware_intermittent, 0.7),
@@ -499,6 +548,8 @@ def _window(rng: np.random.Generator, ctx: dict, gen, slow: bool) -> dict | None
     w = _W(rng, ctx)
     total = int(rng.integers(10, 513))
     noise = rng.uniform(0.5, 0.8) if slow else rng.uniform(0.0, 0.6)
+    if gen in START_BURSTS and rng.random() < 0.6:   # the pod's first window: only the burst itself
+        w.first, total, noise = True, int(rng.integers(20, 65)), rng.uniform(0.0, 0.1)
     budget = max(1, int(total * (1 - noise)))
     if gen.__name__.startswith("ransomware") and rng.random() < 0.5:   # setup phase: low-entropy file creates, then the attack
         for _ in range(int(budget * rng.uniform(0.2, 0.7))):
@@ -531,7 +582,7 @@ def _window(rng: np.random.Generator, ctx: dict, gen, slow: bool) -> dict | None
     entropy = [] if rng.random() < 0.25 else w.entropy[-int(rng.integers(1, MAX_ENTROPY_SAMPLES + 1)):]
     # Pod-wide counters over the window: background (sidecars, app traffic, logs) + the scenario's bytes, writes
     # only partly flushed yet; a window's first evaluation (one sample) or an unreadable pid/cgroup gives None.
-    first_eval = rng.random() < 0.15
+    first_eval = rng.random() < (0.6 if w.first else 0.15)   # a pod's first window has no earlier counter sample
     bg_write = 0.0 if rng.random() < 0.5 else rng.lognormal(np.log(1e3), 1.5) * window_s
     bg_net = rng.lognormal(np.log(2e3), 1.5) * window_s
     return {
