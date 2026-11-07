@@ -164,6 +164,7 @@ Tier 1 capture (no `read`/`write` hooks) cut Falco from 1985m CPU p50 and 565 Mi
 
 How the models are trained and evaluated is described in
 [docs/models-and-data.md](docs/models-and-data.md).
+A live evaluation on workloads outside the training data (false kills, detection sweep, resilience, drift, resources) is in [docs/evaluation.md](docs/evaluation.md).
 
 ## Limitations
 

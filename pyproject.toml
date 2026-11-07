@@ -66,3 +66,4 @@ ignore = ["E501", "S101", "S104", "S311"]   # asserts in tests, 0.0.0.0 bind in 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S"]
 "training/*" = ["S"]
+"deploy/scripts/*.py" = ["S"]   # operator tooling that shells out to kubectl
