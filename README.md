@@ -29,7 +29,7 @@ flowchart LR
   end
 
   API -- "watch Deployments,<br/>list pods" --> HA
-  PROM -- "query_range<br/>[change, change + 120 s]" --> HA
+  PROM -- "query_range<br/>[change, assess time]" --> HA
   FALCO -- "tail JSON lines" --> SA
   PROC -- "entropy · bytes written · bytes out" --> SA
   HA -- "POST /v1/health/predict" --> INF
@@ -46,9 +46,9 @@ flowchart LR
 
 | | What it does |
 |---|---|
-| **Config-drift detection** | The health agent assesses a Deployment 120 s after a real spec change: 24 spec-diff features plus 12 features of the post-change Prometheus window (CPU/memory utilisation, throttling, p99 latency, 5xx ratio, restarts, ready ratio). |
+| **Config-drift detection** | The health agent assesses a Deployment 60 s after a real spec change (at once on a posture violation, within about 2 s of a failed rollout appearing): 24 spec-diff features plus 12 features of the post-change Prometheus window (CPU/memory utilisation, throttling, p99 latency, 5xx ratio, restarts, ready ratio). |
 | **Rule-based rollback** | Hard rollout failures after a change trigger AUTO_PATCH by rule, at any tier and any model confidence. These are pods created after the change stuck in `ImagePullBackOff`, `ErrImagePull`, `InvalidImageName`, `CrashLoopBackOff`, `CreateContainer*Error`, `RunContainerError` or `OOMKilled`, and `ProgressDeadlineExceeded` on the rollout. The model handles subtle drift: throttling, latency, memory pressure. |
-| **Ransomware-like behaviour** | The security agent tails Falco file syscalls on data volumes, samples the entropy of files the pod wrote, measures the pod's write and network-out bytes, and scores a per-pod 60 s window every 5 s. |
+| **Ransomware-like behaviour** | The security agent tails Falco file syscalls on data volumes, samples the entropy of files the pod wrote, measures the pod's write and network-out bytes, and scores a per-pod 60 s window every 1 s, or at once at 32 new events. |
 | **Correlation** | A deterministic score joins a health and a security event of the same workload within 120 s. A compound incident raises both scores by ×1.15. |
 | **Explanations** | Every event carries class probabilities, the conformal prediction set and the top 5 TreeSHAP factors. Every action carries a rationale and a summary. |
 | **Remediation** | AUTO_KILL: label the pod `kubeheal.io/quarantined`, create a deny-all NetworkPolicy owned by the pod, delete it. AUTO_PATCH: JSON-patch `/spec/template` (and `/spec/replicas` if it changed) back to the stored baseline. |
@@ -116,7 +116,7 @@ These are the main settings. The full per-component table is in
 | `MAX_KILLS_PER_HOUR` / `MAX_PATCHES_PER_HOUR` | `3` / `5` | Per-workload circuit breakers |
 | `EXTRA_PROTECTED_NAMESPACES` | empty | Namespaces added to the built-in protected set |
 | `WATCH_NAMESPACES` | empty (all) | Limits the health and security agents to these namespaces |
-| `ASSESS_DELAY_S` | `120` | Length of the post-change metric window before a health assessment |
+| `ASSESS_DELAY_S` | `60` | Length of the post-change metric window before a health assessment (sooner on a posture violation or failed rollout) |
 | `KUBEHEAL_CAPTURE` | `0` | `1` makes the security agent record every scored window (lab collection only) |
 
 The namespace label `kubeheal.io/namespace-tier: prod|staging|dev` sets the tier multiplier. Without
@@ -141,6 +141,8 @@ the label, the tier is guessed from the namespace name.
 | Spec change → AUTO_PATCH (rule path) | <!-- RESULTS --> |
 | Spec change → AUTO_PATCH (model path) | <!-- RESULTS --> |
 
+Tier 1 capture (no `read`/`write` hooks) cut Falco to 53m CPU p50 (was 1985m) and 209 Mi memory p50 (was 565 Mi) under a 300 s heavy-I/O load; kill-time numbers follow the security retrain on lab data. Details in [docs/architecture.md](docs/architecture.md#resources).
+
 How the models are trained and evaluated is described in
 [docs/models-and-data.md](docs/models-and-data.md).
 
@@ -149,7 +151,7 @@ How the models are trained and evaluated is described in
 - **Exfiltration is unvalidated.** The `exfiltration` class (and `suspicious`) is trained only on synthetic windows. The serve-time byte counters are real, but no real exfiltration was ever observed.
 - **One workload and one node.** Health lab data comes from one workload type (podinfo) on a single-node minikube. Effects on a multi-node cluster under real traffic can differ.
 - **Simulated ransomware.** Ransomware windows come from one parameterised, non-destructive simulator, not from real malware families.
-- **120 s window.** Health is judged on the first 120 s after a change. Harm that appears later (slow leaks) is missed.
+- **60 s window.** Health is judged on the first 60 s after a change. Harm that appears later (slow leaks) is missed.
 - **Pre-existing drift.** The first spec the health agent sees is assumed good and becomes the baseline, so drift that predates the agent is not detected.
 - **Redis is a single point of failure.** It runs without persistence. On a restart the streams and baselines are lost, and baselines are re-learned on first sight.
 

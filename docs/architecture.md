@@ -10,8 +10,8 @@ diagram is at the top of the [README](../README.md). Models and data are covered
 | Component | Kind (namespace `kubeheal`) | Entry point | Responsibility |
 |---|---|---|---|
 | **inference** | Deployment ×1 (dev) / 2–6 with an HPA (production), `kubeheal/inference:v5` | `uvicorn kubeheal.inference.app:app` (:8000) | Loads `models/{health,security}` at startup and serves `POST /v1/{task}/predict`. Never serves untrained weights: a missing bundle makes that task, and `/readyz`, return 503. |
-| **health-agent** | Deployment ×1, `kubeheal/agents:v5` | `python -m agents.health_agent.agent` (:8080) | Watches Deployments and assesses each real spec change `ASSESS_DELAY_S` after it is seen. Derives `failure_reasons`, publishes a `HealthEvent`, and keeps the spec and baseline keys up to date. |
-| **security-agent** | DaemonSet, `hostPID`, `kubeheal/agents:v5` | `python -m agents.security_agent.agent` (:8080) | Tails Falco JSON on its node and builds per-pod windows. Adds file entropy, write bytes and network-out bytes, scores a pod on a 2 s timer or as soon as it has 64 new events, and publishes a `SecurityEvent` when risk ≥ 0.4. **It observes only.** |
+| **health-agent** | Deployment ×1, `kubeheal/agents:v5` | `python -m agents.health_agent.agent` (:8080) | Watches Deployments and assesses each real spec change `ASSESS_DELAY_S` (60 s) after it is seen, sooner on a posture violation or failed rollout. Derives `failure_reasons`, publishes a `HealthEvent`, and keeps the spec and baseline keys up to date. |
+| **security-agent** | DaemonSet, `hostPID`, `kubeheal/agents:v5` | `python -m agents.security_agent.agent` (:8080) | Tails Falco JSON on its node and builds per-pod windows. Adds file entropy, write bytes and network-out bytes, scores a pod every 1 s or as soon as it has 32 new events, and publishes a `SecurityEvent` when risk ≥ 0.4. **It observes only.** |
 | **fusion-agent** | Deployment ×1, `strategy: Recreate` | `python -m agents.fusion_agent.agent` (:8080) | The single decision point and the only component that changes the cluster. It pairs events, scores correlation, runs the pure policy, acts or records `would_*`, and publishes an `ActionEvent` for every decision. |
 | **dashboard** | Deployment ×1 | `uvicorn dashboard.fastapi_app:app` (:8080) | Read-only console that tails the three streams and pushes them over WebSocket. It has no Kubernetes access. |
 | **redis** | Deployment ×1, `redis:7.4.2-alpine` | `redis-master:6379` | Holds the streams and keys. It is ephemeral (no RDB or AOF), capped at 256 MB with `noeviction`, and a NetworkPolicy allows only same-namespace clients. |
@@ -94,10 +94,10 @@ Labels and class risks are listed in index order, which is also the model class 
 ### Health: configuration drift
 
 1. **Watch.** A Deployment watch (all namespaces, or one per entry in `WATCH_NAMESPACES`) computes `canonical_spec`: a camelCase DeploymentSpec with empty values dropped. Only a changed `spec_hash` counts. Status-only updates just refresh the "rollout complete" flag.
-2. **Debounce.** A per-workload timer fires `ASSESS_DELAY_S` (120 s) after the change was first seen. A newer change restarts the timer. Assessments run off the watch loop, at most 8 at a time.
+2. **Debounce.** A per-workload timer fires `ASSESS_DELAY_S` (60 s) after the change was first seen. A newer change restarts the timer. The assessment comes sooner when the change adds a posture violation (at once) or when a failed rollout shows up (polled every `POLL_S` = 2 s). Assessments run off the watch loop, at most 8 at a time.
 3. **Compare.** The first time a workload is seen, its spec is stored as both spec and baseline, assumed good. A spec equal to the stored baseline (an AUTO_PATCH restore or a manual rollback) is recorded without an assessment.
 4. **Features.**
-   - **Metrics:** `agents/health_agent/prometheus.fetch_window` queries the 11 raw metrics over `[change seen, change seen + 120 s]` at a 15 s step, in raw SI units.
+   - **Metrics:** `agents/health_agent/prometheus.fetch_window` queries the 11 raw metrics over `[change seen, assess time]` at a 15 s step, in raw SI units.
    - **Features:** `health_features(old, new, window)` returns 36 features (24 spec-diff and 12 metric). A missing metric is `None`, never 0.
    - **Failure reasons:** `failure_reasons` collects Kubernetes evidence that the new spec cannot run. The agent lists the Deployment's pods by its `selector.matchLabels` and keeps those created at or after the change (with 5 s of slack). For each one it records an init or app container waiting in `ImagePullBackOff`, `ErrImagePull`, `InvalidImageName`, `CrashLoopBackOff`, `CreateContainerConfigError`, `CreateContainerError` or `RunContainerError`, and a last termination reason of `OOMKilled`. It also adds `ProgressDeadlineExceeded` when the watched status shows `Progressing=False` for the current generation. If listing the pods fails, only the pod evidence is lost. These reasons are not model features.
    - **Policy violations:** the agent also adds one `policy:<feature>` entry for each security-posture weakening the spec introduces **relative to the baseline**: `privileged_added`, `root_user_added` (`runAsUser: 0` / `runAsNonRoot: false`), `capabilities_added`, `host_namespace_added` (hostNetwork/hostPID/hostIPC), `host_path_added`. These come from the existing spec-diff features. Because they are judged against the baseline, a violation left in place is reported again on every later change. **A spec is never promoted to baseline while `failure_reasons` is non-empty**, so a model that rates a posture weakening benign can't make it the restore target.
@@ -106,10 +106,10 @@ Labels and class risks are listed in index order, which is also the model class 
 
 ### Security: ransomware-like file activity
 
-1. **Capture.** A single Falco rule, *KubeHeal Data File Activity*, emits file syscalls of `CAPTURED_GROUPS` (read, write, open, rename, unlink, truncate, chmod) on `kh_data_dirs` (default `/data`) from containers in pods. A test keeps the rule's `evt.type` list and `CAPTURED_GROUPS` in sync.
+1. **Capture.** A single Falco rule, *KubeHeal Data File Activity*, emits file syscalls of `CAPTURED_GROUPS` (read, write, rename, unlink, truncate, chmod) on `kh_data_dirs` (default `/data`) from containers in pods. The rule hooks no `read()`/`write()`: it captures `open`, `openat`, `openat2` and `creat`, and `open_syscall` classifies each by `evt.arg.flags` into `open_w` (write intent: `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, or `creat`) or `open_r`. So `frac_read` and `frac_write` are per-file opens by intent, and `frac_open` is kept as a feature but is always 0 live. A test keeps the rule's `evt.type` list and `CAPTURED_GROUPS` in sync.
 2. **Tail.** `FalcoTail` starts at the end of the file and follows rotation and truncation. It punches holes over consumed bytes, so the tmpfs file stays bounded by the unread tail.
 3. **Window.** The agent keeps one window per `(namespace, pod)`: at most 512 events within 60 s of the newest event. A new `k8s.pod.uid` for the same name starts a fresh window and cooldown. Pods idle for 300 s are evicted.
-4. **Evaluate.** A pod with new events is evaluated on the `EVAL_INTERVAL_S` timer (2 s), or at once when it has 64 new events.
+4. **Evaluate.** A pod with new events is evaluated on the `EVAL_INTERVAL_S` timer (1 s), or at once when it has `BURST_EVENTS` = 32 new events.
    - **Entropy:** the entropy of the first 16 KiB of up to 8 recently written files, read through `/proc/{pid}/root`. A bounded LRU cache keyed by path and stat signature (device, inode, size, mtime, ctime) skips re-reading unchanged files; ctime cannot be set back, so in-place encryption that restores size and mtime is still re-read. Every path component is opened with `O_NOFOLLOW`, and only regular files are read. Falco reports PIDs from the root PID namespace, so on nested nodes (minikube docker driver, kind) the agent finds a local PID of the container via `/proc/*/cgroup`.
    - **Counters:** on each evaluation the agent samples two counters (at most 32 samples per pod):
      - **Write bytes:** the sum of `wbytes=` in the pod's cgroup v2 `io.stat`, read through `/proc/1/root/sys/fs/cgroup`. Both the systemd and cgroupfs layouts are supported. This counts block-device writes at writeback.
@@ -234,7 +234,7 @@ sequenceDiagram
   W->>F: openat / write / rename / unlink on /data
   F->>SA: JSON line (evt.type, fd.name, fs.path.*, proc.pid, k8s.pod.*)
   Note over F,INF: append to the pod window (max 512 events, last 60 s)
-  loop 2 s timer (EVAL_INTERVAL_S) or 64 new events, pods with new events
+  loop 1 s timer (EVAL_INTERVAL_S) or 32 new events, pods with new events
     Note over F,INF: entropy of up to 8 recently written files via /proc/{pid}/root
     Note over F,INF: sample pod cgroup io.stat wbytes and<br/>netns TX bytes (/proc/{pid}/net/dev)
     SA->>INF: POST /v1/security/predict {26 features}
@@ -272,12 +272,12 @@ sequenceDiagram
   U->>K: change Deployment spec (patch / apply)
   K-->>HA: watch MODIFIED
   Note over HA,P: canonical_spec + spec_hash differ → (re)start the ASSESS_DELAY_S timer
-  Note over HA: 120 s later (a newer change restarts the clock)
+  Note over HA: ASSESS_DELAY_S = 60 s later, or earlier on a posture violation or failed rollout (a newer change restarts the clock)
   HA->>R: GET kubeheal:spec and kubeheal:baseline
   alt new spec equals the baseline (restore or rollback)
     HA->>R: SET kubeheal:spec, no assessment
   else real spec change
-    HA->>P: query_range, 11 raw metrics<br/>[change, change + 120 s], step 15 s
+    HA->>P: query_range, 11 raw metrics<br/>[change, assess time], step 15 s
     HA->>K: list pods by selector → failure_reasons<br/>(new pods: ImagePullBackOff, CrashLoopBackOff, OOMKilled, ...)
     HA->>INF: POST /v1/health/predict {24 spec-diff + 12 metric features}
     INF-->>HA: label, risk, conformal set, top 5 SHAP factors
@@ -312,12 +312,12 @@ listed here.
 | `REDIS_URL` | `redis://redis-master.kubeheal.svc:6379/0` | same | health, security, fusion, dashboard |
 | `INFERENCE_URL` | `http://kubeheal-inference.kubeheal.svc:8000` | same (health, security) | health, security |
 | `PROMETHEUS_URL` | `http://prometheus-operated.monitoring.svc:9090` | same | health |
-| `ASSESS_DELAY_S` | `120` | `120` | health; `drift_lab.py` imports it |
+| `ASSESS_DELAY_S` | `60` | `60` | health; `drift_lab.py` imports it |
 | `WATCH_NAMESPACES` | empty = all | not set | health (one watch per namespace), security (filter) |
-| `EXTRA_PROTECTED_NAMESPACES` | empty | not set | health, security, fusion |
+| `EXTRA_PROTECTED_NAMESPACES` | empty | `falco,monitoring` | health, security, fusion |
 | `FALCO_EVENTS_PATH` | `/var/run/falco/events.jsonl` | same | security |
 | `PROC_ROOT` | `/proc` | `/host/proc` | security |
-| `EVAL_INTERVAL_S` | `2` | `2` | security (timer; a pod with 64 new events is scored at once) |
+| `EVAL_INTERVAL_S` | `1` | `1` | security (timer; a pod with 32 new events is scored at once) |
 | `KUBEHEAL_CAPTURE` | `0` | `0` (`run_lab.sh` sets `1` for a run) | security |
 | `KUBEHEAL_MODE` | `observe` (unknown values fall back to observe) | `enforce` | fusion |
 | `MAX_KILLS_PER_HOUR` / `MAX_PATCHES_PER_HOUR` | `3` / `5` | `3` / `5` | fusion (per workload) |
@@ -374,9 +374,27 @@ are kept so Python startup (imports) is not throttled during rollouts.
 | Falco (Helm) | 1.9 CPU / 294Mi under lab load | 100m / 256Mi | 2 / 1Gi (1 CPU was throttled and OOMKilled) |
 
 Falco traces only the syscalls its one rule needs (`base_syscalls.custom_set` + `repair: true` in
-`deploy/k8s/helm/falco-values.yaml`): 50 syscalls instead of the 87 of its default state set. The
-dropped ones are socket, accept, connect, bind, epoll, eventfd, pipe, mount and similar; read and write,
-which dominate the volume, stay because the rule matches them.
+`deploy/k8s/helm/falco-values.yaml`): 38 syscalls instead of the 87 of its default state set (`all: false`). The
+dropped ones are socket, accept, connect, bind, epoll, eventfd, pipe, mount and similar. `read` and
+`write`, which dominate the volume, are dropped too: the rule matches opens, renames, unlinks,
+truncates and chmods only (Tier 1).
+
+Measured with `deploy/scripts/bench.sh` (same bench, minikube 8 CPU / 8 GB, 300 s heavy-I/O load: a
+64 MiB `dd`/`cp` loop):
+
+| | before (read/write hooked) | after (Tier 1) |
+|---|---|---|
+| Falco CPU p50 / max | 1985m / 1987m | 53m / 253m |
+| Falco memory p50 | 565 Mi | 209 Mi |
+| Falco events file growth | 822 KB/s | 9.6 KB/s |
+| Security agent CPU p50 | 73m | 9m |
+| Security agent memory p50 | 94 Mi | 83 Mi |
+
+Before, Falco was saturated under that load and dropped events; kills arrived a median ~144 s after the
+workload started. After Tier 1 the pipeline publishes a window ~5 s after pod start with no drops, but
+the interim security model (synthetic-only, retrained for the new features) did not yet reach AUTO_KILL
+confidence on the real workload. The security model is being retrained on real lab data; kill-time
+numbers will be added after that.
 
 ### Scaling
 
@@ -397,7 +415,7 @@ Each component has its own ServiceAccount and ClusterRole, and only fusion can c
 |---|---|
 | `kubeheal-health` | `apps/deployments`: get, list, watch. `pods`: list (rollout-failure evidence for `failure_reasons`). |
 | `kubeheal-security` | `pods`: get. `apps/replicasets`: get. These are needed for owner resolution. |
-| `kubeheal-fusion` | `pods`: get, patch, delete. `namespaces`: get (tier label). `apps/deployments`: get, patch. `networking.k8s.io/networkpolicies`: create. |
+| `kubeheal-fusion` | `pods`: get, patch, delete. `namespaces`: get (tier label). `apps/deployments`: get, patch. `apps/replicasets`: get (pod to Deployment, protected check). `networking.k8s.io/networkpolicies`: create. |
 | `kubeheal-dashboard` | none (`automountServiceAccountToken: false`) |
 | inference, redis | no token mounted |
 

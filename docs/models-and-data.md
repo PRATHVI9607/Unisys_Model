@@ -12,7 +12,7 @@ at serve time. KubeHeal enforces that match structurally, so it does not depend 
 
 - **One feature module.** All feature code lives in `kubeheal/features/`. Training, the lab collectors and the live agents import the same functions. There is no second implementation anywhere.
 - **Collectors record what the agents computed.** The lab collectors never compute features: health rows carry the features of the `HealthEvent` the live agent published, and security rows carry the features the live agent captured. `train.py --collected` fails if a recorded feature set differs from the current feature list.
-- **One metric window.** The health agent and `training/collect/drift_lab.py` both call `agents/health_agent/prometheus.fetch_window` over `[change seen, change seen + ASSESS_DELAY_S]` at `METRIC_STEP_S` = 15 s, which is also Prometheus' scrape interval.
+- **One metric window.** The health agent and `training/collect/drift_lab.py` both call `agents/health_agent/prometheus.fetch_window` over `[change seen, assess time]` (`ASSESS_DELAY_S` = 60 s by default, shorter when the agent assesses early; `drift_lab.py` records `assess_delay_s`) at `METRIC_STEP_S` = 15 s, which is also Prometheus' scrape interval.
 - **Synthetic windows match what Falco can see.** The synthetic security windows are cut down to the agent's view: `CAPTURED_GROUPS` syscalls on the data volume only, at most 512 events, at most `MAX_ENTROPY_SAMPLES` = 8 entropy samples of the first 16 KiB, and the same `window_seconds()` = max(event span, 5 s) capped at 60 s for every per-second rate, defined once in `kubeheal/features/security.py`. A test keeps the Falco rule and `CAPTURED_GROUPS` in sync.
 - **Unknown is `None`, never 0.** LightGBM handles missing values natively, and the inference API rejects unknown feature names with a 422.
 
@@ -91,10 +91,11 @@ files the pod wrote, the window length, and two byte counters.
 | Group | Features |
 |---|---|
 | Volume | `n_events`, `events_per_s` |
-| Syscall mix | `frac_read`, `frac_write`, `frac_open`, `frac_rename`, `frac_unlink`, `frac_truncate`, `frac_network`, `frac_mmap`, `frac_exec`, `frac_chmod`. Network, mmap and exec are never captured live, so these are always 0 at serve time. |
+| Syscall mix | `frac_read` and `frac_write` (per-file opens by intent, via `open_syscall`: the live capture has no `read()`/`write()`), `frac_open` (always 0 live), `frac_rename`, `frac_unlink`, `frac_truncate`, `frac_network`, `frac_mmap`, `frac_exec`, `frac_chmod`. Network, mmap and exec are never captured live, so these are always 0 at serve time. |
 | Paths | `unique_paths`, `unique_dirs`, `files_written_per_s`, `rename_ext_change_ratio`, `suspicious_ext_ratio` (27 known ransomware extensions), `ransom_note` (a name like `README_DECRYPT.txt`) |
 | Entropy (bits/byte, first 16 KiB) | `entropy_mean`, `entropy_max`, `entropy_p90`, `entropy_high_frac` (> 7.5), `entropy_slope`, `n_entropy_samples`. All `None` when no samples. |
 | Byte counters | `write_bytes_per_s` (pod cgroup v2 `io.stat` `wbytes`, counted at writeback), `net_out_bytes_per_s` (TX bytes of every non-loopback interface in the pod netns, `/proc/{pid}/net/dev`). Both are the counter increase across the window divided by its length, and `None` on a pod's first evaluation or after a reset. |
+| Short horizon (last `RECENT_EVENTS` = 64 events, so a burst stands out from the setup phase) | `recent_frac_write` (open for write + truncate), `recent_frac_rename`, `recent_frac_unlink`, `recent_frac_chmod` (fractions of the 64), `recent_unique_files` (distinct paths), `recent_ext_change_frac` (renames that change the extension; `None` without renames), `recent_entropy_mean` / `recent_entropy_high_frac` (entropy samples of the files written in those 64 events; `None` without samples), `recent_events_per_s` (64 / max(span, 0.5 s)). Computed by `recent_features()` for the agent and the generator alike; an older bundle without them keeps serving because the inference service ignores `recent_*` it does not list. |
 
 The two byte counters are filled at serve time. They are the agent's only network signal, because
 the Falco rule captures file syscalls only. The synthetic generator produces them too: they are
@@ -113,7 +114,7 @@ match `meta.json`.
 - **Inputs:** unknown keys raise an error, missing or non-finite values become NaN, and prediction runs with `num_threads=1`.
 - **Label:** the argmax class.
 - **Risk:** `risk = Σ p(class) · class_risk`, clipped to [0, 1]. Health class risks are 0.05, 0.60 and 0.95. Security class risks are 0.05, 0.45, 0.95 and 0.85.
-- **Conformal set:** `{c : 1 − p_c ≤ q}`. `uncertain = len(set) != 1`.
+- **Conformal set:** `{c : 1 − p_c ≤ max(q, 0.05)}` (the floor admits any label with p ≥ 0.95). `uncertain = len(set) != 1`, so an empty set is uncertain.
 - **Top factors:** the 5 largest non-zero |TreeSHAP| contributions to the predicted class, from LightGBM `pred_contrib=True`. These are exact for trees, and the `shap` package is not needed.
 
 ### Split-conformal uncertainty (`kubeheal/ml/conformal.py`)
@@ -180,7 +181,8 @@ counts, scenario families and label reasons. Do not edit it by hand.
 Operational details are in [operations.md](operations.md#lab-data-collection).
 
 **Health** (`drift_lab.py`) runs podinfo "slots" in the namespace `kubeheal-lab`. The namespace is
-prod tier and labelled `kubeheal.io/protected=true`, so fusion never acts on a sample mid-measurement.
+prod tier (the label is reconciled on every start); the lab Deployments and pods, not the namespace, carry
+`kubeheal.io/protected=true`, so fusion never acts on a sample mid-measurement.
 Each slot runs a load generator on a random base spec, and the collector applies changes from 21
 weighted families with random magnitudes (`FAMILIES` = generators, `WEIGHTS` = the mix, one table in
 `drift_lab.py`):
@@ -262,5 +264,5 @@ the image and roll out `kubeheal-inference`.
 - **Exfiltration rests entirely on synthetic data.** The serve-time byte counters are real measurements, but `exfiltration` and `suspicious` are trained only on synthetic windows. Treat `exfiltration` predictions as unvalidated until real labelled windows exist.
 - **Narrow health data.** There is one workload type (podinfo) on a single minikube node. The legacy CSV has only about 9 harmful runs, so health quality depends on lab data.
 - **One ransomware simulator.** It is non-destructive and randomised (rate, size, rename, partial overwrite), but it is not real malware.
-- **Short window.** Health labels and features cover the first 120 s after a change. Slow leaks are judged by what was visible within that time.
+- **Short window.** Health labels and features cover the first 60 s after a change (the assess delay; shorter on an early assessment). Slow leaks are judged by what was visible within that time.
 - **Conformal assumptions.** The coverage guarantee assumes exchangeability. A shift from the lab to production weakens it, and the set size is the signal to watch.
