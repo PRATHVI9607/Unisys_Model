@@ -1,0 +1,36 @@
+# Runtime trial only (not wired into the security agent). Sensor JSON lines go to stdout: `kubectl logs`.
+# kubectl apply -f sensor/deploy/trial-daemonset.yaml ; image: minikube image build -t kubeheal-sensor:trial sensor/
+apiVersion: v1
+kind: Namespace
+metadata: {name: kubeheal-sensor-trial, labels: {kubeheal.io/protected: "true"}}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: kubeheal-sensor, namespace: kubeheal-sensor-trial, labels: {app: kubeheal-sensor, kubeheal.io/protected: "true"}}
+spec:
+  selector: {matchLabels: {app: kubeheal-sensor}}
+  template:
+    metadata: {labels: {app: kubeheal-sensor, kubeheal.io/protected: "true"}}
+    spec:
+      hostPID: true
+      containers:
+        - name: sensor
+          image: kubeheal-sensor:trial
+          imagePullPolicy: Never
+          args: ["--prefix", "/data/", "--prefix", "/tmp/", "--stats-secs", "30"]
+          securityContext: {privileged: true}
+          resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {cpu: 500m, memory: 128Mi}}
+          volumeMounts:
+            - {name: cgroup, mountPath: /sys/fs/cgroup, readOnly: true}
+            - {name: kubelet, mountPath: /var/lib/kubelet, readOnly: true, mountPropagation: HostToContainer}
+            - {name: bpffs, mountPath: /sys/fs/bpf}
+            - {name: btf, mountPath: /sys/kernel/btf, readOnly: true}
+            - {name: debugfs, mountPath: /sys/kernel/debug}
+            - {name: tracefs, mountPath: /sys/kernel/tracing}
+      volumes:
+        - {name: cgroup, hostPath: {path: /sys/fs/cgroup}}
+        - {name: kubelet, hostPath: {path: /var/lib/kubelet}}
+        - {name: bpffs, hostPath: {path: /sys/fs/bpf}}
+        - {name: btf, hostPath: {path: /sys/kernel/btf}}
+        - {name: debugfs, hostPath: {path: /sys/kernel/debug}}
+        - {name: tracefs, hostPath: {path: /sys/kernel/tracing}}
