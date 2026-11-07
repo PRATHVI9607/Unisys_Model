@@ -13,10 +13,12 @@ JSON strings.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from enum import StrEnum
-from typing import Any
+from types import UnionType
+from typing import Any, Union, get_args, get_origin
 
 from pydantic import BaseModel, Field
 
@@ -79,10 +81,10 @@ def namespace_tier(namespace: str, label: str | None = None) -> str:
     """Tier from the namespace's TIER_LABEL value when valid, else from its name."""
     if label in TIERS:
         return label
-    n = (namespace or "").lower()
-    if "prod" in n:
+    tokens = set(re.split(r"[-_.]", (namespace or "").lower()))   # whole tokens: nonprod/preprod -> dev
+    if tokens & {"prod", "production", "prd"}:
         return "prod"
-    if "stag" in n:
+    if tokens & {"stag", "staging", "stg"}:
         return "staging"
     return "dev"
 
@@ -152,9 +154,10 @@ class _Event(BaseModel):
             if name not in raw:
                 continue
             v = raw[name]
-            ann = str(f.annotation)
-            if "Dict" in ann or "List" in ann or "dict" in ann or "list" in ann:
-                data[name] = json.loads(v) if v else ({} if "ict" in ann else [])
+            members = get_args(f.annotation) if get_origin(f.annotation) in (Union, UnionType) else (f.annotation,)
+            kinds = {get_origin(m) or m for m in members}   # unwraps X | None
+            if kinds & {dict, list}:
+                data[name] = json.loads(v) if v else ({} if dict in kinds else [])   # bad JSON -> json.JSONDecodeError (ValueError)
             elif f.annotation is bool:
                 data[name] = v in ("1", "true", "True")
             else:
@@ -178,6 +181,7 @@ POLICY_REASON_PREFIX = "policy:"   # failure_reasons entry = prefix + posture fe
 
 class SecurityEvent(_Event):
     """Published by the security agent for one pod's syscall/entropy window."""
+    pod_uid: str = ""                 # lets fusion delete exactly this pod instance (empty: unknown)
     window_start_ms: int = 0
     window_end_ms: int = 0
     n_events: int = 0

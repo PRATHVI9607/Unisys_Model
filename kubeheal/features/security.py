@@ -1,7 +1,7 @@
 """Syscall + file-entropy window features for the security model.
 
 Input events are `{"syscall": str, "path": str, "new_path": str?, "ts_ms": int?}`
-(Falco `evt.type` / `fd.name`). Pure functions shared by the synthetic
+(Falco `evt.type` / `fd.name`; open-family calls are first classified by open_syscall()). Pure functions shared by the synthetic
 generator, the lab collector and the security agent.
 """
 
@@ -21,31 +21,60 @@ SECURITY_FEATURES: list[str] = [
     "entropy_mean", "entropy_max", "entropy_p90", "entropy_high_frac", "entropy_slope", "n_entropy_samples",
     "write_bytes_per_s", "net_out_bytes_per_s",
 ]
+# Short-horizon features (last RECENT_EVENTS events). A bundle trained before they existed still serves: the
+# inference service ignores them when the bundle does not list them.
+RECENT_FEATURES: list[str] = [
+    "recent_frac_write", "recent_frac_rename", "recent_frac_unlink", "recent_frac_chmod", "recent_unique_files",
+    "recent_ext_change_frac", "recent_entropy_mean", "recent_entropy_high_frac", "recent_events_per_s",
+]
+SECURITY_FEATURES += RECENT_FEATURES
+
+OPEN_SYSCALLS = ("open", "openat", "openat2", "creat")
+_WRITE_FLAGS = frozenset({"O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC"})
+
+
+def open_syscall(syscall: str, flags: str | None) -> str:
+    """Open-family call → "open_w" (write intent: O_WRONLY|O_RDWR|O_CREAT|O_TRUNC, or creat) / "open_r"
+    (read, also when flags are missing); any other syscall unchanged. Flags: Falco text or a number."""
+    if syscall not in OPEN_SYSCALLS:
+        return syscall
+    if syscall == "creat":
+        return "open_w"
+    flags = (flags or "").strip()
+    if flags.isdigit():
+        n = int(flags)
+        # Falco numbers are PPM-encoded (RDONLY=1, WRONLY=2, RDWR=3, CREAT=4, APPEND=8, TRUNC=256), not Linux values
+        return "open_w" if n & (2 | 4 | 8 | 256) else "open_r"
+    return "open_w" if _WRITE_FLAGS & set(flags.split("|")) else "open_r"
+
 
 SYSCALL_GROUPS: dict[str, frozenset[str]] = {
-    "read": frozenset({"read", "pread", "pread64", "readv", "preadv", "preadv2"}),
-    "write": frozenset({"write", "pwrite", "pwrite64", "writev", "pwritev", "pwritev2"}),
-    "open": frozenset({"open", "openat", "openat2", "creat"}),
+    # read/write = per-file opens by intent (open_syscall); the live capture has no read()/write() calls
+    "read": frozenset({"open_r"}),
+    "write": frozenset({"open_w"}),
+    "open": frozenset(OPEN_SYSCALLS),      # unclassified opens: never captured live, kept so frac_open stays a feature
     "rename": frozenset({"rename", "renameat", "renameat2"}),
-    "unlink": frozenset({"unlink", "unlinkat", "rmdir"}),
+    "unlink": frozenset({"unlink", "unlinkat"}),
     "truncate": frozenset({"truncate", "ftruncate"}),
     "network": frozenset({"connect", "accept", "accept4", "sendto", "sendmsg", "sendmmsg", "recvfrom",
                           "recvmsg", "socket", "bind", "listen"}),
     "mmap": frozenset({"mmap", "munmap", "mprotect"}),
     "exec": frozenset({"execve", "execveat"}),
-    "chmod": frozenset({"chmod", "fchmod", "fchmodat", "chown", "fchown", "fchownat", "lchown"}),
+    "chmod": frozenset({"chmod", "fchmod", "fchmodat"}),
 }
 
 # What live windows can contain: the syscall groups deploy/k8s/falco-kubeheal-rules.yaml emits, and only on data
 # volumes. Network / mmap / exec and other background syscalls never reach the agent, so the synthetic
 # generator drops them too (training windows must look like live ones; tests/test_features_security.py
 # checks the rule file against this set).
-CAPTURED_GROUPS: tuple[str, ...] = ("read", "write", "open", "rename", "unlink", "truncate", "chmod")
+CAPTURED_GROUPS: tuple[str, ...] = ("read", "write", "rename", "unlink", "truncate", "chmod")
 MAX_ENTROPY_SAMPLES = 8   # files the agent reads per evaluation (n_entropy_samples is at most this)
 # Window definition shared by the agent and the synthetic generator (train/serve parity):
 # the newest <= MAX_WINDOW_EVENTS events no older than WINDOW_S before the newest one, lasting window_seconds().
 MAX_WINDOW_EVENTS = 512
 WINDOW_S = 60.0
+RECENT_EVENTS = 64        # short horizon: an encryption burst must stand out from the setup phase before it
+MIN_RECENT_S = 0.5        # floor of the recent span (recent_events_per_s)
 MIN_WINDOW_S = 5.0        # floor: a burst scored early would otherwise get absurd per-second rates
 
 HIGH_ENTROPY = 7.5  # bits/byte; compressed or encrypted content
@@ -79,6 +108,45 @@ def _ext(path: str) -> str:
 def _is_note(path: str) -> bool:
     name = posixpath.basename(path)
     return name.lower().endswith(_NOTE_EXT) and bool(_RANSOM_NOTE.search(name))
+
+
+def recent_features(events: list[dict], entropy: list[float]) -> dict[str, float | None]:
+    """recent_* features of the last RECENT_EVENTS events (same definitions as the window features, None = unknown).
+
+    `entropy` is the window's samples, oldest write first; the newest ones belong to the recently written files.
+    shortcut: samples are matched by recency, not path (an unreadable file shifts it by one), fine for a 64-event tail.
+    """
+    ev = events[-RECENT_EVENTS:]
+    n = len(ev)
+    counts = {"write": 0, "rename": 0, "unlink": 0, "chmod": 0}
+    paths: set[str] = set()
+    written: set[str] = set()
+    renames = changed = 0
+    for e in ev:
+        sc, path, new_path = e.get("syscall", ""), e.get("path") or "", e.get("new_path") or ""
+        group = next((g for g, names in SYSCALL_GROUPS.items() if sc in names), None)
+        group = "write" if group == "truncate" else group
+        if group in counts:
+            counts[group] += 1
+        if path:
+            paths.add(path)
+        if group == "write" and path:
+            written.add(path)
+        elif group == "rename" and path and new_path:
+            renames += 1
+            changed += _ext(path) != _ext(new_path)
+            written.add(new_path)
+    ts = [e["ts_ms"] for e in (ev[0], ev[-1]) if e.get("ts_ms") is not None] if n else []
+    ent = np.asarray([x for x in entropy[-len(written):] if x is not None] if written else [], dtype=float)
+    ent = ent[np.isfinite(ent)]
+    return {
+        **{f"recent_frac_{g}": (c / n if n else None) for g, c in counts.items()},
+        "recent_unique_files": float(len(paths)) if n else None,
+        "recent_ext_change_frac": changed / renames if renames else None,
+        "recent_entropy_mean": float(ent.mean()) if ent.size else None,
+        "recent_entropy_high_frac": float((ent > HIGH_ENTROPY).mean()) if ent.size else None,
+        "recent_events_per_s": n / max((ts[1] - ts[0]) / 1000, MIN_RECENT_S) if len(ts) == 2 else None,
+    }
 
 
 def security_features(
@@ -133,4 +201,5 @@ def security_features(
         "entropy_slope": float(np.polyfit(np.arange(ent.size), ent, 1)[0]) if ent.size >= 2 else None,
         "n_entropy_samples": float(ent.size),
     })
+    f.update(recent_features(events, entropy))
     return {k: f[k] for k in SECURITY_FEATURES}

@@ -64,6 +64,17 @@ class ModelBundle:
                     x[i, j] = v
         return x
 
+    def _explained(self, x, rows, n_cls):
+        """(probs, {row: contrib (n_cls, n_features)}) from one pred_contrib pass.
+
+        pred_contrib for multiclass is (m, n_classes * (n_features + 1)); the last column per class is the bias, and
+        a class's contributions sum to its raw score, so softmax over them is the predicted probability.
+        """
+        c = self.booster.predict(x[rows], pred_contrib=True, num_threads=1).reshape(rows.size, n_cls, -1)
+        raw = c.sum(2)
+        e = np.exp(raw - raw.max(1, keepdims=True))
+        return e / e.sum(1, keepdims=True), dict(zip(rows.tolist(), c[:, :, :-1], strict=True))
+
     def predict(self, features: dict[str, float | None], explain_risk: float = 0.0) -> Prediction:
         return self.predict_batch([features], explain_risk)[0]
 
@@ -77,15 +88,17 @@ class ModelBundle:
         n, n_cls = len(rows), len(self.labels)
         if n == 0:
             return []
-        probs = self.booster.predict(x, num_threads=1)
-        in_sets = prediction_sets(probs, self.meta["conformal_q"])
-        risks = np.clip(probs @ np.asarray(self.meta["class_risk"]), 0.0, 1.0)
-        explain = np.flatnonzero(risks >= explain_risk)
+        risk_w = np.asarray(self.meta["class_risk"])
         contribs = {}
-        if explain.size:
-            # pred_contrib for multiclass: (m, n_classes * (n_features + 1)); the last column per class is the bias.
-            c = self.booster.predict(x[explain], pred_contrib=True, num_threads=1).reshape(explain.size, n_cls, -1)
-            contribs = dict(zip(explain.tolist(), c[:, :, :-1], strict=True))
+        if explain_risk <= 0.0:   # every row explained: one pred_contrib pass also yields the probabilities
+            probs, contribs = self._explained(x, np.arange(n), n_cls)
+        else:
+            probs = self.booster.predict(x, num_threads=1)
+            explain = np.flatnonzero(np.clip(probs @ risk_w, 0.0, 1.0) >= explain_risk)
+            if explain.size:
+                contribs = self._explained(x, explain, n_cls)[1]
+        in_sets = prediction_sets(probs, self.meta["conformal_q"])
+        risks = np.clip(probs @ risk_w, 0.0, 1.0)
         latency_ms = (time.perf_counter() - t0) * 1000.0 / n
         out = []
         for i, p in enumerate(probs):

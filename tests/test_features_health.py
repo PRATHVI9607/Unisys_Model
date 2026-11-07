@@ -157,3 +157,23 @@ def test_health_features_order_and_canonicalisation():
     f = health_features({"spec": SPEC}, SPEC, {})
     assert list(f) == HEALTH_FEATURES
     assert f["spec_changed"] == 0.0
+
+
+def _spec(**kw):
+    pod = {"containers": [{"name": "app", "image": "a:1"}], **kw.pop("pod", {})}
+    return {"replicas": 1, "template": {"spec": pod}}
+
+
+def test_init_container_posture_and_runasuser_precedence():
+    base = _spec()
+    priv_init = _spec(pod={"initContainers": [{"name": "i", "image": "a:1", "securityContext": {"privileged": True}}]})
+    assert spec_diff_features(base, priv_init)["privileged_added"] == 1.0
+    root_pod = {"securityContext": {"runAsUser": 0}}
+    overridden = _spec(pod={**root_pod, "containers": [{"name": "app", "image": "a:1",
+                                                         "securityContext": {"runAsUser": 1000, "runAsNonRoot": True}}]})
+    assert spec_diff_features(base, overridden)["root_user_added"] == 0.0
+    assert spec_diff_features(base, _spec(pod=root_pod))["root_user_added"] == 1.0
+
+
+def test_restarts_delta_ignores_pod_replacement_resets():
+    assert metric_features({"restarts_total": [5, 5, 0, 2]})["restarts_delta"] == 2.0

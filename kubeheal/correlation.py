@@ -8,6 +8,8 @@ term that contributes is reported as a plain-English reason.
 
 from __future__ import annotations
 
+import re
+
 from kubeheal.contracts import HealthEvent, SecurityEvent
 
 CORRELATION_WINDOW_S = 120
@@ -17,7 +19,12 @@ SECURITY_ELEVATED = 0.4
 HEALTH_ELEVATED = 0.3
 WRITE_STRESS_FILES_PER_S = 10.0
 # Changed spec fields that would by themselves explain a performance change.
-_CONFIG_CAUSES = ("resources", "replicas", "image", "Probe", "command", "args")
+_CONFIG_CAUSES = frozenset({"resources", "replicas", "image", "livenessProbe", "readinessProbe", "startupProbe", "command", "args"})
+
+
+def _is_config_cause(path: str) -> bool:
+    # any whole segment, not just the last: leaf paths are deep (containers[0].resources.limits.cpu)
+    return not _CONFIG_CAUSES.isdisjoint(re.sub(r"\[\d+\]", "", path).split("."))
 
 
 def _num(features: dict, name: str) -> float:
@@ -35,7 +42,7 @@ def compound_score(health: HealthEvent, security: SecurityEvent) -> tuple[float,
 
     degraded = health.label != "benign"
     onset_ms = security.window_start_ms or security.timestamp_ms
-    explained = health.spec_changed and any(c in p for p in health.changed_fields for c in _CONFIG_CAUSES)
+    explained = health.spec_changed and any(_is_config_cause(p) for p in health.changed_fields)
     resource_stress = max(min(_num(health.features, "cpu_util_max"), 1.0), min(_num(health.features, "mem_util_max"), 1.0))
     write_stress = min(_num(security.features, "files_written_per_s") / WRITE_STRESS_FILES_PER_S, 1.0)
 

@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from itertools import islice
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -215,6 +216,10 @@ async def event_detail(request: Request, kind: Kind, event_id: str):
 @app.websocket("/ws")
 async def ws(websocket: WebSocket):
     hub: Hub = websocket.app.state.hub
+    origin = websocket.headers.get("origin")
+    if origin and urlparse(origin).netloc != websocket.headers.get("host"):   # cross-site WebSocket hijacking
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     await websocket.send_json({"type": "stats", "stats": hub.stats()})
     hub.clients.add(websocket)

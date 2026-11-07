@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from kubeheal.contracts import HEALTH_CLASS_RISK, HEALTH_LABELS, SECURITY_CLASS_RISK, SECURITY_LABELS
 from kubeheal.features.health import HEALTH_FEATURES
-from kubeheal.features.security import SECURITY_FEATURES
+from kubeheal.features.security import RECENT_FEATURES, SECURITY_FEATURES
 from kubeheal.inference.app import app
 from kubeheal.ml.bundle import ModelBundle
 
@@ -72,6 +72,9 @@ def test_empty_model_dir_is_503_never_random_weights(monkeypatch, tmp_path):
 ])
 def test_committed_bundles_match_the_feature_and_label_lists(task, features, labels, risk):
     meta = ModelBundle.load(MODELS / task).meta     # what the agents send == what the model was trained on
+    if task == "security":      # a bundle from before recent_* is still served (the service ignores them)
+        features = [f for f in features if f in meta["features"]] if meta["features"] != features else features
+        assert features == meta["features"][:len(features)] and set(SECURITY_FEATURES) - set(features) <= set(RECENT_FEATURES)
     assert (meta["features"], meta["labels"], meta["class_risk"]) == (features, labels, risk)
 
 
@@ -126,7 +129,34 @@ def test_security_explains_only_publishable_rows(client):
         else:
             assert p["top_factors"] == [f.model_dump() for f in bundle.predict(row).top_factors]
     assert {p["risk"] >= SECURITY_PUBLISH_RISK for p in preds} == {True, False}   # both branches exercised
-    health = ModelBundle.load(MODELS / "health").predict({})
+    benign_change = {"cpu_limit_ratio": 1.0, "cpu_request_ratio": 1.0, "mem_limit_ratio": 1.0, "mem_request_ratio": 1.0,
+              "replicas_ratio": 1.0, "n_changed_fields": 1.0, "spec_changed": 1.0, "cpu_util_mean": 0.0495,
+              "cpu_util_max": 0.0581, "cpu_throttle_mean": 0.0025, "mem_util_mean": 0.1708, "mem_util_max": 0.2357,
+              "latency_p99_mean_s": 0.005, "latency_p99_max_s": 0.005, "latency_trend": 0.0, "error_ratio": 0.0,
+              "request_rate_log": 2.6278, "restarts_delta": 0.0, "ready_ratio": 1.0}   # a lab "meta" label change
+    health = ModelBundle.load(MODELS / "health").predict(benign_change)
     assert health.risk < SECURITY_PUBLISH_RISK and health.top_factors                 # health: low risk still explained
-    r = client.post("/v1/health/predict_batch", json={"items": [{"features": {}}]}).json()
+    r = client.post("/v1/health/predict_batch", json={"items": [{"features": benign_change}]}).json()
     assert r[0]["top_factors"] == [f.model_dump() for f in health.top_factors]
+
+
+def test_old_bundle_ignores_recent_features(client):
+    """A bundle trained before recent_* existed keeps serving when the agent sends them."""
+    import lightgbm as lgb
+    import numpy as np
+
+    from kubeheal.features.security import RECENT_FEATURES
+    from kubeheal.ml.conformal import calibrate
+    names = [f for f in SECURITY_FEATURES if f not in RECENT_FEATURES][:3]
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(600, 3))
+    y = np.arange(600) % len(SECURITY_LABELS)
+    booster = lgb.train({"objective": "multiclass", "num_class": len(SECURITY_LABELS), "verbose": -1, "num_threads": 1},
+                        lgb.Dataset(x, y, feature_name=names), num_boost_round=5)
+    client.app.state.bundles["security"] = ModelBundle(booster, {
+        "task": "security", "version": "old-1", "labels": SECURITY_LABELS, "class_risk": SECURITY_CLASS_RISK,
+        "features": names, "alpha": 0.1, "conformal_q": calibrate(booster.predict(x), y, alpha=0.1),
+        "metrics": {}, "data": {}, "created_at": "now"})
+    row = {names[0]: 50.0} | {f: 1.0 for f in RECENT_FEATURES}
+    assert client.post("/v1/security/predict", json={"features": row}).status_code == 200
+    assert client.post("/v1/security/predict", json={"features": {"not_a_feature": 1.0}}).status_code == 422

@@ -6,6 +6,9 @@ import math
 
 import numpy as np
 
+# a label with p >= 0.95 is always admitted: a razor-thin calibrated q must not empty the set of a confident verdict
+Q_FLOOR = 0.05
+
 
 def calibrate(probs: np.ndarray, y: np.ndarray, alpha: float) -> float:
     """Threshold q such that {c : 1 - p_c <= q} covers the true label w.p. >= 1 - alpha."""
@@ -17,5 +20,6 @@ def calibrate(probs: np.ndarray, y: np.ndarray, alpha: float) -> float:
 
 
 def prediction_sets(probs: np.ndarray, q: float) -> np.ndarray:
-    """Boolean mask (n, k): class c is in row i's set."""
-    return (1.0 - probs) <= q
+    """Boolean mask (n, k): class c is in row i's set iff 1 - p_c <= max(q, Q_FLOOR). A superset of plain LAC, so
+    coverage stays >= 1 - alpha; low-confidence rows can still come out empty (= uncertain)."""
+    return (1.0 - probs) <= max(q, Q_FLOOR)

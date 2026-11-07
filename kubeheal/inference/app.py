@@ -23,6 +23,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 from pydantic import BaseModel, ConfigDict, Field
 
 from kubeheal.contracts import SECURITY_PUBLISH_RISK, Prediction
+from kubeheal.features.security import RECENT_FEATURES
 from kubeheal.ml.bundle import ModelBundle
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
@@ -97,12 +98,14 @@ def _predict(task: str, items: list[PredictRequest]) -> list[Prediction]:
     if bundle is None:
         REQUESTS.labels(task, "unavailable").inc()
         raise HTTPException(503, f"{task} model not loaded")
-    unknown = sorted(set().union(*(r.features for r in items)) - set(bundle.features))
+    known = set(bundle.features)
+    unknown = sorted(set().union(*(r.features for r in items)) - known - set(RECENT_FEATURES))
     if unknown:
         REQUESTS.labels(task, "invalid").inc()
         raise HTTPException(422, f"unknown features: {unknown}")
     t0 = time.perf_counter()
-    preds = bundle.predict_batch([r.features for r in items], EXPLAIN_RISK[task])
+    rows = [{k: v for k, v in r.features.items() if k in known} for r in items]   # old bundle: recent_* ignored
+    preds = bundle.predict_batch(rows, EXPLAIN_RISK[task])
     LATENCY.labels(task).observe(time.perf_counter() - t0)
     REQUESTS.labels(task, "ok").inc(len(preds))
     for pred in preds:

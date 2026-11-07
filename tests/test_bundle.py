@@ -110,7 +110,23 @@ def test_only_rows_at_or_above_explain_risk_get_factors(bundle):
     cut = sorted(p.risk for p in full)[1]                     # explain the two riskiest rows only
     part = bundle.predict_batch(rows, explain_risk=cut)
     for f, p in zip(full, part, strict=True):
-        assert (p.label, p.risk, p.prediction_set) == (f.label, f.risk, f.prediction_set)
+        assert (p.label, p.prediction_set) == (f.label, f.prediction_set) and p.risk == pytest.approx(f.risk, abs=1e-9)
         assert p.top_factors == (f.top_factors if f.risk >= cut else [])
     assert sum(not p.top_factors for p in part) == 1
     assert bundle.predict_batch(rows, explain_risk=2.0)[0].top_factors == []   # nothing explained
+
+
+def test_explained_probabilities_equal_predict(bundle):
+    rng = np.random.default_rng(3)
+    rows = [dict(zip(FEATURES, r, strict=True)) for r in rng.normal(size=(64, 3)) * 3]
+    x = bundle.matrix(rows)
+    probs, contribs = bundle._explained(x, np.arange(64), 3)
+    np.testing.assert_allclose(probs, bundle.booster.predict(x), atol=1e-9)
+    assert contribs[0].shape == (3, 3)
+
+
+def test_prediction_sets_floor_keeps_confident_labels_only():
+    assert prediction_sets(np.array([[0.9999, 0.00005, 0.00005]]), q=3e-5).tolist() == [[True, False, False]]
+    sets = prediction_sets(np.array([[0.5, 0.3, 0.2]]), q=0.356)   # q < 0.5 and p_max < 0.95: empty -> uncertain
+    assert sets.sum() == 0
+    assert prediction_sets(np.array([[0.7, 0.4, 0.1]]), q=0.7).tolist() == [[True, True, False]]   # q above floor: plain LAC

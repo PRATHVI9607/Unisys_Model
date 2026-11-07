@@ -115,6 +115,12 @@ def _containers(spec: dict) -> dict[str, dict]:
     return {c.get("name", str(i)): c for i, c in enumerate(_pod(spec).get("containers", []))}
 
 
+def _posture_containers(spec: dict) -> dict[str, dict]:
+    """Containers + initContainers: an init container can be privileged or root too."""
+    pod = _pod(spec)
+    return {c.get("name", f"#{i}"): c for i, c in enumerate(pod.get("containers", []) + pod.get("initContainers", []))}
+
+
 def _resource_sum(containers: dict[str, dict], kind: str, name: str, parse) -> float | None:
     vals = [parse(c.get("resources", {}).get(kind, {}).get(name)) for c in containers.values()]
     vals = [v for v in vals if v is not None]
@@ -133,7 +139,8 @@ def _image_unpinned(image: str) -> bool:
 
 
 def _runs_as_root(pod_sc: dict, c_sc: dict) -> bool:
-    return any(sc.get("runAsUser") == 0 or sc.get("runAsNonRoot") is False for sc in (pod_sc, c_sc))
+    uid = c_sc.get("runAsUser", pod_sc.get("runAsUser"))   # container securityContext overrides the pod's
+    return uid == 0 or c_sc.get("runAsNonRoot", pod_sc.get("runAsNonRoot")) is False
 
 
 def _env(c: dict) -> dict[str, Any]:
@@ -166,15 +173,17 @@ def spec_diff_features(old: dict, new: dict) -> dict[str, float | None]:
     f["image_changed"] = float(bool(changed_images))
     f["image_unpinned"] = float(any(_image_unpinned(i) for i in changed_images))
 
+    opc, npc = _posture_containers(old), _posture_containers(new)
+
     def added(pred) -> float:
-        return float(sum(1 for name, c in nc.items() if pred(npod, c) and not (name in oc and pred(opod, oc[name]))))
+        return float(sum(1 for name, c in npc.items() if pred(npod, c) and not (name in opc and pred(opod, opc[name]))))
 
     f["privileged_added"] = added(lambda p, c: c.get("securityContext", {}).get("privileged") is True)
     f["root_user_added"] = added(lambda p, c: _runs_as_root(p.get("securityContext", {}), c.get("securityContext", {})))
     f["capabilities_added"] = float(sum(
         len(set(c.get("securityContext", {}).get("capabilities", {}).get("add", []))
-            - set(oc.get(name, {}).get("securityContext", {}).get("capabilities", {}).get("add", [])))
-        for name, c in nc.items()))
+            - set(opc.get(name, {}).get("securityContext", {}).get("capabilities", {}).get("add", [])))
+        for name, c in npc.items()))
     f["host_namespace_added"] = float(sum(1 for k in ("hostNetwork", "hostPID", "hostIPC")
                                           if npod.get(k) is True and opod.get(k) is not True))
     old_host = {v.get("name") for v in opod.get("volumes", []) if "hostPath" in v}
@@ -238,7 +247,7 @@ def metric_features(window: dict[str, list[float]]) -> dict[str, float | None]:
         "latency_trend": trend,
         "error_ratio": float(err.sum() / req.sum()) if err.size and req.size and req.sum() > 0 else None,
         "request_rate_log": float(math.log1p(max(req.mean(), 0.0))) if req.size else None,
-        "restarts_delta": float(restarts[-1] - restarts[0]) if restarts.size else None,
+        "restarts_delta": float(np.clip(np.diff(restarts), 0, None).sum()) if restarts.size else None,
         "ready_ratio": float(ready[-1] / desired[-1]) if ready.size and desired.size and desired[-1] > 0 else None,
     }
 
