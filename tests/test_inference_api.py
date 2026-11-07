@@ -73,9 +73,12 @@ def test_empty_model_dir_is_503_never_random_weights(monkeypatch, tmp_path):
 def test_committed_bundles_match_the_feature_and_label_lists(task, features, labels, risk):
     meta = ModelBundle.load(MODELS / task).meta     # what the agents send == what the model was trained on
     assert (meta["labels"], meta["class_risk"]) == (labels, risk)
-    # A security bundle may leave out recent_* features (the agent computes them, inference drops them); nothing else.
-    kept = [f for f in features if f in meta["features"]]
-    assert meta["features"] == kept and not {f for f in features if f not in kept and not f.startswith("recent_")}
+    # A security bundle may leave out recent_* / rename-kind features (older bundles) and may list the two retired
+    # rename_ext_change names (the inference service sends them as missing); nothing else.
+    retired = {"rename_ext_change_ratio", "recent_ext_change_frac"}
+    new_names = ("recent_", "frac_rename_", "rename_ext_added")
+    assert set(meta["features"]) <= set(features) | (retired if task == "security" else set())
+    assert not {f for f in features if f not in meta["features"] and not f.startswith(new_names)}
 
 
 def test_oversized_body_is_413(client):
@@ -162,3 +165,24 @@ def test_old_bundle_ignores_recent_features(client):
     row = {names[0]: 50.0} | {f: 1.0 for f in RECENT_FEATURES}
     assert client.post("/v1/security/predict", json={"features": row}).status_code == 200
     assert client.post("/v1/security/predict", json={"features": {"not_a_feature": 1.0}}).status_code == 422
+
+
+def test_old_bundle_gets_none_for_dropped_feature_names(client):
+    """A bundle listing a feature we no longer compute (rename_ext_change_ratio) is served with it missing."""
+    import lightgbm as lgb
+    import numpy as np
+
+    from kubeheal.ml.conformal import calibrate
+    names = ["n_events", "rename_ext_change_ratio", "recent_ext_change_frac"]
+    assert not {"rename_ext_change_ratio", "recent_ext_change_frac"} & set(SECURITY_FEATURES)
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(600, 3))
+    y = np.arange(600) % len(SECURITY_LABELS)
+    booster = lgb.train({"objective": "multiclass", "num_class": len(SECURITY_LABELS), "verbose": -1, "num_threads": 1},
+                        lgb.Dataset(x, y, feature_name=names), num_boost_round=5)
+    client.app.state.bundles["security"] = ModelBundle(booster, {
+        "task": "security", "version": "old-2", "labels": SECURITY_LABELS, "class_risk": SECURITY_CLASS_RISK,
+        "features": names, "alpha": 0.1, "conformal_q": calibrate(booster.predict(x), y, alpha=0.1),
+        "metrics": {}, "data": {}, "created_at": "now"})
+    row = {f: 1.0 for f in SECURITY_FEATURES}                     # what the agent sends today
+    assert client.post("/v1/security/predict", json={"features": row}).status_code == 200

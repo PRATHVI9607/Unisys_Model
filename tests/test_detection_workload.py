@@ -55,3 +55,11 @@ def test_cleanup_ignores_ledger_symlink_and_traversal(tmp_path):
     (sb / dw.LEDGER).write_text("link\n../keep.txt\n")
     assert dw.cleanup(sb) == 0
     assert keep.exists() and (sb / "link").is_symlink()
+
+
+def test_swap_ext_replaces_the_extension(tmp_path):
+    sb = _sandbox(tmp_path)
+    assert dw.run(sb, 2, 2, 10, 0, rename=True, swap_ext=True) == 2
+    assert sorted(p.name for p in sb.glob("khtest_*")) == ["khtest_0000.khlocked", "khtest_0001.khlocked"]
+    dw.cleanup(sb)
+    assert not list(sb.glob("khtest_*"))

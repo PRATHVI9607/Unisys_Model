@@ -8,8 +8,10 @@ STREAM_CAPTURE; this collector joins those windows to the pod's profile and writ
 record per window. It never computes features itself.
 
 Labels: a benign profile's windows are `benign`. A detection-test pod first creates plain files,
-waits --delay, then overwrites them: windows that end before the overwrite starts are `benign`
-(plain file creation), windows that start after it are `ransomware`, straddling windows are dropped.
+waits --delay (0-3 s, 5-20 s or 30-80 s), then overwrites them: windows that end before the overwrite starts are
+`benign` (plain file creation), windows that start after it are `ransomware`. Straddling windows are dropped after a
+long gap; after a gap shorter than the agent window (the setup is still in view, as live) they are `ransomware`
+once they hold >= MIN_ATTACK_S of the attack.
 
     uv run python -m training.collect.security_lab --hours 1 --slots 6
 """
@@ -118,9 +120,11 @@ def _benign_profiles() -> dict:
             " >> /data/app.log; done; mv /data/app.log /data/app.log.1 && gzip -f /data/app.log.1; sleep {pause}",
             lines=lambda r: r.randint(200, 5000), pause=lambda r: r.randint(1, 5)),
         "atomic_config_writes": busybox(
-            "for i in $(seq {n}); do echo \"{{\\\"version\\\": $i, \\\"replicas\\\": $((i % 7))}}\" > /data/conf.json.tmp"
-            " && mv /data/conf.json.tmp /data/conf.json; done; sleep {pause}",
-            n=lambda r: r.randint(20, 400), pause=lambda r: r.randint(1, 5)),
+            "for i in $(seq {n}); do echo \"{{\\\"version\\\": $i, \\\"replicas\\\": $((i % 7))}}\" > /data/{tmp}"
+            " && mv /data/{tmp} /data/conf.json; done; sleep {pause}",
+            n=lambda r: r.randint(20, 400), pause=lambda r: r.randint(1, 5),
+            # temp-suffix, dot-prefixed, editor-style and plain-name (replaces the existing file) atomic writes
+            tmp=lambda r: r.choice(["conf.json.tmp", ".conf.json.swp", "conf.json.new", "conf.json~", "conf.next"])),
         "large_copy": busybox(
             "head -c {mb}M /dev/urandom > /data/blob && cp /data/blob /data/blob.copy && md5sum /data/blob.copy"
             " && rm /data/blob.copy; sleep {pause}",
@@ -147,15 +151,31 @@ def _benign_profiles() -> dict:
 BENIGN = _benign_profiles()
 
 
+GAP_MIX = ((0.4, (0, 3)), (0.3, (5, 20)), (0.3, (30, 80)))   # (share, seconds): back-to-back, short, long quiet gap
+MIN_ATTACK_S = 2.0         # a back-to-back window needs this much attack time to be labelled ransomware
+
+
+def draw_gap(r: random.Random) -> int:
+    """Seconds between file creation and encryption. The old 65-80 s gap hid the setup phase from attack windows."""
+    x, lo = r.random(), 0.0
+    for share, (a, b) in GAP_MIX:
+        lo += share
+        if x < lo:
+            return r.randint(a, b)
+    return r.randint(*GAP_MIX[-1][1])
+
+
 def detection_profile(r: random.Random) -> tuple[list[str], dict]:
     p = {"num_files": r.randint(20, 400), "rate": r.choice([5, 20, 60, 180, 400]),
          "file_size": r.choice([512, 4096, 65536, 1 << 20]), "rename": r.random() < 0.7,
-         "partial": r.choice([1.0, 1.0, 0.5, 0.25, 0.1]), "delay": r.randint(int(WINDOW_S) + 5, int(WINDOW_S) + 20),
+         "partial": r.choice([1.0, 1.0, 0.5, 0.25, 0.1]), "delay": draw_gap(r),
          "duration": 90}
+    p["swap_ext"] = p["rename"] and r.random() < 0.3   # some families replace the extension instead of appending
     p["file_size"] = min(p["file_size"], (256 << 20) // p["num_files"])     # stay under the emptyDir limit
     args = ["--sandbox", "/data", "--num-files", p["num_files"], "--max-files", p["num_files"], "--rate", p["rate"],
             "--file-size", p["file_size"], "--partial", p["partial"], "--delay", p["delay"], "--duration", p["duration"]]
     args += [] if p["rename"] else ["--no-rename"]
+    args += ["--swap-ext"] if p["swap_ext"] else []
     cmd = "touch /data/.kubeheal-sandbox && exec python /app/detection-test-workload.py " + shlex.join(map(str, args))
     return _sh(cmd), p
 
@@ -214,7 +234,8 @@ def overwrite_start_ms(log_text: str, delay_s: float) -> int | None:
     return None
 
 
-def label_window(ev: SecurityEvent, profile_label: str, overwrite_ms: int | None) -> str | None:
+def label_window(ev: SecurityEvent, profile_label: str, overwrite_ms: int | None,
+                 delay_s: float = float("inf")) -> str | None:
     if profile_label == "benign":
         return "benign"
     if overwrite_ms is None:                       # never reached the overwrite phase: no clean label
@@ -222,6 +243,8 @@ def label_window(ev: SecurityEvent, profile_label: str, overwrite_ms: int | None
     if ev.window_end_ms <= overwrite_ms:
         return "benign"
     if ev.window_start_ms >= overwrite_ms:
+        return profile_label
+    if delay_s < WINDOW_S and ev.window_end_ms - overwrite_ms >= MIN_ATTACK_S * 1000:
         return profile_label
     return None
 
@@ -285,7 +308,7 @@ class Lab:
                 text = await self.core.read_namespaced_pod_log(name, NS, timestamps=True)
                 overwrite_ms = overwrite_start_ms(text, params["delay"])
             for ev in self.pending.get(name, []):
-                lab = label_window(ev, label, overwrite_ms)
+                lab = label_window(ev, label, overwrite_ms, params.get("delay", float("inf")))
                 if lab is None:
                     self.dropped += 1
                     continue

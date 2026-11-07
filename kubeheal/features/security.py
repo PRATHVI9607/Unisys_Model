@@ -17,15 +17,17 @@ SECURITY_FEATURES: list[str] = [
     "frac_read", "frac_write", "frac_open", "frac_rename", "frac_unlink", "frac_truncate",
     "frac_network", "frac_mmap", "frac_exec", "frac_chmod",
     "unique_paths", "unique_dirs", "files_written_per_s",
-    "rename_ext_change_ratio", "suspicious_ext_ratio", "ransom_note",
+    "frac_rename_suffix_added", "frac_rename_temp_replace", "frac_rename_rotate", "rename_ext_added_ratio",
+    "suspicious_ext_ratio", "ransom_note",
     "entropy_mean", "entropy_max", "entropy_p90", "entropy_high_frac", "entropy_slope", "n_entropy_samples",
     "write_bytes_per_s", "net_out_bytes_per_s",
 ]
 # Short-horizon features (last RECENT_EVENTS events). A bundle trained before they existed still serves: the
-# inference service ignores them when the bundle does not list them.
+# inference service ignores names the bundle does not list (and sends None for names it lists but we dropped).
 RECENT_FEATURES: list[str] = [
     "recent_frac_write", "recent_frac_rename", "recent_frac_unlink", "recent_frac_chmod", "recent_unique_files",
-    "recent_ext_change_frac", "recent_entropy_mean", "recent_entropy_high_frac", "recent_events_per_s",
+    "recent_frac_rename_suffix_added", "recent_frac_rename_temp_replace", "recent_ext_added_frac",
+    "recent_entropy_mean", "recent_entropy_high_frac", "recent_events_per_s",
 ]
 SECURITY_FEATURES += RECENT_FEATURES
 
@@ -110,7 +112,63 @@ def _is_note(path: str) -> bool:
     return name.lower().endswith(_NOTE_EXT) and bool(_RANSOM_NOTE.search(name))
 
 
-def recent_features(events: list[dict], entropy: list[float]) -> dict[str, float | None]:
+COMPRESSION_EXT = frozenset({".gz", ".bz2", ".xz", ".zst"})
+_ROT_SUFFIX = re.compile(r"\.\d{1,2}(\.(gz|bz2|xz|zst))?$")          # x.log.1, x.log.2.gz
+_TEMP_NAME = re.compile(r"\.(tmp|swp|part|new|lock|dpkg-new|dpkg-old)|~|\.(?=[a-z0-9]*\d)[a-z0-9]{5,}$", re.IGNORECASE)
+
+
+def _is_temp_name(path: str) -> bool:
+    """Temporary-looking basename: leading ".", ".tmp"/".swp"/".part"/".new"/".lock"/".dpkg-new" anywhere, "~", or a
+    mktemp-style random suffix (>= 5 alphanumerics with a digit, e.g. cfg.a1B2c3).
+    shortcut: a real extension like ".sqlite3" also matches; harmless because suffix_added/rotate are checked first."""
+    name = posixpath.basename(path)
+    return name.startswith(".") or bool(_TEMP_NAME.search(name))
+
+
+def rename_kinds(events: list[dict]) -> list[tuple[int, str, str]]:
+    """Classify every rename (path → new_path) of the window: [(event index, kind, added suffix)], in order.
+
+    kind, first match wins:
+      rotate        new carries a 1-2 digit rotation suffix and both share the stem: x.log → x.log.1, x.log.1 → x.log.2.gz
+      suffix_added  new = old + "." + ext (file.txt → file.txt.locked): the encryption signature
+      temp_replace  old looks temporary (_is_temp_name) or new was already seen (opened, written, renamed to) earlier
+                    in the window, i.e. the rename replaces an existing file
+      other         anything else (a plain move; an extension swap file.txt → file.abc)
+    The added suffix (with the dot) is only set for suffix_added.
+    """
+    out: list[tuple[int, str, str]] = []
+    seen: set[str] = set()
+    for i, e in enumerate(events):
+        path, new = e.get("path") or "", e.get("new_path") or ""
+        if e.get("syscall", "") in SYSCALL_GROUPS["rename"] and path and new:
+            suffix = ""
+            if path != new and _ROT_SUFFIX.search(new) and _ROT_SUFFIX.sub("", new) == _ROT_SUFFIX.sub("", path):
+                kind = "rotate"
+            elif new.startswith(path + ".") and len(new) > len(path) + 1:
+                kind, suffix = "suffix_added", new[len(path):]
+            elif _is_temp_name(path) or new in seen:
+                kind = "temp_replace"
+            else:
+                kind = "other"
+            out.append((i, kind, suffix))
+            seen.add(new)
+        if path:
+            seen.add(path)
+    return out
+
+
+def _rename_fracs(kinds: list[tuple[int, str, str]], prefix: str, names: tuple[str, ...]) -> dict[str, float | None]:
+    n = len(kinds)
+    return {f"{prefix}{k}": (sum(x[1] == k for x in kinds) / n if n else None) for k in names}
+
+
+def _ext_added(kinds: list[tuple[int, str, str]]) -> float | None:
+    """Share of renames that add an extension to the original name, compression (.gz ...) and rotation excluded."""
+    return sum(k == "suffix_added" and s.lower() not in COMPRESSION_EXT for _, k, s in kinds) / len(kinds) if kinds else None
+
+
+def recent_features(events: list[dict], entropy: list[float],
+                    kinds: list[tuple[int, str, str]] | None = None) -> dict[str, float | None]:
     """recent_* features of the last RECENT_EVENTS events (same definitions as the window features, None = unknown).
 
     `entropy` is the window's samples, oldest write first; the newest ones belong to the recently written files.
@@ -121,7 +179,6 @@ def recent_features(events: list[dict], entropy: list[float]) -> dict[str, float
     counts = {"write": 0, "rename": 0, "unlink": 0, "chmod": 0}
     paths: set[str] = set()
     written: set[str] = set()
-    renames = changed = 0
     for e in ev:
         sc, path, new_path = e.get("syscall", ""), e.get("path") or "", e.get("new_path") or ""
         group = next((g for g, names in SYSCALL_GROUPS.items() if sc in names), None)
@@ -133,16 +190,17 @@ def recent_features(events: list[dict], entropy: list[float]) -> dict[str, float
         if group == "write" and path:
             written.add(path)
         elif group == "rename" and path and new_path:
-            renames += 1
-            changed += _ext(path) != _ext(new_path)
             written.add(new_path)
+    # classified over the whole window (a rename onto a file seen before the tail is still a replace)
+    kinds = [k for k in (rename_kinds(events) if kinds is None else kinds) if k[0] >= len(events) - n]
     ts = [e["ts_ms"] for e in (ev[0], ev[-1]) if e.get("ts_ms") is not None] if n else []
     ent = np.asarray([x for x in entropy[-len(written):] if x is not None] if written else [], dtype=float)
     ent = ent[np.isfinite(ent)]
     return {
         **{f"recent_frac_{g}": (c / n if n else None) for g, c in counts.items()},
         "recent_unique_files": float(len(paths)) if n else None,
-        "recent_ext_change_frac": changed / renames if renames else None,
+        **_rename_fracs(kinds, "recent_frac_rename_", ("suffix_added", "temp_replace")),
+        "recent_ext_added_frac": _ext_added(kinds),
         "recent_entropy_mean": float(ent.mean()) if ent.size else None,
         "recent_entropy_high_frac": float((ent > HIGH_ENTROPY).mean()) if ent.size else None,
         "recent_events_per_s": n / max((ts[1] - ts[0]) / 1000, MIN_RECENT_S) if len(ts) == 2 else None,
@@ -162,7 +220,6 @@ def security_features(
     groups = {g: 0 for g in SYSCALL_GROUPS}
     paths: set[str] = set()
     written: set[str] = set()
-    renames: list[tuple[str, str]] = []
     for e in events:
         sc, path, new_path = e.get("syscall", ""), e.get("path") or "", e.get("new_path") or ""
         group = next((g for g, names in SYSCALL_GROUPS.items() if sc in names), None)
@@ -173,8 +230,8 @@ def security_features(
         if group in ("write", "truncate") and path:
             written.add(path)
         elif group == "rename" and path and new_path:
-            renames.append((path, new_path))
             written.add(new_path)
+    kinds = rename_kinds(events)
 
     f: dict[str, float | None] = {
         "n_events": float(n),
@@ -183,7 +240,8 @@ def security_features(
         "unique_paths": float(len(paths)),
         "unique_dirs": float(len({posixpath.dirname(p) for p in paths})),
         "files_written_per_s": len(written) * rate if rate else None,
-        "rename_ext_change_ratio": (sum(_ext(a) != _ext(b) for a, b in renames) / len(renames)) if renames else None,
+        **_rename_fracs(kinds, "frac_rename_", ("suffix_added", "temp_replace", "rotate")),
+        "rename_ext_added_ratio": _ext_added(kinds),
         "suspicious_ext_ratio": (sum(_ext(p) in SUSPICIOUS_EXTENSIONS for p in written) / len(written)) if written else None,
         "ransom_note": float(any(_is_note(p) for p in paths | written)),
         "write_bytes_per_s": bytes_written * rate if rate and bytes_written is not None else None,
@@ -201,5 +259,5 @@ def security_features(
         "entropy_slope": float(np.polyfit(np.arange(ent.size), ent, 1)[0]) if ent.size >= 2 else None,
         "n_entropy_samples": float(ent.size),
     })
-    f.update(recent_features(events, entropy))
+    f.update(recent_features(events, entropy, kinds))
     return {k: f[k] for k in SECURITY_FEATURES}

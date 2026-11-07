@@ -1,6 +1,8 @@
 import random
 import subprocess
 
+import pytest
+
 from kubeheal.contracts import SecurityEvent
 from training.collect import security_lab as lab
 
@@ -37,13 +39,33 @@ def test_every_profile_builds_valid_commands_and_lab_pod():
         assert pod["metadata"]["labels"]["kubeheal.io/protected"] == "true"      # fusion must never act mid-sample
         assert pod["metadata"]["labels"][lab.SCENARIO_LABEL] == "benign"
     cmd, params = lab.detection_profile(r)
-    assert "--sandbox /data" in cmd[2] and params["delay"] >= 10   # ≥ 2 agent eval intervals between phases
+    assert "--sandbox /data" in cmd[2] and params["delay"] >= 0
 
 
-def test_detection_delay_outlasts_the_agents_window():
-    from agents.security_agent.agent import WINDOW_S
+def test_detection_gap_mix():
     r = random.Random(1)
-    assert all(lab.detection_profile(r)[1]["delay"] > WINDOW_S for _ in range(50))   # no setup event in an overwrite window
+    gaps = [lab.draw_gap(r) for _ in range(4000)]
+    share = lambda lo, hi: sum(lo <= g <= hi for g in gaps) / len(gaps)   # noqa: E731
+    assert share(0, 3) == pytest.approx(0.4, abs=0.04) and share(5, 20) == pytest.approx(0.3, abs=0.04)
+    assert share(30, 80) == pytest.approx(0.3, abs=0.04) and share(0, 80) == 1.0
+    assert all(lab.detection_profile(r)[1]["delay"] <= 80 for _ in range(50))
+
+
+def test_back_to_back_windows_that_hold_the_attack_are_ransomware():
+    t = 1_000_000
+    w = window(t - 20_000, t + 4_000)                                       # setup still in the window, 4 s of attack
+    assert lab.label_window(w, "ransomware", t, delay_s=1) == "ransomware"
+    assert lab.label_window(window(t - 20_000, t + 500), "ransomware", t, delay_s=1) is None   # too little attack
+    assert lab.label_window(w, "ransomware", t, delay_s=70) is None        # long gap: straddlers stay dropped
+    assert lab.label_window(window(t - 20_000, t - 1), "ransomware", t, delay_s=1) == "benign"
+
+
+def test_benign_families_cover_atomic_writes_and_rotation_with_gzip():
+    r = random.Random(2)
+    assert {"atomic_config_writes", "log_rotation"} <= set(lab.BENIGN)
+    assert "gzip" in lab.BENIGN["log_rotation"][1](r)[0][2]
+    tmps = {lab.BENIGN["atomic_config_writes"][1](r)[0][2].split("mv /data/")[1].split()[0] for _ in range(60)}
+    assert len(tmps) > 2 and all(t.startswith((".", "conf.json")) or t == "conf.next" for t in tmps)
 
 
 def test_caught_up_waits_for_the_lagging_agent(monkeypatch):

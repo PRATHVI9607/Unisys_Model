@@ -6,6 +6,7 @@ from kubeheal.features.security import (
     RECENT_EVENTS,
     RECENT_FEATURES,
     SECURITY_FEATURES,
+    rename_kinds,
     security_features,
     shannon_entropy,
 )
@@ -34,7 +35,7 @@ def test_ransomware_like_window():
     assert list(f) == SECURITY_FEATURES
     assert f["n_events"] == 8 and f["events_per_s"] == 2.0
     assert f["frac_rename"] == 0.25 and f["frac_write"] == 0.375 and f["frac_truncate"] == 0.125 and f["frac_network"] == 0.125
-    assert f["rename_ext_change_ratio"] == 1.0
+    assert f["rename_ext_added_ratio"] == 1.0 and f["frac_rename_suffix_added"] == 1.0
     # written: a.docx, b.txt, README, a.docx.locked, b.txt.x7f3q → one known ransomware extension
     assert f["suspicious_ext_ratio"] == pytest.approx(1 / 5)
     assert f["files_written_per_s"] == pytest.approx(5 / 4)
@@ -46,7 +47,7 @@ def test_ransomware_like_window():
 def test_missing_data_is_none_not_zero():
     f = security_features([], [], window_s=0)
     assert f["n_events"] == 0.0 and f["n_entropy_samples"] == 0.0
-    for k in ("events_per_s", "frac_read", "entropy_mean", "entropy_slope", "rename_ext_change_ratio",
+    for k in ("events_per_s", "frac_read", "entropy_mean", "entropy_slope", "rename_ext_added_ratio",
               "suspicious_ext_ratio", "files_written_per_s", "write_bytes_per_s"):
         assert f[k] is None, k
 
@@ -56,7 +57,7 @@ def test_benign_log_rotation_is_not_a_note_or_ransom_ext():
               {"syscall": "write", "path": "/var/log/app.log"}]
     f = security_features(events, [], window_s=10)
     assert f["ransom_note"] == 0.0 and f["suspicious_ext_ratio"] == 0.0
-    assert f["rename_ext_change_ratio"] == 1.0   # benign renames change extensions too; the model must cope
+    assert f["frac_rename_rotate"] == 1.0 and f["rename_ext_added_ratio"] == 0.0   # rotation is not an encryption suffix
 
 
 def test_synthetic_generator_matches_agent_window_definition():
@@ -122,7 +123,7 @@ def test_recent_features_unknown_are_none_not_zero():
     assert all(f[k] is None for k in RECENT_FEATURES)
     f = security_features([{"syscall": "open_r", "path": "/data/a"}], [], window_s=5)   # no ts, no writes
     assert f["recent_frac_write"] == 0.0 and f["recent_unique_files"] == 1.0
-    for k in ("recent_ext_change_frac", "recent_entropy_mean", "recent_entropy_high_frac", "recent_events_per_s"):
+    for k in ("recent_ext_added_frac", "recent_frac_rename_suffix_added", "recent_entropy_mean", "recent_entropy_high_frac", "recent_events_per_s"):
         assert f[k] is None, k
 
 
@@ -131,7 +132,7 @@ def test_recent_features_cover_only_the_last_64_events():
     burst = [_ev(400 + i, "rename", f"/data/b{i}.txt", new_path=f"/data/b{i}.txt.locked") for i in range(RECENT_EVENTS)]
     f = security_features(setup + burst, [4.0] * 8, window_s=60)
     assert f["frac_rename"] < 0.2 and f["recent_frac_rename"] == 1.0     # window dilutes it, recent does not
-    assert f["recent_unique_files"] == RECENT_EVENTS and f["recent_ext_change_frac"] == 1.0
+    assert f["recent_unique_files"] == RECENT_EVENTS and f["recent_ext_added_frac"] == 1.0 and f["recent_frac_rename_suffix_added"] == 1.0
     assert f["recent_frac_write"] == 0.0
 
 
@@ -169,3 +170,60 @@ def test_hard_negative_families_are_benign_and_rename_heavy():
         mine = [r for r in recs if r["scenario"] == gen.__name__]
         assert mine and {r["label"] for r in mine} == {"benign"}
         assert any(e["syscall"] == "rename" for r in mine for e in r["events"])
+
+
+# ── rename classification ────────────────────────────────────────────────────
+def _kinds(*pairs, before=()):
+    ev = [{"syscall": "open_w", "path": p} for p in before]
+    ev += [{"syscall": "rename", "path": a, "new_path": b} for a, b in pairs]
+    return [k for _, k, _ in rename_kinds(ev)]
+
+
+def test_rename_classifier():
+    assert _kinds(("/d/file.txt", "/d/file.txt.locked")) == ["suffix_added"]
+    assert _kinds(("/d/.cfg.tmp123", "/d/cfg")) == ["temp_replace"]
+    assert _kinds(("/d/cfg~", "/d/cfg"), ("/d/a.dpkg-new", "/d/a"), ("/d/x.k3Jd9Z", "/d/x")) == ["temp_replace"] * 3
+    assert _kinds(("/d/new", "/d/cfg"), before=["/d/cfg"]) == ["temp_replace"]          # onto a file seen earlier
+    assert _kinds(("/d/new", "/d/cfg")) == ["other"]                                     # not seen: plain move
+    assert _kinds(("/d/x.log", "/d/x.log.1"), ("/d/x.log.1.gz", "/d/x.log.2.gz")) == ["rotate", "rotate"]
+    assert _kinds(("/d/x", "/d/y")) == ["other"]
+    assert _kinds(("/d/a", "/d/b"), ("/d/c", "/d/b")) == ["other", "temp_replace"]      # target of an earlier rename
+    assert _kinds(("/d/f.tmp", "/d/f.tmp.locked")) == ["suffix_added"]                   # suffix wins over temp-looking
+
+
+def test_rename_features_split_encryption_from_benign_renames():
+    enc = [{"syscall": "rename", "path": f"/d/f{i}.txt", "new_path": f"/d/f{i}.txt.q8x2k"} for i in range(4)]
+    f = security_features(enc, [], 5)
+    assert f["frac_rename_suffix_added"] == f["rename_ext_added_ratio"] == f["recent_ext_added_frac"] == 1.0
+    assert f["frac_rename_temp_replace"] == f["frac_rename_rotate"] == 0.0
+    gz = [{"syscall": "rename", "path": "/d/a.log", "new_path": "/d/a.log.gz"}]     # compression is not encryption
+    f = security_features(gz, [], 5)
+    assert f["frac_rename_suffix_added"] == 1.0 and f["rename_ext_added_ratio"] == 0.0
+    atomic = [{"syscall": "rename", "path": f"/d/.c.tmp{i}", "new_path": "/d/c"} for i in range(3)]
+    f = security_features(atomic, [], 5)
+    assert f["frac_rename_temp_replace"] == f["recent_frac_rename_temp_replace"] == 1.0
+    assert f["rename_ext_added_ratio"] == 0.0 and f["recent_frac_rename_suffix_added"] == 0.0
+
+
+def test_rename_features_none_without_renames():
+    f = security_features([{"syscall": "open_w", "path": "/d/a"}], [], 5)
+    for k in ("frac_rename_suffix_added", "frac_rename_temp_replace", "frac_rename_rotate", "rename_ext_added_ratio",
+              "recent_frac_rename_suffix_added", "recent_frac_rename_temp_replace", "recent_ext_added_frac"):
+        assert f[k] is None, k
+
+
+def test_recent_rename_kind_sees_the_whole_window():
+    ev = [{"syscall": "open_w", "path": "/d/cfg"}] + [_ev(i, "open_r") for i in range(100)]
+    ev.append({"syscall": "rename", "path": "/d/new", "new_path": "/d/cfg"})        # target written 100 events ago
+    f = security_features(ev, [], 5)
+    assert f["recent_frac_rename_temp_replace"] == 1.0
+
+
+def test_synthetic_families_produce_their_rename_kinds():
+    recs = generate(600, seed=7)
+    got: dict[str, set] = {}
+    for r in recs:
+        got.setdefault(r["scenario"], set()).update(k for _, k, _ in rename_kinds(r["events"]))
+    assert "suffix_added" in got["ransomware_rename"] and "temp_replace" in got["atomic_rename"]
+    assert "rotate" in got["logrotate_gz"] and "temp_replace" in got["dpkg_install"]
+    assert "suffix_added" not in got["atomic_rename"] | got["dpkg_install"] | got["logrotate_gz"]

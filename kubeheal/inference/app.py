@@ -23,7 +23,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 from pydantic import BaseModel, ConfigDict, Field
 
 from kubeheal.contracts import SECURITY_PUBLISH_RISK, Prediction
-from kubeheal.features.security import RECENT_FEATURES
+from kubeheal.features.security import SECURITY_FEATURES
 from kubeheal.ml.bundle import ModelBundle
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
@@ -99,12 +99,14 @@ def _predict(task: str, items: list[PredictRequest]) -> list[Prediction]:
         REQUESTS.labels(task, "unavailable").inc()
         raise HTTPException(503, f"{task} model not loaded")
     known = set(bundle.features)
-    unknown = sorted(set().union(*(r.features for r in items)) - known - set(RECENT_FEATURES))
+    unknown = sorted(set().union(*(r.features for r in items)) - known - (set(SECURITY_FEATURES) if task == "security" else set()))
     if unknown:
         REQUESTS.labels(task, "invalid").inc()
         raise HTTPException(422, f"unknown features: {unknown}")
     t0 = time.perf_counter()
-    rows = [{k: v for k, v in r.features.items() if k in known} for r in items]   # old bundle: recent_* ignored
+    # Older bundle: feature names it does not list are ignored; names it lists but are gone from SECURITY_FEATURES
+    # (renamed rename_* features) are absent from the row, which the bundle reads as missing (None), never an error.
+    rows = [{k: v for k, v in r.features.items() if k in known} for r in items]
     preds = bundle.predict_batch(rows, EXPLAIN_RISK[task])
     LATENCY.labels(task).observe(time.perf_counter() - t0)
     REQUESTS.labels(task, "ok").inc(len(preds))

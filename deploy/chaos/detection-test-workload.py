@@ -2,7 +2,7 @@
 """Non-destructive detection test workload for KubeHeal's security agent.
 
 Generates the file-I/O pattern of ransomware — a burst of high-entropy writes
-followed by renames with a new extension — so the security model's detection
+followed by renames that append an extension — so the security model's detection
 path can be exercised end to end. It is deliberately harmless:
 
   * It only ever touches files it created itself in this run (O_EXCL|O_NOFOLLOW,
@@ -103,7 +103,7 @@ def overwrite(data: bytes, partial: float) -> bytes:
 
 
 def run(path: Path, num_files: int, max_files: int, duration_s: float, rate: float, file_size: int = 864,
-        rename: bool = True, partial: float = 1.0, delay_s: float = 0.0) -> int:
+        rename: bool = True, partial: float = 1.0, delay_s: float = 0.0, swap_ext: bool = False) -> int:
     """Create our own files, then high-entropy-overwrite (+ optionally rename) each one."""
     n = min(num_files, max_files)
     placeholder = (PLACEHOLDER * (file_size // len(PLACEHOLDER) + 1))[:max(file_size, 1)]
@@ -137,7 +137,8 @@ def run(path: Path, num_files: int, max_files: int, duration_s: float, rate: flo
                 with os.fdopen(_open(src, os.O_WRONLY | os.O_TRUNC), "wb") as f:
                     f.write(overwrite(data, partial))
                 if rename:
-                    dst = src.with_name(src.stem + ENCRYPTED_EXT)
+                    # appended (x.dat.khlocked) as most ransomware does, or swapped (x.khlocked) as some families do
+                    dst = src.with_suffix(ENCRYPTED_EXT) if swap_ext else src.with_name(src.name + ENCRYPTED_EXT)
                     if os.path.lexists(dst):         # shortcut: check-then-rename race, fine inside a private sandbox
                         raise FileExistsError(dst)
                     os.write(ledger, dst.name.encode() + b"\n")
@@ -164,6 +165,7 @@ def main() -> None:
     ap.add_argument("--duration", type=float, default=60.0, help="max seconds of the overwrite phase")
     ap.add_argument("--file-size", type=int, default=864, help="bytes per created file (max 16 MiB)")
     ap.add_argument("--no-rename", dest="rename", action="store_false", help="overwrite in place only")
+    ap.add_argument("--swap-ext", action="store_true", help="rename x.dat -> x.khlocked instead of appending")
     ap.add_argument("--partial", type=float, default=1.0,
                     help="fraction of each file overwritten (every 1/f-th 1 KiB block); 1 = whole file")
     ap.add_argument("--delay", type=float, default=0.0, help="seconds to wait between creating and overwriting")
@@ -180,7 +182,7 @@ def main() -> None:
     if not 0 < args.file_size <= 16 << 20 or not 0 < args.partial <= 1:
         sys.exit("refusing to run: --file-size must be in (0, 16 MiB] and --partial in (0, 1]")
     touched = run(sandbox, args.num_files, args.max_files, args.duration, args.rate, args.file_size,
-                  args.rename, args.partial, args.delay)
+                  args.rename, args.partial, args.delay, args.swap_ext)
     print(f"overwrote{'+renamed' if args.rename else ''} {touched} self-created files, wrote {NOTE_NAME}", flush=True)
 
 
