@@ -422,6 +422,12 @@ temp-file + rename (about 80 per second each, 60 s, prod-tier namespace, not pro
 event above benign and no AUTO_KILL. See the variant table in
 [docs/models-and-data.md](models-and-data.md#known-limitations).
 
+Bench of the rename-kind candidate `security-5.0.0-064782d7` (new lab data with gaps of 0 to 80 s, hard negatives, all features;
+not shipped, 120 s load, 5 runs at 20 files/s, 3 at 180 files/s): kill time 1.04, 0.69, 0.64, 0.53, 0.76 s at 20 files/s and
+0.58, 0.70, 0.53 s at 180 files/s, with Falco CPU p50 43m, security agent 6m, inference 4m. It was removed again because three
+benign gzip-rotation pods were killed (the shipped bundle leaves them alone); the speed comes with that gap in the negatives, not
+from policy. Details in [docs/models-and-data.md](models-and-data.md#rename-kind-features-variants-a-to-d).
+
 ### Scaling
 
 The per-cluster components are flat: inference, health agent, fusion agent, Redis (and the dashboard in

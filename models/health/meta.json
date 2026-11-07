@@ -5,14 +5,14 @@
     0.6,
     0.95
   ],
-  "conformal_q": 0.3859097715108297,
-  "created_at": "2026-11-07T07:23:46+00:00",
+  "conformal_q": 0.3490159730049516,
+  "created_at": "2026-11-07T16:17:22+00:00",
   "data": {
-    "groups": 237,
+    "groups": 277,
     "legacy_csv": false,
-    "metric_dropout_rows": 2519,
-    "rows": 2519,
-    "sha256": "37c9309f3bd6235aed2d1bdc55599c83e0666739d74bdba05ce907924cd9ba5f",
+    "metric_dropout_rows": 2998,
+    "rows": 2998,
+    "sha256": "421cec833d116a10bdbbc530163ce449e6b5840e8026b82e49b488935b13a02f",
     "source": {
       "lab": "training/data/collected/health.jsonl"
     },
@@ -62,101 +62,101 @@
     "critical"
   ],
   "metrics": {
-    "best_iteration": 99,
+    "best_iteration": 148,
     "conformal": {
       "alpha": 0.1,
       "calibrated_on": "5-fold grouped out-of-fold probabilities, non-test groups, real serving rows",
-      "q": 0.38591
+      "q": 0.349016
     },
     "cv5_grouped": {
-      "accuracy": 0.9399,
+      "accuracy": 0.9471,
       "confusion_matrix": [
         [
-          1491,
-          18,
-          58
+          1795,
+          13,
+          67
         ],
         [
           3,
-          228,
-          1
+          292,
+          2
         ],
         [
-          42,
-          15,
-          423
+          45,
+          14,
+          492
         ]
       ],
-      "coverage": 0.9004,
-      "macro_f1": 0.9218,
-      "mean_set_size": 0.9289,
-      "n": 2279,
+      "coverage": 0.9005,
+      "macro_f1": 0.9328,
+      "mean_set_size": 0.928,
+      "n": 2723,
       "per_class": {
         "benign": {
-          "f1": 0.961,
-          "precision": 0.9707,
-          "recall": 0.9515,
-          "support": 1567
+          "f1": 0.9656,
+          "precision": 0.974,
+          "recall": 0.9573,
+          "support": 1875
         },
         "critical": {
-          "f1": 0.8794,
-          "precision": 0.8776,
-          "recall": 0.8812,
-          "support": 480
+          "f1": 0.8849,
+          "precision": 0.877,
+          "recall": 0.8929,
+          "support": 551
         },
         "degradation": {
-          "f1": 0.9249,
-          "precision": 0.8736,
-          "recall": 0.9828,
-          "support": 232
+          "f1": 0.9481,
+          "precision": 0.9154,
+          "recall": 0.9832,
+          "support": 297
         }
       },
-      "weighted_f1": 0.9402
+      "weighted_f1": 0.9473
     },
     "cv5_grouped_spec_changed": {
-      "accuracy": 0.9399,
+      "accuracy": 0.9471,
       "confusion_matrix": [
         [
-          1491,
-          18,
-          58
+          1795,
+          13,
+          67
         ],
         [
           3,
-          228,
-          1
+          292,
+          2
         ],
         [
-          42,
-          15,
-          423
+          45,
+          14,
+          492
         ]
       ],
-      "coverage": 0.9004,
-      "macro_f1": 0.9218,
-      "mean_set_size": 0.9289,
-      "n": 2279,
+      "coverage": 0.9005,
+      "macro_f1": 0.9328,
+      "mean_set_size": 0.928,
+      "n": 2723,
       "per_class": {
         "benign": {
-          "f1": 0.961,
-          "precision": 0.9707,
-          "recall": 0.9515,
-          "support": 1567
+          "f1": 0.9656,
+          "precision": 0.974,
+          "recall": 0.9573,
+          "support": 1875
         },
         "critical": {
-          "f1": 0.8794,
-          "precision": 0.8776,
-          "recall": 0.8812,
-          "support": 480
+          "f1": 0.8849,
+          "precision": 0.877,
+          "recall": 0.8929,
+          "support": 551
         },
         "degradation": {
-          "f1": 0.9249,
-          "precision": 0.8736,
-          "recall": 0.9828,
-          "support": 232
+          "f1": 0.9481,
+          "precision": 0.9154,
+          "recall": 0.9832,
+          "support": 297
         }
       },
-      "weighted_f1": 0.9402
+      "weighted_f1": 0.9473
     },
     "heldout_family": {
       "note": "each lab family held out in turn (model never saw it); pooled = all held-out predictions",
@@ -164,401 +164,401 @@
         "args_break": {
           "accuracy": 1.0,
           "labels": {
-            "critical": 40
+            "critical": 44
           },
           "macro_f1_present": 1.0,
-          "n": 40
+          "n": 44
         },
         "args_stress": {
           "accuracy": 1.0,
           "labels": {
-            "benign": 35,
-            "degradation": 32
+            "benign": 42,
+            "degradation": 40
           },
           "macro_f1_present": 1.0,
-          "n": 67
+          "n": 82
         },
         "combined": {
-          "accuracy": 0.81,
+          "accuracy": 0.8295,
           "labels": {
-            "benign": 197,
-            "critical": 216,
-            "degradation": 66
+            "benign": 228,
+            "critical": 249,
+            "degradation": 86
           },
-          "macro_f1_present": 0.8245,
-          "n": 479
+          "macro_f1_present": 0.8421,
+          "n": 563
         },
         "cpu_limit_down": {
-          "accuracy": 0.9746,
+          "accuracy": 1.0,
           "labels": {
-            "benign": 74,
-            "degradation": 44
+            "benign": 80,
+            "degradation": 47
           },
-          "macro_f1_present": 0.9732,
-          "n": 118
+          "macro_f1_present": 1.0,
+          "n": 127
         },
         "cpu_limit_up": {
           "accuracy": 1.0,
           "labels": {
-            "benign": 52
+            "benign": 64
           },
           "macro_f1_present": 1.0,
-          "n": 52
+          "n": 64
         },
         "cpu_request": {
           "accuracy": 1.0,
           "labels": {
-            "benign": 39
-          },
-          "macro_f1_present": 1.0,
-          "n": 39
-        },
-        "cpu_throttle": {
-          "accuracy": 0.9921,
-          "labels": {
-            "benign": 56,
-            "degradation": 71
-          },
-          "macro_f1_present": 0.992,
-          "n": 127
-        },
-        "env": {
-          "accuracy": 1.0,
-          "labels": {
-            "benign": 61
-          },
-          "macro_f1_present": 1.0,
-          "n": 61
-        },
-        "image_missing": {
-          "accuracy": 0.4783,
-          "labels": {
-            "critical": 46
-          },
-          "macro_f1_present": 0.6471,
-          "n": 46
-        },
-        "image_valid": {
-          "accuracy": 0.4754,
-          "labels": {
-            "benign": 61
-          },
-          "macro_f1_present": 0.6444,
-          "n": 61
-        },
-        "mem_limit_down": {
-          "accuracy": 0.9278,
-          "labels": {
-            "benign": 69,
-            "critical": 26,
-            "degradation": 2
-          },
-          "macro_f1_present": 0.7641,
-          "n": 97
-        },
-        "mem_limit_up": {
-          "accuracy": 1.0,
-          "labels": {
-            "benign": 61
-          },
-          "macro_f1_present": 1.0,
-          "n": 61
-        },
-        "mem_pressure": {
-          "accuracy": 1.0,
-          "labels": {
-            "benign": 44,
-            "degradation": 1
+            "benign": 45
           },
           "macro_f1_present": 1.0,
           "n": 45
         },
+        "cpu_throttle": {
+          "accuracy": 0.9938,
+          "labels": {
+            "benign": 69,
+            "degradation": 92
+          },
+          "macro_f1_present": 0.9936,
+          "n": 161
+        },
+        "env": {
+          "accuracy": 1.0,
+          "labels": {
+            "benign": 73
+          },
+          "macro_f1_present": 1.0,
+          "n": 73
+        },
+        "image_missing": {
+          "accuracy": 0.5294,
+          "labels": {
+            "critical": 51
+          },
+          "macro_f1_present": 0.6923,
+          "n": 51
+        },
+        "image_valid": {
+          "accuracy": 0.5897,
+          "labels": {
+            "benign": 78
+          },
+          "macro_f1_present": 0.7419,
+          "n": 78
+        },
+        "mem_limit_down": {
+          "accuracy": 0.9492,
+          "labels": {
+            "benign": 84,
+            "critical": 32,
+            "degradation": 2
+          },
+          "macro_f1_present": 0.7784,
+          "n": 118
+        },
+        "mem_limit_up": {
+          "accuracy": 1.0,
+          "labels": {
+            "benign": 68
+          },
+          "macro_f1_present": 1.0,
+          "n": 68
+        },
+        "mem_pressure": {
+          "accuracy": 1.0,
+          "labels": {
+            "benign": 59,
+            "degradation": 1
+          },
+          "macro_f1_present": 1.0,
+          "n": 60
+        },
         "meta": {
           "accuracy": 1.0,
           "labels": {
-            "benign": 89
+            "benign": 100
           },
           "macro_f1_present": 1.0,
-          "n": 89
+          "n": 100
         },
         "posture": {
-          "accuracy": 0.9873,
+          "accuracy": 0.9884,
           "labels": {
-            "critical": 79
+            "critical": 86
           },
-          "macro_f1_present": 0.9936,
-          "n": 79
+          "macro_f1_present": 0.9942,
+          "n": 86
         },
         "probe_break": {
-          "accuracy": 0.6393,
+          "accuracy": 0.6197,
           "labels": {
-            "benign": 11,
-            "critical": 50
+            "benign": 13,
+            "critical": 58
           },
-          "macro_f1_present": 0.609,
-          "n": 61
+          "macro_f1_present": 0.5936,
+          "n": 71
         },
         "probe_remove": {
           "accuracy": 1.0,
           "labels": {
-            "benign": 33
+            "benign": 38
           },
           "macro_f1_present": 1.0,
-          "n": 33
+          "n": 38
         },
         "probe_tweak": {
-          "accuracy": 0.9118,
+          "accuracy": 0.875,
           "labels": {
-            "benign": 34
+            "benign": 40
           },
-          "macro_f1_present": 0.9538,
-          "n": 34
+          "macro_f1_present": 0.9333,
+          "n": 40
         },
         "replicas_down": {
           "accuracy": 1.0,
           "labels": {
-            "benign": 14
+            "benign": 15
           },
           "macro_f1_present": 1.0,
-          "n": 14
+          "n": 15
         },
         "replicas_up": {
           "accuracy": 1.0,
           "labels": {
-            "benign": 62
+            "benign": 70
           },
           "macro_f1_present": 1.0,
-          "n": 62
+          "n": 70
         },
         "replicas_zero": {
-          "accuracy": 0.9545,
+          "accuracy": 1.0,
           "labels": {
-            "critical": 22
+            "critical": 28
           },
-          "macro_f1_present": 0.9767,
-          "n": 22
+          "macro_f1_present": 1.0,
+          "n": 28
         },
         "revert": {
-          "accuracy": 0.8579,
+          "accuracy": 0.859,
           "labels": {
-            "benign": 699,
-            "critical": 62,
-            "degradation": 41
+            "benign": 861,
+            "critical": 66,
+            "degradation": 52
           },
-          "macro_f1_present": 0.5943,
-          "n": 802
+          "macro_f1_present": 0.5344,
+          "n": 979
         },
         "volume_mount_remove": {
           "accuracy": 1.0,
           "labels": {
-            "benign": 30
+            "benign": 37
           },
           "macro_f1_present": 1.0,
-          "n": 30
+          "n": 37
         }
       },
       "pooled": {
-        "accuracy": 0.8813,
+        "accuracy": 0.8899,
         "confusion_matrix": [
           [
-            1624,
-            11,
-            86
+            1965,
+            3,
+            96
           ],
           [
-            18,
-            234,
+            39,
+            276,
             5
           ],
           [
-            163,
+            171,
             16,
-            362
+            427
           ]
         ],
-        "macro_f1": 0.851,
-        "n": 2519,
+        "macro_f1": 0.8575,
+        "n": 2998,
         "per_class": {
           "benign": {
-            "f1": 0.9212,
-            "precision": 0.8997,
-            "recall": 0.9436,
-            "support": 1721
+            "f1": 0.9271,
+            "precision": 0.9034,
+            "recall": 0.952,
+            "support": 2064
           },
           "critical": {
-            "f1": 0.7284,
-            "precision": 0.7991,
-            "recall": 0.6691,
-            "support": 541
+            "f1": 0.7478,
+            "precision": 0.8087,
+            "recall": 0.6954,
+            "support": 614
           },
           "degradation": {
-            "f1": 0.9035,
-            "precision": 0.8966,
-            "recall": 0.9105,
-            "support": 257
+            "f1": 0.8976,
+            "precision": 0.9356,
+            "recall": 0.8625,
+            "support": 320
           }
         },
-        "weighted_f1": 0.8779
+        "weighted_f1": 0.8872
       }
     },
     "latency_ms": {
       "note": "single-row bundle.predict incl. TreeSHAP, num_threads=1",
-      "p50": 1.855,
-      "p99": 2.27
+      "p50": 2.632,
+      "p99": 3.978
     },
     "metric_dropout_copies": {
       "cv5_grouped": {
-        "accuracy": 0.7363,
+        "accuracy": 0.7481,
         "confusion_matrix": [
           [
-            1086,
-            209,
-            272
+            1326,
+            240,
+            309
           ],
           [
-            17,
-            199,
-            16
+            25,
+            257,
+            15
           ],
           [
-            10,
-            77,
-            393
+            11,
+            86,
+            454
           ]
         ],
-        "coverage": 0.6516,
-        "macro_f1": 0.6808,
-        "mean_set_size": 0.7661,
-        "n": 2279,
+        "coverage": 0.6456,
+        "macro_f1": 0.6955,
+        "mean_set_size": 0.7462,
+        "n": 2723,
         "per_class": {
           "benign": {
-            "f1": 0.8104,
-            "precision": 0.9757,
-            "recall": 0.693,
-            "support": 1567
+            "f1": 0.8193,
+            "precision": 0.9736,
+            "recall": 0.7072,
+            "support": 1875
           },
           "critical": {
-            "f1": 0.677,
-            "precision": 0.5771,
-            "recall": 0.8188,
-            "support": 480
+            "f1": 0.6832,
+            "precision": 0.5835,
+            "recall": 0.824,
+            "support": 551
           },
           "degradation": {
-            "f1": 0.5551,
-            "precision": 0.4103,
-            "recall": 0.8578,
-            "support": 232
+            "f1": 0.5841,
+            "precision": 0.4408,
+            "recall": 0.8653,
+            "support": 297
           }
         },
-        "weighted_f1": 0.7563
+        "weighted_f1": 0.7661
       },
       "note": "fit-only rows, not in calibration or the gate; own metrics"
     },
     "split": {
       "test": {
-        "groups": 24,
-        "rows": 480
+        "groups": 27,
+        "rows": 550
       },
       "train": {
-        "groups": 190,
-        "rows": 4056
+        "groups": 222,
+        "rows": 4846
       },
       "val": {
-        "groups": 23,
-        "rows": 502
+        "groups": 28,
+        "rows": 600
       }
     },
     "test": {
-      "accuracy": 0.9417,
+      "accuracy": 0.9636,
       "confusion_matrix": [
         [
-          144,
-          1,
-          9
+          184,
+          0,
+          5
         ],
         [
-          0,
-          25,
+          1,
+          22,
           0
         ],
         [
-          3,
-          1,
-          57
+          2,
+          2,
+          59
         ]
       ],
-      "coverage": 0.9,
-      "macro_f1": 0.9387,
-      "mean_set_size": 0.925,
-      "n": 240,
+      "coverage": 0.9164,
+      "macro_f1": 0.948,
+      "mean_set_size": 0.9236,
+      "n": 275,
       "per_class": {
         "benign": {
-          "f1": 0.9568,
-          "precision": 0.9796,
-          "recall": 0.9351,
-          "support": 154
+          "f1": 0.9787,
+          "precision": 0.984,
+          "recall": 0.9735,
+          "support": 189
         },
         "critical": {
-          "f1": 0.8976,
-          "precision": 0.8636,
-          "recall": 0.9344,
-          "support": 61
+          "f1": 0.9291,
+          "precision": 0.9219,
+          "recall": 0.9365,
+          "support": 63
         },
         "degradation": {
-          "f1": 0.9615,
-          "precision": 0.9259,
-          "recall": 1.0,
-          "support": 25
+          "f1": 0.9362,
+          "precision": 0.9167,
+          "recall": 0.9565,
+          "support": 23
         }
       },
-      "weighted_f1": 0.9423
+      "weighted_f1": 0.9638
     },
     "test_spec_changed": {
-      "accuracy": 0.9417,
+      "accuracy": 0.9636,
       "confusion_matrix": [
         [
-          144,
-          1,
-          9
+          184,
+          0,
+          5
         ],
         [
-          0,
-          25,
+          1,
+          22,
           0
         ],
         [
-          3,
-          1,
-          57
+          2,
+          2,
+          59
         ]
       ],
-      "coverage": 0.9,
-      "macro_f1": 0.9387,
-      "mean_set_size": 0.925,
-      "n": 240,
+      "coverage": 0.9164,
+      "macro_f1": 0.948,
+      "mean_set_size": 0.9236,
+      "n": 275,
       "per_class": {
         "benign": {
-          "f1": 0.9568,
-          "precision": 0.9796,
-          "recall": 0.9351,
-          "support": 154
+          "f1": 0.9787,
+          "precision": 0.984,
+          "recall": 0.9735,
+          "support": 189
         },
         "critical": {
-          "f1": 0.8976,
-          "precision": 0.8636,
-          "recall": 0.9344,
-          "support": 61
+          "f1": 0.9291,
+          "precision": 0.9219,
+          "recall": 0.9365,
+          "support": 63
         },
         "degradation": {
-          "f1": 0.9615,
-          "precision": 0.9259,
-          "recall": 1.0,
-          "support": 25
+          "f1": 0.9362,
+          "precision": 0.9167,
+          "recall": 0.9565,
+          "support": 23
         }
       },
-      "weighted_f1": 0.9423
+      "weighted_f1": 0.9638
     }
   },
   "task": "health",
-  "version": "health-5.0.0-37c9309f"
+  "version": "health-5.0.0-421cec83"
 }
