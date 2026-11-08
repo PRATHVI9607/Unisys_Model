@@ -2,10 +2,11 @@
 
 Launches short-lived pods in the lab namespace, each running one workload profile with randomised
 parameters: ordinary benign file workloads (backups, log rotation, databases, compiles, copies,
-atomic config writes), and the sandboxed, non-destructive deploy/chaos/detection-test-workload.py. The
+atomic config writes, and real tools: restic, npm, pip, git), and the sandboxed, non-destructive deploy/chaos/detection-test-workload.py. The
 security agent (capture mode on, see run_lab.sh) publishes every window it scores to
 STREAM_CAPTURE; this collector joins those windows to the pod's profile and writes one JSONL
-record per window. It never computes features itself.
+record per window, with the window's raw events and entropy samples when the capture carries them
+(`events_json`, `entropy_json`), so training can recompute features. It never computes features itself.
 
 Labels: a benign profile's windows are `benign`. A detection-test pod first creates plain files,
 waits --delay (0-3 s, 5-20 s or 30-80 s), then overwrites them: windows that end before the overwrite starts are
@@ -46,10 +47,11 @@ from training.collect.common import (
     ensure_namespace,
     wait_for_memory,
 )
+from training.datasets.collected import pack_events
 
 log = logging.getLogger("kubeheal.lab.security")
 
-CHAOS_IMAGE = "kubeheal/chaos:v5"
+CHAOS_IMAGE = "kubeheal.invalid/chaos:v5"
 POD_DEADLINE_S = 420
 TRAILING_S = 15            # windows for the last seconds arrive after the pod exits (agent evaluates every 5 s)
 XREAD_RETRIES, XREAD_BACKOFF_S = 8, 2.0   # a dropped port-forward heals in seconds; ~8 min of backoff then fail loud
@@ -100,13 +102,25 @@ def _redis_snapshots(r: random.Random) -> tuple[list[str], dict]:
     return _looped(r, body, p, prefix="redis-server --dir /data --save '' --daemonize yes && sleep 1 && ")
 
 
+RESTIC_IMAGE, NODE_IMAGE, GIT_IMAGE = "restic/restic:0.17.3", "node:22-alpine", "alpine/git:latest"
+NPM_PACKAGES = ["express", "lodash", "axios", "chalk", "commander", "uuid", "dayjs", "debug", "yaml", "ws", "moment"]
+PIP_PACKAGES = ["requests", "flask", "rich", "click", "pyyaml", "jinja2", "httpx", "attrs", "packaging", "idna"]
+
+
+def _pick(names: list[str]):
+    return lambda r: " ".join(r.sample(names, r.randint(2, 4)))
+
+
 # name → (image, fn(rng) -> (command, params)). Every benign command loops until DURATION seconds pass.
 def _benign_profiles() -> dict:
-    def busybox(body: str, **params):
+    def tool(image: str, body: str, prefix: str = "", **params):
         def make(r: random.Random):
             p = {k: v(r) for k, v in params.items()}
-            return _looped(r, body.format(**p), p)
-        return "busybox:1.37", make
+            return _looped(r, body.format(**p), p, prefix.format(**p))
+        return image, make
+
+    def busybox(body: str, **params):
+        return tool("busybox:1.37", body, **params)
 
     return {
         "tar_gzip_backup": busybox(
@@ -145,13 +159,59 @@ def _benign_profiles() -> dict:
             " head -c {mb}M /dev/urandom > /data/src/blob.bin; tar czf /data/backup.tgz -C /data src"
             f" && nc -w 3 {SINK_NAME} {SINK_PORT} < /data/backup.tgz; sleep {{pause}}",
             files=lambda r: r.randint(5, 80), mb=lambda r: r.randint(1, 48), pause=lambda r: r.randint(1, 10)),
+        # Real tools. Held out for evaluation, never added here: borg, kopia, duplicity, yarn, pnpm (docs/models-and-data.md).
+        # restic: encrypted, compressed, content-addressed packs; originals are only read; prune deletes packs it read.
+        "restic_backup": tool(
+            RESTIC_IMAGE,
+            "n=$((n+1)); for j in $(seq {edits}); do echo \"edit $n $j\" >> /data/src/f$(( (n * 7 + j) % {files} )).txt; done;"
+            " restic backup -q --compression {compression} /data/src;"
+            " [ $((n % {prune_every})) = 0 ] && restic forget -q --keep-last 2 --prune; sleep {pause}",
+            "export RESTIC_PASSWORD=lab RESTIC_REPOSITORY=/data/repo RESTIC_CACHE_DIR=/data/cache; mkdir -p /data/src;"
+            " i=0; while [ $i -lt {files} ]; do seq 1 {lines} | sed \"s/^/f$i /\" > /data/src/f$i.txt;"
+            " head -c {kb}k /dev/urandom > /data/src/r$i.bin; i=$((i+1)); done; restic init -q; n=0; ",
+            files=lambda r: r.randint(20, 300), lines=lambda r: r.choice([50, 500, 4000]), kb=lambda r: r.choice([1, 20, 200]),
+            edits=lambda r: r.randint(1, 20), compression=lambda r: r.choice(["auto", "off", "max"]),
+            prune_every=lambda r: r.randint(2, 5), pause=lambda r: r.randint(0, 5)),
+        # npm: cached tarballs read, a fresh node_modules tree written, package.json / lock rewritten
+        "npm_install": tool(
+            NODE_IMAGE,
+            "rm -rf node_modules package-lock.json; {clean}npm install --no-audit --no-fund {pkgs} >/dev/null 2>&1;"
+            " sleep {pause}",
+            "export HOME=/data/home npm_config_cache=/data/npmcache; mkdir -p /data/app && cd /data/app"
+            " && npm init -y >/dev/null; ",
+            pkgs=_pick(NPM_PACKAGES), pause=lambda r: r.randint(0, 5),
+            clean=lambda r: r.choice(["", "", "npm cache clean --force >/dev/null 2>&1; "])),
+        "pip_install": tool(
+            "python:3.13-slim",
+            "rm -rf /data/venv; python -m venv /data/venv && /data/venv/bin/pip install -q {cache}{pkgs} >/dev/null 2>&1;"
+            " sleep {pause}",
+            "export HOME=/data/home PIP_CACHE_DIR=/data/pipcache PIP_DISABLE_PIP_VERSION_CHECK=1; ",
+            pkgs=_pick(PIP_PACKAGES), pause=lambda r: r.randint(0, 5),
+            cache=lambda r: r.choice(["", "", "--no-cache-dir "])),
+        # git: a local repo (no network), checkouts across tags rewrite the work tree, gc repacks, local clones
+        "git_repo": tool(
+            GIT_IMAGE,
+            "for t in $(seq {tags}); do git checkout -q -f v$t; done; git gc -q; rm -rf /data/c2;"
+            " git clone -q /data/repo /data/c2; sleep {pause}",
+            "export HOME=/data/home; mkdir -p $HOME /data/repo && cd /data/repo && git init -q"
+            " && git config user.email lab@kubeheal.local && git config user.name lab"
+            " && for t in $(seq {tags}); do for i in $(seq {files}); do seq $t $((t * {lines})) > f$i.txt; done;"
+            " git add -A && git commit -qm c$t && git tag v$t; done; ",
+            tags=lambda r: r.randint(3, 10), files=lambda r: r.randint(20, 300), lines=lambda r: r.choice([10, 200, 2000]),
+            pause=lambda r: r.randint(0, 5)),
     }
+
+
+# Real tools weigh more: they are the nearest false-kill risk seen live (docs/evaluation.md); default weight 1.
+BENIGN_WEIGHTS = {"restic_backup": 3.0, "npm_install": 2.0, "pip_install": 1.5, "git_repo": 1.5}
+POD_MEMORY = {"restic_backup": "768Mi", "npm_install": "1Gi", "pip_install": "1Gi", "git_repo": "512Mi"}
 
 
 BENIGN = _benign_profiles()
 
 
 GAP_MIX = ((0.4, (0, 3)), (0.3, (5, 20)), (0.3, (30, 80)))   # (share, seconds): back-to-back, short, long quiet gap
+SLOW_SHARE = 0.3           # detection pods at 1-5 files/s: live, slow attacks were killed only after ~10 files
 MIN_ATTACK_S = 2.0         # a back-to-back window needs this much attack time to be labelled ransomware
 
 
@@ -166,7 +226,8 @@ def draw_gap(r: random.Random) -> int:
 
 
 def detection_profile(r: random.Random) -> tuple[list[str], dict]:
-    p = {"num_files": r.randint(20, 400), "rate": r.choice([5, 20, 60, 180, 400]),
+    p = {"num_files": r.randint(20, 400),
+         "rate": r.choice([1, 2, 3, 5]) if r.random() < SLOW_SHARE else r.choice([5, 20, 60, 180, 400]),
          "file_size": r.choice([512, 4096, 65536, 1 << 20]), "rename": r.random() < 0.7,
          "partial": r.choice([1.0, 1.0, 0.5, 0.25, 0.1]), "delay": draw_gap(r),
          "duration": 90}
@@ -180,7 +241,8 @@ def detection_profile(r: random.Random) -> tuple[list[str], dict]:
     return _sh(cmd), p
 
 
-def pod_manifest(name: str, scenario: str, label: str, image: str, command: list[str], params: dict) -> dict:
+def pod_manifest(name: str, scenario: str, label: str, image: str, command: list[str], params: dict,
+                 memory: str = "256Mi") -> dict:
     return {
         "apiVersion": "v1", "kind": "Pod",
         "metadata": {"name": name, "namespace": NS,
@@ -192,7 +254,7 @@ def pod_manifest(name: str, scenario: str, label: str, image: str, command: list
             "containers": [{
                 "name": "work", "image": image, "imagePullPolicy": "IfNotPresent", "command": command,
                 "volumeMounts": [{"name": "data", "mountPath": "/data"}],
-                "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"cpu": "500m", "memory": "256Mi"}},
+                "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"cpu": "500m", "memory": memory}},
                 "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
             }],
             "volumes": [{"name": "data", "emptyDir": {"sizeLimit": "512Mi"}}],
@@ -249,11 +311,50 @@ def label_window(ev: SecurityEvent, profile_label: str, overwrite_ms: int | None
     return None
 
 
+def raw_window(fields: dict) -> tuple[list[dict] | None, list | None]:
+    """The capture entry's raw window (`events_json`, `entropy_json`); None for a field that is absent or bad."""
+    out = []
+    for k in ("events_json", "entropy_json"):
+        try:
+            v = json.loads(fields[k]) if fields.get(k) else None
+        except ValueError:
+            v = None
+        out.append(v if isinstance(v, list) else None)
+    return out[0], out[1]
+
+
+def window_records(kept: list[tuple[SecurityEvent, list[dict] | None, list | None, str]], scenario: str, label: str,
+                   params: dict, group: str, phase: str) -> list[dict]:
+    """One pod's labelled windows → JSONL records. Raw events go into one `events_log` (first row with events) and
+    an `events_range` per row (training/datasets/collected.py pack_events); rows without raw events carry neither."""
+    raw = [i for i, (_, events, _, _) in enumerate(kept) if events]
+    log, ranges = pack_events([kept[i][1] for i in raw])
+    where = dict(zip(raw, ranges, strict=True))
+    out = []
+    for i, (ev, _, entropy, lab) in enumerate(kept):
+        rec = {
+            "source": "security_lab", "scenario": scenario, "params": params, "group": group,
+            "label": lab, "label_reasons": [f"profile:{label}" + ("" if lab == label else ":setup_phase")],
+            "pod_phase": phase, "features": ev.features, "n_events": ev.n_events,
+            "window_start_ms": ev.window_start_ms, "window_end_ms": ev.window_end_ms,
+            "model_version": ev.model_version, "model_label": ev.label, "model_risk": ev.risk,
+        }
+        if i in where:
+            rec["events_range"] = list(where[i])
+            if entropy is not None:
+                rec["entropy"] = entropy
+            if i == raw[0]:
+                rec["events_log"] = log
+        out.append(rec)
+    return out
+
+
 class Lab:
     def __init__(self, args, core: client.CoreV1Api, api: client.ApiClient, redis, out: Output):
         self.args, self.core, self.api, self.redis, self.out = args, core, api, redis, out
         self.rng = random.Random(args.seed)
-        self.pending: dict[str, list[SecurityEvent]] = {}   # pod name → captured windows awaiting its label
+        # pod name → captured windows awaiting its label: (event, raw events | None, entropy samples | None)
+        self.pending: dict[str, list[tuple[SecurityEvent, list[dict] | None, list | None]]] = {}
         self.dropped = 0
         self.late = 0          # lab windows that arrived after their pod's sample was closed (lost)
         self.watermark_ms = 0  # newest window end the agent has captured (any pod): how far it has caught up
@@ -283,7 +384,7 @@ class Lab:
                         continue
                     self.watermark_ms = max(self.watermark_ms, ev.window_end_ms)
                     if ev.namespace == NS and ev.pod in self.pending:
-                        self.pending[ev.pod].append(ev)
+                        self.pending[ev.pod].append((ev, *raw_window(fields)))
                     elif ev.namespace == NS and ev.pod.startswith("sec-"):
                         self.late += 1
 
@@ -293,32 +394,31 @@ class Lab:
             scenario, label, image = "detection_test", "ransomware", CHAOS_IMAGE
             command, params = detection_profile(self.rng)
         else:
-            scenario = self.rng.choice(sorted(BENIGN))
+            names = sorted(BENIGN)
+            scenario = self.rng.choices(names, [BENIGN_WEIGHTS.get(n, 1.0) for n in names])[0]
             label = "benign"
             image, make = BENIGN[scenario]
             command, params = make(self.rng)
         name = f"sec-{scenario.replace('_', '-')}-{uuid.uuid4().hex[:6]}"
         self.pending[name] = []
         try:
-            await self.core.create_namespaced_pod(NS, pod_manifest(name, scenario, label, image, command, params))
+            await self.core.create_namespaced_pod(NS, pod_manifest(name, scenario, label, image, command, params,
+                                                                   POD_MEMORY.get(scenario, "256Mi")))
             phase = await self.wait_done(name)
             await self.caught_up(time.time() * 1000)
             overwrite_ms = None
             if detection:
                 text = await self.core.read_namespaced_pod_log(name, NS, timestamps=True)
                 overwrite_ms = overwrite_start_ms(text, params["delay"])
-            for ev in self.pending.get(name, []):
+            kept = []
+            for ev, events, entropy in self.pending.get(name, []):
                 lab = label_window(ev, label, overwrite_ms, params.get("delay", float("inf")))
                 if lab is None:
                     self.dropped += 1
                     continue
-                self.out.write({
-                    "source": "security_lab", "scenario": scenario, "params": params, "group": name,
-                    "label": lab, "label_reasons": [f"profile:{label}" + ("" if lab == label else ":setup_phase")],
-                    "pod_phase": phase, "features": ev.features, "n_events": ev.n_events,
-                    "window_start_ms": ev.window_start_ms, "window_end_ms": ev.window_end_ms,
-                    "model_version": ev.model_version, "model_label": ev.label, "model_risk": ev.risk,
-                })
+                kept.append((ev, events, entropy, lab))
+            for rec in window_records(kept, scenario, label, params, name, phase):
+                self.out.write(rec)
         finally:
             self.pending.pop(name, None)
             try:

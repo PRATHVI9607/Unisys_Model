@@ -15,8 +15,13 @@ separable by tokens:
   (write .gz + unlink original), media transcoding (high entropy), log
   rotation and atomic tmp→rename writes (benign renames with extension
   changes), backup uploads (bulk read + network);
+- hard negatives that read many originals and write high-entropy files: encrypting
+  dedup backups (restic/borg/kopia-like repos: hash-named packs, temp + rename,
+  prune unlinks) and package installs (npm/pip: cached tarballs, fresh trees,
+  staged renames); originals are never transformed (frac_write_from_read);
 - hard positives: in-place encryption without renames, intermittent/partial
-  encryption (mid entropy), slow encryption (1-3 files in a long window);
+  encryption (mid entropy), slow encryption (1-3 files in a long window), and
+  trickle encryption at 1-5 files/s caught after 2-12 files;
 - windows are cut down to what the live agent can see: only CAPTURED_GROUPS
   syscalls on the data volume (the scenario root) survive, as with the Falco
   rules; at most MAX_ENTROPY_SAMPLES entropy samples (the newest files), missing
@@ -124,13 +129,16 @@ def web_serve(w: _W, budget: int) -> None:
 
 def db_workload(w: _W, budget: int) -> None:
     files = [w.file([""], "/base/16384") for _ in range(int(w.rng.integers(2, 8)))]
-    opened = set()   # the capture emits one open_r/open_w per file per window, however many preads/pwrites follow
+    # Data files are opened O_RDWR: the capture emits one open_w per file per window, however many preads/pwrites follow.
+    opened = set()
     while len(w.events) < budget:
         f = w.rng.choice(files)
         sc = w.rng.choice(["pread64", "pwrite64", "mmap", "pread64", "fsync"])
-        if sc not in ("pread64", "pwrite64") or (f, sc) not in opened:
+        if sc not in ("pread64", "pwrite64"):
             w.ev(sc, f)
-        opened.add((f, sc))
+        elif f not in opened:
+            w.ev("pwrite64", f)
+            opened.add(f)
         if sc == "pwrite64":
             w.wrote((8, 64))
             w.ent(STRUCT)
@@ -259,10 +267,12 @@ def maintenance_script(w: _W, budget: int) -> None:
 def encrypted_store(w: _W, budget: int) -> None:
     """Encrypted-at-rest stores (vault, restic, encrypted DB pages) rewrite files in place with ciphertext."""
     files = [w.file(["", ".db", ".dat", ".pack", ".idx"], "/store") for _ in range(int(w.rng.integers(2, 30)))]
+    ro = w.rng.random() < 0.2   # stores open O_RDWR (one open_w live); a separate read-only open is the exception
     while len(w.events) < budget:
         f = w.rng.choice(files)
         w.ev("openat", f)
-        w.ev(w.rng.choice(["read", "pread64"]), f, n=int(w.rng.integers(0, 3)))
+        if ro:
+            w.ev(w.rng.choice(["read", "pread64"]), f)
         w.ev(w.rng.choice(["write", "pwrite64"]), f, n=int(w.rng.integers(1, 4)))
         w.wrote((4, 256))
         w.ent(ENCRYPTED)
@@ -424,8 +434,102 @@ def archive_burst(w: _W, budget: int) -> None:
         w.files += 1
 
 
+def _hex(w: _W, n: int = 64) -> str:
+    return "".join(w.rng.choice(list("0123456789abcdef"), size=n))
+
+
+def backup_repo(w: _W, budget: int) -> None:
+    """Encrypting deduplicating backups (restic/borg/kopia style): originals are only read; encrypted, content-addressed
+    pack files (repo/data/xx/<hash>, often temp + rename) are new; index/snapshot/lock files; prune reads old packs,
+    writes repacked ones and unlinks the old; a local cache copies index files into another directory."""
+    _rate(w)
+    _setup(w, budget)
+    repo = f"{w.ctx['root']}{w.rng.choice(['/repo', '/backup/repo', '/.restic', '/borg'])}"
+    temp = str(w.rng.choice(["dot", "suffix", "none"]))
+    srcs = [w.file(sub=f"/src{w.rng.integers(0, 9)}") for _ in range(int(w.rng.integers(5, 200)))]
+    packs: list[str] = []
+
+    def pack(sub: str = "data") -> str:
+        h = _hex(w)
+        final = f"{repo}/{sub}/{h[:2]}/{h}"
+        tmp = {"dot": f"{repo}/{sub}/{h[:2]}/.{h}-tmp-{w.rng.integers(10**8)}", "suffix": final + ".tmp", "none": final}[temp]
+        w.ev("write", tmp)
+        if tmp != final:
+            w.ev("rename", tmp, final)
+        w.wrote((64, 16384))
+        w.ent(ENCRYPTED if w.rng.random() < 0.8 else COMPRESSED)
+        w.files += 1
+        packs.append(final)
+        return final
+
+    w.ev("read", f"{repo}/config")
+    lock = f"{repo}/locks/{_hex(w)}"
+    w.ev("write", lock)
+    prune = w.rng.random() < 0.3
+    while len(w.events) < budget:
+        if prune and packs and w.rng.random() < 0.4:      # repack: read an old pack, write a new one, drop the old
+            old = packs.pop(int(w.rng.integers(len(packs))))
+            w.ev("read", old)
+            pack()
+            w.ev("unlink", old)
+            continue
+        for _ in range(int(w.rng.integers(1, 12))):        # chunk a few originals into one pack
+            w.ev("read", str(w.rng.choice(srcs)))
+        pack()
+        if w.rng.random() < 0.1:
+            idx = pack("index")
+            w.ev("read", idx)
+            w.ev("write", f"{w.ctx['root']}/cache/{_hex(w, 16)}/index/{idx.rsplit('/', 1)[1]}")
+            w.ent(ENCRYPTED)
+    w.ev("write", f"{repo}/snapshots/{_hex(w)}")
+    w.ent(ENCRYPTED)
+    w.ev("unlink", lock)
+
+
+def package_tree(w: _W, budget: int) -> None:
+    """npm/yarn/pip install: read cached tarballs/wheels, many fresh files in a new tree, staged directory renames,
+    cache writes via temp + rename (high-entropy .tgz/.whl), .pyc via temp + rename, the manifest rewritten."""
+    _rate(w)
+    _setup(w, budget)
+    npm = w.rng.random() < 0.5
+    tree = f"{w.ctx['root']}{'/app/node_modules' if npm else '/venv/lib/python3.13/site-packages'}"
+    cache = f"{w.ctx['root']}{'/.npm/_cacache' if npm else '/.cache/pip'}"
+    manifest = f"{w.ctx['root']}/app/{'package.json' if npm else 'requirements.txt'}"
+    w.ev("read", manifest)
+    while len(w.events) < budget:
+        pkg = f"{w.rng.choice(WORDS)}{w.rng.integers(0, 999)}"
+        h = _hex(w)
+        blob = f"{cache}/{'content-v2/sha512' if npm else 'wheels'}/{h[:2]}/{h[2:4]}/{h}"
+        if w.rng.random() < 0.5:                          # not cached yet: downloaded into the cache first
+            tmp = f"{cache}/tmp/{_hex(w, 8)}"
+            w.ev("write", tmp)
+            w.ev("rename", tmp, blob)
+            w.ent(COMPRESSED)
+        w.ev("read", blob)
+        dest = f"{tree}/.staging/{pkg}-{_hex(w, 8)}" if npm and w.rng.random() < 0.5 else f"{tree}/{pkg}"
+        for _ in range(int(w.rng.integers(2, 25))):
+            f = f"{dest}/{w.rng.choice(['lib/', 'src/', ''])}{w.rng.choice(WORDS)}{w.rng.choice(['.js', '.json', '.py', '.d.ts', '.md', '.so'])}"
+            w.ev("write", f)
+            w.ent(TEXT if not f.endswith(".so") else BINARY)
+            w.files += 1
+            if not npm and f.endswith(".py") and w.rng.random() < 0.5:
+                pyc = f"{f.rsplit('/', 1)[0]}/__pycache__/{f.rsplit('/', 1)[1][:-3]}.cpython-313.pyc"
+                tmp = f"{pyc}.{w.rng.integers(10**6)}"
+                w.ev("write", tmp)
+                w.ev("rename", tmp, pyc)
+        if dest != f"{tree}/{pkg}":
+            w.ev("rename", dest, f"{tree}/{pkg}")
+        w.wrote((1, 2000))
+        if w.rng.random() < 0.05:
+            w.ev("chmod", f"{tree}/.bin/{pkg}")
+    if w.rng.random() < 0.7:                               # npm rewrites its manifest and lock file
+        w.ev("write", manifest)
+        w.ev("write", manifest.replace("package.json", "package-lock.json"))
+        w.ent(TEXT)
+
+
 START_BURSTS = (logrotate_start, archive_burst)
-HARD_NEGATIVES = (atomic_rename, logrotate_gz, dpkg_install, git_npm) + START_BURSTS
+HARD_NEGATIVES = (atomic_rename, logrotate_gz, dpkg_install, git_npm, backup_repo, package_tree) + START_BURSTS
 
 
 # ── suspicious ───────────────────────────────────────────────────────────────
@@ -512,6 +616,17 @@ def ransomware_slow(w: _W, budget: int) -> None:
     _encrypt(w, budget, str(w.rng.choice(["inplace", "rename", "copy"])), ENCRYPTED, files=int(w.rng.integers(1, 4)))
 
 
+def ransomware_trickle(w: _W, budget: int) -> None:
+    """1-5 files/s caught early: 2-12 files transformed after a setup/idle phase, so the first evidence is learned."""
+    w.rate = float(w.rng.uniform(1, 5))
+    w.files = int(w.rng.integers(2, 13))
+    _encrypt(w, budget, str(w.rng.choice(["inplace", "rename", "rename", "copy"])),
+             ENCRYPTED if w.rng.random() < 0.8 else PARTIAL, files=w.files)
+
+
+HARD_POSITIVES = (ransomware_trickle,)   # used with --collected too: the lab's slow profiles are few
+
+
 # ── exfiltration ─────────────────────────────────────────────────────────────
 def exfiltration(w: _W, budget: int) -> None:
     stage = w.file(ARCHIVE_EXT, "/tmp") if w.rng.random() < 0.4 else None
@@ -533,12 +648,12 @@ SCENARIOS = [  # (label, generator, weight)
     ("benign", package_install, 0.8), ("benign", backup_upload, 0.8), ("benign", maintenance_script, 1.0),
     ("benign", encrypted_store, 0.8),
     ("benign", atomic_rename, 1.0), ("benign", logrotate_gz, 1.0), ("benign", dpkg_install, 1.0),
-    ("benign", git_npm, 1.0),
+    ("benign", git_npm, 1.0), ("benign", backup_repo, 1.2), ("benign", package_tree, 1.2),
     ("benign", logrotate_start, 1.5), ("benign", archive_burst, 1.5),
     ("suspicious", recon, 1.0), ("suspicious", file_enumeration, 1.0), ("suspicious", permission_tamper, 0.6),
     ("ransomware", ransomware_rename, 0.8), ("ransomware", ransomware_inplace, 0.8),
     ("ransomware", ransomware_copy_delete, 0.6), ("ransomware", ransomware_intermittent, 0.7),
-    ("ransomware", ransomware_slow, 0.7),
+    ("ransomware", ransomware_slow, 0.7), ("ransomware", ransomware_trickle, 0.8),
     ("exfiltration", exfiltration, 1.8),
 ]
 assert {label for label, _, _ in SCENARIOS} == set(SECURITY_LABELS)

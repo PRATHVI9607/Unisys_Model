@@ -1,7 +1,8 @@
 """Lab-collected data (training/collect/) → training rows, and the committed gz export + dataset card.
 
 Rows are `{features, label, group, family, source}`. `features` are the ones the live agents
-computed (HealthEvent / captured SecurityEvent), so there is nothing to recompute. `family` is the
+computed (HealthEvent / captured SecurityEvent); security rows that carry raw events are recomputed
+with the current feature code (recompute_security). `family` is the
 scenario family used for the held-out-family evaluation in training/train.py ("" = always train).
 
 Reads training/data/collected/<task>.jsonl (raw collector output, git-ignored) when present, else
@@ -25,6 +26,7 @@ COLLECTED = DATA / "collected"
 # Classes the security lab cannot produce: these come from training/synth_security.py.
 SYNTH_ONLY = ("suspicious", "exfiltration")
 ROBUST_P99 = "p99>=2x_robust_pre"
+READINESS_STUCK = "readiness_break_replicas1"
 
 
 def source_path(task: str) -> Path:
@@ -50,9 +52,37 @@ def read(task: str, path: Path | None = None) -> list[dict]:
                 bad += 1
     if bad:
         print(f"warning: {path}: skipped {bad} unparseable line(s)", file=sys.stderr)
+    if task == "security" and (n := recompute_security(out)):
+        print(f"note: {path}: {n} security window(s) recomputed from raw events", file=sys.stderr)
+    if task == "health" and (n := relabel_readiness_stuck(out)):   # first: critical wins over the p99 upgrade
+        print(f"note: {path}: {n} record(s) relabelled critical ({READINESS_STUCK})", file=sys.stderr)
     if task == "health" and (n := relabel_health(out)):
         print(f"note: {path}: {n} benign record(s) relabelled degradation ({ROBUST_P99})", file=sys.stderr)
     return out
+
+
+def relabel_readiness_stuck(recs: list[dict]) -> int:
+    """A broken readiness probe at 1 replica is a stuck rollout too, in place; returns the relabel count.
+
+    The collector's rollout_complete returned True at replicas=1 while only the old pod was available, so a forward
+    change breaking the readiness probe (probe_break: wrong path/port) was recorded stuck=False, while the same change
+    at 2-3 replicas was stuck=True → critical in every lab record. Rule (shared with the health-runtime fix): forward
+    record, obs.desired == 1, obs.stuck False, a readinessProbe op with `path` or `port` → obs.stuck = True and
+    drift_lab.impact_label re-run, flagged `relabeled`. Reverts are left alone (restoring the base is fine).
+    """
+    from training.collect.drift_lab import impact_label
+
+    n = 0
+    for r in recs:
+        obs, ops = r.get("obs") or {}, (r.get("params") or {}).get("ops") or []
+        if r.get("revert") or obs.get("desired") != 1 or obs.get("stuck") or not any(
+                o["op"] == "probe" and o["probe"] == "readinessProbe" and ("path" in o or "port" in o) for o in ops):
+            continue
+        obs = {**obs, "stuck": True}
+        label, reasons = impact_label(r["features"], obs, r.get("pre_p99_s"), ops)
+        r.update(label=label, label_reasons=reasons, obs=obs, relabeled=READINESS_STUCK)
+        n += 1
+    return n
 
 
 def relabel_health(recs: list[dict]) -> int:
@@ -92,9 +122,45 @@ def family(task: str, rec: dict) -> str:
     return "detection_test:" + ("rename" if p["rename"] else "inplace") + ("_partial" if p["partial"] < 1 else "")
 
 
+def _op_family(op: dict) -> str:
+    """drift_lab.FAMILIES entry that generated `op` (inverse of the generators' shapes)."""
+    from training.collect.drift_lab import POSTURE_OPS
+
+    match op["op"]:
+        case "cpu_limit":
+            return "cpu_throttle" if "m" in op else "cpu_limit_down" if op["ratio"] < 1 else "cpu_limit_up"
+        case "mem_limit":
+            return "mem_pressure" if "mi" in op else "mem_limit_down" if op["ratio"] < 1 else "mem_limit_up"
+        case "replicas":
+            return "replicas_zero" if "n" in op else "replicas_up" if op["delta"] > 0 else "replicas_down"
+        case "image":
+            return "image_missing" if op["tag"].endswith("-missing") else "image_valid"
+        case "probe":
+            return "probe_tweak" if "period" in op else "probe_break"
+        case "env_set":
+            return "env"
+        case "args_add":
+            return "args_stress" if all(a.startswith("--stress") for a in op["args"]) else "args_break"
+        case "template_label" | "template_annotation":
+            return "meta"
+        case o if o in POSTURE_OPS:
+            return "posture"
+    return op["op"]   # cpu_request, probe_remove, volume_mount_remove: family name == op name
+
+
+def heldout_key(task: str, rec: dict) -> str:
+    """'|'-joined families a row involves; train.py holds out every row involving the held-out family.
+
+    Health derives them from params.ops, so a combined change or a revert (its params carry the forward ops) leaves
+    training with each family it touches instead of staying in as "combined"/"revert".
+    """
+    ops = (rec.get("params") or {}).get("ops") if task == "health" else None
+    return "|".join(sorted({_op_family(o) for o in ops})) if ops else family(task, rec)
+
+
 def lab_rows(task: str, path: Path | None = None) -> list[dict]:
     return [{"features": r["features"], "label": r["label"], "group": f"lab:{r['group']}",
-             "family": family(task, r), "source": "lab",
+             "family": heldout_key(task, r), "source": "lab",
              "assess_delay_s": r.get("assess_delay_s")} for r in read(task, path)]
 
 
@@ -112,20 +178,66 @@ def health_rows(legacy_csv: str | None = None) -> tuple[list[dict], dict]:
     return rows, {"sources": src, "legacy_csv": bool(legacy_csv), "synthetic": False}
 
 
+# ── raw security events: one compact log per pod, windows are slices of it ──────────────────────────────────────
+# Consecutive captured windows of a pod overlap almost entirely (60 s window, scored every few seconds), so a lab
+# row stores `events_range` [lo, hi) into its pod's `events_log` (rows [ts_ms, syscall, path, new_path], on the
+# pod's first row that has events) and `entropy` (the window's samples), not the events themselves.
+BYTE_FEATURES = ("write_bytes_per_s", "net_out_bytes_per_s")   # pod counters: not derivable from events, kept
+
+
+def pack_events(windows: list[list[dict]]) -> tuple[list[list], list[tuple[int, int]]]:
+    """Event lists of one pod's windows, in capture order → (log, ranges) with unpack(log[lo:hi]) == window."""
+    log: list[list] = []
+    ranges: list[tuple[int, int]] = []
+    for w in windows:
+        rows = [[e.get("ts_ms"), e.get("syscall", ""), e.get("path") or "", e.get("new_path") or ""] for e in w]
+        # earliest start whose log tail is a prefix of this window (the agent's buffer only grows and trims)
+        lo = next((s for s in range(max(0, len(log) - len(rows)), len(log))
+                   if log[s] == rows[0] and log[s:] == rows[:len(log) - s]), len(log))
+        log += rows[len(log) - lo:]
+        ranges.append((lo, lo + len(rows)))
+    return log, ranges
+
+
+def unpack_events(rows: list[list]) -> list[dict]:
+    return [{"syscall": sc, "path": p, "ts_ms": ts} | ({"new_path": new} if new else {}) for ts, sc, p, new in rows]
+
+
+def recompute_security(recs: list[dict]) -> int:
+    """Recompute, in place, the features of lab rows that carry raw events (feature changes need no re-collection).
+    Rows without them (collected before raw capture) keep the agent's features. Returns the count recomputed."""
+    from kubeheal.features.security import security_features, window_seconds
+
+    logs = {r["group"]: r["events_log"] for r in recs if "events_log" in r}
+    n = 0
+    for r in recs:
+        if "events_range" not in r or "entropy" not in r or r["group"] not in logs:
+            continue
+        lo, hi = r["events_range"]
+        ev = unpack_events(logs[r["group"]][lo:hi])
+        ts = [e["ts_ms"] for e in ev if e["ts_ms"] is not None]
+        window_s = window_seconds(min(ts), ts[-1]) if ts else 0.0
+        r["features"] = security_features(ev, r["entropy"], window_s) | {k: r["features"].get(k) for k in BYTE_FEATURES}
+        n += 1
+    return n
+
+
 def security_rows(n_scenarios: int, seed: int) -> tuple[list[dict], dict]:
     from kubeheal.features.security import security_features
-    from training.synth_security import HARD_NEGATIVES, generate
+    from training.synth_security import HARD_NEGATIVES, HARD_POSITIVES, generate
 
     rows = [r for r in lab_rows("security") if r["label"] not in SYNTH_ONLY]
     # Pre-telemetry captures (training/data/collected/pre-telemetry/) have no byte counters at all; never train on them.
     if rows and all(r["features"].get("write_bytes_per_s") is None for r in rows):
         raise ValueError(f"{source_path('security')}: no byte telemetry in any window (pre-telemetry data?)")
     hard = {g.__name__ for g in HARD_NEGATIVES}   # benign families the lab under-covers (rename-heavy, high entropy)
-    synth = [r for r in generate(n_scenarios, seed) if r["label"] in SYNTH_ONLY or r["scenario"] in hard]
+    pos = {g.__name__ for g in HARD_POSITIVES}    # slow (1-5 files/s) attacks caught early: few lab windows
+    synth = [r for r in generate(n_scenarios, seed) if r["label"] in SYNTH_ONLY or r["scenario"] in hard | pos]
     rows += [{"features": security_features(r["events"], r["entropy"], r["window_s"], r["bytes_written"],
                                             r["net_bytes_out"]),
               "label": r["label"], "group": f"synth:{r['group']}", "family": "",
-              "source": "synthetic_hard_negative" if r["scenario"] in hard else "synthetic"}
+              "source": "synthetic_hard_negative" if r["scenario"] in hard else
+                        "synthetic_hard_positive" if r["scenario"] in pos else "synthetic"}
              for r in synth]
     class_source = {lbl: sorted({r["source"] for r in rows if r["label"] == lbl}) for lbl in
                     dict.fromkeys(r["label"] for r in rows)}
@@ -137,7 +249,7 @@ def security_rows(n_scenarios: int, seed: int) -> tuple[list[dict], dict]:
                   "synthetic_fraction_by_class": {lbl: round(sum(r["source"] != "lab" for r in rows if r["label"] == lbl)
                                                              / sum(r["label"] == lbl for r in rows), 4)
                                                   for lbl in class_source},
-                  "synthetic_hard_negatives": sorted(hard)}
+                  "synthetic_hard_negatives": sorted(hard), "synthetic_hard_positives": sorted(pos)}
 
 
 # ── export ───────────────────────────────────────────────────────────────────

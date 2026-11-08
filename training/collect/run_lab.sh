@@ -56,11 +56,14 @@ trap 'exit 143' TERM
 trap '' HUP     # survive a closed terminal even without nohup
 
 log "build images"
-minikube image build -t kubeheal/agents:v5 -f deploy/docker/Dockerfile.agents .
-minikube image build -t kubeheal/chaos:v5 -f deploy/docker/Dockerfile.chaos .
+minikube image build -t kubeheal.invalid/agents:v5 -f deploy/docker/Dockerfile.agents .
+minikube image build -t kubeheal.invalid/chaos:v5 -f deploy/docker/Dockerfile.chaos .
+minikube image build -t kubeheal.invalid/inference:v5 -f deploy/docker/Dockerfile.inference .
+minikube image build -t kubeheal.invalid/dashboard:v5 -f deploy/docker/Dockerfile.dashboard .
+minikube image build -t kubeheal.invalid/sensor:v5 sensor
 log "pre-pull lab images"
 for img in ghcr.io/stefanprodan/podinfo:{6.9.0,6.10.0,6.12.0,6.13.0,6.14.1} busybox:1.37 busybox:1.37.0 \
-           python:3.13-slim redis:7-alpine; do
+           python:3.13-slim redis:7-alpine restic/restic:0.17.3 node:22-alpine alpine/git:latest; do
   minikube image pull "$img"
 done
 
@@ -71,6 +74,12 @@ kubectl -n kubeheal rollout restart deploy/kubeheal-health-agent deploy/kubeheal
 for d in redis kubeheal-inference kubeheal-health-agent kubeheal-fusion-agent; do
   kubectl -n kubeheal rollout status "deploy/$d" --timeout=300s
 done
+
+# Redis requires auth: the collectors use the default user's password from the Secret the redis-secret Job creates
+for _ in $(seq 60); do kubectl -n kubeheal get secret kubeheal-redis >/dev/null 2>&1 && break; sleep 5; done
+REDIS_PW="$(kubectl -n kubeheal get secret kubeheal-redis -o jsonpath='{.data.default-password}' | base64 -d)"
+[[ -n "$REDIS_PW" ]] || { log "no Redis password in secret kubeheal-redis"; exit 1; }
+REDIS_URL="redis://default:$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$REDIS_PW")@localhost:16379/0"
 
 log "capture ON"
 kubectl -n kubeheal set env "$DS" KUBEHEAL_CAPTURE=1     # a change vs the manifest: always rolls the DS
@@ -89,10 +98,10 @@ done
 log "collect for ${HOURS}h: health slots $HEALTH_SLOTS, security slots $SECURITY_SLOTS -> $OUT"
 # 0 slots skips that collector (e.g. security-only after the health target is reached)
 if [[ $HEALTH_SLOTS -gt 0 ]]; then
-  uv run --all-extras python -m training.collect.drift_lab --hours "$HOURS" --slots "$HEALTH_SLOTS" >>"$OUT/health.log" 2>&1 & PIDS+=($!)
+  uv run --all-extras python -m training.collect.drift_lab --hours "$HOURS" --slots "$HEALTH_SLOTS" --redis "$REDIS_URL" >>"$OUT/health.log" 2>&1 & PIDS+=($!)
 fi
 if [[ $SECURITY_SLOTS -gt 0 ]]; then
-  uv run --all-extras python -m training.collect.security_lab --hours "$HOURS" --slots "$SECURITY_SLOTS" >>"$OUT/security.log" 2>&1 & PIDS+=($!)
+  uv run --all-extras python -m training.collect.security_lab --hours "$HOURS" --slots "$SECURITY_SLOTS" --redis "$REDIS_URL" >>"$OUT/security.log" 2>&1 & PIDS+=($!)
 fi
 
 # Resource log (node, Prometheus, Redis, Falco events file + queue drops) once a minute while collecting.
@@ -102,7 +111,7 @@ resources() {
     { echo "--- $(date -Is)"
       kubectl top node --no-headers
       kubectl -n monitoring top pod -l app.kubernetes.io/name=prometheus --no-headers
-      kubectl -n kubeheal exec deploy/redis -- redis-cli info memory | grep '^used_memory_human'
+      kubectl -n kubeheal exec deploy/redis -- redis-cli --no-auth-warning -a "$REDIS_PW" info memory | grep '^used_memory_human'
       kubectl -n kubeheal exec "$DS" -- python -c \
         "import os; s=os.stat('/var/run/falco/events.jsonl'); print('falco_events size', s.st_size, 'allocated', s.st_blocks*512)"
       # Falco over capacity drops alerts (deploy/k8s/helm/falco-values.yaml outputs_queue): fewer security slots if > 0
