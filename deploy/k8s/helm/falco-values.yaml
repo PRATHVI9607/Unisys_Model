@@ -37,8 +37,14 @@ resources:
 falco:
   rules_files: [/etc/falco/rules.d]    # KubeHeal rules only; the default set floods pod windows with noise
   json_output: true
-  json_include_output_property: true
+  # The agent reads output_fields only. Measured with 10 busy pods (2026-11-08): the formatted `output` string,
+  # tags and the container plugin's appended image fields tripled every line (1.5 KB → 0.5 KB), and
+  # syslog_output (no /dev/log in the pod) cost a failed socket per alert. Throughput 500 → 1900 alerts/s.
+  json_include_output_property: false
+  json_include_tags_property: false
   json_include_output_fields_property: true   # output_fields{evt.type, proc.pid, fd.name, k8s.*} the agent reads
+  append_output: [{suggested_output: false}]
+  syslog_output: {enabled: false}
   file_output:
     enabled: true
     keep_alive: true

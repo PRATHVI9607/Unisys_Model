@@ -320,6 +320,7 @@ dependencies = [
  "clap",
  "libbpf-cargo",
  "libbpf-rs",
+ "libbpf-sys",
  "libc",
  "serde_json",
 ]

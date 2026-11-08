@@ -14,7 +14,8 @@
 # Output %fields → output_fields keys the agent reads: evt.type, evt.arg.flags (opens), proc.pid,
 # fd.name (fd-based calls), fs.path.name (path-based: unlink, chmod, truncate),
 # fs.path.source / fs.path.target (rename old/new path), k8s.pod.name, k8s.pod.uid
-# (a recreated pod with the same name gets a fresh window), k8s.ns.name.
+# (a recreated pod with the same name gets a fresh window), k8s.ns.name, container.id (the agent checks
+# proc.pid belongs to this container before reading /proc/<pid>/root for entropy).
 
 # Mount points of the volumes KubeHeal protects (prefix match). Add yours here.
 - list: kh_data_dirs
@@ -36,6 +37,6 @@
                  unlink, unlinkat, truncate, ftruncate,
                  chmod, fchmod, fchmodat)
     and kh_on_data and kh_in_pod
-  output: "kubeheal file (evt_type=%evt.type flags=%evt.arg.flags pid=%proc.pid file=%fd.name path=%fs.path.name oldpath=%fs.path.source newpath=%fs.path.target pod=%k8s.pod.name pod_uid=%k8s.pod.uid ns=%k8s.ns.name)"
+  output: "kubeheal file (evt_type=%evt.type flags=%evt.arg.flags pid=%proc.pid file=%fd.name path=%fs.path.name oldpath=%fs.path.source newpath=%fs.path.target pod=%k8s.pod.name pod_uid=%k8s.pod.uid ns=%k8s.ns.name cid=%container.id)"
   priority: NOTICE
   tags: [kubeheal]

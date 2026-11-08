@@ -1,60 +1,85 @@
-# kubeheal-sensor (Tier 3 prototype)
+# kubeheal-sensor (default event source)
 
-eBPF replacement for Falco's ingestion: one `raw_syscalls/sys_enter` program filters in the kernel
-(pod cgroup + path prefix) and ships compact records through a ring buffer. Userspace prints
-Falco-shaped JSON lines, so the Python security agent consumes it unchanged
-(`FALCO_EVENTS_PATH=<sensor output file>`, same `parse_line`, same features).
+eBPF file-activity sensor for the security agent. It runs as container `sensor` in the security-agent DaemonSet
+(`deploy/k8s/base/security-agent-daemonset.yaml`) and appends Falco-shaped JSON lines to
+`/var/run/kubeheal/events.jsonl` (emptyDir shared with the agent, `FALCO_EVENTS_PATH`). The agent's `parse_line`,
+`FalcoTail` (hole punching) and features are unchanged. Falco stays available: `EVENT_SOURCE=falco ./deploy/scripts/install.sh`
+(`deploy/k8s/components/falco-source`).
 
-## Build
+Why: Falco's single event thread caps at ~1900 alerts/s per node. With 10 busy pods its lag grew ~0.8 s per second
+and a ransomware pod was killed minutes late (missed entirely in the 20-pod evaluation). The sensor filters in the kernel.
 
-Needs clang, libelf, zlib, libbpf headers (`/usr/include/bpf`), cargo. No bpftool/vmlinux.h: the program reads
-only the stable tracepoint context and x86_64 syscall ABI.
+## Design
 
-    cd sensor && CARGO_BUILD_JOBS=2 nice -n 19 cargo build --release
-    cargo test --release && uv run pytest sensor/tests
-
-## Run (root or CAP_BPF + CAP_PERFMON + CAP_SYS_RESOURCE; needs host cgroup v2 and /var/lib/kubelet)
-
-    kubeheal-sensor --prefix /data/ > /var/run/falco/events.jsonl      # pods only
-    kubeheal-sensor --all-cgroups --prefix /tmp/kh-sensor-test/        # debug, every process
-    kubeheal-sensor --selftest-json                                    # fixture lines, no BPF, no root
-
-Flags: `--prefix` (1-4, <=63 bytes, absolute), `--cgroup-root`, `--kubelet-dir`, `--rescan-secs`, `--stats-secs`
-(per-cgroup per-group counters from the BPF map, printed to stderr; always dumped at exit).
-
-## Output -> Falco fields
+- **Hooks.** One program per VFS security hook, attached after the lookup and permission checks, so failed
+  lookups never appear: `file_open` (opens; flags from `f_flags`, still holding `O_CREAT`/`O_TRUNC`), `path_rename`,
+  `path_unlink`, `path_truncate` (truncate), `file_truncate` (ftruncate; skipped when called from an `O_TRUNC` open),
+  `path_chmod` (chmod/fchmod/fchmodat). Each exists twice: `lsm/` (never denies, passes the previous verdict on) and
+  `fexit/security_*`. At start the sensor performs each operation itself and keeps, per hook, the `lsm/` program if it
+  saw it, else the `fexit/` one, and logs the choice (`hooks open=lsm ...`). `lsm/` needs `bpf` among the active LSMs;
+  `fexit/` misses calls the kernel inlined (LTO kernels: `security_file_open` is inlined into `do_dentry_open` on
+  CachyOS 7.3, so fexit sees no opens there). A hook neither variant sees is logged as a WARNING.
+- **Paths.** Resolved in BPF like `d_path()`: dentry `d_parent` up to the mount root, across mounts up to the task's
+  `fs->root` (bounded `bpf_loop`, 64 steps), so the path is the one inside the container (`/data/x`) whatever the
+  argument was: relative, dirfd-relative, `/./data`, `..`, or an fd (ftruncate, fchmod). Paths not reachable from the
+  task root (overlayfs backing files, internal mounts) and paths over 254 bytes are dropped, never cut.
+- **Kernel filter, in order:** task under the `kubepods` cgroup (`bpf_current_task_under_cgroup`: a new pod is covered
+  from its first syscall); container cgroup not in `skip` (namespaces from `--exclude-ns`, default `kubeheal`, added
+  once resolved; userspace also drops them); resolved path matches a `--prefix` (rodata, default `/data/`). Only then a
+  ring-buffer record is reserved (288 B, 544 B for renames; 16 MiB ring). Reserve failures and walk-pool exhaustion
+  are per-CPU counters (`drops`, `pool_full` in the stats line), fexit recursion misses come from `bpf_prog_info`.
+- **Identity.** cgroup id -> pod uid + container id from the cgroup v2 tree (`kubepods*/...pod<uid>.../cri-containerd-<id>.scope`);
+  uid -> namespace/name from the kubelet's pod log directories `/var/log/pods/<ns>_<pod>_<uid>`, which the kubelet
+  creates before the sandbox starts, for every pod (automount off and hostNetwork included). No API access, RBAC or
+  TLS crate. An unknown cgroup triggers a rescan (at most every 100 ms); its records wait up to 10 s, in order, then
+  count as `unresolved`. A rescan every 30 s prunes vanished cgroups.
+- **Output.** Buffered, flushed at most 40 ms after the last write (an event reaches the file in < 100 ms).
+  SIGTERM/SIGINT drain the ring buffer, flush and print final stats. `evt.time` = boottime stamp + realtime offset
+  (re-read every second).
 
 | Falco field | Sensor |
 |---|---|
-| `evt.type` | open, openat, openat2, creat, rename, renameat, renameat2, unlink, unlinkat, truncate, chmod, fchmodat (fchmodat2 -> fchmodat) |
-| `evt.arg.flags` | open flags as Falco text, e.g. `O_WRONLY\|O_CREAT` (opens only; creat = O_WRONLY\|O_CREAT\|O_TRUNC) |
-| `fd.name` | opened path (opens) |
+| `evt.type` | open, openat, openat2, creat, rename, renameat, renameat2, unlink, unlinkat, truncate, ftruncate, chmod, fchmod, fchmodat (by syscall number; io_uring / fchmodat2 get the hook's generic name) |
+| `evt.arg.flags` | opens: `O_RDONLY`/`O_WRONLY`/`O_RDWR` + `O_CREAT`, `O_TRUNC`, `O_APPEND` |
+| `fd.name` | opens, ftruncate, fchmod |
 | `fs.path.source` / `fs.path.target` | rename old / new path |
-| `fs.path.name` | path of unlink/truncate/chmod |
-| `proc.pid` | tgid |
-| `evt.time` | epoch ns (boottime stamp + boot-to-realtime offset taken at start) |
-| `container.id`, `k8s.pod.uid` | from the cgroup directory names |
-| `k8s.ns.name`, `k8s.pod.name` | `/var/lib/kubelet/pods/<uid>/` : `etc-hosts` hostname and the projected service-account `namespace` file |
+| `fs.path.name` | unlink, truncate, chmod, fchmodat |
+| `proc.pid` | host tgid |
+| `container.id`, `k8s.pod.uid`, `k8s.ns.name`, `k8s.pod.name` | cgroup tree + `/var/log/pods` |
 
-## Known limits
+## Privileges
 
-- x86_64 syscall numbers only (arm64 needs another table).
-- Entry-only: failed syscalls are reported too (Falco reports on exit).
-- Runtime trial (minikube, kernel 7.3, x86_64, 2026-11-07): the program passed the verifier first try and attached; no program change needed.
-  Attribution (ns/pod/uid/container id) correct for open/rename/unlink/chmod/O_TRUNC; `parse_line` accepts every emitted line.
-  Relative paths confirmed missed (`cd /tmp; echo > rel.txt` emits nothing); dirfd-relative `openat`/`unlinkat` are the same case. Fixing needs
-  all relative paths shipped from pod cgroups plus `/proc/<pid>/{cwd,fd/<n>}` resolution in userspace (racy, noisy): not done.
-- Trial manifest: `deploy/trial-daemonset.yaml` (privileged, hostPID, hostPath cgroup/kubelet/bpffs/btf/debugfs/tracefs; kubelet mount needs
-  `mountPropagation: HostToContainer` or the projected SA `namespace` files are invisible and every pod stays unresolved; tracefs is needed to attach).
-  Image: `minikube image build -t kubeheal-sensor:trial sensor/` (runtime base debian-slim: libbpf-sys links libelf/zlib dynamically).
+uid 0 with `drop: [ALL]`, `add: [BPF, PERFMON]`, `readOnlyRootFilesystem`, no hostPID. No SYS_ADMIN (attach is a BPF
+link) and no SYS_RESOURCE (kernel >= 5.11 charges BPF memory to the memcg: the ring buffer counts against the
+container's memory limit). Mounts: the events emptyDir (rw), host `/sys/fs/cgroup` (ro), `/var/log/pods` (ro).
+Kernel needs: BTF (`/sys/kernel/btf/vmlinux`), `bpf_loop` (5.17+), x86_64 (syscall numbers read from `orig_ax`).
 
-## Known gaps (prototype)
+## Build and test
 
-- Pod resolution uses the projected SA volume + etc-hosts (`src/pods.rs:171-177`): pods with `automountServiceAccountToken: false` and hostNetwork pods are invisible; the name is wrong for StatefulSet subdomain / hostAliases / `spec.hostname` / names over 63 chars. Fix: resolve uid -> ns/name from the API (watch pods with `fieldSelector spec.nodeName`).
-- Raw-argument prefix match (`sensor.bpf.c:57-73,88-93`): relative / dirfd paths are missed, `/./data` evades the filter, `/data/../etc` matches falsely, paths over 255 bytes are cut silently. Fix: fentry/LSM on `security_file_open` / `security_path_{rename,unlink,truncate,chmod}` / `security_file_truncate`, with `bpf_d_path` or a bounded d_parent walk. This also covers `ftruncate` and `fchmod` (fd only, not hooked today).
-- Ring-buffer reserve failure is silent (`sensor.bpf.c:83-85`; 4 MiB buffer). Fix: a per-CPU drops counter in the stats dump.
-- New cgroups enter the kernel filter only at the 2 s rescan (`main.rs:229-242`), so a pod can lose its first ~2 s of events. Fix: filter on the kubepods ancestor cgroup and resolve lazily.
-- The `counts` map is never pruned (cap 16384), so stats stop after many pods. Fix: delete the counts key together with the cgroups key.
-- The trial DaemonSet runs privileged + hostPID and mounts bpffs/btf/debugfs it doesn't need. Fix: drop ALL capabilities, add BPF, PERFMON (+SYS_RESOURCE before kernel 5.11), set `readOnlyRootFilesystem`, keep only the cgroup/kubelet/tracefs mounts.
-- No SIGTERM handler (`main.rs:243-246`): buffered output and the final stats are lost on shutdown. Fix: signal-hook flag.
-- CPU: `raw_syscalls/sys_enter` runs on every syscall and reserves and reads strings before the prefix test; the pod cache is rebuilt on every scan. Fix: per-syscall tracepoints and a per-CPU scratch buffer, reserve only on a hit; keep the pod cache across scans.
+    cd sensor && CARGO_BUILD_JOBS=4 nice -n 10 cargo build --release && cargo test --release
+    uv run --all-extras pytest sensor/tests       # every --selftest-json line through parse_line + SYSCALL_GROUPS
+    minikube image build -t kubeheal.invalid/sensor:v5 sensor/   # install.sh does this
+
+Flags: `--prefix` (1-4), `--exclude-ns`, `--output`, `--cgroup-root`, `--pod-logs-dir`, `--stats-secs` (default 60),
+`--all-cgroups` (debug: every process), `--selftest-json` (fixture lines, no BPF).
+
+## Measured (minikube, kernel 7.3.1 CachyOS, 12 CPUs, 2026-11-08)
+
+khe-perf/ioload (write tmp, rename, read; RATE 500 per pod), lag sampled every 2 s for 30 s:
+
+| | Falco (before) | sensor, 10 pods | sensor, 20 pods |
+|---|---|---|---|
+| events/s | capped ~1900 | ~7000 | ~6400 (node CPU saturated) |
+| event lag (newest line) | grows ~0.8 s/s | 3-41 ms | <= 40 ms (first samples; apiserver then unreachable) |
+| agent read lag | minutes | <= 0.25 s | - |
+| event-source CPU | ~1.7-2 cores | 0.14-0.30 cores | 0.22 cores |
+| security-agent CPU | - | 0.37-0.43 cores | 0.46 cores |
+| lost | Falco drops | 0 | 0 ring drops, 2 pool_full (pool then 8 slots; 32 now) |
+
+## Limits
+
+- x86_64 only (`orig_ax`, syscall table). rmdir/mkdir, link/symlink, chown, xattrs, mmap writes are not hooked
+  (the model does not use them).
+- An open is reported after the LSM check; a later failure inside the filesystem's `->open` still shows.
+- With `fexit/` only (no bpf LSM), inlined hooks are blind: the startup line says which.
+- If the agent stops reading, the events file grows on the emptyDir (node disk) without bound, as with Falco.

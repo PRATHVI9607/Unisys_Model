@@ -1,10 +1,11 @@
-"""Sensor fixture lines must parse with the unchanged Falco parser into the expected events."""
+"""Sensor fixture lines must parse with the unchanged Falco parser into the expected events and syscall groups."""
 import pathlib
 import subprocess
 
 import pytest
 
 from agents.security_agent.falco import parse_line
+from kubeheal.features.security import SYSCALL_GROUPS
 
 BIN = pathlib.Path(__file__).parents[1] / "target/release/kubeheal-sensor"
 pytestmark = pytest.mark.skipif(not BIN.exists(), reason="build first: cd sensor && cargo build --release")
@@ -17,7 +18,7 @@ def events():
 
 def test_every_line_parses_with_identity_and_time():
     evs = events()
-    assert len(evs) == 14 and all(evs)
+    assert len(evs) == 17 and all(evs)
     for e in evs:
         assert (e["namespace"], e["pod"], e["pid"]) == ("demo", "web-0", 42)
         assert e["pod_uid"] == "11111111-2222-3333-4444-555555555555" and e["container_id"] == "c" * 64
@@ -26,12 +27,15 @@ def test_every_line_parses_with_identity_and_time():
 
 def test_syscall_groups_and_paths():
     by = [(e["syscall"], e["path"], e["new_path"]) for e in events()]
+    f, locked = "/data/f.txt", "/data/f.txt.locked"
     assert by == [
-        ("open_r", "/data/f.txt", ""), ("open_r", "/data/f.txt", ""),   # open, openat O_RDONLY
-        ("open_w", "/data/f.txt", ""), ("open_w", "/data/f.txt", ""),   # openat O_WRONLY|O_CREAT, openat2 O_RDWR
-        ("open_w", "/data/f.txt", ""),                                  # creat
-        ("rename", "/data/f.txt", "/data/f.txt.locked"), ("renameat", "/data/f.txt", "/data/f.txt.locked"),
-        ("renameat2", "/data/f.txt", "/data/f.txt.locked"),
-        ("unlink", "/data/f.txt", ""), ("unlinkat", "/data/f.txt", ""), ("truncate", "/data/f.txt", ""),
-        ("chmod", "/data/f.txt", ""), ("fchmodat", "/data/f.txt", ""), ("fchmodat", "/data/f.txt", ""),
+        ("open_r", f, ""), ("open_r", f, ""),                     # open O_RDONLY|O_LARGEFILE, openat O_RDONLY
+        ("open_w", f, ""), ("open_w", f, ""), ("open_w", f, ""),  # openat O_WRONLY|O_CREAT, openat2 O_RDWR, creat
+        ("open_w", f, ""),                                        # openat O_RDONLY|O_TRUNC
+        ("rename", f, locked), ("renameat", f, locked), ("renameat2", f, locked),
+        ("unlink", f, ""), ("unlinkat", f, ""), ("truncate", f, ""), ("ftruncate", f, ""),
+        ("chmod", f, ""), ("fchmod", f, ""), ("fchmodat", f, ""), ("fchmodat", f, ""),
     ]
+    group = {s: g for g, ss in SYSCALL_GROUPS.items() for s in ss}
+    assert [group[s] for s, _, _ in by] == ["read"] * 2 + ["write"] * 4 + ["rename"] * 3 + ["unlink"] * 2 + \
+        ["truncate"] * 2 + ["chmod"] * 4

@@ -24,6 +24,7 @@ spec:
     spec:
       serviceAccountName: kubeheal-security
       hostPID: true           # see host PIDs so /proc/<pid> resolves other pods' processes
+      tolerations: [{operator: Exists}]   # every node that runs pods, control plane included
       # No pod-level runAsNonRoot: the agent must read /proc/<pid>/root of
       # processes owned by other UIDs across container boundaries, which needs
       # uid 0 plus DAC_READ_SEARCH. It never kills — fusion is the only actor.
@@ -32,14 +33,16 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: agent
-          image: kubeheal/agents:v5
+          image: kubeheal.invalid/agents:v5
           imagePullPolicy: IfNotPresent
           command: ["python", "-m", "agents.security_agent.agent"]
           ports: [{containerPort: 8080, name: http}]
           env:
-            - {name: REDIS_URL, value: "redis://redis-master.kubeheal.svc:6379/0"}
+            - {name: REDIS_URL, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: security-url}}}
             - {name: INFERENCE_URL, value: "http://kubeheal-inference.kubeheal.svc:8000"}
-            - {name: FALCO_EVENTS_PATH, value: "/var/run/falco/events.jsonl"}
+            # written by the sensor container below (or by Falco: deploy/k8s/components/falco-source)
+            - {name: FALCO_EVENTS_PATH, value: "/var/run/kubeheal/events.jsonl"}
+            - {name: CGROUP_ROOT, value: "/host/sys/fs/cgroup"}   # containment: cgroup.freeze of a pod
             - {name: PROC_ROOT, value: "/host/proc"}
             - {name: EVAL_INTERVAL_S, value: "1"}
             # "1" also XADDs every scored window to kubeheal.security.capture (lab data collection only;
@@ -58,8 +61,8 @@ spec:
           # Sized from kubectl top under lab load (2026-10-17, training/collect/ run): cpu 126m, mem 119Mi peak (Falco event parsing).
           # requests ~ p95; limits >= 2x requests and >= 1.5x peak; 500m CPU limit keeps Python startup fast.
           resources:
-            requests: {cpu: 150m, memory: 128Mi}
-            limits: {cpu: 500m, memory: 256Mi}
+            requests: {cpu: 400m, memory: 128Mi}   # 0.37-0.46 cores at ~7k events/s (sensor, 10 busy pods)
+            limits: {cpu: "1", memory: 256Mi}
           startupProbe:          # /healthz is served only after Redis answers; give Redis time to start
             httpGet: {path: /healthz, port: 8080}
             periodSeconds: 5
@@ -68,12 +71,40 @@ spec:
             httpGet: {path: /healthz, port: 8080}
             periodSeconds: 10
           volumeMounts:
-            # writable: the agent punches holes over consumed events so Falco's file (tmpfs = node RAM)
+            # writable: the agent punches holes over consumed events so the events file
             # stays bounded (agents/security_agent/falco.py FalcoTail)
-            - {name: falco-events, mountPath: /var/run/falco}
+            - {name: events, mountPath: /var/run/kubeheal}
             - {name: host-proc, mountPath: /host/proc, readOnly: true}
+            - {name: host-cgroup, mountPath: /host/sys/fs/cgroup}
+        # eBPF event source (sensor/): lsm/ (or fexit/) programs on the VFS security hooks, filtered in the kernel
+        # to pod cgroups and the data prefix, appending Falco-shaped JSON lines to the file the agent tails.
+        - name: sensor
+          image: kubeheal.invalid/sensor:v5
+          imagePullPolicy: IfNotPresent
+          args: ["--output", "/var/run/kubeheal/events.jsonl", "--prefix", "/data/", "--exclude-ns", "kubeheal"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              # BPF: load programs and maps. PERFMON: tracing/LSM program types and kernel memory reads.
+              # Nothing else: no SYS_ADMIN (attach is a BPF link), no SYS_RESOURCE (kernel >= 5.11 charges BPF
+              # memory to the memcg, so the ring buffer counts against the memory limit below).
+              add: ["BPF", "PERFMON"]
+          # Measured on minikube (2026-11-08): see sensor/README.md. The 8 MiB ring buffer is charged here.
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: "1", memory: 128Mi}
+          volumeMounts:
+            - {name: events, mountPath: /var/run/kubeheal}
+            - {name: host-cgroup, mountPath: /sys/fs/cgroup, readOnly: true}   # kubepods tree: pod uid + container id
+            - {name: pod-logs, mountPath: /var/log/pods, readOnly: true}        # <ns>_<pod>_<uid> dirs: pod identity
       volumes:
-        - name: falco-events
-          hostPath: {path: /var/run/falco, type: DirectoryOrCreate}
+        - name: events            # keep the name: deploy/k8s/components/falco-source swaps it for Falco's hostPath
+          emptyDir: {}
         - name: host-proc
           hostPath: {path: /proc, type: Directory}
+        - name: host-cgroup
+          hostPath: {path: /sys/fs/cgroup, type: Directory}
+        - name: pod-logs
+          hostPath: {path: /var/log/pods, type: Directory}

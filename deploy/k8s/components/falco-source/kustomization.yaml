@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Falco instead of the eBPF sensor as the security agent's event source (install.sh EVENT_SOURCE=falco):
+# drops the sensor container and points the agent's events volume at Falco's file_output directory
+# (deploy/k8s/helm/falco-values.yaml writes /var/run/falco/events.jsonl on every node).
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata: {name: kubeheal-security-agent, namespace: kubeheal}
+      spec:
+        template:
+          spec:
+            containers:
+              - {name: sensor, $patch: delete}
+            volumes:
+              - name: events
+                emptyDir: null
+                hostPath: {path: /var/run/falco, type: DirectoryOrCreate}
