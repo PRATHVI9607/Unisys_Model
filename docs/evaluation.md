@@ -13,7 +13,7 @@ Measured on the deployed stack, not on held-out training data. Driver: `deploy/s
 | Falco | 0.45.1-rc1 (limit 2 CPU) |
 | Namespaces | throwaway `khe-*`, tier label `prod`, unprotected pods; all deleted afterwards |
 
-Attack-like runs use only `deploy/chaos/detection-test-workload.py` (sandbox-gated, image `kubeheal/chaos:v5`) with other parameters. No attack or encryption code was added.
+Attack-like runs use only `deploy/chaos/detection-test-workload.py` (sandbox-gated, image `kubeheal.invalid/chaos:v5`) with other parameters. No attack or encryption code was added.
 
 ## Scorecard
 

@@ -3,15 +3,17 @@ kind: Kustomization
 
 # Production: `kubectl apply -k deploy/k8s/overlays/production`. Same control plane and safety
 # settings as deploy/k8s (dev/lab), minus the dashboard, plus inference HA/autoscaling and a
-# PriorityClass so the security components are not the first evicted under node pressure.
+# PriorityClass so KubeHeal's own pods are not the first evicted under node pressure.
 # The HPA needs metrics-server (metrics.k8s.io).
-# Images fail closed: `kubeheal/*` would resolve to Docker Hub, which is not our registry, so they
-# point at the reserved .invalid TLD and pods ImagePullBackOff until install.sh --production --registry
-# <host/path> rewrites them (a temp kustomization on top of this overlay). Applying this overlay
-# directly without that is deliberately unusable. (The dashboard is dropped here, so it is not listed.)
+# Images fail closed: base names `kubeheal.invalid/*` (the reserved .invalid TLD never resolves, so they
+# are only ever found pre-loaded on the node) map to registry.invalid/kubeheal/*, and pods
+# ImagePullBackOff until install.sh --production --registry <host/path> rewrites them (a temp
+# kustomization on top of this overlay). Applying this overlay directly without that is deliberately
+# unusable. (The dashboard is dropped here, so it is not listed.)
 images:
-  - {name: kubeheal/inference, newName: registry.invalid/kubeheal/inference}
-  - {name: kubeheal/agents, newName: registry.invalid/kubeheal/agents}
+  - {name: kubeheal.invalid/inference, newName: registry.invalid/kubeheal/inference}
+  - {name: kubeheal.invalid/agents, newName: registry.invalid/kubeheal/agents}
+  - {name: kubeheal.invalid/sensor, newName: registry.invalid/kubeheal/sensor}
 
 resources:
   - ../../base
@@ -35,14 +37,19 @@ patches:
       apiVersion: v1
       kind: ServiceAccount
       metadata: {name: kubeheal-dashboard, namespace: kubeheal}
+  # No `replicas`: the HPA (minReplicas 2) owns the count, so a re-apply never fights it. A strategic
+  # merge cannot drop a field the base sets, hence the JSON patch.
+  - target: {group: apps, version: v1, kind: Deployment, name: kubeheal-inference}
+    patch: |-
+      - {op: remove, path: /spec/replicas}
   - patch: |-
       apiVersion: apps/v1
       kind: Deployment
       metadata: {name: kubeheal-inference, namespace: kubeheal}
       spec:
-        # no `replicas`: the HPA (minReplicas 2) owns the count, so a re-apply never fights it
         template:
           spec:
+            priorityClassName: kubeheal-security
             containers:
               - name: inference
                 # HPA targets 70% of the request: at the dev request (10m) idle load (~8m) would
@@ -53,6 +60,20 @@ patches:
       apiVersion: apps/v1
       kind: Deployment
       metadata: {name: kubeheal-fusion-agent, namespace: kubeheal}
+      spec:
+        template:
+          spec: {priorityClassName: kubeheal-security}
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: kubeheal-health-agent, namespace: kubeheal}
+      spec:
+        template:
+          spec: {priorityClassName: kubeheal-security}
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: redis, namespace: kubeheal}
       spec:
         template:
           spec: {priorityClassName: kubeheal-security}

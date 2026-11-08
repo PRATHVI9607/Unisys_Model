@@ -29,7 +29,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: inference
-          image: kubeheal/inference:v5
+          image: kubeheal.invalid/inference:v5
           imagePullPolicy: IfNotPresent
           ports: [{containerPort: 8000, name: http}]
           env:
@@ -46,6 +46,27 @@ spec:
           livenessProbe:
             httpGet: {path: /healthz, port: 8000}
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           readinessProbe:
             httpGet: {path: /readyz, port: 8000}
             periodSeconds: 5
+            timeoutSeconds: 3
+---
+# Only the agents that score (health, security) and Prometheus (namespace monitoring, ServiceMonitor kubeheal)
+# may reach the model API. kubectl port-forward is not subject to this policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubeheal-inference-clients
+  namespace: kubeheal
+spec:
+  podSelector: {matchLabels: {app: kubeheal-inference}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - {key: app, operator: In, values: [kubeheal-health-agent, kubeheal-security-agent]}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}
+      ports: [{port: 8000}]

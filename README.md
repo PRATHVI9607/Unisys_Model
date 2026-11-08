@@ -14,7 +14,7 @@ flowchart LR
     direction TB
     API["kube-apiserver<br/>Deployments · Pods"]
     PROM["Prometheus<br/>cAdvisor · kube-state-metrics · app /metrics"]
-    FALCO["Falco DaemonSet (modern eBPF)<br/>KubeHeal rule → events.jsonl on the node"]
+    FALCO["kubeheal-sensor (eBPF, in the security-agent pod)<br/>or Falco (EVENT_SOURCE=falco) → events.jsonl"]
     PROC["Node /proc<br/>written files · pod cgroup io.stat · pod net/dev"]
   end
 
@@ -48,7 +48,7 @@ flowchart LR
 |---|---|
 | **Config-drift detection** | The health agent assesses a Deployment 60 s after a real spec change (at once on a posture violation, within about 2 s of a failed rollout appearing): 24 spec-diff features plus 12 features of the post-change Prometheus window (CPU/memory utilisation, throttling, p99 latency, 5xx ratio, restarts, ready ratio). |
 | **Rule-based rollback** | Hard rollout failures after a change trigger AUTO_PATCH by rule, at any tier and any model confidence. These are pods created after the change stuck in `ImagePullBackOff`, `ErrImagePull`, `InvalidImageName`, `CrashLoopBackOff`, `CreateContainer*Error`, `RunContainerError` or `OOMKilled`, and `ProgressDeadlineExceeded` on the rollout. The model handles subtle drift: throttling, latency, memory pressure. |
-| **Ransomware-like behaviour** | The security agent tails Falco file syscalls on data volumes, samples the entropy of files the pod wrote, measures the pod's write and network-out bytes, and scores a per-pod 60 s window every 1 s, or at once at 32 new events. |
+| **Ransomware-like behaviour** | The security agent tails file operations on data volumes (eBPF sensor, or Falco), samples the entropy of files the pod wrote, measures the pod's write and network-out bytes, and scores a per-pod 60 s window every 1 s, or at once at 32 new events. |
 | **Correlation** | A deterministic score joins a health and a security event of the same workload within 120 s. A compound incident raises both scores by ×1.15. |
 | **Explanations** | Every event carries class probabilities, the conformal prediction set and the top 5 TreeSHAP factors. Every action carries a rationale and a summary. |
 | **Remediation** | AUTO_KILL: label the pod `kubeheal.io/quarantined`, create a deny-all NetworkPolicy owned by the pod, delete it. AUTO_PATCH: JSON-patch `/spec/template` (and `/spec/replicas` if it changed) back to the stored baseline. |
@@ -74,7 +74,8 @@ minikube start --cpus=8 --memory=8g
 uv sync --all-extras                 # Python 3.13 env from pyproject.toml + uv.lock
 uv run --all-extras pytest && uv run --all-extras ruff check . # tests + lint
 
-./deploy/scripts/install.sh   # builds 4 images, installs Prometheus + Falco (Helm), kubectl apply -k deploy/k8s/, demo app
+./deploy/scripts/install.sh   # builds the images, installs Prometheus (Helm), kubectl apply -k deploy/k8s/, demo app
+EVENT_SOURCE=falco ./deploy/scripts/install.sh   # Falco (Helm) instead of the eBPF sensor as event source
 ./deploy/scripts/demo.sh      # A) CPU-limit drift → health → decision   B) detection-test workload → AUTO_KILL
 ./deploy/scripts/reset.sh     # back to a clean demo baseline (streams, keys, circuit breakers, victim app)
 ```
@@ -99,7 +100,8 @@ namespace. Install, demo, dashboard, lab collection and troubleshooting are cove
 | `dashboard/` | Read-only FastAPI + JS console (:8080) |
 | `training/` | `train.py`, dataset adapters, synthetic security generator, lab collectors (`collect/`) |
 | `models/{health,security}/` | Trained bundles (`model.txt` + `meta.json`) baked into the inference image |
-| `deploy/k8s/` | Kustomize: `base/` manifests + RBAC (default dev install), `overlays/production` (no dashboard, inference HPA/PDB, PriorityClass); Falco rule, Helm values for Prometheus and Falco |
+| `deploy/k8s/` | Kustomize: `base/` manifests + RBAC (default dev install), `overlays/production` (no dashboard, inference HPA/PDB, PriorityClass), `components/falco-source` (Falco as event source); Falco rule, Helm values for Prometheus and Falco |
+| `sensor/` | Rust + libbpf eBPF event source (default): LSM-hook file events filtered in the kernel, Falco-shaped JSON (see `sensor/README.md`) |
 | `deploy/docker/` | 4 images: `inference`, `agents` (all three agents), `dashboard`, `chaos` |
 | `deploy/scripts/` | `install.sh`, `demo.sh`, `reset.sh`, `seed_demo.sh` |
 | `deploy/chaos/`, `deploy/demo/` | Non-destructive detection-test workload; demo app (podinfo + load generator) |

@@ -21,7 +21,7 @@ spec:
       type: RuntimeDefault
   initContainers:
     - name: mark-sandbox
-      image: kubeheal/chaos:v5
+      image: kubeheal.invalid/chaos:v5
       imagePullPolicy: IfNotPresent
       command: ["sh", "-c", "touch /data/.kubeheal-sandbox"]
       volumeMounts:
@@ -29,7 +29,7 @@ spec:
           mountPath: /data
   containers:
     - name: workload
-      image: kubeheal/chaos:v5
+      image: kubeheal.invalid/chaos:v5
       imagePullPolicy: IfNotPresent
       args: ["--sandbox", "/data", "--num-files", "400", "--rate", "20", "--duration", "60"]
       volumeMounts:

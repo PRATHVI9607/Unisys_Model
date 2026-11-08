@@ -32,7 +32,7 @@ metadata: {name: io-load, labels: {kubeheal.io/protected: "true"}}
 spec:
   containers:
     - name: load
-      image: busybox:1.36
+      image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
       imagePullPolicy: IfNotPresent
       command: ["sh", "-c", "while true; do dd if=/dev/urandom of=/data/a bs=1M count=64 2>/dev/null; cp /data/a /data/b; md5sum /data/a /data/b >/dev/null; rm -f /data/a /data/b; done"]
       volumeMounts: [{name: data, mountPath: /data}]
@@ -69,10 +69,10 @@ spec:
   restartPolicy: Never
   securityContext: {runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
   initContainers:
-    - {name: mark-sandbox, image: "kubeheal/chaos:v5", imagePullPolicy: IfNotPresent, command: ["sh","-c","touch /data/.kubeheal-sandbox"], volumeMounts: [{name: data, mountPath: /data}]}
+    - {name: mark-sandbox, image: "kubeheal.invalid/chaos:v5", imagePullPolicy: IfNotPresent, command: ["sh","-c","touch /data/.kubeheal-sandbox"], volumeMounts: [{name: data, mountPath: /data}]}
   containers:
     - name: workload
-      image: kubeheal/chaos:v5
+      image: kubeheal.invalid/chaos:v5
       imagePullPolicy: IfNotPresent
       args: ["--sandbox", "/data", "--num-files", "400", "--rate", "20", "--duration", "60"]
       volumeMounts: [{name: data, mountPath: /data}]

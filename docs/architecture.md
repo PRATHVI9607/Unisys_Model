@@ -11,12 +11,13 @@ diagram is at the top of the [README](../README.md). Models and data are covered
 |---|---|---|---|
 | **inference** | Deployment ×1 (dev) / 2–6 with an HPA (production), `kubeheal/inference:v5` | `uvicorn kubeheal.inference.app:app` (:8000) | Loads `models/{health,security}` at startup and serves `POST /v1/{task}/predict`. Never serves untrained weights: a missing bundle makes that task, and `/readyz`, return 503. |
 | **health-agent** | Deployment ×1, `kubeheal/agents:v5` | `python -m agents.health_agent.agent` (:8080) | Watches Deployments and assesses each real spec change `ASSESS_DELAY_S` (60 s) after it is seen, sooner on a posture violation or failed rollout. Derives `failure_reasons`, publishes a `HealthEvent`, and keeps the spec and baseline keys up to date. |
-| **security-agent** | DaemonSet, `hostPID`, `kubeheal/agents:v5` | `python -m agents.security_agent.agent` (:8080) | Tails Falco JSON on its node and builds per-pod windows. Adds file entropy, write bytes and network-out bytes, scores a pod every 1 s or as soon as it has 32 new events, and publishes a `SecurityEvent` when risk ≥ 0.4. **It observes only.** |
+| **security-agent** | DaemonSet, `hostPID`, `kubeheal.invalid/agents:v5` + `kubeheal.invalid/sensor:v5` | `python -m agents.security_agent.agent` (:8080) + `kubeheal-sensor` | Tails the Falco-shaped JSON of its node's event source and builds per-pod windows. Adds file entropy, write bytes and network-out bytes, scores a pod every 1 s or as soon as it has 32 new events, and publishes a `SecurityEvent` when risk ≥ 0.4. **It observes only.** |
 | **fusion-agent** | Deployment ×1, `strategy: Recreate` | `python -m agents.fusion_agent.agent` (:8080) | The single decision point and the only component that changes the cluster. It pairs events, scores correlation, runs the pure policy, acts or records `would_*`, and publishes an `ActionEvent` for every decision. |
 | **dashboard** | Deployment ×1 | `uvicorn dashboard.fastapi_app:app` (:8080) | Read-only console that tails the three streams and pushes them over WebSocket. It has no Kubernetes access. |
 | **redis** | Deployment ×1, `redis:7.4.2-alpine` | `redis-master:6379` | Holds the streams and keys. It is ephemeral (no RDB or AOF), capped at 256 MB with `noeviction`, and a NetworkPolicy allows only same-namespace clients. |
 | Prometheus | Helm `kube-prometheus-stack` 92.10.1, namespace `monitoring` | `prometheus-operated:9090` | cAdvisor, kube-state-metrics and app `/metrics` (PodMonitor `kubeheal.io/scrape=true`), every 15 s, with keep-lists. |
-| Falco | Helm `falco` 9.2.0, namespace `falco` | `/var/run/falco/events.jsonl` (hostPath) | Modern eBPF, loading **only** `deploy/k8s/falco-kubeheal-rules.yaml`. It writes JSON to a node file that the security agent tails. |
+| Event source: sensor (default) | container `sensor` in the security-agent DaemonSet (`sensor/`) | `/var/run/kubeheal/events.jsonl` (emptyDir shared with the agent) | Rust + libbpf. `lsm/` programs (fallback `fexit/`) on `file_open`, `path_rename`, `path_unlink`, `path_truncate`, `file_truncate`, `path_chmod`; filters in the kernel (pod cgroups under `kubepods`, resolved path prefix `/data/`, namespace `kubeheal` excluded) and writes Falco-shaped JSON lines. See `sensor/README.md`. |
+| Event source: Falco (`EVENT_SOURCE=falco`) | Helm `falco` 9.2.0, namespace `falco` | `/var/run/falco/events.jsonl` (hostPath) | Modern eBPF, loading **only** `deploy/k8s/falco-kubeheal-rules.yaml`. `deploy/k8s/components/falco-source` drops the sensor and mounts this directory as the agent's `events` volume. Single event thread: ~1900 alerts/s per node. |
 
 Shared code lives in `kubeheal/`, which every image copies: `contracts.py`, `features/`, `ml/` and
 `correlation.py`. Only the inference image and training import `lightgbm`.
@@ -35,25 +36,28 @@ change. Stream entries are flat `str → str` maps: nested values are compact JS
 | `kubeheal.security.events` | security-agent → fusion (group `fusion`), dashboard | `SecurityEvent` |
 | `kubeheal.actions` | fusion → dashboard | `ActionEvent` |
 | `kubeheal.deadletter` | fusion | The original fields plus `_stream`, `_id` and `_error` |
+| `kubeheal.contain` | fusion → every security-agent (each node acts on its own pods) | `{pod_uid, namespace, pod, event_id, ts_ms}`: freeze this pod's cgroup now. Written only for an enforce-mode AUTO_KILL that passed every check. `MAXLEN ~ 1000`. |
 | `kubeheal.security.capture` | security-agent (only when `KUBEHEAL_CAPTURE=1`) → `training/collect/security_lab.py` | `SecurityEvent` for **every** scored window, whatever its risk |
 
-Every XADD uses `MAXLEN ~ 10000` (`STREAM_MAXLEN`).
+Every other XADD uses `MAXLEN ~ 10000` (`STREAM_MAXLEN`).
 
 ### Redis keys
 
 | Key | Written by | Meaning |
 |---|---|---|
-| `kubeheal:spec:{ns}:{workload}` | health | Last canonical spec the agent recorded |
-| `kubeheal:baseline:{ns}:{workload}` | health (read by fusion) | Restore target for AUTO_PATCH: set on first sight, then promoted only when a new spec is benign **and certain relative to the current baseline** and its rollout completed |
-| `kubeheal:{health\|security\|action}:{event_id}` | every publisher | Hash copy of an event for dashboard detail lookups. TTL 24 h. |
-| `kubeheal:lock:{ns}:{workload}` | fusion | Incident lock: `SET NX PX 10000`, a unique token per holder, and an owner-checked heartbeat every 3 s (Lua) |
-| `kubeheal:cb:{kill\|patch}:{ns}:{workload}` | fusion | Circuit-breaker counter: `INCR` plus `EXPIRE NX 3600` in one transaction |
+| `kubeheal:spec:{ns}:{workload}` | health | Last spec the agent recorded, API-shaped JSON (older agents stored the canonical form; both hash the same). Deleted on a DELETE event or when a full re-list no longer contains the Deployment. |
+| `kubeheal:baseline:{ns}:{workload}` | health (read by fusion) | Restore target for AUTO_PATCH: set on first sight, then promoted only when a new spec is benign **and certain relative to the current baseline** and its rollout completed. Stored API-shaped, so fusion restores `template` verbatim (canonical form camelCases user-data keys such as csi `volumeAttributes`). |
+| `kubeheal:{health\|security\|action}:{event_id}` | every publisher | Hash copy of an event for dashboard detail lookups. TTL 24 h, and at most 10000 per kind (the stream's horizon): Redis runs `noeviction`, so an unbounded count would end in failed writes. Written in the same MULTI as the XADD. |
+| `kubeheal:index:{health\|security\|action}` | every publisher | List of the hash-copy keys, newest first, trimmed to 10000; trimmed-off copies are deleted |
+| `kubeheal:done:{event_id}` | fusion | Idempotency marker for one consumed event: the `ActionEvent` it produced (JSON, `SET NX`, TTL 1 h). A redelivery after a failed publish/XACK republishes it instead of acting again. |
+| `kubeheal:lock:{ns}:{Kind}/{name}` | fusion | Incident lock on the controller acted on (`Deployment/web`, `DaemonSet/agent`, `Pod/x` for a bare pod): `SET NX PX 10000`, a unique token per holder, and an owner-checked heartbeat every 3 s (Lua) |
+| `kubeheal:cb:{kill\|patch}:{ns}:{Kind}/{name}` | fusion | Circuit-breaker counter of **successful** actions on that controller: checked (`GET`) before acting, `INCR` plus `EXPIRE NX 3600` in one transaction after a success. Both run under the incident lock on the same target, which serialises check → act → count across replicas. |
 
 ### Labels and annotations
 
 | Label | Where | Meaning |
 |---|---|---|
-| `kubeheal.io/protected=true` | pod or Deployment | KubeHeal never acts on it |
+| `kubeheal.io/protected=true` | pod, or its controller (Deployment, StatefulSet, DaemonSet, Job) | KubeHeal never acts on it |
 | `kubeheal.io/quarantined=true` | pod, set by fusion | Selected by the pod's deny-all quarantine NetworkPolicy |
 | `kubeheal.io/namespace-tier=prod\|staging\|dev` | namespace | Tier multiplier. Without it, the tier comes from the name (`prod` → prod, `stag` → staging, otherwise dev). |
 | `kubeheal.io/scrape=true` | app pods | Scraped by the `kubeheal-apps` PodMonitor (request, error and latency metrics) |
@@ -81,32 +85,32 @@ Labels and class risks are listed in index order, which is also the model class 
 ### Inference API (:8000)
 
 - `POST /v1/health/predict` and `POST /v1/security/predict` take `{"features": {name: float|null}, "request_id"?}` and return a `Prediction`.
-  - Error responses: an unknown feature returns 422, NaN or Inf returns 422, more than 200 keys returns 422, a body over 64 KiB returns 413, and a task whose bundle is not loaded returns 503.
+  - Error responses: a feature name neither the bundle nor the agents know returns 422 (names the bundle does not list are ignored; names it lists but nobody sends are scored as missing), NaN or Inf returns 422, more than 200 keys returns 422, a body over 64 KiB returns 413 (by Content-Length, or by counting received bytes for a chunked body), and a task whose bundle is not loaded returns 503.
 - `POST /v1/health/predict_batch` and `POST /v1/security/predict_batch` take `{"items": [<predict body>, ...]}` (1 to 256 items) and return a list of `Prediction` in the same order. The body cap is 1 MiB (256 × 4 KiB); the per-item rules above apply.
 - **Explanations are computed only where they are used.** TreeSHAP is most of the inference CPU, so security predictions with risk below `SECURITY_PUBLISH_RISK` (0.4, in `contracts.py`; the same threshold the agent publishes at) return `top_factors: []`. Every published security event is therefore explained. Health predictions are always explained. Batch cost for mostly-benign security windows: 3.91 → 0.80 ms per row.
   - Prediction runs with `num_threads=1` in the threadpool.
 - `GET /healthz` always returns 200.
-- `GET /readyz` returns 200 only when both bundles are loaded, together with the model versions.
+- `GET /readyz` returns 200 only when both bundles are loaded and every feature a bundle lists is one the agents send (`unsent_features` otherwise), together with the model versions. `/healthz` and `/readyz` are `async` so they never queue behind predictions in the threadpool.
 - `GET /metrics` returns `kubeheal_inference_requests_total`, `_latency_seconds` and `_predictions_total`.
 
 ## Detection pipelines
 
 ### Health: configuration drift
 
-1. **Watch.** A Deployment watch (all namespaces, or one per entry in `WATCH_NAMESPACES`) computes `canonical_spec`: a camelCase DeploymentSpec with empty values dropped. Only a changed `spec_hash` counts. Status-only updates just refresh the "rollout complete" flag.
-2. **Debounce.** A per-workload timer fires `ASSESS_DELAY_S` (60 s) after the change was first seen. A newer change restarts the timer. The assessment comes sooner when the change adds a posture violation (at once) or when a failed rollout shows up (polled every `POLL_S` = 2 s). Assessments run off the watch loop, at most 8 at a time.
+1. **Watch.** A Deployment watch (all namespaces, or one per entry in `WATCH_NAMESPACES`) keeps the API-shaped `spec` and hashes its `canonical_spec` (camelCase, empty values dropped). Only a changed `spec_hash` counts; while an HPA targets the Deployment (`autoscaling/v2` list every 30 s), `spec.replicas` is left out of the hash and the diff. Status-only updates just refresh the "rollout complete" flag. Each (re)start and every 410 does a full list first, replays it, and drops in-memory state and Redis spec/baseline keys of Deployments no longer listed, then watches from the list's `resourceVersion`.
+2. **Debounce.** A per-workload timer fires `ASSESS_DELAY_S` (60 s) after the change was first seen. A newer change restarts the timer, but never past `ASSESS_DELAY_S` after the first still-pending change (the window starts there), so churn cannot postpone an assessment forever. The assessment comes sooner when the change adds a posture violation (at once) or when a failed rollout shows up (polled every `POLL_S` = 2 s). After the first event the spec stays *tracked* until its rollout completes, a newer spec supersedes it, the Deployment is deleted, or `progressDeadlineSeconds` (default 600) + 60 s pass; a failure reason confirmed on two consecutive polls that the first event did not carry is published as a **follow-up** `HealthEvent` for the same spec (same `changed_fields`, full reason set, at most once per new reason). Assessments run off the watch loop, at most 8 at a time.
 3. **Compare.** The first time a workload is seen, its spec is stored as both spec and baseline, assumed good. A spec equal to the stored baseline (an AUTO_PATCH restore or a manual rollback) is recorded without an assessment.
 4. **Features.**
    - **Metrics:** `agents/health_agent/prometheus.fetch_window` queries the 11 raw metrics over `[change seen, assess time]` at a 15 s step, in raw SI units.
    - **Features:** `health_features(old, new, window)` returns 36 features (24 spec-diff and 12 metric). A missing metric is `None`, never 0.
-   - **Failure reasons:** `failure_reasons` collects Kubernetes evidence that the new spec cannot run. The agent lists the Deployment's pods by its `selector.matchLabels` and keeps those created at or after the change (with 5 s of slack). For each one it records an init or app container waiting in `ImagePullBackOff`, `ErrImagePull`, `InvalidImageName`, `CrashLoopBackOff`, `CreateContainerConfigError`, `CreateContainerError` or `RunContainerError`, and a last termination reason of `OOMKilled`. It also adds `ProgressDeadlineExceeded` when the watched status shows `Progressing=False` for the current generation. If listing the pods fails, only the pod evidence is lost. These reasons are not model features.
-   - **Policy violations:** the agent also adds one `policy:<feature>` entry for each security-posture weakening the spec introduces **relative to the baseline**: `privileged_added`, `root_user_added` (`runAsUser: 0` / `runAsNonRoot: false`), `capabilities_added`, `host_namespace_added` (hostNetwork/hostPID/hostIPC), `host_path_added`. These come from the existing spec-diff features. Because they are judged against the baseline, a violation left in place is reported again on every later change. **A spec is never promoted to baseline while `failure_reasons` is non-empty**, so a model that rates a posture weakening benign can't make it the restore target.
+   - **Failure reasons:** `failure_reasons` collects Kubernetes evidence that the new spec cannot run. The agent lists the Deployment's pods by its `selector.matchLabels`, keeps only those owned by one of its ReplicaSets (ownerReference `<deployment>-<pod-template-hash>`, so an overlapping canary's pods never count), and of those keeps the ones created at or after the change (with 5 s of slack). For each one it records an init or app container waiting in `ImagePullBackOff`, `ErrImagePull`, `InvalidImageName`, `CrashLoopBackOff`, `CreateContainerConfigError`, `CreateContainerError` or `RunContainerError`, and a last termination reason of `OOMKilled`. It also adds `ProgressDeadlineExceeded` when the watched status shows `Progressing=False` for the current generation. It also adds `ReadinessNeverPassed` when every app container of a new pod runs, a container with a readiness probe is still not ready, and that has lasted longer than `max(60 s, initialDelay + period × failureThreshold [+ the same for a startupProbe] + 30 s)` (Kubernetes defaults 0 / 10 / 3, so 60 s for a probe with defaults). Pods of the previous ReplicaSet, terminating pods, and containers without a readiness probe are ignored. If listing the pods fails, only the pod evidence is lost. These reasons are not model features.
+   - **Policy violations:** the agent also adds one `policy:<feature>` entry for each security-posture weakening the spec introduces **relative to the baseline**: `privileged_added`, `root_user_added` (`runAsUser: 0` / `runAsNonRoot: false`), `capabilities_added`, `host_namespace_added` (hostNetwork/hostPID/hostIPC), `host_path_added`, plus the unit-typo rules `cpu_cut_10x` / `memory_cut_10x` (a container's limit or request falls ≥ 10× vs the baseline **and** to below 50m CPU / 32Mi; a 2–4× rightsizing or `500m → 100m` never trips them). These come from the existing spec-diff features. Because they are judged against the baseline, a violation left in place is reported again on every later change. **A spec is never promoted to baseline while `failure_reasons` is non-empty (including after a follow-up) or its rollout is unfinished**, so a model that rates a posture weakening benign can't make it the restore target.
 5. **Predict and publish.** The agent calls `/v1/health/predict`, then XADDs the `HealthEvent` and saves the spec **after** the publish succeeds.
-6. **Promote the baseline.** The new spec becomes the baseline only if the model calls it benign and certain **against the current baseline** (re-predicted when the previous spec was not the baseline) **and** its rollout completed: observedGeneration is current and all desired replicas are updated and available. A bad image or a crash-looping spec therefore never becomes the restore target.
+6. **Promote the baseline.** The new spec becomes the baseline only if the model calls it benign and certain **against the current baseline** (re-predicted when the previous spec was not the baseline) **and** its rollout completed: `kubectl rollout status` semantics: observedGeneration is current, `updatedReplicas == spec.replicas`, `status.replicas == updatedReplicas` (no old-ReplicaSet pod left) and `availableReplicas >= updatedReplicas`. A bad image or a crash-looping spec therefore never becomes the restore target.
 
 ### Security: ransomware-like file activity
 
-1. **Capture.** A single Falco rule, *KubeHeal Data File Activity*, emits file syscalls of `CAPTURED_GROUPS` (read, write, rename, unlink, truncate, chmod) on `kh_data_dirs` (default `/data`) from containers in pods. The rule hooks no `read()`/`write()`: it captures `open`, `openat`, `openat2` and `creat`, and `open_syscall` classifies each by `evt.arg.flags` into `open_w` (write intent: `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, or `creat`) or `open_r`. So `frac_read` and `frac_write` are per-file opens by intent, and `frac_open` is kept as a feature but is always 0 live. A test keeps the rule's `evt.type` list and `CAPTURED_GROUPS` in sync.
+1. **Capture.** The sensor (default) or a single Falco rule, *KubeHeal Data File Activity*, emits file syscalls of `CAPTURED_GROUPS` (read, write, rename, unlink, truncate, chmod) on `kh_data_dirs` (default `/data`) from containers in pods. The rule hooks no `read()`/`write()`: it captures `open`, `openat`, `openat2` and `creat`, and `open_syscall` classifies each by `evt.arg.flags` into `open_w` (write intent: `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, or `creat`) or `open_r`. So `frac_read` and `frac_write` are per-file opens by intent, and `frac_open` is kept as a feature but is always 0 live. A test keeps the rule's `evt.type` list and `CAPTURED_GROUPS` in sync.
 2. **Tail.** `FalcoTail` starts at the end of the file and follows rotation and truncation. It punches holes over consumed bytes, so the tmpfs file stays bounded by the unread tail.
 3. **Window.** The agent keeps one window per `(namespace, pod)`: at most 512 events within 60 s of the newest event. A new `k8s.pod.uid` for the same name starts a fresh window and cooldown. Pods idle for 300 s are evicted.
 4. **Evaluate.** A pod with new events is evaluated on the `EVAL_INTERVAL_S` timer (1 s), or at once when it has `BURST_EVENTS` = 32 new events.
@@ -182,7 +186,7 @@ flowchart TD
   OB1 -- no --> BE(["BENIGN"])
   AK --> RAILS
   AP --> RAILS
-  RAILS["safety rails, in order:<br/>protected namespace → skipped_protected<br/>no pod / no baseline → escalated to HUMAN<br/>kubeheal.io/protected=true → skipped_protected<br/>observe mode → would_kill / would_patch<br/>lock held → skipped_locked<br/>hourly budget spent → skipped_circuit_open"]
+  RAILS["safety rails, in order:<br/>protected namespace → skipped_protected<br/>no pod / no baseline → escalated to HUMAN<br/>kubeheal.io/protected=true → skipped_protected<br/>unknown controller / unsafe baseline → escalated to HUMAN<br/>observe mode → would_kill / would_patch<br/>lock held → skipped_locked<br/>hourly budget spent → skipped_circuit_open"]
 ```
 
 ### Pairing
@@ -191,6 +195,9 @@ Fusion keeps unpaired events in memory per workload. An incoming event is paired
 kind's pending event if they are at most 120 s apart, and the pair is re-decided with the compound
 flag. If the pair yields the same AUTO_* decision that was already executed for the lone partner,
 the outcome is `already_handled`. Events older than `MAX_EVENT_AGE_S` (300 s) are acked and skipped.
+If the namespace no longer exists (404), there is nothing left to act on: the decision is OBSERVE with
+outcome `namespace_gone` (the rationale keeps what the policy alone said), not a HUMAN escalation that
+the name-heuristic tier would otherwise produce.
 
 ## Actions and safety rails
 
@@ -201,21 +208,22 @@ published as an `ActionEvent`.
 2. **Protected namespace** (built-in set or `EXTRA_PROTECTED_NAMESPACES`): `skipped_protected`.
 3. **AUTO_KILL without a pod name**: decision becomes HUMAN, `escalated_no_pod`. **AUTO_PATCH without a readable baseline**: HUMAN, `escalated_no_baseline`.
 4. **Target state.**
-   - **Kill:** read the pod (404 gives `pod_already_gone`). If the pod or its Deployment has `kubeheal.io/protected=true`: `skipped_protected`.
-   - **Patch:** read the Deployment (404 gives `workload_gone`). If it is protected: `skipped_protected`.
+   - **Kill:** read the pod and the event's workload Deployment in parallel (pod 404 gives `pod_already_gone`; a different UID than the event's gives `skipped_stale_pod`). Resolve the pod's controller from its `controller=true` ownerReference: ReplicaSet → its Deployment (the mapping is cached 5 min; the Deployment is still read fresh), StatefulSet / DaemonSet / Job as themselves, a bare pod is its own target. Any other controller kind (for example an Argo Rollout) cannot be checked: HUMAN, `escalated_unknown_owner`. If the pod, its controller or the event's Deployment has `kubeheal.io/protected=true`: `skipped_protected`.
+   - **Patch:** read the Deployment (404 gives `workload_gone`). If it is protected: `skipped_protected`. The baseline comes from Redis, which other pods can reach, so it is validated, never trusted: it must be a pod template whose labels match the Deployment's `matchLabels` (a `matchExpressions` selector always escalates), and it must not weaken posture against the live template (the health agent's `policy_violations`: privileged, root, added capabilities, host namespaces, hostPath, 10x resource cuts). Otherwise HUMAN, `escalated_unsafe_baseline`.
 5. **Observe mode**: `would_kill` or `would_patch`. Nothing changes.
-6. **Incident lock** `kubeheal:lock:{ns}:{workload}`. If it is held elsewhere: `skipped_locked`.
-7. **Circuit breaker** (taken after the lock, so there is no TOCTOU race). If more than `MAX_KILLS_PER_HOUR` or `MAX_PATCHES_PER_HOUR` actions hit this workload in the hour: `skipped_circuit_open`.
+6. **Incident lock** `kubeheal:lock:{ns}:{Kind}/{name}`, on the controller, so every pod of one DaemonSet shares it. If it is held elsewhere: `skipped_locked`.
+7. **Circuit breaker** (checked under the lock, so there is no TOCTOU race). If `MAX_KILLS_PER_HOUR` or `MAX_PATCHES_PER_HOUR` successful actions already hit this controller in the hour: `skipped_circuit_open`. Only `pod_killed` and `patched` are counted, so timeouts, 404s and 409s do not spend the budget.
 8. **Act.**
    - **AUTO_KILL:**
-     1. Label the pod `kubeheal.io/quarantined=true`.
-     2. Create the NetworkPolicy `kubeheal-quarantine-{pod}`. It selects the quarantine label, denies all ingress and egress, and has an `ownerReference` to the pod, so it is garbage-collected with the pod. A 409 from an earlier attempt is fine.
-     3. Delete the pod with grace period 0.
-     4. Outcome: `pod_killed`.
+     1. XADD `{pod_uid, namespace, pod, event_id, ts_ms}` to `kubeheal.contain`, concurrently with the steps below: the security agent on the pod's node freezes its cgroup within milliseconds. Best effort: it never delays the kill by more than 1 s and a Redis error never fails it. `ActionEvent.containment` is `requested` or `failed`; metric `kubeheal_fusion_containment_total{result}`.
+     2. Label the pod `kubeheal.io/quarantined=true`. The patch carries `metadata.uid`, so a successor that reuses the name gets 409 (`skipped_stale_pod`).
+     3. Create the NetworkPolicy `kubeheal-quarantine-{pod}` (concurrently with step 2). It selects the quarantine label, denies all ingress and egress, and has an `ownerReference` to the pod, so it is garbage-collected with the pod. A 409 from an earlier attempt is fine.
+     4. Only then delete the pod with grace period 0 and a UID precondition (the UID read in step 4), so the pod is never alive without isolation.
+     5. Count the success in the breaker. Outcome: `pod_killed`.
    - **AUTO_PATCH:**
      1. JSON-patch `replace /spec/template` with the baseline template.
      2. Also `replace /spec/replicas` when `changed_fields` contains `replicas`.
-     3. Outcome: `patched`. The health agent then sees the baseline spec and records it without an assessment.
+     3. Count the success. Outcome: `patched`. The health agent then sees the baseline spec and records it without an assessment.
 9. **Kubernetes errors.** A call that takes longer than 10 s gives `failed:kube_timeout`. An API error gives `failed:api_{status}_{reason}`.
 
 ### Sequence: ransomware-like activity → AUTO_KILL
@@ -246,14 +254,16 @@ sequenceDiagram
   Note over R,FU: pair with a health event of the same<br/>ns/workload within 120 s, compound score
   FU->>K: GET namespace (kubeheal.io/namespace-tier, cached 5 min)
   Note over R,FU: decide(): certain ransomware, security adj ≥ 0.85 → AUTO_KILL
-  FU->>K: GET pod and Deployment (kubeheal.io/protected?)
-  FU->>R: SET NX kubeheal:lock:{ns}:{workload} (10 s TTL, owner-checked heartbeat)
-  FU->>R: INCR kubeheal:cb:kill:{ns}:{workload} (≤ MAX_KILLS_PER_HOUR)
-  FU->>K: PATCH pod label kubeheal.io/quarantined=true
-  FU->>K: CREATE NetworkPolicy kubeheal-quarantine-{pod} (deny all in/out, owned by the pod)
-  FU->>K: DELETE pod (grace 0) → policy garbage-collected with it
-  FU->>R: XADD kubeheal.actions (AUTO_KILL, outcome pod_killed)
-  FU->>R: XACK
+  FU->>K: GET pod ∥ GET event's Deployment, then the controller chain (RS cached 5 min)
+  Note over FU,K: kubeheal.io/protected on pod or controller → skipped
+  FU->>R: SET NX kubeheal:lock:{ns}:{Kind}/{name} (10 s TTL, owner-checked heartbeat)
+  FU->>R: GET kubeheal:cb:kill:{ns}:{Kind}/{name} (< MAX_KILLS_PER_HOUR)
+  FU->>R: XADD kubeheal.contain {pod_uid, …} → node's security agent freezes the cgroup
+  FU->>K: PATCH pod label kubeheal.io/quarantined=true (uid precondition) ∥ CREATE deny-all NetworkPolicy
+  FU->>K: DELETE pod (grace 0, uid precondition) → policy garbage-collected with it
+  FU->>R: INCR kubeheal:cb:kill:{ns}:{Kind}/{name}
+  FU->>R: SET NX kubeheal:done:{event_id} (outcome)
+  FU->>R: MULTI: XADD kubeheal.actions (AUTO_KILL, pod_killed) + XACK
 ```
 
 ### Sequence: config drift → health assessment → AUTO_PATCH (rule path and model path)
@@ -309,20 +319,22 @@ listed here.
 
 | Env var | Code default | Manifest | Read by |
 |---|---|---|---|
-| `REDIS_URL` | `redis://redis-master.kubeheal.svc:6379/0` | same | health, security, fusion, dashboard |
+| `REDIS_URL` | `redis://redis-master.kubeheal.svc:6379/0` | from Secret `kubeheal-redis` `<user>-url` (per-component ACL user) | health, security, fusion, dashboard |
 | `INFERENCE_URL` | `http://kubeheal-inference.kubeheal.svc:8000` | same (health, security) | health, security |
 | `PROMETHEUS_URL` | `http://prometheus-operated.monitoring.svc:9090` | same | health |
 | `ASSESS_DELAY_S` | `60` | `60` | health; `drift_lab.py` imports it |
 | `WATCH_NAMESPACES` | empty = all | not set | health (one watch per namespace), security (filter) |
 | `EXTRA_PROTECTED_NAMESPACES` | empty | `falco,monitoring` | health, security, fusion |
-| `FALCO_EVENTS_PATH` | `/var/run/falco/events.jsonl` | same | security |
+| `FALCO_EVENTS_PATH` | `/var/run/falco/events.jsonl` | `/var/run/kubeheal/events.jsonl` (shared `events` volume: the sensor's emptyDir, or Falco's hostPath with `components/falco-source`) | security |
+| `CGROUP_ROOT` | `/host/sys/fs/cgroup` | `/host/sys/fs/cgroup` (host cgroup v2, read-write) | security (containment: `cgroup.freeze`) |
 | `PROC_ROOT` | `/proc` | `/host/proc` | security |
 | `EVAL_INTERVAL_S` | `1` | `1` | security (timer; a pod with 32 new events is scored at once) |
 | `KUBEHEAL_CAPTURE` | `0` | `0` (`run_lab.sh` sets `1` for a run) | security |
 | `KUBEHEAL_MODE` | `observe` (unknown values fall back to observe) | `enforce` | fusion |
-| `MAX_KILLS_PER_HOUR` / `MAX_PATCHES_PER_HOUR` | `3` / `5` | `3` / `5` | fusion (per workload) |
+| `MAX_KILLS_PER_HOUR` / `MAX_PATCHES_PER_HOUR` | `3` / `5` | `3` / `5` | fusion (per controller) |
 | `HOSTNAME` | `socket.gethostname()` | set by Kubernetes | fusion (consumer name) |
 | `KUBEHEAL_MODEL_DIR` | `models` (the image's `/app/models`) | not set | inference |
+| `DASHBOARD_ALLOWED_HOSTS` | `localhost,127.0.0.1,kubeheal-dashboard` and its `.kubeheal`, `.svc`, `.svc.cluster.local` names | not set | dashboard (Host header allow-list) |
 | `LOG_LEVEL` | `INFO` | `INFO` | all |
 
 The toolchain is Python 3.13 and uv, with a single `pyproject.toml` and `uv.lock`. There is one extra
@@ -351,7 +363,7 @@ sum of the unpacked layers, measured 2026-10-17.
 | inference | 8000 | liveness `/healthz`, readiness `/readyz` | Process up; ready = both bundles loaded | `kubeheal_inference_*` |
 | health-agent | 8080 | startup (5 s × 60) + liveness `/healthz` | Every watch loop active within the last 420 s | `kubeheal_health_assessments_total{outcome}`, `_watch_errors_total` |
 | security-agent | 8080 | startup + liveness `/healthz` | Tail and eval loops ticked within max(60 s, 6 × `EVAL_INTERVAL_S`) | `kubeheal_security_falco_events_total`, `_evaluations_total{outcome}` |
-| fusion-agent | 8080 | startup + liveness `/healthz` | Stream polled within the last 30 s | `kubeheal_fusion_decisions_total`, `_outcomes_total`, `_deadlettered_total`, `_stale_events_total` |
+| fusion-agent | 8080 | startup + liveness `/healthz` | Progress (a poll, an entry processed or a Kubernetes call returned) within the last 30 s | `kubeheal_fusion_decisions_total`, `_outcomes_total`, `_deadlettered_total`, `_stale_events_total`, `_containment_total{result}` |
 | dashboard | 8080 | liveness `/healthz`, readiness `/readyz` | Ready = Redis answered within 10 s | none |
 | redis | 6379 | readiness `redis-cli ping`, liveness TCP | n/a | n/a |
 
@@ -438,9 +450,9 @@ Each component has its own ServiceAccount and ClusterRole, and only fusion can c
 
 | ServiceAccount | Permissions |
 |---|---|
-| `kubeheal-health` | `apps/deployments`: get, list, watch. `pods`: list (rollout-failure evidence for `failure_reasons`). |
+| `kubeheal-health` | `apps/deployments`: get, list, watch. `pods`: list (rollout-failure evidence for `failure_reasons`). `autoscaling/horizontalpodautoscalers`: list (replicas an HPA owns are not drift; without it the agent logs a warning and treats scaling as drift). |
 | `kubeheal-security` | `pods`: get. `apps/replicasets`: get. These are needed for owner resolution. |
-| `kubeheal-fusion` | `pods`: get, patch, delete. `namespaces`: get (tier label). `apps/deployments`: get, patch. `apps/replicasets`: get (pod to Deployment, protected check). `networking.k8s.io/networkpolicies`: create. |
+| `kubeheal-fusion` | `pods`: get, patch, delete. `namespaces`: get (tier label). `apps/deployments`: get, patch. `apps/replicasets`, `apps/statefulsets`, `apps/daemonsets`, `batch/jobs`: get (pod to controller: protected check, lock and breaker key). `networking.k8s.io/networkpolicies`: create. |
 | `kubeheal-dashboard` | none (`automountServiceAccountToken: false`) |
 | inference, redis | no token mounted |
 
@@ -453,10 +465,11 @@ files through `/proc/{pid}/root`, mounts `/proc` read-only and mounts the Falco 
 ## Failure handling
 
 - **Delivery.**
-  - **Acks:** fusion uses a consumer group created at `$` with MKSTREAM, so a fresh deploy never replays history. It acks only after an event is handled successfully.
+  - **Acks:** fusion uses a consumer group created at `$` with MKSTREAM, so a fresh deploy never replays history. It acks only after an event is handled successfully, in the same MULTI as the `ActionEvent` publish.
+  - **Idempotency:** the outcome is stored at `kubeheal:done:{event_id}` before publishing, so a redelivery after a failed publish or XACK republishes it instead of patching or killing twice. Only a crash between the action and that one `SET` can repeat an action; the repeat is then harmless (the pod is gone → `pod_already_gone`; re-patching the same template is a no-op).
   - **Retries:** an unacked entry is re-claimed with `XAUTOCLAIM` after 60 s idle.
   - **Dead-lettering:** malformed entries go to `kubeheal.deadletter` immediately, and entries that fail 3 deliveries go there too. Both are then acked.
-- **Redis restarts.** Redis is ephemeral. On `NOGROUP`, fusion recreates the group and keeps consuming. At startup fusion removes idle consumers of earlier pods that have nothing pending. Other Redis errors in fusion's loop are retried after 1 s. Agents wait for Redis at startup with backoff (30 attempts). The health agent re-learns baselines on first sight.
+- **Redis restarts.** Redis is ephemeral. On `NOGROUP`, fusion recreates the group and keeps consuming. At startup fusion removes idle consumers of earlier pods that have nothing pending. Every other Redis error in fusion's loop (OOM, timeouts) is logged and retried after 1 s, never a crash loop; a dead-letter write that fails leaves the entry pending for a later retry. Agents wait for Redis at startup with backoff (30 attempts). The health agent re-learns baselines on first sight.
 - **Single consumer.** The fusion Deployment has one replica with `strategy: Recreate`. Agents exit on SIGTERM (`agents/common.run`), so a terminating pod never consumes alongside its replacement. The pairing buffer is in memory: a restart forgets unpaired events, which were already decided alone.
 - **Inference down.**
   - **Health:** the spec stays unsaved and is re-assessed after 60 s. No fake assessment is published.

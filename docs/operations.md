@@ -15,13 +15,13 @@ minikube start --cpus=8 --memory=8g
 
 `install.sh` is idempotent and fails loudly. It runs five steps:
 
-1. **Build** `kubeheal/{inference,agents,dashboard,chaos}:v5` from `deploy/docker/`. On minikube the images are built straight into the node. Otherwise they are built with docker, and you push them yourself.
+1. **Build** `kubeheal.invalid/{inference,agents,dashboard,chaos}:v5` from `deploy/docker/` (see [Images](#images)). On minikube the images are built straight into the node. Otherwise they are built with docker, and you push them yourself.
 2. **Add the Helm repos** `prometheus-community` and `falcosecurity`.
 3. **Install the dependencies:**
    - **Prometheus:** `kube-prometheus-stack` 92.10.1 in `monitoring`, with `deploy/k8s/helm/monitoring-values.yaml`.
    - **Falco:** `falco` 9.2.0 in `falco`, with `deploy/k8s/helm/falco-values.yaml` and `--set-file customRules...=deploy/k8s/falco-kubeheal-rules.yaml`.
      The values trace only the syscalls the rule needs (`base_syscalls.custom_set`). If you add an `evt.type` to the rule, add it to `custom_set` too. Check the final set with `falco --dry-run -o log_level=debug -o log_stderr=true`.
-4. **Deploy** with `kubectl apply -k deploy/k8s/` (namespace, RBAC, Redis, the five components, the ServiceMonitor and the PodMonitor), then `kubectl apply -f deploy/demo/victim-app.yaml`. The victim app is podinfo with a PVC and a load generator in namespace `demo`, which has tier `prod`.
+4. **Deploy** with `kubectl apply -k deploy/k8s/` (namespace, RBAC, Redis with its credentials Job, the five components, the ServiceMonitor and the PodMonitor), then `kubectl apply -f deploy/demo/victim-app.yaml`. The victim app is podinfo with a PVC and a load generator in namespace `demo`, which has tier `prod`.
 5. **Wait** for every rollout.
 
 ### Dev vs production
@@ -31,7 +31,7 @@ The manifests live in `deploy/k8s/base/`; two kustomizations build them:
 | Install | Command | Includes |
 |---|---|---|
 | Dev / demo / lab (default) | `kubectl apply -k deploy/k8s` or `./deploy/scripts/install.sh` | Everything in `base/`: dashboard, **1** inference replica. Cheapest; fits a small cluster or minikube. |
-| Production | `./deploy/scripts/install.sh --production --registry HOST/PATH [--tag TAG]` (applying the overlay directly leaves its images at `registry.invalid`, so pods do not start) | `base/` minus the dashboard (Deployment, Service, ServiceAccount), plus: a CPU HorizontalPodAutoscaler for inference (min **2** replicas, max 6, 70% of the 10m request) and a PodDisruptionBudget (`minAvailable: 1`); PriorityClass `kubeheal-security` (value 1000000, below the `system-*` classes) on the security-agent DaemonSet and the fusion agent so app pods are evicted first under node pressure; DaemonSet rolling update `maxUnavailable: 10%`. |
+| Production | `./deploy/scripts/install.sh --production --registry HOST/PATH [--tag TAG]` (applying the overlay directly leaves its images at `registry.invalid`, so pods do not start) | `base/` minus the dashboard (Deployment, Service, ServiceAccount), plus: a CPU HorizontalPodAutoscaler for inference (min **2** replicas, max 6, 70% of the 10m request) and a PodDisruptionBudget (`minAvailable: 1`); PriorityClass `kubeheal-security` (value 1000000, below the `system-*` classes) on the security-agent DaemonSet, fusion, the health agent, inference and Redis so app pods are evicted first under node pressure; DaemonSet rolling update `maxUnavailable: 10%`. |
 
 Every safety setting (enforce mode and rails, securityContexts, probes, resources, RBAC, NetworkPolicy) is the same in both.
 The fusion agent stays a single `Recreate` replica (one consumer-group owner), so it has no PDB.
@@ -41,6 +41,57 @@ The fusion agent stays a single `Recreate` replica (one consumer-group owner), s
   `kubectl -n kubeheal delete deploy/kubeheal-dashboard svc/kubeheal-dashboard sa/kubeheal-dashboard`.
 - `--production` builds `HOST/PATH/{inference,agents}:TAG` with docker and pushes them (TAG defaults to the git short SHA), then applies the overlay through a temporary kustomization that points its fail-closed `registry.invalid/kubeheal/*` images at that registry. It skips the demo app and the chaos image. The dev install rebuilds the `:v5` images in place, so it restarts the KubeHeal workloads (not Redis) after applying.
 - Preview either build without a cluster: `kubectl kustomize deploy/k8s/overlays/production`.
+
+### Network policy enforcement (required)
+
+Quarantine is a deny-all NetworkPolicy, and Redis and inference accept only KubeHeal's own pods through
+NetworkPolicies. All of this needs a CNI that **enforces** NetworkPolicy: Calico, Cilium, kindnet (minikube
+and kind, recent releases), Antrea, or Weave do; **flannel alone does not** (policies are accepted and
+silently ignored). Check before you rely on it: from a pod outside the allow-list,
+`nc -zv redis-master.kubeheal.svc 6379` must time out.
+
+- `redis-agents-only`: only pods labelled `app` in {health, security, fusion agents, dashboard} reach Redis :6379.
+- `kubeheal-inference-clients`: only the health and security agents, plus namespace `monitoring` (the
+  ServiceMonitor scrape), reach inference :8000. If Prometheus runs in another namespace, edit the policy.
+- `kubectl port-forward` is not subject to NetworkPolicy, so the scripts below keep working.
+
+### Redis credentials
+
+Redis runs with ACLs (`deploy/k8s/base/redis.yaml`). Job `kubeheal-redis-secret` creates Secret
+`kubeheal/kubeheal-redis` once with random passwords: keys `<user>-password` and `<user>-url` for users
+`default` (admin), `health`, `security`, `fusion`, `dashboard`. Each component's `REDIS_URL` comes from its
+`<user>-url` key. Health, security and dashboard can only touch their own keys (the dashboard reads only);
+only fusion and the admin can run scripts. Pods that need the Secret wait until the Job has created it.
+
+- Ops scripts use the admin user through the Redis container's `REDISCLI_AUTH`:
+  `kubectl -n kubeheal exec deploy/redis -- redis-cli ...`. Note that `redis-cli` exits 0 on error replies
+  (`NOAUTH`, `NOPERM`), so check its output.
+- From the host: `kubectl -n kubeheal port-forward svc/redis-master 16379:6379`, then
+  `redis://default:$(kubectl -n kubeheal get secret kubeheal-redis -o jsonpath='{.data.default-password}' | base64 -d)@localhost:16379/0`.
+- Denied commands are listed by `redis-cli ACL LOG`.
+- **Rotate** (all passwords at once):
+  `kubectl -n kubeheal delete secret kubeheal-redis job/kubeheal-redis-secret --ignore-not-found && kubectl apply -k deploy/k8s && kubectl -n kubeheal rollout restart deploy ds`.
+
+### Redis persistence
+
+Redis keeps the streams and the health baselines (the AUTO_PATCH targets) in an AOF on PVC `redis-data`
+(1Gi, default StorageClass): `appendonly yes`, `appendfsync everysec` (at most ~1 s of writes lost on a
+crash), RDB preamble, no RDB snapshots. A restart replays the AOF; the pod is not Ready (PING answers
+`LOADING`) until that finishes. Without persistence, the health agent would re-baseline whatever is live
+after a Redis restart, drift included. `maxmemory 192mb` with `noeviction`: a full Redis fails writes
+rather than dropping baselines, so watch `used_memory` (`redis-cli INFO memory`). The 512Mi limit leaves
+room for the copy-on-write of an AOF rewrite fork. Keep Redis in namespace `kubeheal`: the Falco and sensor
+rules exclude that namespace from `/data` monitoring. To wipe all state: delete PVC `redis-data` with Redis
+scaled to 0.
+
+### Images
+
+Our images are named `kubeheal.invalid/<name>:v5`. The reserved `.invalid` TLD never resolves, so with
+`imagePullPolicy: IfNotPresent` a node either has the image locally (minikube builds it there) or the pull
+fails. It never falls back to `docker.io/kubeheal/*`, which anyone could register. (`.local` would not be
+safe: it is mDNS and can resolve on the LAN.) Production maps these names to `registry.invalid/kubeheal/*`
+and then to your `--registry`. Base images in `deploy/docker/` and Redis are pinned by digest: bump the tag
+and digest together.
 
 To protect your own data volumes, add their mount points to `kh_data_dirs` in
 `deploy/k8s/falco-kubeheal-rules.yaml` (default `/data`) and re-run `install.sh`.
@@ -83,11 +134,13 @@ To show the rule path, give the victim app an image that does not exist. The new
 kubectl -n demo set image deploy/victim-app app=ghcr.io/stefanprodan/podinfo:0.0.0-missing
 ```
 
-`reset.sh` does the following:
+`reset.sh` refuses to run unless `kubectl config current-context` is `minikube`, or you pass
+`--force-context <that context>`. It does the following:
 
 1. Deletes chaos pods and leftover quarantine policies.
 2. Recreates `victim-app` from its manifest (delete, then apply).
-3. Clears the KubeHeal streams and `kubeheal:*` keys, which include baselines, locks and circuit breakers.
+3. Deletes the Redis state of namespace `demo` only: its stream entries and event copies, and its baselines,
+   specs, locks, circuit breakers and idempotency markers. Other namespaces and the consumer groups stay.
 4. Restarts the agents.
 
 ## Dashboard
@@ -95,8 +148,12 @@ kubectl -n demo set image deploy/victim-app app=ghcr.io/stefanprodan/podinfo:0.0
 ```bash
 kubectl -n kubeheal port-forward svc/kubeheal-dashboard 8080:8080   # http://localhost:8080
 # local, against a port-forwarded Redis:
-REDIS_URL=redis://localhost:6379/0 uv run --all-extras uvicorn dashboard.fastapi_app:app --port 8080
+REDIS_URL=redis://dashboard:<dashboard-password>@localhost:16379/0 uv run --all-extras uvicorn dashboard.fastapi_app:app --port 8080
 ```
+
+The dashboard answers only Host headers in `DASHBOARD_ALLOWED_HOSTS` (default: `localhost`, `127.0.0.1` and the
+`kubeheal-dashboard` Service names; add your Ingress host there) and sends a strict Content-Security-Policy:
+all script and CSS come from `/static`, and `/ws` rejects a cross-site `Origin`.
 
 The dashboard is a read-only console with no write endpoints and no Kubernetes access.
 
@@ -185,7 +242,9 @@ but never acts on them, even in enforce mode.
 | Prometheus is OOMKilled or slow during long lab runs | Lab pods churn hundreds of series per hour. `monitoring-values.yaml` keeps only the series `agents/health_agent/prometheus.py` queries (keep-lists), with retention 6 h and a 1.5 GiB limit. If you add a metric to `build_queries()`, add it to the matching keep regex too. |
 | Health events lack request, error or latency features | The app pods need the label `kubeheal.io/scrape=true` and a port named `http` that serves `http_requests_total` and `http_request_duration_seconds_bucket`. Without them those features are `None`, which is valid but weaker. |
 | No health event after a change | Assessments run 60 s after the change (sooner on a posture violation or failed rollout). The first sight of a workload stores a baseline without an assessment. A change back to the baseline is not assessed. If inference is unavailable, the agent retries every 60 s (see `kubeheal_health_assessments_total{outcome}`). |
-| AUTO_PATCH escalates to HUMAN with `escalated_no_baseline` | No baseline is stored, for example after a Redis restart and before first sight. Baselines are re-learned when the agent first sees each workload. |
-| Actions say `skipped_circuit_open` | The per-workload hourly budget is spent. Wait out the hour, or clear `kubeheal:cb:*` (`reset.sh` does this). |
+| AUTO_PATCH escalates to HUMAN with `escalated_no_baseline` | No baseline is stored, for example for a workload not yet seen, or after PVC `redis-data` was wiped. Baselines are re-learned when the agent first sees each workload. |
+| Agents stuck in `CreateContainerConfigError`, Redis in `ContainerCreating` | Secret `kubeheal-redis` does not exist yet. Check `kubectl -n kubeheal logs job/kubeheal-redis-secret` (it needs the agents image). |
+| Agent logs `NOPERM` / `NOAUTH` from Redis | The ACL in `redis.yaml` does not allow that command or key for the component, or the Secret was rotated without restarting the pods. `redis-cli ACL LOG` names the user, command and key. |
+| Actions say `skipped_circuit_open` | The per-workload hourly budget is spent. Wait out the hour, or clear the `kubeheal:cb:*` keys (`reset.sh` clears those of namespace `demo`; it refuses to run unless the context is minikube or `--force-context <current context>` is given). |
 | Capture is still on after a collection run was killed with `-9` | Run `kubectl -n kubeheal set env ds/kubeheal-security-agent KUBEHEAL_CAPTURE=0`. Capture only adds the `kubeheal.security.capture` stream (capped by MAXLEN). It never changes decisions. |
 | `/readyz` of inference returns 503 | A bundle in `models/{health,security}` is missing or does not match its `meta.json`. The logs name the task. Retrain or restore the bundle and rebuild the image. |

@@ -1,5 +1,6 @@
 # Least-privilege RBAC: one ServiceAccount + ClusterRole per component.
-# Only fusion can change anything (and only pods, deployments, networkpolicies).
+# Only fusion can change anything (and only pods, deployments, networkpolicies); the redis-secret Job
+# can only create Secrets in kubeheal.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -24,6 +25,9 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods"]                  # failed-rollout evidence (ImagePullBackOff, CrashLoopBackOff, OOMKilled)
+    verbs: ["list"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]   # an HPA-owned spec.replicas change is not drift
     verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -93,7 +97,10 @@ rules:
     resources: ["deployments"]
     verbs: ["get", "patch"]
   - apiGroups: ["apps"]
-    resources: ["replicasets"]           # pod -> ReplicaSet -> Deployment, for the protected check and breaker key
+    resources: ["replicasets", "statefulsets", "daemonsets"]   # pod -> owning controller: protected check, lock, breaker key
+    verbs: ["get"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
     verbs: ["get"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
@@ -119,3 +126,35 @@ metadata:
   name: kubeheal-dashboard
   namespace: kubeheal
 automountServiceAccountToken: false
+---
+# ── Redis credentials: Job kubeheal-redis-secret (redis.yaml) creates Secret kubeheal-redis once ──
+# create only (no get/list/update): it cannot read or overwrite any existing Secret.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubeheal-redis-secret
+  namespace: kubeheal
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubeheal-redis-secret
+  namespace: kubeheal
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubeheal-redis-secret
+  namespace: kubeheal
+subjects:
+  - kind: ServiceAccount
+    name: kubeheal-redis-secret
+    namespace: kubeheal
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubeheal-redis-secret

@@ -2,8 +2,9 @@
 # high-entropy data into files it creates in a marked sandbox, to exercise the
 # security agent. Stdlib only, no deps. Refuses to run outside a marked sandbox
 # (see deploy/chaos/detection-test-workload.py).
-#   docker build -t kubeheal/chaos:v5 -f deploy/docker/Dockerfile.chaos .
-FROM python:3.13-slim
+#   docker build -t kubeheal.invalid/chaos:v5 -f deploy/docker/Dockerfile.chaos .
+# Pinned by digest (multi-arch index); bump tag and digest together.
+FROM python:3.13-slim@sha256:09a17cad02668ae61ece136b4fd36ac3849e14f670ebedb637ea3e15580525bc
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY deploy/chaos/detection-test-workload.py /app/detection-test-workload.py

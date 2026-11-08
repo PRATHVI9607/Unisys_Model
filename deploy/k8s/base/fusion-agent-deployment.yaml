@@ -30,12 +30,12 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: agent
-          image: kubeheal/agents:v5
+          image: kubeheal.invalid/agents:v5
           imagePullPolicy: IfNotPresent
           command: ["python", "-m", "agents.fusion_agent.agent"]
           ports: [{containerPort: 8080, name: http}]
           env:
-            - {name: REDIS_URL, value: "redis://redis-master.kubeheal.svc:6379/0"}
+            - {name: REDIS_URL, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: fusion-url}}}   # per-component ACL user (redis.yaml)
             - {name: KUBEHEAL_MODE, value: "enforce"}   # "observe" = dry-run: decide and publish, change nothing
             - {name: MAX_KILLS_PER_HOUR, value: "3"}
             - {name: MAX_PATCHES_PER_HOUR, value: "5"}
@@ -53,7 +53,10 @@ spec:
           startupProbe:          # /healthz is served only after Redis answers; give Redis time to start
             httpGet: {path: /healthz, port: 8080}
             periodSeconds: 5
+            timeoutSeconds: 5
             failureThreshold: 60
-          livenessProbe:
+          livenessProbe:         # tolerant: a slow event-loop tick under load must not restart the agent
             httpGet: {path: /healthz, port: 8080}
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6

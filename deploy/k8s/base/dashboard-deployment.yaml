@@ -30,11 +30,11 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: dashboard
-          image: kubeheal/dashboard:v5
+          image: kubeheal.invalid/dashboard:v5
           imagePullPolicy: IfNotPresent
           ports: [{containerPort: 8080, name: http}]
           env:
-            - {name: REDIS_URL, value: "redis://redis-master.kubeheal.svc:6379/0"}
+            - {name: REDIS_URL, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: dashboard-url}}}   # per-component ACL user (redis.yaml)
             - {name: LOG_LEVEL, value: "INFO"}
           securityContext:
             allowPrivilegeEscalation: false
@@ -45,9 +45,13 @@ spec:
           resources:
             requests: {cpu: 10m, memory: 64Mi}
             limits: {cpu: 500m, memory: 128Mi}
+          # Host header: the app rejects hosts outside DASHBOARD_ALLOWED_HOSTS, and the kubelet would send the pod IP.
           livenessProbe:
-            httpGet: {path: /healthz, port: 8080}
+            httpGet: {path: /healthz, port: 8080, httpHeaders: [{name: Host, value: localhost}]}
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           readinessProbe:
-            httpGet: {path: /readyz, port: 8080}
+            httpGet: {path: /readyz, port: 8080, httpHeaders: [{name: Host, value: localhost}]}
             periodSeconds: 5
+            timeoutSeconds: 3

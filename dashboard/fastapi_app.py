@@ -24,6 +24,7 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from kubeheal.contracts import (
     STREAM_ACTIONS,
@@ -39,6 +40,14 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 log = logging.getLogger("kubeheal.dashboard")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis-master.kubeheal.svc:6379/0")
+# Host header allow-list (DNS rebinding): port-forward (localhost) and the in-cluster Service names.
+ALLOWED_HOSTS = [h.strip() for h in os.getenv(
+    "DASHBOARD_ALLOWED_HOSTS",
+    "localhost,127.0.0.1,kubeheal-dashboard,kubeheal-dashboard.kubeheal,kubeheal-dashboard.kubeheal.svc,"
+    "kubeheal-dashboard.kubeheal.svc.cluster.local").split(",") if h.strip()]
+# Scripts and styles only from /static; style attributes are allowed for the risk bars' computed widths.
+CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; "
+       "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 BUFFER = 200            # events kept in memory per kind
 HIGH_RISK = 0.7
 SEND_TIMEOUT_S = 2.0    # a client slower than this is dropped (it reconnects and refetches)
@@ -166,7 +175,19 @@ async def lifespan(app: FastAPI):
         await task
 
 
-app = FastAPI(title="KubeHeal Dashboard", lifespan=lifespan)
+app = FastAPI(title="KubeHeal Dashboard", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)   # also applies to /ws
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = CSP
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=DIR / "static"), name="static")
 
 

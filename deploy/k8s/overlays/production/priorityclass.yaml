@@ -1,4 +1,4 @@
-# Security components (security-agent DaemonSet, fusion agent) outrank ordinary workloads, so the
+# KubeHeal's own pods (security-agent DaemonSet, fusion, health agent, inference, Redis) outrank ordinary workloads, so the
 # kubelet/scheduler evicts or preempts app pods before them under node pressure. Deliberately below
 # system-cluster-critical / system-node-critical (2e9+), which stay reserved for the platform.
 apiVersion: scheduling.k8s.io/v1
@@ -8,4 +8,4 @@ metadata:
 value: 1000000
 globalDefault: false
 preemptionPolicy: PreemptLowerPriority
-description: "KubeHeal security-agent and fusion agent: evicted after ordinary workloads."
+description: "KubeHeal control plane (agents, inference, Redis): evicted after ordinary workloads."

@@ -37,7 +37,7 @@ flowchart TD
   SYN["synth_security.py<br/>synthetic windows"] --> TR
   GZ -- "--collected<br/>(raw JSONL preferred when present)" --> TR
   TR["training.train --task health | security<br/>grouped 80/10/10 split · 5-fold grouped CV<br/>conformal q · held-out families"] --> GATE
-  GATE{"grouped-CV macro-F1 ≥ gate?<br/>health 0.55 · security 0.80"}
+  GATE{"GATES floors/ceilings, no regression,<br/>None-safe splits?"}
   GATE -- no --> FAIL["exit 1, nothing written"]
   GATE -- yes --> BUN["models/{task}/model.txt + meta.json"]
   BUN -- "COPY in Dockerfile.inference" --> INF["inference :8000"]
@@ -83,7 +83,7 @@ collected training data. It travels on the `HealthEvent` and drives fusion's rul
 (see [architecture.md](architecture.md#decision-policy-agentsfusion_agentdecision_policypy)). The model
 is left to judge subtle drift such as throttling, latency and memory pressure.
 
-### Security: 26 features (`kubeheal/features/security.py`)
+### Security: 45 features (`kubeheal/features/security.py`)
 
 The input is a list of Falco events (`syscall`, `path`, `new_path`, `ts_ms`), the entropy samples of
 files the pod wrote, the window length, and two byte counters.
@@ -94,9 +94,10 @@ files the pod wrote, the window length, and two byte counters.
 | Syscall mix | `frac_read` and `frac_write` (per-file opens by intent, via `open_syscall`: the live capture has no `read()`/`write()`), `frac_open` (always 0 live), `frac_rename`, `frac_unlink`, `frac_truncate`, `frac_network`, `frac_mmap`, `frac_exec`, `frac_chmod`. Network, mmap and exec are never captured live, so these are always 0 at serve time. |
 | Paths | `unique_paths`, `unique_dirs`, `files_written_per_s`, `suspicious_ext_ratio` (27 known ransomware extensions), `ransom_note` (a name like `README_DECRYPT.txt`) |
 | Rename kind (`rename_kinds()`, first match wins per rename) | `frac_rename_rotate` (new = old plus a 1-2 digit suffix, `x.log` to `x.log.1`, `x.log.1.gz` to `x.log.2.gz`), `frac_rename_suffix_added` (new = old + `.ext`, `file.txt` to `file.txt.locked`: the encryption style), `frac_rename_temp_replace` (old looks temporary: leading `.`, `.tmp` `.swp` `.part` `.new` `.lock` `.dpkg-new`, `~`, or a mktemp-style suffix of 5+ alphanumerics with a digit; or the target was already opened, written or renamed onto earlier in the window), fractions of all renames, `None` without renames. `rename_ext_added_ratio` = suffix_added renames whose added extension is not compression (`.gz .bz2 .xz .zst`). Replaces `rename_ext_change_ratio` and `recent_ext_change_frac` (extension compared with the original name: any atomic write or rotation counted as a change). Other renames (plain moves, extension swaps) are in none of the three fractions. |
+| Transforms of read originals (`transforms()`) | Ransomware rewrites the files it has just read; backup tools (restic, borg) read originals and write new content-addressed files elsewhere, package managers and git write fresh trees, atomic writes rename an unread temp file. An event *transforms* an original X opened for read earlier in the window when it opens X for write or truncates it (in place), renames X within its directory (`X` to `X.locked`, `X.dat` to `X.locked`), or writes `X` + suffix (copy). Rotation (`.1`), compression (`.gz .bz2 .xz .zst`) and temp/backup suffixes (`~ .tmp .part .new .swp .bak .orig .old .copy .lock .dpkg-new`) never transform; renames into another directory are moves. `frac_write_from_read` = written files (opens for write, truncates, rename targets) that transform an original / all written files; `frac_read_destroyed` = files read that are later overwritten in place, renamed away or unlinked / all files read (gzip and restic prune score here too, transform nothing); `n_files_transformed` = distinct originals transformed (a count, so a slow attack shows after 2 files). The fractions are `None` without writes / reads. |
 | Entropy (bits/byte, first 16 KiB) | `entropy_mean`, `entropy_max`, `entropy_p90`, `entropy_high_frac` (> 7.5), `entropy_slope`, `n_entropy_samples`. All `None` when no samples. |
 | Byte counters | `write_bytes_per_s` (pod cgroup v2 `io.stat` `wbytes`, counted at writeback), `net_out_bytes_per_s` (TX bytes of every non-loopback interface in the pod netns, `/proc/{pid}/net/dev`). Both are the counter increase across the window divided by its length, and `None` on a pod's first evaluation or after a reset. |
-| Short horizon (last `RECENT_EVENTS` = 64 events, so a burst stands out from the setup phase) | `recent_frac_write` (open for write + truncate), `recent_frac_rename`, `recent_frac_unlink`, `recent_frac_chmod` (fractions of the 64), `recent_unique_files` (distinct paths), `recent_frac_rename_suffix_added`, `recent_frac_rename_temp_replace`, `recent_ext_added_frac` (the rename-kind features over the last 64 events, classified against the whole window; `None` without renames), `recent_entropy_mean` / `recent_entropy_high_frac` (entropy samples of the files written in those 64 events; `None` without samples), `recent_events_per_s` (64 / max(span, 0.5 s)). Computed by `recent_features()` for the agent and the generator alike; an older bundle without them, or one that leaves some out (the shipped bundle omits `recent_frac_rename`), keeps serving because the inference service ignores feature names it does not list, and a name the bundle lists but the agent no longer sends (`rename_ext_change_ratio`, `recent_ext_change_frac`) is read as missing. |
+| Short horizon (last `RECENT_EVENTS` = 64 events, so a burst stands out from the setup phase) | `recent_frac_write` (open for write + truncate), `recent_frac_rename`, `recent_frac_unlink`, `recent_frac_chmod` (fractions of the 64), `recent_unique_files` (distinct paths), `recent_frac_rename_suffix_added`, `recent_frac_rename_temp_replace`, `recent_ext_added_frac` (the rename-kind features over the last 64 events, classified against the whole window; `None` without renames), `recent_entropy_mean` / `recent_entropy_high_frac` (entropy samples of the files written in those 64 events; `None` without samples), `recent_events_per_s` (64 / max(span, 0.5 s)), `recent_frac_write_from_read` / `recent_frac_read_destroyed` (the transform fractions over the last 64 events; originals read before them still count, so the tail of an attack that follows a setup phase scores near 1). Computed by `recent_features()` for the agent and the generator alike; an older bundle without them, or one that leaves some out (the shipped bundle omits `recent_frac_rename`), keeps serving because the inference service ignores feature names it does not list, and a name the bundle lists but the agent no longer sends (`rename_ext_change_ratio`, `recent_ext_change_frac`) is read as missing. |
 
 The two byte counters are filled at serve time. They are the agent's only network signal, because
 the Falco rule captures file syscalls only. The synthetic generator produces them too: they are
@@ -144,7 +145,9 @@ uv run --all-extras python -m training.train --task security --collected --drop-
 | `--n-scenarios` | `3000` | Number of synthetic security scenario instances |
 | `--drop-features` | none | Comma-separated features left out of the bundle (the agents still compute them; inference ignores unknown `recent_*`). The shipped security bundle uses `--drop-features recent_frac_rename`. |
 | `--alpha` | `0.1` | Conformal miscoverage |
-| `--min-macro-f1` | health 0.55, security 0.80 | Promotion gate |
+| `--gate PATH=VALUE` | `GATES` in `train.py` | Override one gate threshold (repeatable) |
+| `--regression-tol` | `0.02` | Max drop of a gated metric vs the bundle being replaced |
+| `--allow-regression` | off | Skip the no-regression check (say why in the commit) |
 | `--seed` | `7` | Seed for splits, LightGBM and the generator |
 | `--out` | `models/<task>` | Bundle directory |
 
@@ -153,9 +156,23 @@ uv run --all-extras python -m training.train --task security --collected --drop-
 1. **Grouped split.** Data is split 80/10/10 into train, validation and test **by group** (a scenario run, a lab base spec, a pod, or a synthetic scenario instance), stratified on each group's most severe label. No run lands on two sides of the split.
 2. **Final model.** The LightGBM multiclass model uses `num_leaves=15`, `learning_rate=0.05`, `min_data_in_leaf=20`, feature and bagging fraction 0.8, `lambda_l2=1` and class-balanced weights. It stops early on the validation set (patience 50, up to 2000 rounds).
 3. **5-fold grouped cross-validation** over all non-test groups at the chosen round count. The out-of-fold probabilities feed both the CV report and the conformal calibration. For health, only rows with a real spec change are used, because those are the only inputs the agent ever sends.
-4. **Held-out families.** With `--collected`, each lab scenario family is held out in turn and the model never sees it in training. The report gives per-family accuracy and pooled metrics. Detection-test runs are split by variant: rename or in-place, and full or partial overwrite.
+4. **Held-out families.** With `--collected`, each lab scenario family is held out in turn. No row involving it trains: health families come from each record's `params.ops` (`collected.heldout_key`), so combined changes and reverts (which carry the forward ops) leave training with every family they touch. The test rows are those involving only that family, so the pooled metric is a partition of them. Detection-test runs are split by variant: rename or in-place, and full or partial overwrite.
 5. **Report.** The report contains per-class precision, recall and F1, macro and weighted F1, the confusion matrix, empirical coverage and mean set size for CV and test (health also on spec-changed rows), and single-row latency p50 and p99 including TreeSHAP.
-6. **Gate.** The bundle is written only if grouped-CV macro-F1 (for health, on spec-changed rows) is at least the gate. Otherwise the script exits 1 and writes nothing.
+6. **Missing values.** Health training appends blanked copies of every row (`missing_dropout`), one per `MISSING_GROUPS` group: all metrics (Prometheus down), app metrics (latency, errors, request rate: the app exports no HTTP metrics) and resources (the 4 limit/request ratios plus CPU/memory utilisation: no limits or requests). Every lab base spec sets limits and requests, so without these copies LightGBM saw no NaN there and scored a live `None` as 0: a Deployment without limits read as "limit cut to 0", and 1,765 of 2,044 benign lab rows flipped to critical. Copies keep label, group and family, so every split keeps them on their source's side; they are fit-only (not in calibration, reports or gates).
+7. **Gate.** The bundle is written only if (a) every `GATES` threshold holds, (b) no gated metric is worse than in the `meta.json` being replaced by more than `--regression-tol` (unless `--allow-regression`), and (c) no feature in `kubeheal.ml.bundle.LIVE_NONE` (can be `None` live) is split with a missing type other than NaN. `ModelBundle.load` logs an error for (c) too. Otherwise the script exits 1 and writes nothing. The result is stored in `metrics.gate`.
+
+| Task | Gated metric (report path) | Threshold | Seeds 1 / 2 / 7 |
+|---|---|---|---|
+| health | `cv5_grouped_spec_changed.macro_f1` | >= 0.90 | 0.939 / 0.930 / 0.939 |
+| health | `cv5_grouped_spec_changed.per_class.critical.recall` | >= 0.85 | 0.898 / 0.877 / 0.904 |
+| health | `cv5_grouped_spec_changed.per_class.degradation.recall` | >= 0.92 | 0.955 / 0.983 / 0.965 |
+| health | `heldout_family.pooled.macro_f1` | >= 0.62 | 0.669 / 0.647 / 0.661 |
+| security | `cv5_grouped.macro_f1` | >= 0.80 | |
+| security | `cv5_grouped_lab.per_class.ransomware.recall` (lab rows only) | >= 0.95 | |
+| security | `cv5_grouped_lab.false_kill_rate` (lab benign predicted ransomware) | <= 0.01 | |
+| security | `heldout_family.pooled.per_class.ransomware.recall` | >= 0.90 | |
+
+Security macro-F1 alone is inflated by the synthetic-only classes, hence the lab-only rows.
 
 ## Datasets
 
@@ -163,11 +180,18 @@ uv run --all-extras python -m training.train --task security --collected --drop-
 |---|---|---|---|
 | Legacy drift CSV | `training/data/health_drift.csv` | health (default, or `--with-legacy`) | Real metric samples of earlier drift-lab runs. Group = `collection_run_id` (48 runs, only about 9 with a harmful label). |
 | Health lab data | `training/data/collected/health.jsonl` (raw, git-ignored), exported to `training/data/health_lab.jsonl.gz` | health `--collected` | Features from the live health agent, labelled by observed impact |
-| Security lab data | `training/data/collected/security.jsonl` (raw), exported to `training/data/security_lab.jsonl.gz` | security `--collected` | Captured windows of benign workloads and the detection-test workload. Captures from before the byte counters existed (`collected/pre-telemetry/`) are never used. |
-| Synthetic security | generated by `training/synth_security.py` | security (default), and `suspicious`/`exfiltration` with `--collected` | Hard positives and hard negatives, cut to the agent's view. `meta.json` marks it `synthetic`. With `--collected` it also supplies the benign hard-negative families `atomic_rename` (temp file + rename, editor saves), `logrotate_gz`, `dpkg_install` and `git_npm`, at 20 to 400 files/s with setup phases; `meta.json` reports `synthetic_fraction_by_class`. |
+| Security lab data | `training/data/collected/security.jsonl` (raw), exported to `training/data/security_lab.jsonl.gz` | security `--collected` | Captured windows of benign workloads and the detection-test workload. Captures from before the byte counters existed (`collected/pre-telemetry/`) are never used. Rows collected with raw events (see below) are recomputed with the current feature code on load; older rows keep the agent's features and have `None` for features added later (the transform features). |
+| Synthetic security | generated by `training/synth_security.py` | security (default), and `suspicious`/`exfiltration` with `--collected` | Hard positives and hard negatives, cut to the agent's view. `meta.json` marks it `synthetic`. With `--collected` it also supplies the benign hard-negative families `atomic_rename` (temp file + rename, editor saves), `logrotate_gz`, `dpkg_install`, `git_npm`, `backup_repo` (restic/borg/kopia-like encrypted repos) and `package_tree` (npm/pip installs), at 20 to 400 files/s with setup phases, and the hard positive `ransomware_trickle` (1 to 5 files/s, 2 to 12 files); `meta.json` reports `synthetic_fraction_by_class`, `synthetic_hard_negatives` and `synthetic_hard_positives`. |
 
 `training/data/README.md` is the dataset card, generated by the export command with row counts, label
 counts, scenario families and label reasons. Do not edit it by hand.
+
+Health relabels on load (`collected.read`, deterministic, raw file untouched, flagged `relabeled`):
+`readiness_break_replicas1` (forward change breaking the readiness probe with a wrong path or port, `obs.desired == 1`,
+not stuck → `obs.stuck = true` and `drift_lab.impact_label` re-run; the collector's rollout check passed at 1 replica
+while only the old pod was available, but every such change at 2-3 replicas was stuck; 23 rows, 20 benign → critical,
+3 already critical gain `rollout_stuck`), then
+`p99>=2x_robust_pre` (benign → degradation against the run's median pre-change p99).
 
 ### Legacy CSV cleaning (`training/datasets/health.py`)
 
@@ -220,13 +244,32 @@ then overwrites them with random bytes and optionally renames them. Windows that
 overwrite are `benign`, windows that start after it are `ransomware`, and straddling windows are
 dropped. The security agent's capture mode (`KUBEHEAL_CAPTURE=1`) supplies every scored window.
 
+Benign profiles also run **real tools** on `/data`, weighted up because they were the nearest false kills live
+([evaluation.md](evaluation.md)): `restic_backup` (`restic/restic` image: init, backups of a generated tree after
+edits, `forget --prune`, random compression), `npm_install` (2 to 4 packages, sometimes after `npm cache clean`),
+`pip_install` (a venv on `/data`, 2 to 4 packages, with or without the pip cache) and `git_repo` (a local repo with
+tagged commits, checkouts across the tags, `gc`, local clones; no network). npm and pip need network access from
+the cluster. **Held out for evaluation, never collected or generated by name:** borg, kopia, duplicity, yarn and
+pnpm, so the live soak measures tools the model has not seen. 30 % of detection-test pods run at 1 to 5 files/s
+(slow attacks, killed only after about 10 files live).
+
+**Raw events.** When the capture entry carries them, a lab row also stores the window's raw events and entropy
+samples, so feature changes need no re-collection. Capture fields (strings, next to the SecurityEvent fields):
+`events_json` = JSON list of `{"syscall", "path", "new_path", "ts_ms"}`, the exact events passed to
+`security_features()`, oldest first, at most 512; `entropy_json` = JSON list of the entropy samples passed to it
+(floats or `null`). Either may be absent. Consecutive windows of a pod overlap, so the collector stores one
+`events_log` per pod (rows `[ts_ms, syscall, path, new_path]`, on the pod's first row with events) and an
+`events_range` `[lo, hi)` plus `entropy` per row (`pack_events()` in `training/datasets/collected.py`). On load,
+`recompute_security()` recomputes every such row's features (byte-counter features are kept from the capture:
+they come from the pod's cgroup and netns, not from events).
+
 ### Synthetic security (`training/synth_security.py`)
 
-The generator has 19 scenario generators across 4 labels:
+The generator has 28 scenario generators across 4 labels:
 
-- **Benign:** web serving, databases, compressed or encrypted backups, media transcoding, log rotation, atomic writes, package installs, backup uploads, maintenance scripts, encrypted-at-rest stores.
+- **Benign:** web serving, databases, compressed or encrypted backups, media transcoding, log rotation, atomic writes, package installs, backup uploads, maintenance scripts, encrypted-at-rest stores, encrypted dedup backup repos (`backup_repo`), npm/pip install trees (`package_tree`).
 - **Suspicious:** reconnaissance, file enumeration, permission tampering.
-- **Ransomware:** rename, in-place, copy-then-delete, intermittent or partial, slow.
+- **Ransomware:** rename, in-place, copy-then-delete, intermittent or partial, slow, trickle (1 to 5 files/s caught early).
 - **Exfiltration.**
 
 Paths, extensions and window lengths are randomised, and 0 to 80 % background noise is added before
@@ -249,18 +292,18 @@ the image and roll out `kubeheal-inference`.
 ## Metrics
 
 Values from `models/{health,security}/meta.json`, plus my own nested evaluation for the security rows marked
-"eval" (scripts are not in the repo). Health numbers use real, spec-changed rows only (metric-dropout copies are fit-only).
+"eval" (scripts are not in the repo). Health numbers use real, spec-changed rows only (missing-dropout copies are fit-only).
 
 | | Health | Security |
 |---|---|---|
-| Bundle version | `health-5.0.0-421cec83` | `security-5.0.0-c6fa12d8` |
+| Bundle version | `health-5.0.0-a374e498` | `security-5.0.0-c6fa12d8` |
 | Rows / groups / sources | 2,998 / 277 / lab (`collected/health.jsonl`) | 49,964 / 1,954 / lab 46,606 (benign + ransomware) + synthetic 3,358 (6.7 %): suspicious and exfiltration (1,296, 100 % of those classes) and benign hard negatives (2,062, 4.6 % of benign); ransomware is 0 % synthetic. `meta.json` has `synthetic_fraction_by_class` |
-| Grouped-CV macro-F1 (gate) | 0.933 | 0.9994 |
-| Test macro-F1 | 0.948 (n = 275) | 1.000 (n = 4,512) |
-| Held-out-family macro-F1 (pooled) | 0.858 (23 families) | 0.999 over benign + ransomware (meta.json: 0.50, because exfiltration and suspicious do not occur in lab families) |
-| Per-class F1 (grouped CV) | benign 0.966, critical 0.885, degradation 0.948 | benign 1.000, ransomware 0.9995, suspicious 0.9993, exfiltration 0.9990 |
-| Conformal q / coverage / mean set size | 0.349 / 0.901 / 0.93 | 3.9e-6 (serving floors it at 0.05) / 1.000 / 1.00 |
-| Latency p50 / p99 (ms) | 2.6 / 4.0 | 13.0 / 15.7 |
+| Grouped-CV macro-F1 (gate) | 0.939 | 0.9994 |
+| Test macro-F1 | 0.902 (n = 304) | 1.000 (n = 4,512) |
+| Held-out-family macro-F1 (pooled) | 0.661 (21 op families; every row involving the family held out. The old 0.858 kept combined/revert rows of the family in training) | 0.999 over benign + ransomware (meta.json: 0.50, because exfiltration and suspicious do not occur in lab families) |
+| Per-class F1 (grouped CV) | benign 0.969, critical 0.901, degradation 0.946 | benign 1.000, ransomware 0.9995, suspicious 0.9993, exfiltration 0.9990 |
+| Conformal q / coverage / mean set size | 0.312 / 0.901 / 0.92 | 3.9e-6 (serving floors it at 0.05) / 1.000 / 1.00 |
+| Latency p50 / p99 (ms) | 6.3 / 8.8 (measured with other training jobs running) | 13.0 / 15.7 |
 | Eval: pod-level ransomware recall, prod tier (5-fold by pod, bundle q) | | 177 / 178 (one partial in-place run missed; same in leave-one-family-out) |
 | Eval: benign pods falsely killed (418 pods; prod and dev) | | 0 / 418 in 5-fold CV and 0 / 418 leaving each benign family out; dev never kills, its 0.7 multiplier caps risk at 0.7 < 0.85 |
 | Eval: first overwrite to first kill-eligible window, median / p90 (CV latency proxy, floor about 2 s) | | 2.21 s / 2.72 s |

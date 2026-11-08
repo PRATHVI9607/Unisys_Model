@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Live evaluation of the DEPLOYED KubeHeal stack (enforce mode). Prints a compact TSV.
 
-  uv run --all-extras python deploy/scripts/evaluate.py [--sections A,F,B,C,E,D] [--out DIR] [--dur 200]
+  uv run --all-extras python deploy/scripts/evaluate.py [--sections A,F,B,C,E,D] [--out DIR] [--dur 200] [--repeat N]
 
 A automated checks | F resources (idle, then under the B load) | B false-kill soak with real tools
 C detection sweep (deploy/chaos/detection-test-workload.py, other parameters) | E health/drift | D resilience
-Safety: attacks use only the sandbox-gated detection workload (kubeheal/chaos:v5). Everything runs in
+--repeat N runs B, C and E N times (namespaces khe-b-r<i>-*, ...) and adds AGG rows (n/min/median/max).
+A kubectl or redis-cli failure is an ERROR row for that section, never a silent "no kill".
+Safety: attacks use only the sandbox-gated detection workload (kubeheal.invalid/chaos:v5). Everything runs in
 throwaway `khe-*` prod-tier namespaces, deleted at the end. Only section D restarts KubeHeal's own pods
 (inference, fusion, redis, health agent) and Falco, and restores them. Needs kubectl, a pulled
-kubeheal/chaos:v5 image, and network access from the cluster (apk, pip, npm, git).
+kubeheal.invalid/chaos:v5 image, and network access from the cluster (apk, pip, npm, git).
 """
 from __future__ import annotations
 
@@ -26,20 +28,39 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 KH = "kubeheal"
-CHAOS = "kubeheal/chaos:v5"
+CHAOS = "kubeheal.invalid/chaos:v5"
 OUT: Path
 ROWS: list[str] = []
+REP = ""   # "-r<i>" with --repeat > 1: makes namespace names unique per repetition
+AGG: dict[tuple[str, str, str], list[float]] = {}   # (section, row, metric) -> one value per repetition/pod
+REDIS_ERR = re.compile(r"(ERR|NOAUTH|NOPERM|WRONGPASS|WRONGTYPE|LOADING|NOGROUP|BUSY)\b")
+
+
+class KubectlError(RuntimeError):
+    pass
 
 
 def now_ms() -> int:
     return time.time_ns() // 1_000_000
 
 
-def k(*a: str, inp: str | None = None, timeout: int = 300) -> str:
+def k(*a: str, inp: str | None = None, timeout: int = 300, check: bool = True) -> str:
+    """kubectl stdout. check=True raises KubectlError on a non-zero exit or timeout; check=False is for polls
+    where failure is an answer (pod gone, logs not ready) and returns whatever stdout there was."""
     try:
-        return subprocess.run(["kubectl", *a], input=inp, capture_output=True, text=True, timeout=timeout).stdout
-    except subprocess.TimeoutExpired:
+        r = subprocess.run(["kubectl", *a], input=inp, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        if check:
+            raise KubectlError(f"kubectl {' '.join(a[:6])}: timeout after {timeout}s") from e
         return ""
+    if r.returncode and check:
+        raise KubectlError(f"kubectl {' '.join(a[:6])}: rc={r.returncode}: {r.stderr.strip()[-300:]}")
+    return r.stdout
+
+
+def note(sec: str, key: str, metric: str, v: float | None) -> None:
+    if v is not None:
+        AGG.setdefault((sec, key, metric), []).append(float(v))
 
 
 def row(*cols) -> None:
@@ -55,12 +76,16 @@ def apply(obj: dict) -> None:
 
 
 def mkns(ns: str) -> None:
-    k("create", "ns", ns)
+    k("create", "ns", ns, check=False)   # may exist already; the label below must succeed
     k("label", "ns", ns, "kubeheal.io/namespace-tier=prod", "--overwrite")
 
 
 def rc(*a: str) -> str:
-    return k("-n", KH, "exec", "deploy/redis", "--", "redis-cli", *a)
+    """redis-cli in the Redis pod (admin user via its REDISCLI_AUTH). redis-cli exits 0 on error replies."""
+    out = k("-n", KH, "exec", "deploy/redis", "--", "redis-cli", *a)
+    if REDIS_ERR.match(out):
+        raise KubectlError(f"redis-cli {' '.join(a[:3])}: {out.strip()[:200]}")
+    return out
 
 
 def stream(name: str, t0: int) -> list[dict]:
@@ -82,9 +107,11 @@ def sec(t0: int) -> list[dict]:
     return stream("kubeheal.security.events", t0)
 
 
-def clear_keys(pat: str) -> None:
-    k("-n", KH, "exec", "deploy/redis", "--", "sh", "-c",
-      f"for p in cb lock; do redis-cli --scan --pattern \"kubeheal:$p:*{pat}*\" | xargs -r redis-cli DEL >/dev/null; done")
+def clear_keys(pat: str, kinds: tuple[str, ...] = ("cb:", "lock:")) -> None:
+    for kind in kinds:
+        keys = rc("--scan", "--pattern", f"kubeheal:{kind}*{pat}*").split()
+        for i in range(0, len(keys), 500):
+            rc("DEL", *keys[i:i + 500])
 
 
 def pct(v: list[float], p: float):
@@ -168,7 +195,7 @@ def watch_attack(ns: str, name: str, deadline_s: float, after_finish_s: float = 
             r["gone"] = True
             break
         if r["done"] is None:
-            log = k("logs", name, "-n", ns, "-c", "workload")
+            log = k("logs", name, "-n", ns, "-c", "workload", check=False)
             m = re.search(r"overwrite_start_ms=(\d+)", log)
             r["op"] = int(m.group(1)) if m else r["op"]
             m = re.search(r"overwrote\S* (\d+) self-created", log)
@@ -255,7 +282,7 @@ class Top(threading.Thread):
     def run(self) -> None:
         while not self.stop.is_set():
             acc = {c: [0.0, 0.0] for c in self.COMP}
-            for ln in k("top", "pod", "-A", "--no-headers").splitlines():
+            for ln in k("top", "pod", "-A", "--no-headers", check=False).splitlines():
                 p = ln.split()
                 if len(p) < 4:
                     continue
@@ -290,8 +317,8 @@ def section_b(top: Top | None) -> None:
     t0 = now_ms()
     names = list(WORKLOADS)
     for w in names:
-        mkns(f"khe-b-{w}")
-        apply(work_pod(w, f"khe-b-{w}"))
+        mkns(f"khe-b{REP}-{w}")
+        apply(work_pod(w, f"khe-b{REP}-{w}"))
     seen: dict[str, str] = {}
     tails: dict[str, str] = {}
     t_end = time.time() + DUR + 360
@@ -299,11 +326,11 @@ def section_b(top: Top | None) -> None:
         time.sleep(10)
         alive = 0
         for w in names:
-            ns = f"khe-b-{w}"
-            ph = k("get", "pod", w, "-n", ns, "-o", "jsonpath={.status.phase}")
+            ns = f"khe-b{REP}-{w}"
+            ph = k("get", "pod", w, "-n", ns, "-o", "jsonpath={.status.phase}", check=False)
             if ph:
                 seen[w] = ph
-                tails[w] = k("logs", w, "-n", ns, "--tail=3").strip().replace("\n", " | ")[-120:]
+                tails[w] = k("logs", w, "-n", ns, "--tail=3", check=False).strip().replace("\n", " | ")[-120:]
                 alive += ph in ("Pending", "Running")
             else:
                 seen.setdefault(w, "")
@@ -314,13 +341,16 @@ def section_b(top: Top | None) -> None:
         top.report("B-load")
     acts, secs = actions(t0), sec(t0)
     for w in names:
-        s = summarise_ns(f"khe-b-{w}", acts, secs)
+        s = summarise_ns(f"khe-b{REP}-{w}", acts, secs)
+        note("B", w, "AUTO_KILL", s["kill"])
+        note("B", w, "killed", s["killed"])
+        note("B", w, "max_risk", s["max_risk"])
         ok = "WORK_DONE" in tails.get(w, "") or "SETUP_FAIL" not in tails.get(w, "")
         row("B", w, f"AUTO_KILL={s['kill']}", f"killed={s['killed']}", f"HUMAN={s['human']}", f"OBSERVE={s['observe']}",
             f"max_risk={s['max_risk']:.2f}", f"sec_events={s['n_sec']}", f"labels={s['labels']}",
             f"survived={seen[w]}", f"log={tails.get(w, '')[-70:]}", "ok" if ok else "SETUP_FAIL")
     for w in names:
-        k("delete", "ns", f"khe-b-{w}", "--wait=false")
+        k("delete", "ns", f"khe-b{REP}-{w}", "--wait=false")
     clear_keys("khe-b-")
 
 
@@ -352,7 +382,7 @@ def section_c(only: str = "") -> list[float]:
         n = min(int(args[args.index("--num-files") + 1]), int(args[args.index("--max-files") + 1]) if "--max-files" in args else 500)
         pods = []
         for t in range(1, 4):
-            ns = f"khe-c-{re.sub('[^a-z0-9]', '', rname.lower())}-{t}"
+            ns = f"khe-c{REP}-{re.sub('[^a-z0-9]', '', rname.lower())}-{t}"
             mkns(ns)
             for p in range(per):
                 nm = f"atk-{t}-{p}"
@@ -362,17 +392,26 @@ def section_c(only: str = "") -> list[float]:
             res = list(ex.map(lambda x, dl=150 + delay + n / rate: watch_attack(x[0], x[1], dl), pods))
         time.sleep(3)
         acts = actions(t0)
+        # Containment (fusion freezes the pod via STREAM_CONTAIN before the API delete): measured only when
+        # the stream has entries / ActionEvent carries `containment`, so older builds just leave it blank.
+        contain = stream("kubeheal.contain", t0)
         lats, files = [], []
         for (ns, nm), r in zip(pods, res, strict=True):
             kl = kill_of(acts, ns, nm, r["op"])
             lat = (kl["id"] - r["op"]) / 1000 if kl and r["op"] else None
+            cn = next((c for c in contain if c.get("namespace") == ns and c.get("pod") == nm), None)
+            clat = (cn["id"] - r["op"]) / 1000 if cn and r["op"] else None
+            note("C", rname, "latency_s", lat)
+            note("C", rname, "contain_s", clat)
             est = (r["files"] if r["files"] is not None else min(n, int(rate * lat))) if lat is not None else None
             if lat is not None:
                 lats.append(lat)
                 all_lat.append(lat)
             files.append(est)
             row("C", rname, f"{ns}/{nm}", f"killed={'y' if kl else 'n'}", f"latency_s={lat:.2f}" if lat is not None else "latency_s=",
-                f"files_total={n}", f"files_overwritten={'all(done)' if r['files'] is not None else '~' + str(est) if est is not None else ''}")
+                f"files_total={n}", f"files_overwritten={'all(done)' if r['files'] is not None else '~' + str(est) if est is not None else ''}",
+                f"contain_s={clat:.2f}" if clat is not None else "contain_s=", f"containment={(kl or {}).get('containment', '')}")
+        note("C", rname, "recall", len(lats) / len(pods))
         row("C-sum", rname, f"recall={len(lats)}/{len(pods)}", f"med_s={st.median(lats):.2f}" if lats else "med_s=",
             f"p90_s={pct(lats, 90):.2f}" if lats else "p90_s=")
         for ns, _ in pods:
@@ -420,7 +459,7 @@ BENIGN = {"image-upgrade(benign)", "replicas-2to4(benign)", "env-var(benign)"}
 
 
 def section_e(window: int = 480) -> None:
-    ns = "khe-e"
+    ns = f"khe-e{REP}"
     mkns(ns)
     for nm, (_, ov, rep) in CHANGES.items():
         apply(podinfo(re.sub("[^a-z0-9]+", "-", nm).strip("-"), ns, rep, ov.get("image", f"{IMG}:6.14.1")))
@@ -451,14 +490,16 @@ def section_e(window: int = 480) -> None:
         h = sorted((x for x in health if x.get("workload") == d), key=lambda x: x["id"])
         o = json.loads(k("-n", ns, "get", "deploy", d, "-o", "json") or "{}")
         ready = f"{o.get('status', {}).get('readyReplicas', 0)}/{o.get('spec', {}).get('replicas')}"
+        note("E", nm, "restored", nm in restored)
+        note("E", nm, "restored_s", restored.get(nm))
+        note("E", nm, "false_patch", nm in BENIGN and any("patch" in x.get("outcome", "") for x in a))
         row("E", nm, "decisions=" + (",".join(f"{x['decision']}:{x['outcome']}@{(x['id'] - t0) / 1000:.0f}s" for x in a[:4]) or "none"),
             "health=" + ",".join(f"{x.get('label')}/{float(x.get('risk', 0)):.2f}{'?' if x.get('uncertain') == '1' else ''}"
                                  f"{('/' + x['failure_reasons']) if x.get('failure_reasons') not in (None, '', '[]') else ''}" for x in h[:3]),
             f"restored_s={restored[nm]:.0f}" if nm in restored else "restored=no", f"ready={ready}",
             "FALSE_PATCH" if nm in BENIGN and any(x.get("outcome") == "patched" or "patch" in x.get("outcome", "") for x in a) else "")
     k("delete", "ns", ns, "--wait=false")
-    clear_keys("khe-e")
-    k("-n", KH, "exec", "deploy/redis", "--", "sh", "-c", "redis-cli --scan --pattern 'kubeheal:*khe-e*' | xargs -r redis-cli DEL >/dev/null")
+    clear_keys(ns, ("",))   # every kubeheal:* key of the namespace, baselines included
 
 
 # ------------------------------------------------------------------ D
@@ -542,8 +583,9 @@ def section_d() -> None:
         row("D", "fusion-down", f"pod_alive_while_down={alive_down}", "after_restart:" + result(t0, "khe-d2", "atk1", out, t_up))
     finally:
         scale("kubeheal-fusion-agent", 1)
-    # D3 redis restart
+    # D3 redis restart: AOF on a PVC, so consumer groups and baselines must survive without any agent restart
     g0 = groups()
+    b0 = rc("EXISTS", "kubeheal:baseline:demo:victim-app").strip()
     k("-n", KH, "rollout", "restart", "deploy/redis")
     wait_rollout("deploy", KH, "redis")
     time.sleep(45)
@@ -552,10 +594,8 @@ def section_d() -> None:
     th, out = start_attack("khe-d3", "atk1", BENCH_ARGS)
     th.join(timeout=200)
     row("D", "redis-restart", f"groups_before={g0}", f"groups_45s_after={g1}", f"groups_after_attack={groups()}", "attack:" + result(t0, "khe-d3", "atk1", out))
-    k("-n", KH, "rollout", "restart", "deploy/kubeheal-health-agent")  # re-learn baselines (redis is ephemeral)
-    wait_rollout("deploy", KH, "kubeheal-health-agent")
-    time.sleep(20)
-    row("D", "redis-restart-baseline-relearned", "demo/victim-app baseline exists=" + rc("EXISTS", "kubeheal:baseline:demo:victim-app").strip())
+    row("D", "redis-restart-baseline-persisted", f"demo/victim-app baseline exists before={b0}",
+        "after=" + rc("EXISTS", "kubeheal:baseline:demo:victim-app").strip())
     # D4 falco restart during benign load
     t0 = now_ms()
     mkns("khe-d4")
@@ -598,11 +638,11 @@ def section_d() -> None:
 
 # ------------------------------------------------------------------ cleanup / verify
 def cleanup() -> None:
-    for ns in k("get", "ns", "-o", "name").split():
+    for ns in k("get", "ns", "-o", "name", check=False).split():
         if ns.startswith("namespace/khe-"):
-            k("delete", ns, "--wait=false")
+            k("delete", ns, "--wait=false", check=False)
     for _ in range(90):
-        if "khe-" not in k("get", "ns", "--no-headers"):
+        if "khe-" not in k("get", "ns", "--no-headers", check=False):
             break
         time.sleep(3)
     clear_keys("khe-")
@@ -612,7 +652,7 @@ def cleanup() -> None:
     pods = k("-n", KH, "get", "pods", "--no-headers")
     row("CLEAN", f"khe_ns_left={'khe-' in k('get', 'ns', '--no-headers')}", f"redis_khe_keys_left={len(left)}",
         f"capture0={'KUBEHEAL_CAPTURE' not in cap or '\"KUBEHEAL_CAPTURE\",\"value\":\"0\"' in cap.replace(' ', '')}",
-        f"enforce={'enforce' in mode}", f"not_ready={[ln.split()[0] for ln in pods.splitlines() if ln.split()[1].split('/')[0] != ln.split()[1].split('/')[1]]}")
+        f"enforce={'enforce' in mode}", f"not_ready={[ln.split()[0] for ln in pods.splitlines() if ln.split()[2] != 'Completed' and ln.split()[1].split('/')[0] != ln.split()[1].split('/')[1]]}")
 
 
 def main() -> None:
@@ -622,16 +662,23 @@ def main() -> None:
     ap.add_argument("--out", default=str(ROOT / "training/data/collected/eval"))
     ap.add_argument("--dur", type=int, default=200)
     ap.add_argument("--c-rows", default="", help="only section C rows whose name contains this")
+    ap.add_argument("--repeat", type=int, default=1, help="run sections B, C, E this many times (not D)")
     a = ap.parse_args()
     OUT, DUR = Path(a.out), a.dur
     OUT.mkdir(parents=True, exist_ok=True)
     secs = a.sections.split(",")
     row("META", time.strftime("%Y-%m-%d %H:%M"), k("-n", KH, "get", "deploy", "kubeheal-inference", "-o", "jsonpath={.spec.template.spec.containers[0].image}"),
         rc("XREVRANGE", "kubeheal.security.events", "+", "-", "COUNT", "1").split("model_version")[-1].split()[0:1])
+    def guarded(name: str, fn, *args) -> None:
+        try:
+            fn(*args)
+        except KubectlError as e:   # reported, not swallowed: the scorecard shows which section broke
+            row("ERROR", name + REP, str(e)[:300])
+
+    global REP
     try:
         if "A" in secs:
             section_a()
-        top = None
         if "F" in secs:
             top = Top()
             top.start()
@@ -639,27 +686,31 @@ def main() -> None:
             top.stop.set()
             top.join()
             top.report("idle-2min")
-            top = None
-        if "B" in secs:
-            top = Top()
-            top.start()
-            try:
-                section_b(top)
-            finally:
-                top.stop.set()
-        if "C" in secs:
+        for i in range(1, a.repeat + 1):
+            REP = f"-r{i}" if a.repeat > 1 else ""
             if "B" in secs:
-                time.sleep(150)  # let Falco and the agent drain the soak backlog, or detection latency measures the backlog
-            section_c(a.c_rows)
-        if "E" in secs:
-            section_e()
+                top = Top()
+                top.start()
+                try:
+                    guarded("B", section_b, top)
+                finally:
+                    top.stop.set()
+            if "C" in secs:
+                if "B" in secs:
+                    time.sleep(150)  # let Falco and the agent drain the soak backlog, or detection latency measures the backlog
+                guarded("C", section_c, a.c_rows)
+            if "E" in secs:
+                guarded("E", section_e)
+        REP = ""
+        if a.repeat > 1:
+            for (sec_, key, metric), v in sorted(AGG.items()):
+                row("AGG", sec_, key, metric, f"n={len(v)}", f"min={min(v):.2f}", f"median={st.median(v):.2f}", f"max={max(v):.2f}")
         if "D" in secs:
-            section_d()
+            guarded("D", section_d)
     finally:
-        k("-n", KH, "scale", "deploy/kubeheal-fusion-agent", "--replicas=1")
-        k("-n", KH, "scale", "deploy/kubeheal-inference", "--replicas=1")
+        k("-n", KH, "scale", "deploy/kubeheal-fusion-agent", "--replicas=1", check=False)
+        k("-n", KH, "scale", "deploy/kubeheal-inference", "--replicas=1", check=False)
         cleanup()
-
 
 if __name__ == "__main__":
     main()

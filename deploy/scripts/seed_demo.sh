@@ -18,7 +18,10 @@ PF=$!; trap 'kill $PF 2>/dev/null || true' EXIT
 for _ in $(seq 1 20); do (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break; sleep 0.5; done
 kill -0 "$PF" 2>/dev/null || { echo "port-forward failed:"; cat /tmp/kh-redis-pf.log; exit 1; }
 
-REDIS_URL="redis://127.0.0.1:$PORT/0" CLEAR="${1:-}" uv run --extra dashboard python - <<'PY'
+# Redis requires auth (deploy/k8s/base/redis.yaml): the admin (`default`) password from Secret kubeheal-redis.
+PW="$(kubectl get secret kubeheal-redis -n kubeheal -o jsonpath='{.data.default-password}' | base64 -d)"
+[[ -n $PW ]] || { echo "no Secret kubeheal/kubeheal-redis (default-password)"; exit 1; }
+REDIS_URL="redis://default:$PW@127.0.0.1:$PORT/0" CLEAR="${1:-}" uv run --extra dashboard python - <<'PY'
 import os, redis
 from kubeheal import contracts as c
 

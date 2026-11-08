@@ -1,6 +1,16 @@
-# Redis Streams broker for KubeHeal: one ephemeral instance (no persistence, no AOF).
-# Service name redis-master keeps REDIS_URL stable. Anyone who can write to these
-# streams can make fusion act, so only pods in the kubeheal namespace may connect.
+# Redis Streams broker for KubeHeal: one persistent instance (AOF on a 1Gi PVC) with one ACL user per
+# component. Anyone who can write the event streams or a baseline can make fusion act, so:
+#   - passwords live in Secret kubeheal-redis, generated in-cluster by Job kubeheal-redis-secret below
+#     (random, never in git; the Job keeps an existing Secret, so re-applying never rotates them);
+#   - each agent gets its own REDIS_URL (Secret key <user>-url) and may write only its own keys;
+#     the dashboard is read-only; only fusion may EVAL (its lock scripts);
+#   - `default` is the admin user (password <default-password>); REDISCLI_AUTH in this container lets
+#     `kubectl exec deploy/redis -- redis-cli ...` (scripts, probes) authenticate as it;
+#   - NetworkPolicy redis-agents-only admits only the three agents and the dashboard.
+# Persistence matters: the health agent's baselines (the AUTO_PATCH targets) live here, and an empty Redis
+# would make it re-baseline whatever is live, drift included. Keep Redis in namespace kubeheal: the
+# Falco/sensor rules exclude it from /data write monitoring (AOF rewrites look like bulk rewrites).
+# Service name redis-master keeps REDIS_URL stable.
 apiVersion: v1
 kind: Service
 metadata:
@@ -12,6 +22,16 @@ spec:
   ports:
     - {name: redis, port: 6379, targetPort: 6379}
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  namespace: kubeheal
+  labels: {app.kubernetes.io/name: redis}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,7 +40,7 @@ metadata:
   labels: {app.kubernetes.io/name: redis}
 spec:
   replicas: 1
-  strategy: {type: Recreate}
+  strategy: {type: Recreate}   # RWO volume: the old pod must release it first
   selector: {matchLabels: {app.kubernetes.io/name: redis}}
   template:
     metadata:
@@ -31,39 +51,138 @@ spec:
         runAsNonRoot: true
         runAsUser: 999
         runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: redis
-          image: redis:7.4.2-alpine
-          args: ["--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+          # 7.4.12: fixes CVE-2025-49844 (Lua use-after-free RCE) and CVE-2025-21605. Digest = Docker Hub index.
+          image: redis:7.4.12-alpine@sha256:c5d34a98396a4775e223c74e929162c35c5a2182901ba26b50ade939941ce14b
+          # The ACL file is written to a memory-backed emptyDir at start (passwords come from the Secret via
+          # env), so passwords never reach the PVC, the pod spec or redis-server's argv.
+          # Users (one per component; %R~ read-only, %RW~ read-write key patterns; -@dangerous drops
+          # KEYS/FLUSHALL/CONFIG/DEBUG/...; no user but fusion and default may run scripts):
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              umask 077
+              cat > /run/redis/users.acl <<EOF
+              user default on >$REDISCLI_AUTH ~* &* +@all
+              user health on >$HEALTH_PASSWORD resetchannels -@all +@read +@write +@transaction +ping +client|setinfo -@scripting -@dangerous %RW~kubeheal:spec:* %RW~kubeheal:baseline:* %RW~kubeheal:health:* %RW~kubeheal:index:health %RW~kubeheal.health.events
+              user security on >$SECURITY_PASSWORD resetchannels -@all +@read +@write +@transaction +ping +client|setinfo -@scripting -@dangerous %RW~kubeheal:security:* %RW~kubeheal:index:security %RW~kubeheal.security.events %RW~kubeheal.security.capture %R~kubeheal.contain
+              user fusion on >$FUSION_PASSWORD resetchannels -@all +@read +@write +@transaction +@stream +ping +client|setinfo -@scripting -@dangerous +eval +evalsha %RW~kubeheal:* %RW~kubeheal.*
+              user dashboard on >$DASHBOARD_PASSWORD resetchannels -@all +@read +ping +client|setinfo -@scripting -@dangerous %R~kubeheal:* %R~kubeheal.*
+              EOF
+              exec redis-server --aclfile /run/redis/users.acl --dir /data \
+                --appendonly yes --appendfsync everysec --aof-use-rdb-preamble yes --save "" \
+                --maxmemory 192mb --maxmemory-policy noeviction
+          env:
+            - {name: REDISCLI_AUTH, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: default-password}}}
+            - {name: HEALTH_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: health-password}}}
+            - {name: SECURITY_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: security-password}}}
+            - {name: FUSION_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: fusion-password}}}
+            - {name: DASHBOARD_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: dashboard-password}}}
           ports: [{containerPort: 6379, name: redis}]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: {drop: ["ALL"]}
-          # Sized from kubectl top under lab load (2026-10-17, training/collect/ run): cpu 34m, mem 43Mi peak (used_memory <= 38M).
-          # requests ~ p95; memory limit stays above --maxmemory 256mb (noeviction) + overhead.
+          # Lab peak (2026-10-17): cpu 34m, mem 43Mi (used_memory <= 38M). Guaranteed QoS (requests == limits).
+          # The 512Mi limit covers --maxmemory 192mb plus the copy-on-write of an AOF-rewrite fork
+          # (up to ~2x the dataset when every page is touched during the rewrite) plus allocator overhead.
           resources:
-            requests: {cpu: 40m, memory: 64Mi}
-            limits: {cpu: 500m, memory: 320Mi}
-          readinessProbe:
-            exec: {command: ["redis-cli", "ping"]}
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: 250m, memory: 512Mi}
+          readinessProbe:          # not ready while the AOF replays (PING answers LOADING); redis-cli exits 0 on errors
+            exec: {command: ["sh", "-c", "redis-cli ping | grep -qx PONG"]}
             periodSeconds: 5
+            timeoutSeconds: 5
           livenessProbe:
             tcpSocket: {port: 6379}
             periodSeconds: 10
-          volumeMounts: [{name: data, mountPath: /data}]
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: acl, mountPath: /run/redis}
       volumes:
-        - {name: data, emptyDir: {}}
+        - name: data
+          persistentVolumeClaim: {claimName: redis-data}
+        - name: acl
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+---
+# Creates Secret kubeheal-redis once, with random passwords and the matching per-component REDIS_URLs.
+# Works with plain `kubectl apply -k`: pods referencing the Secret wait (CreateContainerConfigError /
+# ContainerCreating) until it exists. An existing Secret is kept (409), so re-applies never rotate.
+# Rotate: docs/operations.md "Redis credentials".
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kubeheal-redis-secret
+  namespace: kubeheal
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 600   # gone after 10 min, so a later apply (e.g. after a rotation) runs it again
+  template:
+    spec:
+      serviceAccountName: kubeheal-redis-secret
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: create
+          image: kubeheal.invalid/agents:v5   # has Python + kubernetes_asyncio
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -c
+            - |
+              import asyncio, secrets
+              from kubernetes_asyncio import client, config
+
+              USERS = ("default", "health", "security", "fusion", "dashboard")
+              HOST = "redis-master.kubeheal.svc:6379/0"
+
+              async def main() -> None:
+                  config.load_incluster_config()
+                  pw = {u: secrets.token_hex(32) for u in USERS}
+                  data = {f"{u}-password": p for u, p in pw.items()}
+                  data |= {f"{u}-url": f"redis://{u}:{p}@{HOST}" for u, p in pw.items()}
+                  body = client.V1Secret(metadata=client.V1ObjectMeta(name="kubeheal-redis"), string_data=data)
+                  async with client.ApiClient() as api:
+                      try:
+                          await client.CoreV1Api(api).create_namespaced_secret("kubeheal", body)
+                          print("created secret kubeheal/kubeheal-redis")
+                      except client.ApiException as e:
+                          if e.status != 409:
+                              raise
+                          print("secret kubeheal/kubeheal-redis exists; kept")
+
+              asyncio.run(main())
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: 10m, memory: 64Mi}
+            limits: {cpu: 200m, memory: 128Mi}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: redis-kubeheal-only
+  name: redis-agents-only
   namespace: kubeheal
 spec:
   podSelector: {matchLabels: {app.kubernetes.io/name: redis}}
   policyTypes: [Ingress]
   ingress:
-    - from: [{podSelector: {}}]     # same namespace only
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [kubeheal-health-agent, kubeheal-security-agent, kubeheal-fusion-agent, kubeheal-dashboard]
       ports: [{port: 6379}]
