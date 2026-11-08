@@ -115,3 +115,50 @@ def test_read_capture_retries_dropped_connection_and_keeps_position(monkeypatch)
     except asyncio.CancelledError:
         pass
     assert [c[lab.STREAM_CAPTURE] for c in r.calls] == ["$", "$", "5-0"] and L.watermark_ms == 2
+
+
+def test_real_tool_families_present_and_holdouts_absent():
+    assert {"restic_backup", "npm_install", "pip_install", "git_repo"} <= set(lab.BENIGN)
+    cmds = " ".join(lab.BENIGN[n][1](random.Random(i))[0][2] for i, n in enumerate(sorted(lab.BENIGN)))
+    assert not any(tool in cmds for tool in ("borg", "kopia", "duplicity", "yarn", "pnpm"))   # held out for evaluation
+    r = random.Random(3)
+    rates = [lab.detection_profile(r)[1]["rate"] for _ in range(1000)]
+    assert sum(x <= 5 and x != 5 for x in rates) / len(rates) == pytest.approx(lab.SLOW_SHARE * 0.75, abs=0.05)
+
+
+def test_raw_window_tolerates_absent_and_bad_fields():
+    assert lab.raw_window({}) == (None, None)
+    assert lab.raw_window({"events_json": "{bad", "entropy_json": "[7.9, null]"}) == (None, [7.9, None])
+    assert lab.raw_window({"events_json": '[{"syscall":"open_r","path":"/data/a","ts_ms":1}]', "entropy_json": ""})[0] \
+        == [{"syscall": "open_r", "path": "/data/a", "ts_ms": 1}]
+
+
+def test_raw_events_round_trip_and_recompute(tmp_path):
+    from kubeheal.features.security import security_features, window_seconds
+    from training.datasets import collected
+
+    stream = []
+    for i in range(300):   # one pod: create, then read + overwrite + rename (the detection-test pattern)
+        x = f"/data/f{i % 100}.dat"
+        stream += [{"syscall": "open_r", "path": x, "ts_ms": 1000 + 30 * i},
+                   {"syscall": "open_w", "path": x, "ts_ms": 1010 + 30 * i},
+                   {"syscall": "rename", "path": x, "new_path": x + ".khlocked", "ts_ms": 1020 + 30 * i}]
+    windows = [stream[max(0, end - 512):end] for end in range(100, len(stream) + 1, 150)]   # overlapping, ≤512
+    windows.append(stream[-40:])                                                              # a gap (agent restart)
+    kept = [(window(w[0]["ts_ms"], w[-1]["ts_ms"]), w, [7.9, None, 7.95], "ransomware") for w in windows]
+    kept.insert(1, (window(0, 1), None, None, "benign"))                                   # a window without raw events
+    recs = lab.window_records(kept, "detection_test", "ransomware", {"rename": True}, "sec-x", "Succeeded")
+    assert sum("events_log" in r for r in recs) == 1 and "events_range" not in recs[1]
+    log = recs[0]["events_log"]
+    assert len(log) == 850 + 40              # overlapping windows stored once (events 0-849), the gap window appended
+    path = tmp_path / "security.jsonl"
+    path.write_text("".join(__import__("json").dumps(r) + "\n" for r in recs))
+    back = collected.read("security", path)                                                 # recomputed on load
+    with_raw = [r for r in back if "events_range" in r]
+    assert len(with_raw) == len(windows)
+    for r, w in zip(with_raw, windows, strict=True):
+        assert collected.unpack_events(log[slice(*r["events_range"])]) == w
+        want = security_features(w, [7.9, None, 7.95], window_seconds(w[0]["ts_ms"], w[-1]["ts_ms"]))
+        assert r["features"] == want | {k: None for k in collected.BYTE_FEATURES}
+        assert r["features"]["frac_read_destroyed"] > 0.95
+    assert back[1]["features"] == {}                                                        # no raw events: untouched

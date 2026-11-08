@@ -13,7 +13,6 @@ from kubernetes_asyncio.client.exceptions import ApiException
 from agents.security_agent import agent as sa
 from agents.security_agent.falco import FalcoTail, parse_line
 from kubeheal.contracts import STREAM_SECURITY, Prediction, SecurityEvent, key_event
-from kubeheal.features.security import MIN_WINDOW_S
 
 
 def falco_line(evt="openat", path="/data/a.txt", ns="shop", pod="web-7d9f8b6c5-x2x7q", pid=4242,
@@ -105,6 +104,12 @@ def test_tail_missing_file_then_created(tmp_path):
 
 
 # ── windows ──────────────────────────────────────────────────────────────────
+@pytest.fixture(autouse=True)
+def no_pod_interval(monkeypatch):
+    """Tests score the same pod back to back; test_hot_pod_rescored_at_most_every_interval covers the interval."""
+    monkeypatch.setattr(sa, "POD_MIN_INTERVAL_S", 0.0)
+
+
 @pytest.fixture
 async def redis():
     r = fakeredis.FakeAsyncRedis(decode_responses=True)
@@ -228,9 +233,9 @@ def test_entropy_reads_only_the_file_head(tmp_path):
 
 
 # ── owner resolution ─────────────────────────────────────────────────────────
-def meta(*owners):
+def meta(*owners, controller=True):
     return SimpleNamespace(metadata=SimpleNamespace(
-        owner_references=[SimpleNamespace(kind=k, name=n) for k, n in owners] or None))
+        owner_references=[SimpleNamespace(kind=k, name=n, controller=controller) for k, n in owners] or None))
 
 
 class FakeCore:
@@ -256,6 +261,9 @@ async def test_owner_resolution():
     core = FakeCore({"web-abc12-x2x7q": meta(("ReplicaSet", "web-abc12")),
                      "solo": meta(),
                      "job-pod": meta(("Job", "nightly")),
+                     "db-0": meta(("StatefulSet", "db")),
+                     "agent-x1": meta(("DaemonSet", "agent")),
+                     "adopted": meta(("ReplicaSet", "web-abc12"), controller=False),   # no controller: bare pod
                      "orphan-rs-pod": meta(("ReplicaSet", "orphan-rs"))})
     apps = FakeApps({"web-abc12": meta(("Deployment", "web")), "orphan-rs": meta()})
     r = sa.OwnerResolver(core, apps)
@@ -263,8 +271,11 @@ async def test_owner_resolution():
     assert await r.resolve("shop", "web-abc12-x2x7q") == "web"
     assert core.calls == 1                                # cached
     assert await r.resolve("shop", "solo") == "solo"
-    assert await r.resolve("shop", "job-pod") == "job-pod"
-    assert await r.resolve("shop", "orphan-rs-pod") == "orphan-rs-pod"
+    assert await r.resolve("shop", "job-pod") == "nightly"
+    assert await r.resolve("shop", "db-0") == "db"
+    assert await r.resolve("shop", "agent-x1") == "agent"
+    assert await r.resolve("shop", "adopted") == "adopted"
+    assert await r.resolve("shop", "orphan-rs-pod") == "orphan-rs"     # a ReplicaSet without Deployment: itself
     assert await r.resolve("shop", "gone") == "gone"      # API error → pod name
 
 
@@ -364,7 +375,10 @@ NET_DEV = """Inter-|   Receive                                                | 
 
 
 def fake_node(root, tx=1000, wbytes=(500, 20), lo=7777):
-    """A /proc tree with pid 4242 (net/dev) and the node's cgroup2 tree under /proc/1/root (systemd driver)."""
+    """A /proc tree with pid 4242 (net/dev, own netns) and the node's cgroup2 tree under /proc/1/root (systemd)."""
+    for pid in ("1", "4242"):                                 # ns/net: distinct inodes = distinct network namespaces
+        (root / pid / "ns").mkdir(parents=True, exist_ok=True)
+        (root / pid / "ns" / "net").touch()
     (root / "4242" / "net").mkdir(parents=True, exist_ok=True)
     (root / "4242" / "net" / "dev").write_text(NET_DEV.format(lo=lo, eth0=tx))
     cg = root / "1/root/sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice"
@@ -378,6 +392,11 @@ def test_net_tx_bytes_sums_non_loopback(tmp_path):
     fake_node(tmp_path, tx=12211861)
     assert sa.net_tx_bytes(str(tmp_path), 4242) == 12211861.0
     assert sa.net_tx_bytes(str(tmp_path), 999) is None                        # process gone
+    (tmp_path / "4242" / "ns" / "net").unlink()
+    os.link(tmp_path / "1" / "ns" / "net", tmp_path / "4242" / "ns" / "net")
+    assert sa.net_tx_bytes(str(tmp_path), 4242) is None                       # hostNetwork: node egress, not the pod's
+    (tmp_path / "4242" / "ns" / "net").unlink()
+    (tmp_path / "4242" / "ns" / "net").touch()
     (tmp_path / "4242" / "net" / "dev").write_text("h1\nh2\n  eth0: garbage\n")
     assert sa.net_tx_bytes(str(tmp_path), 4242) is None                       # unparsable, never 0
 
@@ -403,30 +422,50 @@ def test_counter_delta():
 
 
 async def test_window_rates_from_first_and_last_sample(redis, monkeypatch, tmp_path):
-    clock = [time.time_ns() // 1_000_000]
-    monkeypatch.setattr(sa, "now_ms", lambda: clock[0])      # samples are >= SAMPLE_EVERY_S apart
+    clock = [1000.0]
+    monkeypatch.setattr(sa, "clock", lambda: clock[0])       # samples are >= SAMPLE_EVERY_S apart on this clock
     fake_node(tmp_path, tx=1000, wbytes=(500,))
     a = make_agent(redis, proc_root=str(tmp_path))
     calls = stub_predict(monkeypatch, "benign", 0.1)
     a.ingest(parse_line(falco_line(**{"k8s.pod.uid": UID})))
     await a.evaluate_all()
-    clock[0] += 1500
     assert calls[-1][1]["net_out_bytes_per_s"] is None and calls[-1][1]["write_bytes_per_s"] is None
+    clock[0] += 2.0
     fake_node(tmp_path, tx=6000, wbytes=(500 + 10_000,))
     a.ingest(parse_line(falco_line(**{"k8s.pod.uid": UID})))
     await a.evaluate_all()
-    clock[0] += 1500
-    f = calls[-1][1]                                         # same event ts → window_s floors at MIN_WINDOW_S
-    assert f["net_out_bytes_per_s"] == 5000 / MIN_WINDOW_S
-    assert f["write_bytes_per_s"] == 10_000 / MIN_WINDOW_S
+    f = calls[-1][1]                                         # rate over the samples' 2 s span, not the event window
+    assert f["net_out_bytes_per_s"] == 5000 / 2 and f["write_bytes_per_s"] == 10_000 / 2
+    clock[0] += 0.5                                          # no sample due: counters not read, same rate
+    fake_node(tmp_path, tx=7000, wbytes=(500 + 10_000,))
+    a.ingest(parse_line(falco_line(**{"k8s.pod.uid": UID})))
+    await a.evaluate_all()
     w = a.windows[("shop", "web-7d9f8b6c5-x2x7q")]
-    w.samples[0] = (0, 0.0, 0.0)                             # older than the event window: trimmed, not used
-    clock[0] += 1500
+    assert len(w.samples) == 2 and calls[-1][1]["net_out_bytes_per_s"] == 5000 / 2
+    clock[0] += sa.WINDOW_S                                  # the first two samples are now older than WINDOW_S
     fake_node(tmp_path, tx=9000, wbytes=(500 + 10_000,))
     a.ingest(parse_line(falco_line(**{"k8s.pod.uid": UID})))
     await a.evaluate_all()
-    assert calls[-1][1]["net_out_bytes_per_s"] == 3000 / MIN_WINDOW_S and len(w.samples) == 2
+    assert len(w.samples) == 2 and w.samples[0][1] == 6000.0              # trimmed by sample age; last two kept
+    assert calls[-1][1]["net_out_bytes_per_s"] == pytest.approx(3000 / (sa.WINDOW_S + 0.5))
     assert calls[-1][1]["write_bytes_per_s"] == 0.0                     # measured: nothing written, not None
+
+
+async def test_dense_burst_keeps_byte_rates(redis, monkeypatch, tmp_path):
+    """512 events in well under a second (heavy I/O) must still yield byte rates: samples are not trimmed by
+    the event window."""
+    clock = [1000.0]
+    monkeypatch.setattr(sa, "clock", lambda: clock[0])
+    a = make_agent(redis, proc_root=str(tmp_path))
+    calls = stub_predict(monkeypatch, "benign", 0.1)
+    for sec in range(3):
+        fake_node(tmp_path, tx=1000, wbytes=(sec * 50_000_000,))
+        for i in range(sa.MAX_EVENTS):
+            a.ingest(parse_line(falco_line(path=f"/data/f{i}", **{"k8s.pod.uid": UID})))
+            a.windows[("shop", "web-7d9f8b6c5-x2x7q")].events[-1]["ts_ms"] = 1_714_564_800_000 + sec * 1000 + i // 8
+        await a.evaluate_all()
+        clock[0] += 1.0
+    assert calls[-1][1]["write_bytes_per_s"] == pytest.approx(50_000_000, rel=1e-6)
 
 
 async def test_burst_triggers_scoring_before_the_timer(redis, monkeypatch):
@@ -493,7 +532,7 @@ def test_written_files_leave_with_the_event_window(tmp_path):
 
 async def test_sustained_byte_rate_survives_burst_rescoring(redis, monkeypatch, tmp_path):
     clock = [1_714_564_800_000]
-    monkeypatch.setattr(sa, "now_ms", lambda: clock[0])
+    monkeypatch.setattr(sa, "clock", lambda: clock[0] / 1000)
     a = make_agent(redis, proc_root=str(tmp_path))
     calls = stub_predict(monkeypatch, "benign", 0.1)
     for sec in range(61):                                        # 10 MB/s for 60 s, scored 5 x per second
@@ -558,3 +597,213 @@ async def test_agent_recent_features_match_the_feature_function(redis, tmp_path)
     assert {k: features[k] for k in want} == want
     assert features["recent_frac_write"] == 1.0 and features["frac_write"] < 0.3
     assert features["recent_unique_files"] == RECENT_EVENTS
+
+
+# ── review round 2 ──────────────────────────────────────────────────────────
+async def test_risk_rise_skips_cooldown(redis, monkeypatch):
+    """0.60 then 0.97 one window later: fusion must see the 0.97 (it decided HUMAN on 0.60)."""
+    a = make_agent(redis)
+    for risk in (0.60, 0.97, 0.99, 0.60):                 # +0.37 news; +0.02 and a fall are cooled down
+        stub_predict(monkeypatch, "ransomware", risk)
+        a.ingest(parse_line(falco_line()))
+        await a.evaluate_all()
+    assert [SecurityEvent.from_fields(f).risk for _, f in await redis.xrange(STREAM_SECURITY)] == [0.60, 0.97]
+
+
+async def test_failed_publish_and_features_rearm_with_backoff(redis, monkeypatch):
+    a = make_agent(redis)
+    calls = stub_predict(monkeypatch, "ransomware", 0.95)
+    real = sa.publish_event
+
+    async def broken(*_):
+        raise sa.aioredis.ConnectionError("down")
+    monkeypatch.setattr(sa, "publish_event", broken)
+    a.ingest(parse_line(falco_line()))
+    w = a.windows[("shop", "web-7d9f8b6c5-x2x7q")]
+    await a.evaluate_all()
+    assert w.new == 1 and w.fails == 1                     # re-armed: re-scored although the pod went quiet
+    await a.evaluate_all()                                 # first retry at once, then backing off
+    assert len(calls) == 2 and w.fails == 2 and w.due_at > time.monotonic() + 0.5
+    await a.evaluate_all()
+    assert len(calls) == 2                                 # a persistent failure does not spin
+    monkeypatch.setattr(sa, "publish_event", real)
+    w.due_at = 0.0
+    await a.evaluate_all()
+    assert w.fails == 0 and w.new == 0 and await redis.xlen(STREAM_SECURITY) == 1
+    w.events.clear()                                       # features() raises
+    w.new = 1
+    await a.evaluate_all()
+    assert w.new == 1 and w.fails == 1
+
+
+async def test_eval_loop_survives_a_failing_round(redis, monkeypatch):
+    monkeypatch.setattr(sa, "EVAL_INTERVAL_S", 0.02)
+    monkeypatch.setattr(sa, "MIN_TICK_S", 0.01)
+    a = make_agent(redis)
+    rounds = []
+
+    async def flaky(burst_only=False):
+        rounds.append(burst_only)
+        if len(rounds) == 1:
+            raise RuntimeError("owner lookup blew up")
+    a.evaluate_all = flaky
+    task = asyncio.create_task(a.eval_loop())
+    await asyncio.sleep(0.2)
+    assert not task.done() and len(rounds) > 2
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_local_pid_caches_misses(tmp_path, monkeypatch):
+    (tmp_path / "5").mkdir()
+    (tmp_path / "5" / "cgroup").write_text("0::/system.slice\n")
+    scans = []
+    real = os.listdir
+    monkeypatch.setattr(sa.os, "listdir", lambda p: scans.append(p) or real(p))
+    cache = {}
+    for _ in range(3):
+        assert sa.local_pid(str(tmp_path), 4242, "deadbeef", cache) is None
+    assert len(scans) == 1                                 # one full /proc scan per TTL
+    cache["deadbeef"] = -(time.monotonic() - 1)            # expired
+    sa.local_pid(str(tmp_path), 4242, "deadbeef", cache)
+    assert len(scans) == 2
+
+
+async def test_capture_failure_still_publishes_one_event_id(redis, monkeypatch):
+    a = make_agent(redis)
+    a.capture = True
+    stub_predict(monkeypatch, "ransomware", 0.95)
+    real_xadd = redis.xadd
+
+    async def xadd(stream, *args, **kw):
+        if stream == sa.STREAM_CAPTURE:
+            raise sa.aioredis.ConnectionError("capture down")
+        return await real_xadd(stream, *args, **kw)
+    monkeypatch.setattr(redis, "xadd", xadd)
+    a.ingest(parse_line(falco_line()))
+    await a.evaluate_all()
+    assert await redis.xlen(STREAM_SECURITY) == 1
+    monkeypatch.setattr(redis, "xadd", real_xadd)
+    a.ingest(parse_line(falco_line()))
+    a.windows[("shop", "web-7d9f8b6c5-x2x7q")].last_label = ""   # publish again
+    await a.evaluate_all()
+    (_, cap), = await redis.xrange(sa.STREAM_CAPTURE)
+    _, pub = (await redis.xrange(STREAM_SECURITY))[-1]
+    assert cap["event_id"] == pub["event_id"]
+    assert "events_json" not in pub and "entropy_json" not in pub
+
+
+async def test_capture_rows_carry_the_scored_window(redis, monkeypatch, tmp_path):
+    (tmp_path / "4242" / "root" / "data").mkdir(parents=True)
+    (tmp_path / "4242" / "root" / "data" / "a.txt.locked").write_bytes(os.urandom(4096))
+    a = make_agent(redis, proc_root=str(tmp_path))
+    a.capture = True
+    calls = stub_predict(monkeypatch, "benign", 0.1)
+    a.ingest(parse_line(falco_line("openat", "/data/a.txt")))
+    a.ingest(parse_line(falco_line("renameat2", None, **{"fs.path.source": "/data/a.txt",
+                                                         "fs.path.target": "/data/a.txt.locked"})))
+    await a.evaluate_all()
+    (_, fields), = await redis.xrange(sa.STREAM_CAPTURE)
+    events, entropy = json.loads(fields["events_json"]), json.loads(fields["entropy_json"])
+    assert events == [{"syscall": "open_w", "path": "/data/a.txt", "new_path": "", "ts_ms": 1714564800123},
+                      {"syscall": "renameat2", "path": "/data/a.txt", "new_path": "/data/a.txt.locked",
+                       "ts_ms": 1714564800123}]
+    assert len(entropy) == 1 and entropy[0] > 7.5
+    from kubeheal.features.security import security_features, window_seconds
+    assert security_features(events, entropy, window_seconds(1714564800123, 1714564800123)) == calls[0][1]
+
+
+async def test_hot_pod_rescored_at_most_every_interval(redis, monkeypatch):
+    monkeypatch.setattr(sa, "POD_MIN_INTERVAL_S", 0.5)
+    a = make_agent(redis)
+    calls = stub_predict(monkeypatch, "benign", 0.1)
+    for _ in range(sa.BURST_EVENTS):
+        a.ingest(parse_line(falco_line()))
+    assert await a.evaluate_all(burst_only=True) is None and len(calls) == 1   # first burst: at once
+    for _ in range(sa.BURST_EVENTS):
+        a.ingest(parse_line(falco_line()))
+    wake_at = await a.evaluate_all(burst_only=True)
+    assert len(calls) == 1 and wake_at > time.monotonic()                      # deferred, wake-up time returned
+    a.windows[("shop", "web-7d9f8b6c5-x2x7q")].due_at = 0.0
+    await a.evaluate_all(burst_only=True)
+    assert len(calls) == 2 and calls[1][1]["n_events"] == 2 * sa.BURST_EVENTS
+
+
+def test_parse_line_reads_only_fields_the_falco_rule_outputs():
+    import inspect
+    import re
+    from pathlib import Path
+
+    from agents.security_agent import falco
+    src = inspect.getsource(falco)
+    keys = set(re.findall(r'(?:_field\(f, |f\.get\(|fields\.get\()"([^"]+)"', src))
+    assert {"container.id", "k8s.pod.uid", "proc.pid", "evt.type"} <= keys
+    rules = (Path(__file__).parent.parent / "deploy/k8s/falco-kubeheal-rules.yaml").read_text()
+    output = re.search(r'^\s*output: "(.*)"$', rules, re.M).group(1)
+    emitted = set(re.findall(r"%([\w.]+)", output)) | {"evt.time"}   # Falco prefixes every output with %evt.time
+    assert keys <= emitted, keys - emitted
+
+
+# ── containment (cgroup freeze) ──────────────────────────────────────────────
+def pod_cgroup(root, rel):
+    d = root / rel
+    d.mkdir(parents=True)
+    (d / "cgroup.freeze").write_text("0")
+    return d / "cgroup.freeze"
+
+
+@pytest.mark.parametrize("rel", [
+    f"kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod{UID.replace('-', '_')}.slice",   # systemd
+    f"kubepods.slice/kubepods-pod{UID.replace('-', '_')}.slice",                                     # guaranteed
+    f"kubepods/besteffort/pod{UID}",                                                                 # cgroupfs
+    f"kubepods/pod{UID}"])                                                                           # guaranteed
+def test_freeze_pod_both_drivers(tmp_path, rel):
+    freeze = pod_cgroup(tmp_path, rel)
+    assert sa.freeze_pod(str(tmp_path), UID) == "frozen" and freeze.read_text() == "1"
+
+
+def test_freeze_pod_refuses_bad_uid_absent_pod_and_symlinks(tmp_path):
+    pod_cgroup(tmp_path, f"kubepods/pod{UID}")
+    for bad in ("", "../../..", UID.upper(), UID + "/..", "*"):
+        assert sa.freeze_pod(str(tmp_path), bad) == "not_on_node"            # never becomes a path
+    other = "0" * 8 + UID[8:]
+    assert sa.freeze_pod(str(tmp_path), other) == "not_on_node"
+    elsewhere = pod_cgroup(tmp_path, "system.slice/sshd.service")
+    os.symlink(elsewhere.parent, tmp_path / "kubepods" / f"pod{other}")      # a symlinked "pod" dir: not followed
+    with pytest.raises(OSError):
+        sa.freeze_pod(str(tmp_path), other)
+    assert elsewhere.read_text() == "0"
+
+
+async def test_contain_loop_freezes_local_pods_only(redis, monkeypatch, tmp_path):
+    from kubeheal.contracts import STREAM_CONTAIN, now_ms
+    monkeypatch.setattr(sa, "CGROUP_ROOT", str(tmp_path / "cg"))
+    freeze = pod_cgroup(tmp_path / "cg", f"kubepods/burstable/pod{UID}")
+    a = make_agent(redis)
+    await redis.xadd(STREAM_CONTAIN, {"pod_uid": UID, "namespace": "shop", "pod": "p", "event_id": "old",
+                                      "ts_ms": now_ms()})                     # before startup: not replayed
+    task = asyncio.create_task(a.contain_loop())
+    await asyncio.sleep(0.05)
+    assert freeze.read_text() == "0"
+    before = {o: sa.CONTAIN.labels(o)._value.get() for o in ("frozen", "not_on_node", "error", "stale")}
+    for uid, ns, ts in ((UID, "shop", now_ms()), ("0" * 8 + UID[8:], "shop", now_ms()),
+                        (UID, "kube-system", now_ms()), (UID, "shop", now_ms() - 60_000)):
+        await redis.xadd(STREAM_CONTAIN, {"pod_uid": uid, "namespace": ns, "pod": "p", "event_id": "e", "ts_ms": ts})
+    for _ in range(100):
+        if sum(sa.CONTAIN.labels(o)._value.get() - v for o, v in before.items()) == 4:
+            break
+        await asyncio.sleep(0.02)
+    task.cancel()
+    assert freeze.read_text() == "1"
+    assert {o: sa.CONTAIN.labels(o)._value.get() - v for o, v in before.items()} == \
+        {"frozen": 1, "not_on_node": 1, "error": 1, "stale": 1}
+
+
+def test_event_lag_metric_and_rate_limited_warning(redis, caplog):
+    a = make_agent(redis)
+    n = sa.EVENT_LAG._sum.get()
+    a.observe_lag(sa.now_ms() - 10_000)
+    a.observe_lag(sa.now_ms() - 10_000)
+    assert sa.EVENT_LAG._sum.get() - n == pytest.approx(20, abs=1)
+    assert sum("lag" in r.message for r in caplog.records) == 1

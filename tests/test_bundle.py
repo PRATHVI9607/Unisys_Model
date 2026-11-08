@@ -2,7 +2,7 @@ import lightgbm as lgb
 import numpy as np
 import pytest
 
-from kubeheal.ml.bundle import ModelBundle
+from kubeheal.ml.bundle import LIVE_NONE, ModelBundle, nan_blind
 from kubeheal.ml.conformal import calibrate, prediction_sets
 
 FEATURES = ["a", "b", "c"]
@@ -130,3 +130,20 @@ def test_prediction_sets_floor_keeps_confident_labels_only():
     sets = prediction_sets(np.array([[0.5, 0.3, 0.2]]), q=0.356)   # q < 0.5 and p_max < 0.95: empty -> uncertain
     assert sets.sum() == 0
     assert prediction_sets(np.array([[0.7, 0.4, 0.1]]), q=0.7).tolist() == [[True, True, False]]   # q above floor: plain LAC
+
+
+def test_nan_blind_flags_features_trained_without_nan(bundle):
+    assert nan_blind(bundle.booster, FEATURES) == FEATURES          # no NaN in training: None would score as 0
+    rng = np.random.default_rng(1)
+    x, y = _data(2000, rng)
+    x[rng.random(2000) < 0.3, 0] = np.nan
+    booster = lgb.train({"objective": "multiclass", "num_class": 3, "verbose": -1, "num_threads": 1},
+                        lgb.Dataset(x, y, feature_name=FEATURES), num_boost_round=20)
+    assert nan_blind(booster, FEATURES) == ["b", "c"]
+
+
+def test_live_none_lists_name_real_features():
+    from kubeheal.features.health import HEALTH_FEATURES
+    from kubeheal.features.security import SECURITY_FEATURES
+
+    assert set(LIVE_NONE["health"]) <= set(HEALTH_FEATURES) and set(LIVE_NONE["security"]) <= set(SECURITY_FEATURES)

@@ -227,3 +227,138 @@ def test_synthetic_families_produce_their_rename_kinds():
     assert "suffix_added" in got["ransomware_rename"] and "temp_replace" in got["atomic_rename"]
     assert "rotate" in got["logrotate_gz"] and "temp_replace" in got["dpkg_install"]
     assert "suffix_added" not in got["atomic_rename"] | got["dpkg_install"] | got["logrotate_gz"]
+
+
+# ── transforms of read originals ─────────────────────────────────────────────
+TRANSFORM = ("frac_write_from_read", "frac_read_destroyed", "n_files_transformed")
+
+
+def _e(sc, p, new=None):
+    return {"syscall": sc, "path": p} | ({"new_path": new} if new else {})
+
+
+def _tf(events):
+    f = security_features(events, [], 5)
+    return tuple(f[k] for k in TRANSFORM)
+
+
+def _detection(n=6, mode="rename", setup=True):
+    """deploy/chaos/detection-test-workload.py: create, then read + O_TRUNC write (+ rename/swap) each file."""
+    ev = [_e("open_w", f"/data/f{i}.dat") for i in range(n)] if setup else []
+    for i in range(n):
+        x = f"/data/f{i}.dat"
+        ev += [_e("open_r", x), _e("open_w", x)]
+        if mode == "rename":
+            ev.append(_e("rename", x, x + ".khlocked"))
+        elif mode == "swap":
+            ev.append(_e("rename", x, f"/data/f{i}.khlocked"))
+        elif mode == "copy":              # write x.enc, delete the original
+            ev[-1] = _e("open_w", x + ".enc")
+            ev.append(_e("unlink", x))
+    return ev
+
+
+@pytest.mark.parametrize("mode", ["rename", "inplace", "swap", "copy"])
+def test_ransomware_transforms_every_file_it_reads(mode):
+    w, d, n = _tf(_detection(mode=mode, setup=False))
+    assert w == 1.0 and d == 1.0 and n == 6.0
+
+
+def test_setup_phase_dilutes_the_window_but_not_the_read_side_or_the_tail():
+    ev = [_e("open_w", f"/data/s{i}.dat") for i in range(200)] + _detection(n=20)
+    f = security_features(ev, [], 5)
+    assert f["frac_write_from_read"] < 0.3 and f["frac_read_destroyed"] == 1.0
+    assert f["recent_frac_write_from_read"] == 1.0 and f["recent_frac_read_destroyed"] > 0.9
+
+
+def test_slow_attack_is_evident_after_two_files():
+    ev = [_e("open_w", f"/data/f{i}.dat") for i in range(100)] + _detection(n=2, setup=False)
+    f = security_features(ev, [], 60)
+    assert f["n_files_transformed"] == 2.0 and f["frac_read_destroyed"] == f["recent_frac_read_destroyed"] == 1.0
+
+
+def test_partial_attack_reads_more_than_it_transforms():
+    ev = _detection(n=4, setup=False) + [_e("open_r", f"/data/g{i}") for i in range(4)]
+    assert _tf(ev)[1] == 0.5
+
+
+def test_restic_backup_reads_originals_and_writes_new_repo_files():
+    ev = [_e("open_r", "/data/repo/config"), _e("open_r", "/data/repo/keys/1f2e")]
+    for i in range(30):
+        ev.append(_e("open_r", f"/data/src/f{i}.txt"))
+        if i % 5 == 0:
+            h = f"{i:02x}a9c3e1b7"
+            ev += [_e("open_w", f"/data/repo/data/{h[:2]}/.{h}-tmp"), _e("rename", f"/data/repo/data/{h[:2]}/.{h}-tmp",
+                                                                       f"/data/repo/data/{h[:2]}/{h}")]
+    ev += [_e("open_w", "/data/repo/snapshots/77ab"), _e("open_w", "/data/repo/locks/88cd"),
+           _e("unlink", "/data/repo/locks/88cd"),
+           _e("open_r", "/data/repo/index/55"), _e("open_w", "/data/cache/x/index/55")]   # cache copy: other dir
+    assert _tf(ev) == (0.0, 0.0, 0.0)
+
+
+def test_restic_prune_deletes_packs_it_read_but_transforms_none():
+    ev = []
+    for i in range(10):
+        ev += [_e("open_r", f"/data/repo/data/0{i}/old{i}"), _e("open_w", f"/data/repo/data/1{i}/new{i}")]
+    ev += [_e("unlink", f"/data/repo/data/0{i}/old{i}") for i in range(10)]
+    w, d, n = _tf(ev)
+    assert w == 0.0 and n == 0.0 and d == 1.0
+
+
+def test_package_installs_and_git_write_fresh_trees():
+    npm = [_e("open_r", "/data/app/package.json"), _e("open_r", "/data/npmcache/content-v2/sha512/ab/cd/ef01")]
+    npm += [_e("open_w", f"/data/app/node_modules/express/lib/f{i}.js") for i in range(40)]
+    npm += [_e("open_w", "/data/app/node_modules/.staging/x-1"),
+            _e("rename", "/data/app/node_modules/.staging/x-1", "/data/app/node_modules/x"),
+            _e("open_w", "/data/app/package.json")]                                # rewrites its manifest
+    w, d, n = _tf(npm)
+    assert w < 0.05 and n == 1.0
+    pip = [_e("open_r", "/data/pipcache/wheels/a/requests-2.32.whl")]
+    pip += [_e("open_w", f"/data/venv/lib/site-packages/requests/m{i}.py") for i in range(30)]
+    pip += [_e("open_r", "/data/venv/lib/site-packages/requests/m1.py"),
+            _e("open_w", "/data/venv/lib/site-packages/requests/__pycache__/m1.cpython-313.pyc.4711"),
+            _e("rename", "/data/venv/lib/site-packages/requests/__pycache__/m1.cpython-313.pyc.4711",
+               "/data/venv/lib/site-packages/requests/__pycache__/m1.cpython-313.pyc")]
+    assert _tf(pip) == (0.0, 0.0, 0.0)
+    git = [_e("open_r", "/data/repo/.git/index"), _e("open_r", "/data/repo/.git/objects/pack/p.pack")]
+    git += [x for i in range(20) for x in (_e("unlink", f"/data/repo/src/f{i}.go"), _e("open_w", f"/data/repo/src/f{i}.go"))]
+    git += [_e("open_w", "/data/repo/.git/index.lock"), _e("rename", "/data/repo/.git/index.lock", "/data/repo/.git/index")]
+    assert _tf(git) == (0.0, 0.0, 0.0)
+
+
+def test_logrotate_gzip_and_atomic_config_writes_do_not_transform():
+    rot = [_e("rename", "/data/app.log", "/data/app.log.1"), _e("open_w", "/data/app.log"),
+           _e("open_r", "/data/app.log.1"), _e("open_w", "/data/app.log.1.gz"), _e("unlink", "/data/app.log.1"),
+           _e("rename", "/data/app.log.1.gz", "/data/app.log.2.gz")]
+    w, d, n = _tf(rot)
+    assert w == 0.0 and n == 0.0 and d == 1.0          # gzip removes what it read: destroyed, not transformed
+    conf = [_e("open_r", "/data/conf.json")]
+    for tmp in ("/data/conf.json.tmp", "/data/.conf.json.swp", "/data/conf.json~", "/data/conf.json.new"):
+        conf += [_e("open_w", tmp), _e("rename", tmp, "/data/conf.json")]
+    assert _tf(conf) == (0.0, 0.0, 0.0)
+    moved = [_e("open_r", "/data/in/a.csv"), _e("rename", "/data/in/a.csv", "/data/done/a.csv")]   # queue move
+    assert _tf(moved) == (0.0, 0.0, 0.0)
+
+
+def test_transform_features_none_without_reads_or_writes():
+    f = security_features([], [], 5)
+    assert f["frac_write_from_read"] is None and f["frac_read_destroyed"] is None and f["n_files_transformed"] == 0.0
+    assert f["recent_frac_write_from_read"] is None and f["recent_frac_read_destroyed"] is None
+    f = security_features([_e("open_w", "/d/a")], [], 5)
+    assert f["frac_write_from_read"] == 0.0 and f["frac_read_destroyed"] is None
+
+
+def test_synthetic_backup_and_package_families_never_transform_but_trickle_does():
+    from training.synth_security import HARD_POSITIVES
+
+    recs = generate(500, seed=11)
+    feats = {}
+    for r in recs:
+        feats.setdefault(r["scenario"], []).append(security_features(r["events"], r["entropy"], r["window_s"]))
+    for fam in ("backup_repo", "package_tree"):
+        assert {r["label"] for r in recs if r["scenario"] == fam} == {"benign"}
+        assert np.median([f["n_files_transformed"] for f in feats[fam]]) <= 1
+    (trickle,) = HARD_POSITIVES
+    t = feats[trickle.__name__]
+    assert np.median([f["n_files_transformed"] for f in t]) >= 2
+    assert np.median([f["frac_read_destroyed"] for f in t if f["frac_read_destroyed"] is not None]) == 1.0

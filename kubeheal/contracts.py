@@ -30,6 +30,10 @@ STREAM_DEADLETTER = "kubeheal.deadletter"
 # Security agent capture mode (KUBEHEAL_CAPTURE=1, lab data collection only): every scored window as a
 # SecurityEvent, whatever its risk. Read by training/collect/security_lab.py.
 STREAM_CAPTURE = "kubeheal.security.capture"
+# Containment commands: fusion → every node's security agent. An entry {pod_uid, namespace, pod, event_id, ts_ms}
+# asks the agent on the pod's node to freeze the pod cgroup at once (the API delete follows).
+STREAM_CONTAIN = "kubeheal.contain"
+CONTAIN_MAXLEN = 1_000  # approximate trim; entries are only useful for seconds
 STREAM_MAXLEN = 10_000  # approximate trim (XADD MAXLEN ~)
 
 # ── Label sets (index order == model class order) ───────────────────────────
@@ -64,12 +68,24 @@ def key_event(kind: str, event_id: str) -> str:
     return f"kubeheal:{kind}:{event_id}"
 
 
-def key_circuit(action: str, ns: str, workload: str) -> str:
-    return f"kubeheal:cb:{action}:{ns}:{workload}"
+def key_event_index(kind: str) -> str:
+    """List of key_event keys of one kind, newest first; caps how many hash copies exist."""
+    return f"kubeheal:index:{kind}"
 
 
-def key_lock(ns: str, workload: str) -> str:
-    return f"kubeheal:lock:{ns}:{workload}"
+def key_done(event_id: str) -> str:
+    """Fusion's idempotency marker for one consumed event: the ActionEvent it produced (JSON)."""
+    return f"kubeheal:done:{event_id}"
+
+
+# `target` is the controller fusion acts on as "{Kind}/{name}" (Deployment/web, DaemonSet/agent, Pod/x for
+# a bare pod), so every pod of one controller shares one lock and one breaker budget.
+def key_circuit(action: str, ns: str, target: str) -> str:
+    return f"kubeheal:cb:{action}:{ns}:{target}"
+
+
+def key_lock(ns: str, target: str) -> str:
+    return f"kubeheal:lock:{ns}:{target}"
 
 
 def workload_key(ns: str, workload: str) -> str:
@@ -119,7 +135,7 @@ class Prediction(BaseModel):
 class _Event(BaseModel):
     event_id: str
     namespace: str
-    workload: str                     # owning Deployment name (join key with namespace)
+    workload: str                     # Deployment of an RS-owned pod, else the controller, else the pod (join key)
     pod: str = ""                     # concrete pod when known (security); "" for health
     timestamp_ms: int = Field(default_factory=now_ms)
     model_version: str = ""
@@ -129,10 +145,6 @@ class _Event(BaseModel):
     probabilities: dict[str, float] = {}
     top_factors: list[Factor] = []
     features: dict[str, float | None] = {}
-
-    @property
-    def tier(self) -> str:
-        return namespace_tier(self.namespace)
 
     def to_fields(self) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -210,6 +222,9 @@ class ActionEvent(BaseModel):
     summary: str = ""                  # one-paragraph plain-English explanation
     health_event_id: str = ""
     security_event_id: str = ""
+    # AUTO_KILL in enforce: "requested" once the STREAM_CONTAIN freeze command was written, "failed" if
+    # that write failed (the API delete went ahead); "" when no containment was attempted.
+    containment: str = ""
     timestamp_ms: int = Field(default_factory=now_ms)
 
     to_fields = _Event.to_fields

@@ -36,7 +36,7 @@ def test_health_event_roundtrip():
 def test_security_and_action_roundtrip():
     s = _roundtrip(SecurityEvent(event_id="s-1", namespace="dev", workload="api", pod="api-7d9-x",
                                  label="ransomware", risk=0.97, n_events=212))
-    assert s.tier == "dev" and s.uncertain is False
+    assert s.uncertain is False
     a = _roundtrip(ActionEvent(event_id="a-1", namespace="dev", workload="api", decision=Decision.AUTO_KILL,
                                mode="observe", outcome="would_kill", score=0.97, rationale="r"))
     assert a.decision is Decision.AUTO_KILL

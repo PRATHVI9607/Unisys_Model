@@ -3,6 +3,7 @@ import time
 import fakeredis
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from dashboard import fastapi_app
 from kubeheal.contracts import (
@@ -26,6 +27,8 @@ ACTION = ActionEvent(event_id="a-1", namespace="shop-prod", workload="cart", pod
                      decision=Decision.AUTO_KILL, mode="observe", outcome="would_kill", score=0.97,
                      compound_score=0.8, rationale="ransomware certain", summary="Would kill cart-abc.",
                      health_event_id="h-1", security_event_id="s-1")
+BASE = "http://localhost"   # an allowed Host (TrustedHostMiddleware)
+WS = "ws://localhost/ws"    # websocket_connect ignores base_url
 
 
 def wait_for(cond, timeout=5.0):
@@ -46,7 +49,7 @@ def redis_and_client(monkeypatch):
     sync.xadd(STREAM_SECURITY, SECURITY.to_fields())
     monkeypatch.setattr(fastapi_app, "make_redis",
                         lambda: fakeredis.FakeAsyncRedis(server=server, decode_responses=True))
-    with TestClient(fastapi_app.app) as client:
+    with TestClient(fastapi_app.app, base_url=BASE) as client:
         assert wait_for(lambda: client.get("/readyz").status_code == 200)
         yield sync, client
 
@@ -62,7 +65,7 @@ def test_backfill_parses_contract_and_skips_malformed(redis_and_client):
 
 def test_live_action_reaches_rest_and_websocket(redis_and_client):
     sync, client = redis_and_client
-    with client.websocket_connect("/ws") as ws:
+    with client.websocket_connect(WS) as ws:
         assert ws.receive_json()["type"] == "stats"
         sync.xadd(STREAM_HEALTH, {"garbage": "1"})    # bad entry in the same read must not drop the good one
         sync.xadd(STREAM_ACTIONS, ACTION.to_fields())
@@ -96,7 +99,26 @@ def test_readyz_503_when_redis_down(monkeypatch):
             raise fastapi_app.aioredis.ConnectionError("down")
 
     monkeypatch.setattr(fastapi_app, "make_redis", lambda: Down())
-    with TestClient(fastapi_app.app) as client:
+    with TestClient(fastapi_app.app, base_url=BASE) as client:
         assert client.get("/healthz").status_code == 200
         assert client.get("/readyz").status_code == 503
         assert client.get("/api/events/health/x").status_code == 503
+
+
+def test_host_allow_list_and_csp(redis_and_client):
+    _, client = redis_and_client
+    r = client.get("/")
+    assert r.status_code == 200 and "script-src 'self';" in r.headers["content-security-policy"]
+    assert "<script>" not in r.text and "<style>" not in r.text      # CSP blocks inline code: all in /static
+    assert client.get("/", headers={"host": "evil.example"}).status_code == 400   # DNS rebinding
+    assert client.get("/healthz", headers={"host": "kubeheal-dashboard.kubeheal.svc:8080"}).status_code == 200
+
+
+def test_websocket_rejects_cross_site_origin(redis_and_client):
+    _, client = redis_and_client
+    with pytest.raises(WebSocketDisconnect) as e, \
+            client.websocket_connect(WS, headers={"origin": "https://evil.example"}) as ws:
+        ws.receive_json()
+    assert e.value.code == 1008
+    with client.websocket_connect(WS, headers={"origin": BASE}) as ws:
+        assert ws.receive_json()["type"] == "stats"

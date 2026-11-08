@@ -21,14 +21,19 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from kubeheal.contracts import SECURITY_PUBLISH_RISK, Prediction
+from kubeheal.features.health import HEALTH_FEATURES
 from kubeheal.features.security import SECURITY_FEATURES
 from kubeheal.ml.bundle import ModelBundle
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
 log = logging.getLogger("kubeheal.inference")
 TASKS = ("health", "security")
+# What the agents send per task. A bundle may list fewer (trained with --drop-features: the rest is ignored) or
+# names no longer sent (served as missing, but /readyz reports the mismatch).
+SENT = {"health": frozenset(HEALTH_FEATURES), "security": frozenset(SECURITY_FEATURES)}
 # Only rows the agent can publish are explained; every health assessment is published, so all are explained.
 EXPLAIN_RISK = {"health": 0.0, "security": SECURITY_PUBLISH_RISK}
 
@@ -76,14 +81,33 @@ MAX_BODY_BYTES = 64 * 1024   # a full feature dict is < 4 KiB
 MAX_BATCH_BODY_BYTES = MAX_BATCH * 4 * 1024
 
 
-@app.middleware("http")
-async def limit_body(request: Request, call_next):
-    # The 200-key limit applies only after the whole body is parsed; refuse huge bodies up front.
-    # shortcut: chunked bodies without Content-Length are not capped; add a streaming cap if callers ever send them.
-    cap = MAX_BATCH_BODY_BYTES if request.url.path.endswith("/predict_batch") else MAX_BODY_BYTES
-    if int(request.headers.get("content-length") or 0) > cap:
-        return JSONResponse(status_code=413, content={"detail": "request body too large"})
-    return await call_next(request)
+class BodyLimit:
+    """Refuse huge bodies before they are buffered (the 200-key limit applies only after parsing): by
+    Content-Length up front, and by counting received bytes for chunked bodies that carry none."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        cap = MAX_BATCH_BODY_BYTES if scope["path"].endswith("/predict_batch") else MAX_BODY_BYTES
+        length = dict(scope["headers"]).get(b"content-length")
+        if length is not None and (not length.isdigit() or int(length) > cap):
+            return await JSONResponse(status_code=413, content={"detail": "request body too large"})(scope, receive, send)
+        seen = 0
+
+        async def capped():
+            nonlocal seen
+            msg = await receive()
+            seen += len(msg.get("body", b""))
+            if seen > cap:     # raised inside body parsing: FastAPI re-raises HTTPException → 413 response
+                raise StarletteHTTPException(413, "request body too large")
+            return msg
+        return await self.app(scope, capped, send)
+
+
+app.add_middleware(BodyLimit)
 
 
 @app.exception_handler(RequestValidationError)
@@ -99,13 +123,13 @@ def _predict(task: str, items: list[PredictRequest]) -> list[Prediction]:
         REQUESTS.labels(task, "unavailable").inc()
         raise HTTPException(503, f"{task} model not loaded")
     known = set(bundle.features)
-    unknown = sorted(set().union(*(r.features for r in items)) - known - (set(SECURITY_FEATURES) if task == "security" else set()))
+    unknown = sorted(set().union(*(r.features for r in items)) - known - SENT[task])
     if unknown:
         REQUESTS.labels(task, "invalid").inc()
         raise HTTPException(422, f"unknown features: {unknown}")
     t0 = time.perf_counter()
-    # Older bundle: feature names it does not list are ignored; names it lists but are gone from SECURITY_FEATURES
-    # (renamed rename_* features) are absent from the row, which the bundle reads as missing (None), never an error.
+    # Names the bundle does not list (older bundle, --drop-features) are ignored; names it lists that are no longer
+    # sent (renamed rename_* features) are absent from the row, which the bundle reads as missing (None).
     rows = [{k: v for k, v in r.features.items() if k in known} for r in items]
     preds = bundle.predict_batch(rows, EXPLAIN_RISK[task])
     LATENCY.labels(task).observe(time.perf_counter() - t0)
@@ -136,18 +160,22 @@ def predict_security_batch(req: PredictBatchRequest) -> list[Prediction]:
     return _predict("security", req.items)
 
 
+# async: probes run on the event loop, never queued behind CPU-bound predictions in the threadpool.
 @app.get("/healthz")
-def healthz() -> dict:
+async def healthz() -> dict:
     return {"status": "ok"}
 
 
 @app.get("/readyz")
-def readyz(response: Response) -> dict:
-    loaded = {t: t in app.state.bundles for t in TASKS}
-    if not all(loaded.values()):
+async def readyz(response: Response) -> dict:
+    bundles = app.state.bundles
+    # A bundle feature the agents never send would be scored as missing on every request: not ready.
+    unsent = {t: sorted(set(b.features) - SENT[t]) for t, b in bundles.items() if set(b.features) - SENT[t]}
+    ready = all(t in bundles for t in TASKS) and not unsent
+    if not ready:
         response.status_code = 503
-    return {"ready": all(loaded.values()), "models": {t: app.state.bundles[t].meta["version"] if ok else None
-                                                       for t, ok in loaded.items()}}
+    return {"ready": ready, "models": {t: bundles[t].meta["version"] if t in bundles else None for t in TASKS},
+            "unsent_features": unsent}
 
 
 @app.get("/metrics")

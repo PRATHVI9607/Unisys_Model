@@ -73,8 +73,9 @@ def test_empty_model_dir_is_503_never_random_weights(monkeypatch, tmp_path):
 def test_committed_bundles_match_the_feature_and_label_lists(task, features, labels, risk):
     meta = ModelBundle.load(MODELS / task).meta     # what the agents send == what the model was trained on
     assert (meta["labels"], meta["class_risk"]) == (labels, risk)
-    # A security bundle may leave out recent_* / rename-kind features (older bundles); nothing else.
-    new_names = ("recent_", "frac_rename_", "rename_ext_added")
+    # A security bundle may leave out recent_* / rename-kind / transform features (older bundles); nothing else.
+    new_names = ("recent_", "frac_rename_", "rename_ext_added", "frac_write_from_read", "frac_read_destroyed",
+                 "n_files_transformed")
     assert set(meta["features"]) <= set(features)
     assert not {f for f in features if f not in meta["features"] and not f.startswith(new_names)}
 
@@ -184,3 +185,41 @@ def test_old_bundle_gets_none_for_dropped_feature_names(client):
         "metrics": {}, "data": {}, "created_at": "now"})
     row = {f: 1.0 for f in SECURITY_FEATURES}                     # what the agent sends today
     assert client.post("/v1/security/predict", json={"features": row}).status_code == 200
+
+
+def test_chunked_body_without_content_length_is_413(client):
+    def chunks():
+        for _ in range(70):
+            yield b"x" * 1024
+    r = client.post("/v1/security/predict", content=chunks(), headers={"content-type": "application/json"})
+    assert r.status_code == 413
+
+
+def _bundle(task, names, labels, risk):
+    import lightgbm as lgb
+    import numpy as np
+
+    from kubeheal.ml.conformal import calibrate
+    x = np.random.default_rng(0).normal(size=(600, len(names)))
+    y = np.arange(600) % len(labels)
+    booster = lgb.train({"objective": "multiclass", "num_class": len(labels), "verbose": -1, "num_threads": 1},
+                        lgb.Dataset(x, y, feature_name=names), num_boost_round=5)
+    return ModelBundle(booster, {"task": task, "version": f"{task}-t", "labels": labels, "class_risk": risk,
+                                 "features": names, "alpha": 0.1, "metrics": {}, "data": {}, "created_at": "now",
+                                 "conformal_q": calibrate(booster.predict(x), y, alpha=0.1)})
+
+
+def test_health_bundle_trained_with_dropped_features_still_serves(client):
+    """--drop-features: the agent keeps sending every HEALTH_FEATURES name; the bundle ignores the extras."""
+    client.app.state.bundles["health"] = _bundle("health", HEALTH_FEATURES[:3], HEALTH_LABELS, HEALTH_CLASS_RISK)
+    row = {f: 1.0 for f in HEALTH_FEATURES}
+    assert client.post("/v1/health/predict", json={"features": row}).status_code == 200
+    assert client.post("/v1/health/predict", json={"features": {"not_a_feature": 1.0}}).status_code == 422
+    assert client.get("/readyz").status_code == 200
+
+
+def test_readyz_fails_when_a_bundle_needs_a_feature_nobody_sends(client):
+    client.app.state.bundles["health"] = _bundle("health", ["cpu_limit_ratio", "gone_feature"],
+                                                 HEALTH_LABELS, HEALTH_CLASS_RISK)
+    r = client.get("/readyz")
+    assert r.status_code == 503 and r.json()["unsent_features"] == {"health": ["gone_feature"]}

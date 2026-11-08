@@ -6,7 +6,9 @@ metrics, data {source, rows, groups, synthetic, sha256}, created_at.
 
 from __future__ import annotations
 
+import io
 import json
+import logging
 import math
 import time
 from dataclasses import dataclass
@@ -17,9 +19,47 @@ import lightgbm as lgb
 import numpy as np
 
 from kubeheal.contracts import Factor, Prediction
+from kubeheal.features.health import METRIC_FEATURES
 from kubeheal.ml.conformal import prediction_sets
 
+log = logging.getLogger(__name__)
 TOP_FACTORS = 5
+# Features the live agents can send as None (kubeheal/features/*). LightGBM scores a NaN as 0 on a split whose
+# missing_type is not NaN (the feature had no NaN in training): cpu_limit_ratio=None (a Deployment without limits)
+# then reads as "limit cut to 0". Health: resource ratios (no limits/requests), replicas_ratio (from 0), every metric.
+LIVE_NONE: dict[str, list[str]] = {
+    "health": ["cpu_limit_ratio", "cpu_request_ratio", "mem_limit_ratio", "mem_request_ratio", "replicas_ratio",
+               *METRIC_FEATURES],
+    "security": ["frac_rename_suffix_added", "frac_rename_temp_replace", "frac_rename_rotate", "rename_ext_added_ratio",
+                 "suspicious_ext_ratio", "entropy_mean", "entropy_max", "entropy_p90", "entropy_high_frac",
+                 "entropy_slope", "write_bytes_per_s", "net_out_bytes_per_s", "recent_frac_rename_suffix_added",
+                 "recent_frac_rename_temp_replace", "recent_ext_added_frac", "recent_entropy_mean",
+                 "recent_entropy_high_frac"],
+}
+
+
+def nan_blind(model: lgb.Booster | Path, features: list[str]) -> list[str]:
+    """Of `features`, those some split reads with missing_type != NaN, i.e. scores a None as 0.
+
+    Parses the model text, not dump_model(): the dict of a 2000-round 4-class model is several hundred MB
+    and OOMKilled the inference pod at load. decision_type bits 2-3 are the missing type (2 = NaN).
+    """
+    names: list[str] = []
+    bad: set[str] = set()
+    split: list[str] = []
+    # a model.txt path is read line by line (load time, no copy); a Booster is serialised (train time)
+    src = open(model) if isinstance(model, Path) else io.StringIO(model.model_to_string())
+    for line in src:
+        line = line.rstrip("\n")
+        if line.startswith("feature_names="):
+            names = line[len("feature_names="):].split()
+        elif line.startswith("split_feature="):
+            split = line[len("split_feature="):].split()
+        elif line.startswith("decision_type="):
+            bad.update(names[int(f)] for f, dt in zip(split, line[len("decision_type="):].split(), strict=True)
+                       if (int(dt) >> 2) & 3 != 2)
+    src.close()
+    return sorted(bad & set(features))
 
 
 @dataclass
@@ -42,6 +82,9 @@ class ModelBundle:
         booster = lgb.Booster(model_file=str(d / "model.txt"))
         if booster.feature_name() != meta["features"] or booster.num_model_per_iteration() != len(meta["labels"]):
             raise ValueError(f"{d}: model.txt does not match meta.json features/labels")
+        if blind := nan_blind(d / "model.txt", LIVE_NONE.get(meta.get("task"), [])):
+            log.error("%s: %s can be None live but the model scores None as 0 (no NaN in training); retrain",
+                      d, blind)
         return cls(booster, meta)
 
     def save(self, directory: str | Path) -> None:

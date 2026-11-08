@@ -16,6 +16,7 @@ KEY = "kubeheal:lock:prod:web"
 class LockRedis:
     def __init__(self):
         self.store, self.extends, self.tokens = {}, 0, []
+        self.extended_twice, self.rejected = asyncio.Event(), asyncio.Event()
 
     async def set(self, key, value, nx=False, px=None):
         self.tokens.append(value)
@@ -26,9 +27,13 @@ class LockRedis:
 
     async def eval(self, script, numkeys, key, token, *args):
         if self.store.get(key) != token:
+            if script == il.EXTEND_IF_OWNER:
+                self.rejected.set()
             return 0
         if script == il.EXTEND_IF_OWNER:
             self.extends += 1
+            if self.extends >= 2:
+                self.extended_twice.set()
         else:
             assert script == il.RELEASE_IF_OWNER
             del self.store[key]
@@ -55,15 +60,16 @@ async def test_release_never_deletes_someone_elses_lock():
 
 
 async def test_heartbeat_extends_only_while_owner(monkeypatch):
-    monkeypatch.setattr(il, "HEARTBEAT_S", 0.01)
+    """Event-driven, no wall-clock assumptions: wait for the extends, then for the rejected one."""
+    monkeypatch.setattr(il, "HEARTBEAT_S", 0)
     r = LockRedis()
     async with il.incident_lock(r, KEY):
-        await asyncio.sleep(0.05)
-        assert r.extends >= 2
-        r.store[KEY] = "other-holder"
-        await asyncio.sleep(0.03)                     # heartbeat notices and stops
+        await asyncio.wait_for(r.extended_twice.wait(), 5)
+        r.store[KEY] = "other-holder"                 # ours expired, someone else took it
+        await asyncio.wait_for(r.rejected.wait(), 5)  # the heartbeat returns right after this
         frozen = r.extends
-        await asyncio.sleep(0.05)
+        for _ in range(10):
+            await asyncio.sleep(0)
         assert r.extends == frozen
     assert r.store[KEY] == "other-holder"
 
@@ -78,11 +84,21 @@ async def test_lock_released_on_exception():
     assert KEY not in r.store
 
 
-async def test_circuit_breaker_limit_and_fixed_window():
+async def test_circuit_breaker_counts_successes_in_a_fixed_window():
     r = fakeredis.FakeAsyncRedis(decode_responses=True)
-    key = "kubeheal:cb:kill:prod:web"
-    assert await il.circuit_allows(r, key, limit=2)
-    assert await il.circuit_allows(r, key, limit=2)
+    key = "kubeheal:cb:kill:prod:Deployment/web"
+    assert not await il.circuit_open(r, key, limit=2)
+    assert not await il.circuit_open(r, key, limit=2)    # checking never spends budget
+    await il.circuit_count(r, key)
+    await il.circuit_count(r, key)
+    assert await il.circuit_open(r, key, limit=2)
     await r.expire(key, 100)
-    assert not await il.circuit_allows(r, key, limit=2)
-    assert 0 < await r.ttl(key) <= 100                # later calls don't extend the window
+    await il.circuit_count(r, key)
+    assert 0 < await r.ttl(key) <= 100                # later counts don't extend the window
+
+
+async def test_circuit_count_never_raises():
+    class Down:
+        def pipeline(self, transaction):
+            raise ConnectionError("redis down")
+    await il.circuit_count(Down(), "k")

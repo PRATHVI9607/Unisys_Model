@@ -66,3 +66,24 @@ def test_ensure_namespace_patches_labels_when_it_exists():
     core = Core()
     asyncio.run(common.ensure_namespace(core))
     assert core.patched[0] == common.NS and core.patched[1]["metadata"]["labels"]["kubeheal.io/lab"] == "true"
+
+
+async def test_publish_event_caps_hash_copies_and_acks_atomically(monkeypatch):
+    import fakeredis
+
+    from kubeheal.contracts import ActionEvent, Decision, key_event, key_event_index
+
+    r = fakeredis.FakeAsyncRedis(decode_responses=True)
+    monkeypatch.setattr(common, "EVENT_COPIES", 2)
+    await r.xgroup_create("in", "g", id="0", mkstream=True)
+    entry = await r.xadd("in", {"x": "1"})
+    await r.xreadgroup("g", "c", {"in": ">"})
+    evs = [ActionEvent(event_id=f"a{i}", namespace="n", workload="w", decision=Decision.BENIGN, mode="observe",
+                       outcome="none", score=0.1, rationale="r") for i in range(3)]
+    for ev in evs[:2]:
+        await common.publish_event(r, "out", "action", ev)
+    await common.publish_event(r, "out", "action", evs[2], ack=("in", "g", entry))
+    assert not await r.exists(key_event("action", "a0"))                  # oldest copy deleted
+    assert await r.exists(key_event("action", "a1"), key_event("action", "a2")) == 2
+    assert await r.llen(key_event_index("action")) == 2
+    assert await r.xlen("out") == 3 and (await r.xpending("in", "g"))["pending"] == 0

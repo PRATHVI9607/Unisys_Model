@@ -68,7 +68,10 @@ def _clean(value: Any, camel_keys: bool = True) -> Any:
 
 
 def canonical_spec(obj: Any) -> dict:
-    """DeploymentSpec as a camelCase dict with None/empty values removed."""
+    """DeploymentSpec as a camelCase dict with None/empty values removed.
+
+    For hashing and diffing only: user-data keys outside _USER_KEYED (csi volumeAttributes, configMap items) are
+    camelCased too, so this is never a restore target; the health agent stores the API-shaped spec for that."""
     if not isinstance(obj, dict):
         # kubernetes_asyncio model: serialize=True gives API (camelCase) names, the same output
         # as ApiClient().sanitize_for_serialization without needing a client or event loop.

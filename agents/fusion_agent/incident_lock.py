@@ -1,6 +1,9 @@
 """Concurrency guards for remediation: per-workload incident lock + circuit breaker.
 
-Order in the agent: take the lock first, then consume circuit-breaker budget.
+Order in the agent: take the lock, check the breaker, act, count a success. The lock and the breaker are
+keyed on the same target, so check → act → count runs serialised per target even across fusion replicas
+and the count cannot overshoot (no Lua needed); only a lock lost mid-action (Redis unreachable > 10 s)
+could let one extra action through.
 """
 
 from __future__ import annotations
@@ -59,10 +62,18 @@ async def _heartbeat(redis, key: str, token: str) -> None:
             return
 
 
-async def circuit_allows(redis, key: str, limit: int, window_s: int = CIRCUIT_WINDOW_S) -> bool:
-    """Atomically count one action in a fixed window; False once `limit` is exceeded."""
-    async with redis.pipeline(transaction=True) as p:
-        p.incr(key)
-        p.expire(key, window_s, nx=True)
-        count, _ = await p.execute()
-    return count <= limit
+async def circuit_open(redis, key: str, limit: int) -> bool:
+    """True once `limit` successful actions were counted in the current window."""
+    return int(await redis.get(key) or 0) >= limit
+
+
+async def circuit_count(redis, key: str, window_s: int = CIRCUIT_WINDOW_S) -> None:
+    """Count one successful action; the fixed window starts at the first (EXPIRE NX). Never raises:
+    the action already happened, and failing now would only re-run it."""
+    try:
+        async with redis.pipeline(transaction=True) as p:
+            p.incr(key)
+            p.expire(key, window_s, nx=True)
+            await p.execute()
+    except Exception:
+        log.error("could not count a success in circuit breaker %s", key, exc_info=True)

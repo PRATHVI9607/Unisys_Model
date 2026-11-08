@@ -35,11 +35,13 @@ TEMPLATE = {"metadata": {"labels": {"app": "web"}}, "spec": {"containers": [{"na
 
 
 class FakeKube:
-    """Stands in for CoreV1Api, AppsV1Api and NetworkingV1Api at once."""
+    """Stands in for CoreV1Api, AppsV1Api, NetworkingV1Api and BatchV1Api at once."""
 
-    def __init__(self, pod_labels=None, dep_labels=None, errors=None, ns_labels=None, owners=None, pod_uid="uid-123"):
+    def __init__(self, pod_labels=None, dep_labels=None, errors=None, ns_labels=None, owners="web", pod_uid="uid-123",
+                 pod_owner=None, ctrl_labels=None):
         self.calls, self.pod_labels, self.dep_labels, self.ns_labels = [], pod_labels, dep_labels, ns_labels
         self.owners, self.pod_uid = owners, pod_uid     # owners: Deployment name the pod's ReplicaSet belongs to
+        self.pod_owner, self.ctrl_labels = pod_owner, ctrl_labels   # (kind, name) of a non-RS controller
         self.errors = errors or {}     # method name -> HTTP status to raise
 
     def _rec(self, name, *args, **kwargs):
@@ -54,18 +56,34 @@ class FakeKube:
 
     async def read_namespaced_pod(self, name, ns):
         self._rec("read_namespaced_pod", name, ns)
-        refs = [SimpleNamespace(kind="ReplicaSet", name="web-7d9f")] if self.owners else []
+        kind, owner = self.pod_owner or (("ReplicaSet", "web-7d9f") if self.owners else (None, None))
+        refs = [SimpleNamespace(kind=kind, name=owner, controller=True)] if kind else []
         return SimpleNamespace(metadata=SimpleNamespace(name=name, uid=self.pod_uid, labels=self.pod_labels,
                                                         owner_references=refs))
 
     async def read_namespaced_replica_set(self, name, ns):
         self._rec("read_namespaced_replica_set", name, ns)
         return SimpleNamespace(metadata=SimpleNamespace(
-            owner_references=[SimpleNamespace(kind="Deployment", name=self.owners)]))
+            owner_references=[SimpleNamespace(kind="Deployment", name=self.owners, controller=True)]))
 
     async def read_namespaced_deployment(self, name, ns):
         self._rec("read_namespaced_deployment", name, ns)
-        return SimpleNamespace(metadata=SimpleNamespace(name=name, uid="uid-dep", labels=self.dep_labels))
+        spec = {"replicas": 2, "selector": {"matchLabels": {"app": "web"}}, "template": TEMPLATE}
+        return SimpleNamespace(metadata=SimpleNamespace(name=name, uid="uid-dep", labels=self.dep_labels),
+                               to_dict=lambda serialize=False: {"spec": spec})
+
+    async def _ctrl(self, method, name, ns):
+        self._rec(method, name, ns)
+        return SimpleNamespace(metadata=SimpleNamespace(name=name, labels=self.ctrl_labels))
+
+    async def read_namespaced_stateful_set(self, name, ns):
+        return await self._ctrl("read_namespaced_stateful_set", name, ns)
+
+    async def read_namespaced_daemon_set(self, name, ns):
+        return await self._ctrl("read_namespaced_daemon_set", name, ns)
+
+    async def read_namespaced_job(self, name, ns):
+        return await self._ctrl("read_namespaced_job", name, ns)
 
     async def patch_namespaced_pod(self, name, ns, body):
         self._rec("patch_namespaced_pod", name, ns, body)
@@ -103,7 +121,7 @@ def _no_lua(monkeypatch):
 
 def make(redis, kube=None, **kw):
     kube = kube or FakeKube()
-    return fa.FusionAgent(redis, kube, kube, kube, **kw), kube
+    return fa.FusionAgent(redis, kube, kube, kube, kube, **kw), kube
 
 
 def ransomware(ns="prod-shop", pod="web-7d9f-abcde", ts=None, eid="s1", risk=0.9):
@@ -138,17 +156,19 @@ async def test_enforce_kill_sequence(redis):
     agent, kube = make(redis, mode="enforce")
     a = await agent.handle(ransomware())
     assert (a.decision, a.outcome) == (Decision.AUTO_KILL, "pod_killed")
-    assert kube.names == ["read_namespaced_pod", "read_namespaced_deployment", "patch_namespaced_pod",
-                          "create_namespaced_network_policy", "delete_namespaced_pod"]   # quarantine before delete
-    label_body = kube.calls[2][1][2]
-    assert label_body == {"metadata": {"labels": {"kubeheal.io/quarantined": "true"}}}
-    ns, policy = kube.calls[3][1]
+    assert kube.names == ["read_namespaced_pod", "read_namespaced_deployment", "read_namespaced_replica_set",
+                          "patch_namespaced_pod", "create_namespaced_network_policy",
+                          "delete_namespaced_pod"]   # quarantine before delete
+    label_body = kube.calls[3][1][2]
+    assert label_body == {"metadata": {"uid": "uid-123", "labels": {"kubeheal.io/quarantined": "true"}}}
+    ns, policy = kube.calls[4][1]
     assert ns == "prod-shop"
     assert policy["metadata"]["ownerReferences"][0] == {"apiVersion": "v1", "kind": "Pod",
                                                         "name": "web-7d9f-abcde", "uid": "uid-123"}
     assert policy["spec"] == {"podSelector": {"matchLabels": {"kubeheal.io/quarantined": "true"}},
                               "policyTypes": ["Ingress", "Egress"]}       # no rules = deny all
-    assert kube.calls[4][2] == {"grace_period_seconds": 0}
+    opts = kube.calls[5][2]
+    assert opts["grace_period_seconds"] == 0 and opts["body"].preconditions.uid == "uid-123"   # read UID, always
 
 
 @pytest.mark.parametrize("errors,outcome", [
@@ -296,7 +316,7 @@ async def test_partner_does_not_repeat_an_automatic_action(redis):
     assert (paired.decision, paired.outcome) == (Decision.AUTO_KILL, "already_handled")
     assert paired.security_event_id == "s1"
     assert kube.names.count("delete_namespaced_pod") == 1
-    assert await redis.get(fa.key_circuit("kill", "prod-shop", "web")) == "1"
+    assert await redis.get(fa.key_circuit("kill", "prod-shop", "Deployment/web")) == "1"
 
 
 def test_summary_is_short_and_factual():
@@ -321,7 +341,7 @@ async def test_failure_not_acked_then_deadlettered_after_3(redis, monkeypatch):
     monkeypatch.setattr(fa, "CLAIM_MIN_IDLE_MS", 0)
     agent, _ = make(redis)
 
-    async def boom(ev):
+    async def boom(ev, ack=None):
         raise RuntimeError("kaboom")
     monkeypatch.setattr(agent, "handle", boom)
     await agent.ensure_groups()
@@ -403,7 +423,7 @@ async def test_lock_and_circuit_keyed_on_resolved_deployment(redis):
     ev = ransomware()
     ev.workload = ev.pod
     assert (await agent.handle(ev)).outcome == "pod_killed"
-    assert await redis.get(fa.key_circuit("kill", "prod-shop", "web")) == "1"
+    assert await redis.get(fa.key_circuit("kill", "prod-shop", "Deployment/web")) == "1"
 
 
 async def test_stale_pod_uid_is_not_deleted(redis):
@@ -462,3 +482,195 @@ async def test_recreated_group_replays_events_published_during_the_loss(redis, m
     await agent.ensure_groups("0")
     await agent.poll_once(block_ms=1)
     assert kube.names.count("delete_namespaced_pod") == 1
+
+
+# ── controller resolution, idempotency, containment ─────────────────────────
+PROTECTED = {"kubeheal.io/protected": "true"}
+
+
+async def test_breaker_and_lock_keyed_on_the_daemonset_not_the_pod(redis):
+    agent, kube = make(redis, FakeKube(pod_owner=("DaemonSet", "node-agent")), mode="enforce", max_kills=1)
+    assert (await agent.handle(ransomware(eid="s1", pod="node-agent-aaaaa"))).outcome == "pod_killed"
+    # the replacement pod has a new name but the same controller: the budget is spent
+    assert (await agent.handle(ransomware(eid="s2", pod="node-agent-bbbbb"))).outcome == "skipped_circuit_open"
+    assert await redis.get(fa.key_circuit("kill", "prod-shop", "DaemonSet/node-agent")) == "1"
+    assert "read_namespaced_daemon_set" in kube.names
+
+
+@pytest.mark.parametrize("kind", ["StatefulSet", "DaemonSet", "Job"])
+async def test_protected_controller_label_is_honoured(redis, kind):
+    kube = FakeKube(pod_owner=(kind, "db"), ctrl_labels=PROTECTED)
+    agent, _ = make(redis, kube, mode="enforce")
+    assert (await agent.handle(ransomware())).outcome == "skipped_protected"
+    assert not MUTATING & set(kube.names)
+
+
+async def test_unreadable_controller_kind_escalates(redis):
+    agent, kube = make(redis, FakeKube(pod_owner=("Rollout", "web")), mode="enforce")
+    a = await agent.handle(ransomware())
+    assert (a.decision, a.outcome) == (Decision.HUMAN, "escalated_unknown_owner")
+    assert not MUTATING & set(kube.names)
+
+
+async def test_bare_pod_is_its_own_target(redis):
+    agent, _ = make(redis, FakeKube(owners=None), mode="enforce")
+    assert (await agent.handle(ransomware())).outcome == "pod_killed"
+    assert await redis.get(fa.key_circuit("kill", "prod-shop", "Pod/web-7d9f-abcde")) == "1"
+
+
+async def test_quarantine_label_uid_conflict_is_a_stale_pod(redis):
+    agent, kube = make(redis, FakeKube(errors={"patch_namespaced_pod": 409}), mode="enforce")
+    assert (await agent.handle(ransomware())).outcome == "skipped_stale_pod"
+    assert "delete_namespaced_pod" not in kube.names
+
+
+async def test_breaker_counts_only_successful_kills(redis):
+    kube = FakeKube(errors={"delete_namespaced_pod": 500})
+    agent, _ = make(redis, kube, mode="enforce", max_kills=1)
+    for i in range(3):
+        assert (await agent.handle(ransomware(eid=f"s{i}"))).outcome == "failed:api_500_Fake"
+    kube.errors = {}
+    assert (await agent.handle(ransomware(eid="s9"))).outcome == "pod_killed"
+
+
+async def test_failed_publish_is_retried_without_acting_twice(redis, monkeypatch):
+    agent, kube = make(redis, mode="enforce")
+    real, calls = fa.publish_event, []
+
+    async def flaky(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ConnectionError("redis blip")
+        await real(*a, **k)
+    monkeypatch.setattr(fa, "publish_event", flaky)
+    ev = ransomware()
+    with pytest.raises(ConnectionError):
+        await agent.handle(ev)
+    again = await agent.handle(ev)                                    # redelivery
+    assert again.outcome == "pod_killed" and kube.names.count("delete_namespaced_pod") == 1
+    assert await redis.xlen(STREAM_ACTIONS) == 1
+    assert await redis.get(fa.key_circuit("kill", "prod-shop", "Deployment/web")) == "1"
+
+
+async def test_publish_and_ack_in_one_transaction(redis):
+    agent, _ = make(redis)
+    await agent.ensure_groups()
+    await redis.xadd(STREAM_SECURITY, ransomware().to_fields())
+    await agent.poll_once(block_ms=1)
+    assert await redis.xlen(STREAM_ACTIONS) == 1
+    assert (await redis.xpending(STREAM_SECURITY, fa.GROUP))["pending"] == 0
+
+
+async def test_progress_counts_per_kube_call(redis):
+    agent, _ = make(redis)
+    agent.last_progress -= 100
+    assert not agent.alive()
+    await agent._kube(agent.core.read_namespace("x"))
+    assert agent.alive()
+
+
+async def test_non_nogroup_redis_error_backs_off_instead_of_crashing(redis, monkeypatch):
+    import asyncio
+
+    import redis.asyncio as aioredis
+    monkeypatch.setattr(fa, "RETRY_S", 0)
+    agent, _ = make(redis)
+    script = [aioredis.ResponseError("OOM command not allowed when used memory > 'maxmemory'"),
+              asyncio.CancelledError()]
+
+    async def poll():
+        raise script.pop(0)
+    monkeypatch.setattr(agent, "poll_once", poll)
+    with pytest.raises(asyncio.CancelledError):
+        await agent.run()
+    assert script == []
+
+
+async def test_deadletter_failure_leaves_entry_pending(redis, monkeypatch):
+    import redis.asyncio as aioredis
+    agent, _ = make(redis)
+    await agent.ensure_groups()
+    await redis.xadd(STREAM_SECURITY, {"event_id": "x", "risk": "not-a-number"})
+
+    async def oom(*a, **k):
+        raise aioredis.ResponseError("OOM command not allowed")
+    monkeypatch.setattr(redis, "xadd", oom)
+    await agent.poll_once(block_ms=1)                                 # does not raise
+    assert (await redis.xpending(STREAM_SECURITY, fa.GROUP))["pending"] == 1
+
+
+async def test_namespace_gone_is_observed_not_escalated(redis):
+    kube = FakeKube(errors={"read_namespace": 404})
+    agent, _ = make(redis, kube, mode="enforce")
+    a = await agent.handle(ransomware(ns="demo", risk=0.95))
+    assert (a.decision, a.outcome) == (Decision.OBSERVE, "namespace_gone")
+    assert "namespace gone" in a.rationale and kube.calls == []
+
+
+async def test_containment_requested_before_the_delete(redis):
+    agent, _ = make(redis, mode="enforce")
+    a = await agent.handle(ransomware(eid="s7"))
+    assert (a.outcome, a.containment) == ("pod_killed", "requested")
+    (_, entry), = await redis.xrange(fa.STREAM_CONTAIN)
+    assert {k: entry[k] for k in ("pod_uid", "namespace", "pod", "event_id")} == {
+        "pod_uid": "uid-123", "namespace": "prod-shop", "pod": "web-7d9f-abcde", "event_id": "s7"}
+    assert int(entry["ts_ms"]) > 0
+
+
+@pytest.mark.parametrize("kw", [{"mode": "observe"}, {"mode": "enforce", "protected": PROTECTED_NAMESPACES | {"prod-shop"}}])
+async def test_no_containment_when_not_killing(redis, kw):
+    agent, _ = make(redis, **kw)
+    a = await agent.handle(ransomware())
+    assert a.containment == "" and await redis.xlen(fa.STREAM_CONTAIN) == 0
+
+
+async def test_protected_pod_gets_no_containment(redis):
+    agent, _ = make(redis, FakeKube(pod_labels=PROTECTED), mode="enforce")
+    assert (await agent.handle(ransomware())).outcome == "skipped_protected"
+    assert await redis.xlen(fa.STREAM_CONTAIN) == 0
+
+
+async def test_containment_failure_never_blocks_the_kill(redis, monkeypatch):
+    real = redis.xadd
+
+    async def xadd(name, *a, **k):
+        if name == fa.STREAM_CONTAIN:
+            raise ConnectionError("redis down")
+        return await real(name, *a, **k)
+    monkeypatch.setattr(redis, "xadd", xadd)
+    agent, kube = make(redis, mode="enforce")
+    a = await agent.handle(ransomware())
+    assert (a.outcome, a.containment) == ("pod_killed", "failed")
+
+
+async def test_owner_chain_is_cached(redis):
+    agent, kube = make(redis, mode="enforce", max_kills=5)
+    await agent.handle(ransomware(eid="s1"))
+    assert len(kube.calls) == 6
+    kube.calls.clear()
+    await agent.handle(ransomware(eid="s2", pod="web-7d9f-fghij"))       # same ReplicaSet
+    assert kube.names == ["read_namespaced_pod", "read_namespaced_deployment", "patch_namespaced_pod",
+                          "create_namespaced_network_policy", "delete_namespaced_pod"]
+
+
+def _unsafe(t):
+    t["spec"]["containers"][0]["securityContext"] = {"privileged": True}
+
+
+def _relabel(t):
+    t["metadata"]["labels"] = {"app": "evil"}
+
+
+def _hostpath(t):
+    t["spec"]["volumes"] = [{"name": "root", "hostPath": {"path": "/"}}]
+
+
+@pytest.mark.parametrize("tamper", [_unsafe, _relabel, _hostpath, lambda t: t.update(spec="x")])
+async def test_unsafe_baseline_is_never_restored(redis, tamper):
+    agent, kube = make(redis, mode="enforce")
+    template = json.loads(json.dumps(TEMPLATE))
+    tamper(template)
+    await redis.set(fa.key_baseline("prod-shop", "web"), json.dumps({"replicas": 2, "template": template}))
+    a = await agent.handle(drift())
+    assert (a.decision, a.outcome) == (Decision.HUMAN, "escalated_unsafe_baseline")
+    assert "patch_namespaced_deployment" not in kube.names

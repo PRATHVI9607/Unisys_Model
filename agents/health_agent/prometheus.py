@@ -12,13 +12,22 @@ from kubeheal.features.health import METRIC_STEP_S
 
 log = logging.getLogger("kubeheal.health.prometheus")
 
+# Kubernetes' random-name alphabet (no vowels, no 0/1/3): the pod-template-hash (1-10 chars) and the pod suffix (5).
+_K8S_ALNUM = "[bcdfghjklmnpqrstvwxz2456789]"
+
+
 def pod_regex(deployment: str) -> str:
-    """Pods of exactly this Deployment: <name>-<pod-template-hash>-<suffix> (PromQL regexes are anchored)."""
-    return deployment.replace(".", r"\\.") + "-[a-z0-9]+-[a-z0-9]+"
+    """Pods of exactly this Deployment: <name>-<pod-template-hash>-<suffix> (PromQL regexes are anchored).
+
+    The alphabet keeps sibling workloads out (web-migrate-x7k2p Job, web-db-0, web-agent-k8s2z DaemonSet).
+    shortcut: a sibling whose middle segment uses only that alphabet (CronJob "web" -> job web-29245678) still
+    matches; join on kube_pod_owner/kube_replicaset_owner if that ever bites.
+    """
+    return deployment.replace(".", r"\\.") + f"-{_K8S_ALNUM}{{1,10}}-{_K8S_ALNUM}{{5}}"
 
 
 def build_queries(namespace: str, deployment: str) -> dict[str, str]:
-    """One PromQL per RAW_METRICS name, scoped to this Deployment's pods, in raw SI units."""
+    """One PromQL per RAW_METRICS name (+ two rollout-progress series), scoped to this Deployment's pods, raw SI units."""
     pods = f'namespace="{namespace}",pod=~"{pod_regex(deployment)}"'
 
     def sel(*extra: str) -> str:
@@ -42,6 +51,10 @@ def build_queries(namespace: str, deployment: str) -> dict[str, str]:
         "restarts_total": f"sum(kube_pod_container_status_restarts_total{sel()})",
         "replicas_desired": f"max(kube_deployment_spec_replicas{dep})",
         "replicas_ready": f"max(kube_deployment_status_replicas_ready{dep})",
+        # Not model features (not in RAW_METRICS; the lab data predates them): replicas_ready also counts pods
+        # of the old ReplicaSet, these two show a stuck rollout. Feature candidate: unavailable / desired.
+        "replicas_updated": f"max(kube_deployment_status_replicas_updated{dep})",
+        "replicas_unavailable": f"max(kube_deployment_status_replicas_unavailable{dep})",
     }
 
 

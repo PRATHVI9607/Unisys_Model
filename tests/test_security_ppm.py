@@ -34,24 +34,27 @@ def test_from_fields_exact_types_and_bad_json():
         HealthEvent.from_fields({**base, "changed_fields": "{not json"})
 
 
+WS = "ws://localhost/ws"   # websocket_connect ignores base_url; Host must be in DASHBOARD_ALLOWED_HOSTS
+
+
 @pytest.fixture
 def client():
     from types import SimpleNamespace
 
     from dashboard import fastapi_app
     fastapi_app.app.state.hub = SimpleNamespace(stats=lambda: {}, clients=set())    # no lifespan: stub the hub
-    yield TestClient(fastapi_app.app)
+    yield TestClient(fastapi_app.app, base_url="http://localhost")   # an allowed Host (TrustedHostMiddleware)
     del fastapi_app.app.state.hub
 
 
 def test_ws_rejects_cross_origin(client):
     with pytest.raises(WebSocketDisconnect) as e:
-        with client.websocket_connect("/ws", headers={"origin": "http://evil.example"}):
+        with client.websocket_connect(WS, headers={"origin": "http://evil.example"}):
             pass
     assert e.value.code == 1008
 
 
-@pytest.mark.parametrize("headers", [{"origin": "http://testserver"}, {}])    # same host:port as Host; no Origin
+@pytest.mark.parametrize("headers", [{"origin": "http://localhost"}, {}])    # same host:port as Host; no Origin
 def test_ws_accepts_same_origin_and_no_origin(client, headers):
-    with client.websocket_connect("/ws", headers=headers) as ws:
+    with client.websocket_connect(WS, headers=headers) as ws:
         assert ws.receive_json()["type"] == "stats"

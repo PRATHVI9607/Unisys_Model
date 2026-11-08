@@ -21,6 +21,7 @@ SECURITY_FEATURES: list[str] = [
     "suspicious_ext_ratio", "ransom_note",
     "entropy_mean", "entropy_max", "entropy_p90", "entropy_high_frac", "entropy_slope", "n_entropy_samples",
     "write_bytes_per_s", "net_out_bytes_per_s",
+    "frac_write_from_read", "frac_read_destroyed", "n_files_transformed",
 ]
 # Short-horizon features (last RECENT_EVENTS events). A bundle trained before they existed still serves: the
 # inference service ignores names the bundle does not list (and sends None for names it lists but we dropped).
@@ -28,6 +29,7 @@ RECENT_FEATURES: list[str] = [
     "recent_frac_write", "recent_frac_rename", "recent_frac_unlink", "recent_frac_chmod", "recent_unique_files",
     "recent_frac_rename_suffix_added", "recent_frac_rename_temp_replace", "recent_ext_added_frac",
     "recent_entropy_mean", "recent_entropy_high_frac", "recent_events_per_s",
+    "recent_frac_write_from_read", "recent_frac_read_destroyed",
 ]
 SECURITY_FEATURES += RECENT_FEATURES
 
@@ -157,6 +159,87 @@ def rename_kinds(events: list[dict]) -> list[tuple[int, str, str]]:
     return out
 
 
+_KEEP_SUFFIX = re.compile(r"~|\.(tmp|temp|part|new|swp|bak|orig|old|copy|lock|dpkg-new|dpkg-old)", re.IGNORECASE)
+
+
+def _derived(src: str, dst: str) -> bool:
+    """dst is a transformed copy of src, not a rotation (x.log.1), compressed (x.gz) or temp/backup copy (x.tmp, x~)."""
+    if _ROT_SUFFIX.search(dst) and _ROT_SUFFIX.sub("", dst) == _ROT_SUFFIX.sub("", src):
+        return False
+    suffix = dst[len(src):] if dst.startswith(src) else ""
+    return suffix.lower() not in COMPRESSION_EXT and not _KEEP_SUFFIX.match(suffix)
+
+
+def _read_origin(path: str, read: set[str]) -> str | None:
+    """A file read earlier that `path` copies with an added suffix (x.docx → x.docx.locked, x.docx.id-1.[m].enc)."""
+    d, name = posixpath.split(path)
+    for k in (k for k, c in enumerate(name) if c == "." and k > 0):
+        src = posixpath.join(d, name[:k])
+        if src in read and _derived(src, path):
+            return src
+    return None
+
+
+Transforms = tuple[list[tuple[int, str]], list[tuple[int, str, str | None]], list[tuple[int, str]]]
+
+
+def transforms(events: list[dict]) -> Transforms:
+    """What each event does to files opened for read earlier in the window: (reads, targets, destroys).
+
+    reads    [(i, path)] opens for read
+    targets  [(i, written path, original)] opens for write / truncates / rename targets; `original` is the file read
+             earlier that this event transforms, else None: the path itself (read X, write X: in place), the rename
+             source (read X, rename X → X.ext or X.other in the same directory), or the name minus an added suffix
+             (read X, write X.ext: copy). Rotations, compression and temp/backup suffixes never transform.
+    destroys [(i, path)] a read original overwritten in place, renamed away in its directory, or unlinked.
+    Ransomware transforms the files it reads; backup tools (restic) read originals and write new content-addressed
+    files elsewhere, package managers and git write fresh trees, atomic writes rename an unread temp file.
+    """
+    read: set[str] = set()
+    reads: list[tuple[int, str]] = []
+    targets: list[tuple[int, str, str | None]] = []
+    destroys: list[tuple[int, str]] = []
+    for i, e in enumerate(events):
+        sc, path, new = e.get("syscall", ""), e.get("path") or "", e.get("new_path") or ""
+        if not path:
+            continue
+        if sc in SYSCALL_GROUPS["read"]:
+            read.add(path)
+            reads.append((i, path))
+        elif sc in SYSCALL_GROUPS["write"] or sc in SYSCALL_GROUPS["truncate"]:
+            orig = path if path in read else _read_origin(path, read)
+            targets.append((i, path, orig))
+            if orig == path:
+                destroys.append((i, path))
+        elif sc in SYSCALL_GROUPS["rename"] and new:
+            away = path in read and posixpath.dirname(path) == posixpath.dirname(new) and _derived(path, new)
+            targets.append((i, new, path if away else None))
+            if away:
+                destroys.append((i, path))
+        elif sc in SYSCALL_GROUPS["unlink"] and path in read:
+            destroys.append((i, path))
+    return reads, targets, destroys
+
+
+def _transform_fracs(tr: Transforms, start: int, prefix: str) -> dict[str, float | None]:
+    """Over events from index `start` on: share of written files that transform a read original, and share of
+    files read there that are destroyed after that read. None without writes / reads."""
+    reads, targets, destroys = tr
+    written: dict[str, bool] = {}
+    for i, p, orig in targets:
+        if i >= start:
+            written[p] = written.get(p, False) or orig is not None
+    first: dict[str, int] = {}
+    for i, p in reads:
+        if i >= start:
+            first.setdefault(p, i)
+    gone = {p for i, p in destroys if p in first and i > first[p]}
+    return {
+        f"{prefix}frac_write_from_read": sum(written.values()) / len(written) if written else None,
+        f"{prefix}frac_read_destroyed": len(gone) / len(first) if first else None,
+    }
+
+
 def _rename_fracs(kinds: list[tuple[int, str, str]], prefix: str, names: tuple[str, ...]) -> dict[str, float | None]:
     n = len(kinds)
     return {f"{prefix}{k}": (sum(x[1] == k for x in kinds) / n if n else None) for k in names}
@@ -167,8 +250,8 @@ def _ext_added(kinds: list[tuple[int, str, str]]) -> float | None:
     return sum(k == "suffix_added" and s.lower() not in COMPRESSION_EXT for _, k, s in kinds) / len(kinds) if kinds else None
 
 
-def recent_features(events: list[dict], entropy: list[float],
-                    kinds: list[tuple[int, str, str]] | None = None) -> dict[str, float | None]:
+def recent_features(events: list[dict], entropy: list[float], kinds: list[tuple[int, str, str]] | None = None,
+                    tr: Transforms | None = None) -> dict[str, float | None]:
     """recent_* features of the last RECENT_EVENTS events (same definitions as the window features, None = unknown).
 
     `entropy` is the window's samples, oldest write first; the newest ones belong to the recently written files.
@@ -204,6 +287,8 @@ def recent_features(events: list[dict], entropy: list[float],
         "recent_entropy_mean": float(ent.mean()) if ent.size else None,
         "recent_entropy_high_frac": float((ent > HIGH_ENTROPY).mean()) if ent.size else None,
         "recent_events_per_s": n / max((ts[1] - ts[0]) / 1000, MIN_RECENT_S) if len(ts) == 2 else None,
+        # originals read before the tail still count (the tail of a fast attack holds only its transforms)
+        **_transform_fracs(transforms(events) if tr is None else tr, len(events) - n, "recent_"),
     }
 
 
@@ -232,6 +317,7 @@ def security_features(
         elif group == "rename" and path and new_path:
             written.add(new_path)
     kinds = rename_kinds(events)
+    tr = transforms(events)
 
     f: dict[str, float | None] = {
         "n_events": float(n),
@@ -246,6 +332,8 @@ def security_features(
         "ransom_note": float(any(_is_note(p) for p in paths | written)),
         "write_bytes_per_s": bytes_written * rate if rate and bytes_written is not None else None,
         "net_out_bytes_per_s": net_bytes_out * rate if rate and net_bytes_out is not None else None,
+        **_transform_fracs(tr, 0, ""),
+        "n_files_transformed": float(len({o for _, _, o in tr[1] if o})),
     }
 
     ent = np.asarray([x for x in entropy if x is not None], dtype=float)
@@ -259,5 +347,5 @@ def security_features(
         "entropy_slope": float(np.polyfit(np.arange(ent.size), ent, 1)[0]) if ent.size >= 2 else None,
         "n_entropy_samples": float(ent.size),
     })
-    f.update(recent_features(events, entropy, kinds))
+    f.update(recent_features(events, entropy, kinds, tr))
     return {k: f[k] for k in SECURITY_FEATURES}

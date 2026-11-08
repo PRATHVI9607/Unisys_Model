@@ -14,11 +14,12 @@ import redis.asyncio as aioredis
 from aiohttp import web
 from kubernetes_asyncio import config as k8s_config
 
-from kubeheal.contracts import PROTECTED_NAMESPACES, STREAM_MAXLEN, Prediction, key_event
+from kubeheal.contracts import PROTECTED_NAMESPACES, STREAM_MAXLEN, Prediction, key_event, key_event_index
 
 log = logging.getLogger("kubeheal.agents")
 
 EVENT_TTL_S = 24 * 3600
+EVENT_COPIES = STREAM_MAXLEN   # hash copies kept per kind: the same horizon as the stream
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis-master.kubeheal.svc:6379/0")
 INFERENCE_URL = os.environ.get("INFERENCE_URL", "http://kubeheal-inference.kubeheal.svc:8000").rstrip("/")
 
@@ -138,12 +139,29 @@ async def predict_batch(session: aiohttp.ClientSession, task: str, rows: list[di
         return None
 
 
-async def publish_event(r: aioredis.Redis, stream: str, kind: str, event) -> None:
-    """XADD the event (approximate MAXLEN) plus a hash copy at key_event(kind, id) with a 24h TTL."""
+async def publish_event(r: aioredis.Redis, stream: str, kind: str, event,
+                        ack: tuple[str, str, str] | None = None) -> None:
+    """XADD the event (approximate MAXLEN) plus a hash copy at key_event(kind, id), in one MULTI.
+
+    Copies expire after 24 h and are capped at EVENT_COPIES per kind (an index list; the oldest copies
+    are deleted), so a busy cluster cannot fill Redis with them: Redis runs noeviction, and a full Redis
+    fails every write. ack=(stream, group, entry id) XACKs the consumed entry in the same transaction,
+    so the event is published and the entry acked, or neither.
+    """
     fields = event.to_fields()
-    key = key_event(kind, event.event_id)
-    async with r.pipeline(transaction=False) as p:
+    key, index = key_event(kind, event.event_id), key_event_index(kind)
+    async with r.pipeline(transaction=True) as p:
         p.xadd(stream, fields, maxlen=STREAM_MAXLEN, approximate=True)
         p.hset(key, mapping=fields)
         p.expire(key, EVENT_TTL_S)
-        await p.execute()
+        p.lpush(index, key)
+        p.lrange(index, EVENT_COPIES, -1)
+        p.ltrim(index, 0, EVENT_COPIES - 1)
+        if ack:
+            p.xack(*ack)
+        overflow = (await p.execute())[4]
+    if overflow:
+        try:
+            await r.delete(*overflow)
+        except aioredis.RedisError as e:   # published already; the copies still expire with their TTL
+            log.warning("could not delete %d old %s copies: %s", len(overflow), kind, e)
