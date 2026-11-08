@@ -29,3 +29,6 @@ data/
 *.jsonl
 
 *.log
+
+# Rust build output (631 MB): never part of a build context
+sensor/target/

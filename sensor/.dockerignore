@@ -1,1 +1,3 @@
-target
+# Rust build output: the Dockerfile builds inside the image
+target/
+tests/__pycache__/
