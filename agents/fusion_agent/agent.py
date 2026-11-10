@@ -81,6 +81,20 @@ def workload_of(fields: Dict) -> str:
     return fields.get("deployment") or fields.get("pod_name") or "unknown"
 
 
+def _ci_width(event: Dict, name: str) -> Optional[float]:
+    """CI width of a PRESENT event. 0.0 only when the whole event is absent (nothing to be uncertain about);
+    a present event without a usable width is None, which the policy treats as uncertain (fail closed)."""
+    if not event:
+        return 0.0
+    raw = event.get(name)
+    if raw in (None, ""):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _truthy(v) -> bool:
     return str(v).strip().lower() == "true"
 
@@ -310,11 +324,11 @@ class FusionAgentV4:
         inp = DecisionInput(
             health_risk=health_risk,
             health_label=health.get("health_label", "benign"),
-            health_ci_width=float(health.get("health_ci_width", 0) or 0),
+            health_ci_width=_ci_width(health, "health_ci_width"),
             health_field_top=health.get("top_field", ""),
             sec_risk=sec_risk,
             sec_label=sec.get("sec_label", "benign"),
-            sec_ci_width=float(sec.get("sec_ci_width", 0) or 0),
+            sec_ci_width=_ci_width(sec, "sec_ci_width"),
             sec_syscall_top=sec.get("top_syscall", ""),
             correlation_score=correlation,
             compound_flag=compound,
@@ -403,6 +417,15 @@ class FusionAgentV4:
             })
             state = "human_pending"
 
+        # The incident is opened and its state stored BEFORE the lock: if the lock is held by another replica
+        # and this event returns early, the next event of the incident must still see the record and any
+        # pending approval (otherwise it would open a second incident and could act past a pending approval).
+        final_ctx = {"opened": "1"}
+        if state:
+            final_ctx["action_state"] = state
+        await self.redis.hset(self._ctx_key(incident_id), mapping=final_ctx)
+        await self.redis.expire(self._ctx_key(incident_id), self.cfg.incident_context_ttl_s)
+
         if action_blocked and out.decision not in {Decision.OBSERVE, Decision.BENIGN}:
             logger.info(f"incident {incident_id} already has state {prior_state!r}; "
                         f"{out.decision.value} from the new event only updates the record")
@@ -414,15 +437,10 @@ class FusionAgentV4:
                 outcome = await self._execute(namespace, workload, pod, out, inp, causal_chain, incident_id,
                                               t0_ms=t0_ms)
                 if outcome == "queued_for_executor":
-                    state = "queued"
+                    await self.redis.hset(self._ctx_key(incident_id), mapping={"action_state": "queued"})
         else:
             await self._execute(namespace, workload, pod, out, inp, causal_chain, incident_id, t0_ms=t0_ms)
 
-        final_ctx = {"opened": "1"}
-        if state:
-            final_ctx["action_state"] = state
-        await self.redis.hset(self._ctx_key(incident_id), mapping=final_ctx)
-        await self.redis.expire(self._ctx_key(incident_id), self.cfg.incident_context_ttl_s)
         if is_update and t0_ms:
             # T0 may only have become known now (the complete event): a finished containment can restore now
             await self._maybe_request_restore(incident_id)
@@ -533,13 +551,16 @@ class FusionAgentV4:
                        "no restore requested")
         elif not (namespace and workload and pod):
             problem = "target_unknown: namespace, workload or pod missing from the incident; no restore requested"
+        elif self.mode.protected_for(namespace):
+            problem = ("namespace_protected: the namespace is protected (kubeheal/protected) or its label "
+                       "state is unknown, so no automatic restore is requested")
         if problem:
             esc_key = f"{RESTORE_PREFIX}:escalated:{incident_id}:{problem.split(':', 1)[0]}"
             if await self.redis.set(esc_key, "1", nx=True, ex=self.cfg.incident_context_ttl_s):
                 await self._escalate(incident_id, namespace, workload, f"restore_not_requested: {problem}")
             return
         dry_run = self.mode.dry_run_for(namespace)
-        approved_by = ctx.get("approved_by") or "auto"
+        contain_approved_by = ctx.get("approved_by") or "auto"
         await self.redis.xadd(EXEC_STREAM, {
             "incident_id": incident_id,
             "action": "restore",
@@ -549,7 +570,10 @@ class FusionAgentV4:
             "workload_kind": kind,
             "t0_ms": t0,
             "namespace_tier": ctx.get("namespace_tier", ""),
-            "approved_by": approved_by,
+            # The restore is Fusion's own automatic request: nobody approved it. Who approved the containment
+            # that preceded it is kept in a separate field.
+            "approved_by": "auto",
+            "contain_approved_by": contain_approved_by,
             "dry_run": str(dry_run).lower(),
             "source": "fusion",
             "rationale": "restore after a successful containment, from the last snapshot before T0",
@@ -558,7 +582,8 @@ class FusionAgentV4:
         await self.redis.set(marker, "1", ex=self.cfg.incident_context_ttl_s)
         await self._append_ledger(incident_id, "restore_requested", {
             "t0_ms": int(t0), "workload_kind": kind, "namespace": namespace, "deployment": workload,
-            "pod": pod, "approved_by": approved_by, "dry_run": dry_run})
+            "pod": pod, "approved_by": "auto", "contain_approved_by": contain_approved_by,
+            "dry_run": dry_run})
         await self.redis.xadd(ACTIONS_STREAM, {
             "incident_id": incident_id, "action_type": "restore_requested",
             "target": json.dumps({"namespace": namespace, "deployment": workload, "pod": pod}),

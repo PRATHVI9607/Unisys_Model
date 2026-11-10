@@ -176,7 +176,11 @@ def test_restore_after_human_approval_of_a_containment():
     assert stream(a.redis, fusion.EXEC_STREAM) == []
     contained(a, iid, approved_by="admin-anna")                                    # the dashboard queued it
     [req] = restores(a)
-    assert req["approved_by"] == "admin-anna" and req["t0_ms"] == str(T0)
+    # the restore itself is automatic: the approver of the containment is kept in a separate field
+    assert req["approved_by"] == "auto" and req["contain_approved_by"] == "admin-anna"
+    assert req["t0_ms"] == str(T0)
+    rec = next(r["payload"] for r in ledger_steps(a) if r["step"] == "restore_requested")
+    assert rec["approved_by"] == "auto" and rec["contain_approved_by"] == "admin-anna"
 
 
 def test_without_t0_no_restore_is_requested_and_the_incident_is_escalated_once():
@@ -272,3 +276,47 @@ def test_a_health_event_paired_with_the_security_event_updates_that_incident():
                   dict(sec, security_embedding_b64=emb(seed=2))))
     assert len({r["incident_id"] for r in ledger_steps(a)}) == 1
     assert len(stream(a.redis, fusion.EXEC_STREAM)) == 1
+
+
+def test_no_automatic_restore_in_a_protected_namespace_even_after_a_human_approved_containment():
+    a = make_agent(protected=True)
+    ev = sec_event(t0_ms=str(T0))
+    handle_sec(a, ev)                                            # protected: human decision, no request
+    iid = incident_id_of(ev)
+    assert stream(a.redis, fusion.EXEC_STREAM) == []
+    contained(a, iid, approved_by="admin-anna")                  # a human approved the containment
+    contained(a, iid, approved_by="admin-anna")
+    assert restores(a) == []
+    esc = escalations(a)
+    assert len(esc) == 1 and "namespace_protected" in esc[0]["reason"]
+
+
+def test_incident_state_survives_a_held_incident_lock():
+    """The lock is held by another replica when the first event is handled. The incident must still be opened
+    with its pending approval, so the next event updates it instead of opening a second one or acting."""
+    a = make_agent()
+    lock_key = "kubeheal:incident-lock:prod:payments"
+    run(a.redis.set(lock_key, "someone-else", nx=True, ex=10))
+    handle_sec(a, sec_event(event_id="sec-1", sec_ci_width="0.30"), "1-0")       # wide CI: human, needs the lock
+    iid = incident_id_of(sec_event())
+    assert a.redis.hashes[fusion.INCIDENT_PREFIX + ":" + iid]["opened"] == "1"
+    assert a.redis.hashes[fusion.INCIDENT_PREFIX + ":" + iid]["action_state"] == "human_pending"
+    assert [r["step"] for r in ledger_steps(a)].count("approval_requested") == 1
+    run(a.redis.delete(lock_key))
+    handle_sec(a, sec_event(event_id="sec-2", entropy_phase="complete"), "2-0")  # now eligible for AUTO
+    steps = [r["step"] for r in ledger_steps(a)]
+    assert steps.count("detection") == 1 and steps.count("approval_requested") == 1
+    assert "incident_update" in steps and stream(a.redis, fusion.EXEC_STREAM) == []
+
+
+def test_a_held_lock_on_an_automatic_decision_leaves_the_incident_open_for_the_next_event():
+    a = make_agent()
+    lock_key = "kubeheal:incident-lock:prod:payments"
+    run(a.redis.set(lock_key, "someone-else", nx=True, ex=10))
+    handle_sec(a, sec_event(event_id="sec-1"), "1-0")             # AUTO, but the lock is held: nothing queued
+    assert stream(a.redis, fusion.EXEC_STREAM) == []
+    run(a.redis.delete(lock_key))
+    handle_sec(a, sec_event(event_id="sec-2", entropy_phase="complete"), "2-0")
+    assert len(stream(a.redis, fusion.EXEC_STREAM)) == 1
+    steps = [r["step"] for r in ledger_steps(a)]
+    assert steps.count("detection") == 1 and steps.count("incident_update") == 1

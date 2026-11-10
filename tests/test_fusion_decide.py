@@ -353,3 +353,34 @@ def test_a_replayed_entry_queues_one_request_and_counts_one_action():
     assert len(a.redis.zsets["kubeheal:cbw:contain:prod"]) == 1
     steps = [r["step"] for r in ledger_steps(a)]
     assert steps.count("detection") == 1 and steps.count("incident_update") == 1
+
+
+# ---- a present event without a usable CI width is uncertain, not certain ---------------------------------
+@pytest.mark.parametrize("missing", ["absent", "empty", "garbage"])
+def test_security_event_without_a_ci_width_never_reaches_auto(missing):
+    a = make_agent()
+    ev = sec_event()
+    if missing == "absent":
+        del ev["sec_ci_width"]
+    else:
+        ev["sec_ci_width"] = "" if missing == "empty" else "n/a"
+    decide(a, sec=ev)
+    assert decisions(a) == ["human_contain"] and exec_requests(a) == []
+
+
+@pytest.mark.parametrize("missing", ["absent", "empty", "garbage"])
+def test_health_event_without_a_ci_width_never_reaches_auto(missing):
+    a = make_agent()
+    ev = health_event()
+    if missing == "absent":
+        del ev["health_ci_width"]
+    else:
+        ev["health_ci_width"] = "" if missing == "empty" else "n/a"
+    decide(a, health=ev)
+    assert decisions(a) == ["human_patch"] and exec_requests(a) == []
+
+
+def test_an_absent_partner_event_does_not_make_the_incident_uncertain():
+    a = make_agent()
+    decide(a, sec=sec_event())                 # no health event at all: its CI width is not an input
+    assert decisions(a) == ["auto_contain"]
