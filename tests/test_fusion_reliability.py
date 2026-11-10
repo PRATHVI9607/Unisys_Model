@@ -5,46 +5,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agents.fusion_agent import agent as fusion
 from agents.fusion_agent import decision_policy as dp
 from agents.fusion_agent.incident_lock import acquire_incident_lock, LOCK_PREFIX
 from agents.common.ledger import InMemoryLedgerStore, Ledger
-
-
-class FakeRedis:
-    def __init__(self):
-        self.acked, self.added, self.store = [], [], {}
-
-    async def xack(self, stream, group, msg_id):
-        self.acked.append((stream, msg_id))
-
-    async def xadd(self, stream, fields):
-        self.added.append((stream, fields))
-
-    async def get(self, k):
-        return self.store.get(k)
-
-    async def incr(self, k):
-        self.store[k] = int(self.store.get(k, 0)) + 1
-        return self.store[k]
-
-    async def expire(self, k, ttl):
-        return True
-
-    async def set(self, k, v, nx=False, ex=None):
-        if nx and k in self.store:
-            return None
-        self.store[k] = v
-        return True
-
-    async def eval(self, script, n, key, token, *extra):
-        if self.store.get(key) != token:
-            return 0
-        if "expire" in script:
-            return 1
-        del self.store[key]
-        return 1
+from fake_redis import FakeRedis
 
 
 def run(c):
@@ -54,7 +21,14 @@ def run(c):
 def agent_with_fake_redis():
     a = fusion.FusionAgentV4()
     a.redis = FakeRedis()
+    open_namespaces(a, "prod", "dev")
     return a
+
+
+def open_namespaces(agent, *names):
+    """The namespace watcher has read the labels and these namespaces carry no protected label."""
+    agent.mode.ns_readable = True
+    agent.mode.ns_protect = {n: None for n in names}
 
 
 def test_key_uses_explicit_deployment_not_pod_suffix():
@@ -124,22 +98,21 @@ def test_dry_run_does_not_use_circuit_breaker_budget():
     a = agent_with_fake_redis()
     run(a._execute("prod", "web", "web-abc-1", _out(dp.Decision.AUTO_CONTAIN, True), _inp(), []))
     run(a._execute("prod", "web", "", _out(dp.Decision.AUTO_PATCH, True), _inp(), []))
-    assert a.redis.store.get("kubeheal:cb:contain:prod") is None
-    assert a.redis.store.get("kubeheal:cb:patch:prod:web") is None
+    assert a.redis.zsets == {}
 
 
 def test_enforced_actions_count_after_queueing():
     a = agent_with_fake_redis()
     run(a._execute("prod", "web", "web-abc-1", _out(dp.Decision.AUTO_CONTAIN, False), _inp(), []))
     run(a._execute("prod", "web", "", _out(dp.Decision.AUTO_PATCH, False), _inp(), []))
-    assert int(a.redis.store["kubeheal:cb:contain:prod"]) == 1
-    assert int(a.redis.store["kubeheal:cb:patch:prod:web"]) == 1
+    assert list(a.redis.zsets["kubeheal:cbw:contain:prod"]) == [a.redis.added[1][1]["incident_id"]]
+    assert len(a.redis.zsets["kubeheal:cbw:patch:prod:web"]) == 1
 
 
 def test_contain_without_pod_is_not_queued():
     a = agent_with_fake_redis()
     run(a._execute("prod", "web", "", _out(dp.Decision.AUTO_CONTAIN, False), _inp(), []))
-    assert a.redis.store.get("kubeheal:cb:contain:prod") is None
+    assert "kubeheal:cbw:contain:prod" not in a.redis.zsets
     assert not any(s == fusion.EXEC_STREAM for s, _ in getattr(a.redis, "added", []))
 
 
@@ -151,7 +124,7 @@ def test_fusion_writes_detection_scores_decision_and_approval_to_ledger():
     run(a._decide("prod:payments", None, {
         "event_id": "sec-1", "namespace": "prod", "deployment": "payments",
         "pod_name": "payments-abc", "sec_risk": "0.70", "sec_label": "suspicious",
-        "sec_ci_width": "0.02", "top_syscall": "write",
+        "sec_ci_width": "0.02", "top_syscall": "write", "model_scored": "true",
     }))
 
     records = [json.loads(store.objects[key]) for key in sorted(store.objects)]

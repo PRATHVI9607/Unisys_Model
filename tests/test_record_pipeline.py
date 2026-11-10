@@ -1,5 +1,10 @@
 import asyncio
 import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fake_redis import FakeRedis  # noqa: E402
 
 from agents.common.ledger import InMemoryLedgerStore, Ledger
 from agents.executor.main import ExecutorService
@@ -59,9 +64,12 @@ def _run(coro):
 def test_fusion_and_executor_records_share_one_incident_ledger():
     store = InMemoryLedgerStore()
     ledger = Ledger(store)
-    fusion_redis = _Redis()
+    fusion_redis = FakeRedis()
     agent = fusion.FusionAgentV4(ledger=ledger)
     agent.redis = fusion_redis
+    # P6 fail-closed inputs: the namespace labels were read and prod is not protected
+    agent.mode.ns_readable = True
+    agent.mode.ns_protect = {"prod": None}
 
     _run(agent._decide("prod:payments", None, {
         "event_id": "sec-test",
@@ -72,6 +80,7 @@ def test_fusion_and_executor_records_share_one_incident_ledger():
         "sec_label": "ransomware_active",
         "sec_ci_width": "0.01",
         "top_syscall": "write",
+        "model_scored": "true",
     }))
 
     exec_request = next(fields for stream, fields in fusion_redis.added if stream == fusion.EXEC_STREAM)
