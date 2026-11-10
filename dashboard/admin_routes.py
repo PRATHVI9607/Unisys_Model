@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -54,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 EXEC_STREAM = "kubeheal.exec"
 CLAIM_KEY = "kubeheal:approval:{incident_id}"
-CLAIM_TTL_S = 30 * 86400
+CLAIM_TTL_S = 10 * 60  # chosen, not measured; override with KUBEHEAL_APPROVAL_CLAIM_TTL_S
 LEDGER_APPEND_ATTEMPTS = 3      # tries to write `approved` after the request was queued
 PAGE_HEADERS = {
     "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
@@ -72,6 +73,8 @@ class DashboardServices:
     release: Callable[[str], Awaitable[None]]
     claim_set: Callable[[str, str], Awaitable[None]]            # store a value in an existing claim
     claim_get: Callable[[str], Awaitable[Optional[str]]]
+    list_claims: Callable[[], Awaitable[List[tuple[str, str]]]]
+    exec_entry_exists: Callable[[str], Awaitable[bool]]
     fetch_event: Callable[[str, str], Awaitable[Optional[Dict[str, Any]]]]
 
 
@@ -89,17 +92,32 @@ def redis_services(ledger: Ledger, mode_store: ModeStore, get_redis: Callable[[]
         return msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
 
     async def claim(incident_id: str) -> bool:
-        return bool(await _redis().set(CLAIM_KEY.format(incident_id=incident_id), "claimed", nx=True, ex=CLAIM_TTL_S))
+        return bool(await _redis().set(CLAIM_KEY.format(incident_id=incident_id), "claimed", nx=True,
+                                       ex=_claim_ttl_s()))
 
     async def release(incident_id: str) -> None:
         await _redis().delete(CLAIM_KEY.format(incident_id=incident_id))
 
     async def claim_set(incident_id: str, value: str) -> None:
-        await _redis().set(CLAIM_KEY.format(incident_id=incident_id), value, xx=True, ex=CLAIM_TTL_S)
+        await _redis().set(CLAIM_KEY.format(incident_id=incident_id), value, xx=True, ex=_claim_ttl_s())
 
     async def claim_get(incident_id: str) -> Optional[str]:
         v = await _redis().get(CLAIM_KEY.format(incident_id=incident_id))
         return v.decode() if isinstance(v, bytes) else v
+
+    async def list_claims() -> List[tuple[str, str]]:
+        r = _redis()
+        claims = []
+        async for key in r.scan_iter(match=CLAIM_KEY.format(incident_id="*")):
+            key = key.decode() if isinstance(key, bytes) else str(key)
+            incident_id = key.removeprefix("kubeheal:approval:")
+            value = await r.get(key)
+            if value is not None and valid_incident_id(incident_id):
+                claims.append((incident_id, value.decode() if isinstance(value, bytes) else str(value)))
+        return claims
+
+    async def exec_entry_exists(stream_id: str) -> bool:
+        return bool(await _redis().xrange(EXEC_STREAM, min=stream_id, max=stream_id, count=1))
 
     async def fetch_event(kind: str, event_id: str) -> Optional[Dict[str, Any]]:
         if not event_id or get_redis() is None:
@@ -114,7 +132,23 @@ def redis_services(ledger: Ledger, mode_store: ModeStore, get_redis: Callable[[]
         return {(k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
                 for k, v in raw.items()}
 
-    return DashboardServices(ledger, mode_store, enqueue_exec, claim, release, claim_set, claim_get, fetch_event)
+    return DashboardServices(ledger, mode_store, enqueue_exec, claim, release, claim_set, claim_get,
+                             list_claims, exec_entry_exists, fetch_event)
+
+
+def _claim_ttl_s() -> int:
+    """Return the chosen short claim lease, tunable per deployment and never disabled by bad config."""
+    raw = os.getenv("KUBEHEAL_APPROVAL_CLAIM_TTL_S")
+    if raw is None:
+        return CLAIM_TTL_S
+    try:
+        value = int(raw)
+        if value > 0:
+            return value
+    except ValueError:
+        pass
+    logger.warning("KUBEHEAL_APPROVAL_CLAIM_TTL_S must be a positive integer; using the chosen default")
+    return CLAIM_TTL_S
 
 
 def get_services(request: Request) -> DashboardServices:
@@ -274,6 +308,40 @@ async def _append_with_retry(svc: DashboardServices, incident_id: str, step: str
     return False
 
 
+async def reconcile_approval_claims(svc: DashboardServices) -> Dict[str, int]:
+    """Repair interrupted approvals at startup using the durable exec stream and audit ledger.
+
+    A queued claim is completed only when its exact Redis stream entry still exists. Claims without a
+    matching stream entry and without a terminal ledger record are released so the pending decision can
+    be handled again. A bare `claimed` value means the process stopped before it stored a stream id.
+    """
+    counts = {"completed": 0, "released": 0, "skipped": 0}
+    for incident_id, value in await svc.list_claims():
+        try:
+            records = await _records(svc, incident_id)
+            steps = [str(r.get("step", "")) for r in records]
+            status = approval_status(steps)
+            if status in {"approved", "rejected"}:
+                counts["skipped"] += 1
+                continue
+            queued = _queued_claim(value)
+            if queued and await svc.exec_entry_exists(str(queued["stream_id"])):
+                payload = {k: queued.get(k) for k in
+                           ("approved_by", "action", "dry_run", "mode", "mode_readable", "note")}
+                payload.update({"exec_stream_id": queued["stream_id"], "reconciled_by": "startup"})
+                if await _append_with_retry(svc, incident_id, STEP_APPROVED, payload):
+                    counts["completed"] += 1
+                else:
+                    counts["skipped"] += 1
+            elif status == "pending":
+                await svc.release(incident_id)
+                counts["released"] += 1
+        except Exception as exc:
+            logger.warning("approval claim reconciliation failed for %s: %s", incident_id, type(exc).__name__)
+            counts["skipped"] += 1
+    return counts
+
+
 def _queued_claim(value: Optional[str]) -> Optional[Dict[str, Any]]:
     """The claim of an approval whose request is queued: JSON with the stream id."""
     if not value or not value.startswith("{"):
@@ -370,6 +438,29 @@ async def reject(incident_id: str, request: Request,
         logger.error("reject %s: ledger write failed: %s", incident_id, type(exc).__name__)
         raise HTTPException(status_code=500, detail="the ledger write failed; nothing was rejected")
     return {"status": "rejected", "incident_id": incident_id, "queued": False, "rejected_by": admin.actor}
+
+
+@router.post("/api/approvals/{incident_id}/release-claim")
+async def release_claim(incident_id: str, request: Request,
+                       admin: AdminIdentity = Depends(require_admin),
+                       svc: DashboardServices = Depends(get_services)):
+    """Admin recovery for an abandoned approval claim. Audit the release before deleting the claim."""
+    note = (await _body(request, DecisionNote)).note
+    records, status = await _load_pending_or_raise(svc, incident_id)
+    if status != "pending":
+        raise HTTPException(status_code=409, detail="only a pending approval claim can be released")
+    value = await svc.claim_get(incident_id)
+    if value is None:
+        raise HTTPException(status_code=404, detail="approval claim not found")
+    try:
+        await _append(svc, incident_id, "claim_released", {
+            "actor": admin.actor, "note": note, "claim_value": value,
+        })
+    except Exception as exc:
+        logger.error("release claim %s: ledger write failed: %s", incident_id, type(exc).__name__)
+        raise HTTPException(status_code=500, detail="the ledger write failed; the claim was not released")
+    await svc.release(incident_id)
+    return {"status": "claim_released", "incident_id": incident_id, "actor": admin.actor}
 
 
 # ---- incidents (read only)

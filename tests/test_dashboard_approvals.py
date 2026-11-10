@@ -1,5 +1,6 @@
 import json
 import logging
+import asyncio
 
 import pytest
 
@@ -347,6 +348,57 @@ def test_claim_update_failure_still_records_approved(client, enforce):
     harness.claim_set_error = RuntimeError("redis blip")
     assert post(client, f"/api/approvals/{INC}/approve", AUTH).status_code == 200
     assert harness.steps()[-1] == "approved"
+
+
+def test_claim_ttl_is_short_and_tunable_as_a_chosen_default(monkeypatch):
+    from dashboard.admin_routes import CLAIM_TTL_S, _claim_ttl_s
+    assert CLAIM_TTL_S == 10 * 60
+    assert _claim_ttl_s() == 10 * 60
+    monkeypatch.setenv("KUBEHEAL_APPROVAL_CLAIM_TTL_S", "45")
+    assert _claim_ttl_s() == 45
+    monkeypatch.setenv("KUBEHEAL_APPROVAL_CLAIM_TTL_S", "invalid")
+    assert _claim_ttl_s() == 10 * 60
+
+
+def test_startup_reconciliation_finishes_a_queued_approval(client, enforce):
+    from dashboard.admin_routes import reconcile_approval_claims
+    harness = enforce
+    seed_incident(harness)
+    harness.exec_requests.append({"incident_id": INC, "action": "patch"})
+    harness.claims[INC] = json.dumps({"stream_id": "1-0", "approved_by": "admin:alice",
+                                     "action": "patch", "dry_run": False, "mode": "enforce",
+                                     "mode_readable": True, "note": "reviewed"})
+    result = asyncio.run(reconcile_approval_claims(harness.services()))
+    assert result == {"completed": 1, "released": 0, "skipped": 0}
+    assert harness.steps()[-1] == "approved"
+    assert harness.records()[-1]["payload"] == {
+        "approved_by": "admin:alice", "action": "patch", "dry_run": False, "mode": "enforce",
+        "mode_readable": True, "note": "reviewed", "exec_stream_id": "1-0", "reconciled_by": "startup",
+    }
+
+
+def test_startup_reconciliation_releases_claim_without_a_matching_exec_record(client, harness):
+    from dashboard.admin_routes import reconcile_approval_claims
+    seed_incident(harness)
+    harness.claims[INC] = "claimed"
+    result = asyncio.run(reconcile_approval_claims(harness.services()))
+    assert result == {"completed": 0, "released": 1, "skipped": 0}
+    assert INC not in harness.claims and harness.steps()[-1] == "approval_requested"
+
+
+def test_admin_release_claim_is_authenticated_and_audited(client, harness):
+    seed_incident(harness)
+    harness.claims[INC] = "claimed"
+    path = f"/api/approvals/{INC}/release-claim"
+    assert client.post(path).status_code == 401
+    r = client.post(path, headers=AUTH, json={"note": "stuck request cleared"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"status": "claim_released", "incident_id": INC, "actor": "admin:dashboard-admin"}
+    assert INC not in harness.claims
+    assert harness.records()[-1]["step"] == "claim_released"
+    assert harness.records()[-1]["payload"] == {
+        "actor": "admin:dashboard-admin", "note": "stuck request cleared", "claim_value": "claimed",
+    }
 
 
 # ---- auth wins over body validation, every mutating route is guarded

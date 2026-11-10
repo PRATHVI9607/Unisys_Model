@@ -72,10 +72,17 @@ class Harness:
         async def claim_get(incident_id):
             return self.claims.get(incident_id)
 
+        async def list_claims():
+            return list(self.claims.items())
+
+        async def exec_entry_exists(stream_id):
+            return any(f"{i}-0" == stream_id for i in range(1, len(self.exec_requests) + 1))
+
         async def fetch(kind, event_id):
             return self.events.get((kind, event_id))
 
-        return DashboardServices(self.ledger, self.mode_store, enqueue, claim, release, claim_set, claim_get, fetch)
+        return DashboardServices(self.ledger, self.mode_store, enqueue, claim, release, claim_set, claim_get,
+                                 list_claims, exec_entry_exists, fetch)
 
     def steps(self, incident_id=INC):
         prefix = f"incidents/{incident_id}/"

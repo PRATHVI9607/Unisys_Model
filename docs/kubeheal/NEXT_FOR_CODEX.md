@@ -1,81 +1,38 @@
-# Next for Codex (handoff from Claude Code, 2026-11-11)
+# KubeHeal continuation notes (2026-11-11)
 
-Read `AGENTS.md` first, then `.ai/handoff.md` and the "Task checklist" in `docs/kubeheal/PROGRESS.md`.
-Never push, never set `ALLOW_PUSH`, no destructive git commands, no invented numbers, no em dashes in docs.
+Read `AGENTS.md`, `docs/kubeheal/PROJECT_SPEC.md`, `docs/kubeheal/IMPLEMENTATION_PLAN.md`, the Task checklist in `docs/kubeheal/PROGRESS.md`, and `.ai/handoff.md` before continuing. This file is a short navigation note; `PROGRESS.md` is the detailed task record.
 
-## State
+## Current repository state
 
-- Repo: `C:\My_projects_1\cLOUD\Unisys_Model`, branch `work`. HEAD at start: `68018bc feat(P10): add Prometheus victim app`. P5-Q1, P9-G1, P10-U5 and handoff/progress changes are staged after review; owner authorized P6 review/merge and related commits. No merge in progress at start.
-- Merged into `work`: P0 to P5, P7, P8 and P9, plus the shared Health Model preprocessing/version guard and chosen Executor defaults.
-- P6 builder is finished on `wave/P6` at `7f95f6c` (base `218029c`, five commits). Owner now explicitly authorized Codex to review and merge it. Direct worktree status is blocked by Git's dubious-ownership protection in this sandbox; the branch diff is accessible from the main repository. P6 review is in progress.
-- P10-V1 is committed in `68018bc`. P5-Q1, P9-G1 and P10-U5 are complete locally and documented below. P10-U5 is a guide only; demo scripts are not present.
-- `k3d-kubeheal` is reserved for Claude. Codex did not access a cluster. Never touch `hybrid-demo`.
+- Root: `C:\My_projects_1\cLOUD\Unisys_Model`; branch `work`.
+- Latest commit before current P8-D5 changes: `391b8ac merge: P6 decision and fusion`.
+- Earlier continuation commit: `3c80df4 docs: record KubeHeal continuation and P6 review`; P10-V1 is `68018bc`.
+- P6 branch `wave/P6` (base `218029c`, five commits through `7f95f6c`) was reviewed through the local branch ref and merged without conflicts as `391b8ac`. Git ownership policy blocked direct inspection of the external P6 worktree from this sandbox. No push occurred.
+- P8-D5 is implemented but not yet committed. See working tree and task entry in `PROGRESS.md`.
+- Cluster `k3d-kubeheal` belongs to Claude. Do not use Kubernetes, touch `hybrid-demo`, or run cluster tasks. Do not train models; P12-H needs the owner's explicit approval.
 
-## Environment
+## Completed in this continuation
 
-- Python: `.venv\Scripts\python.exe` (Python 3.11.9, torch 2.2.0+cpu). It is the Microsoft Store Python; it runs from Claude Code's shell but a sandboxed Codex session could not execute it. First run `.venv\Scripts\python.exe --version`. If it fails, do NOT recreate `.venv`: tell the owner.
-- Test command (pytest.ini already sets `--basetemp=.pytest-tmp/run`): `$env:PYTHONPATH="."; .venv\Scripts\python.exe -m pytest tests/ -q -k "not live and not rbac_k3d"`
-- Temp folders only under the ignored `.pytest-tmp*/` path. `helm` is at `C:\Users\PV\AppData\Local\Microsoft\WinGet\Packages\Helm.Helm_Microsoft.Winget.Source_8wekyb3d8bbwe\windows-amd64\helm.exe` (not on PATH).
-- Owner's latest instruction authorizes the review/merge operations and related staging/commits. Commit small on `work` after tests pass; never push.
+- P10-V1: committed victim app, Prometheus counter/histogram, manifests, ServiceMonitor and tests (`68018bc`). No image build or cluster verification.
+- P5-Q1: aligned Health Agent HTTP PromQL documentation and contract to the victim app; no query columns changed.
+- P9-G1: added `kubeheal_model_inflight_requests` Grafana panel.
+- P10-U5: added `demo/README.md` with run order and honest limitations; demo scripts are still absent.
+- P6: reviewed and merged. P6-D1, D3, D4, D5 and R1 passed focused tests; D2/D6/D7 remain partial/open. Exact findings and test results are in `PROGRESS.md` under P6.
+- P8-D5: 600-second chosen approval claim TTL (override `KUBEHEAL_APPROVAL_CLAIM_TTL_S`), startup reconciliation by exact exec-stream ID and admin-only claim release with `claim_released` ledger record. Focused dashboard tests: 78 passed. No real Redis check.
 
-## Task status and gates
+## P6 review findings and test limits
 
-1. **P8-D5 NEXT after P6 merge** (owner request). Dashboard approval claim hardening.
-   - Goal: `CLAIM_TTL_S` (now 30 days) becomes a short chosen default (about 10 minutes, documented as tunable, labelled "chosen, not measured"); startup reconciliation in the dashboard scans claims against the exec stream and the ledger and either completes (writes the missing `approved`) or releases claims with no matching record; an admin-only "release claim" action writes a ledger entry `claim_released` with the actor.
-   - Touch: `dashboard/admin_routes.py`, `dashboard/ledger_view.py`, `dashboard/fastapi_app.py` (startup hook only), `tests/test_dashboard_*.py` (new tests for the short TTL, reconciliation complete and release, release action needs the admin token and writes the ledger entry).
-   - Do NOT touch: `agents/`, `decision_policy.py`, `dashboard/mode_admin.py` (the only dashboard write, pinned by tests), `k8s/rbac/`, `tests/test_no_writes_outside_executor.py`.
-   - Verify: `... pytest tests/test_dashboard_approvals.py tests/test_dashboard_killswitch.py tests/test_no_writes_outside_executor.py -q`, then the full command above.
-2. **P10-V1 DONE** in commit `68018bc` (victim app contract, owner decision: no guessed metric names).
-   - Goal: `demo/victim-app/`: small FastAPI app with `prometheus_client` exporting `http_requests_total` (labels `method`, `path`, `status`) and `http_request_duration_seconds` (histogram), a Dockerfile, Deployment and Service manifests for namespaces `prod` and `dev`, and a ServiceMonitor. Optional PVC with real files in `prod` is P10-U3 (leave it).
-   - Touch: `demo/victim-app/` only (including the in-directory `test_app.py`).
-   - Do NOT touch: core code, `k8s/` existing files, `deploy/helm/`.
-   - Verify: exporter tests passed (3); manifests parsed locally. No image build or cluster check.
-3. **P5-Q1 DONE** (dependency P10-V1 met).
-   - Goal: in `agents/health_agent/metric_queries.py` change the `app-guess` rows to the victim-app contract (names unchanged; update the docstring so the `http_*` names are no longer called guesses; `basis` becomes e.g. "demo-victim-app contract"). Keep the 15 column names, order and meaning.
-   - Touch: `agents/health_agent/metric_queries.py`, `tests/test_sense_health_window.py` only if it asserts the `app-guess` basis.
-   - Do NOT touch: `models/health_model/preprocess.py` (the preprocessing and its version guard), `decision_policy.py`.
-   - Verify: Health-window tests passed (16); parity file ran 6 passed, 2 failed on missing `torch_geometric` in global Python 3.13. Live PromQL check remains P10-V2.
-4. **Grafana panel DONE**: `kubeheal_model_inflight_requests` panel added; `kubeheal_queue_depth` retained. Dashboard test passed.
-5. **P10-U5 DONE**: `demo/README.md` documents planned run order and limitations; scripts are not present and no cluster run is claimed.
-6. Progress and handoff reflect current task status. Ask the user before staging or committing.
+- P6-D2: Fusion writes the factor-3 sampling request, but Health and Security Agents do not consume it. Health sensing is event-driven, so the polling/scheduling design remains open.
+- P6-D6: interpretation client and KernelExplainer helper exist; a live KernelExplainer is not wired. Fusion has no model/background inputs for it; helper falls back to channel deviation without an injected explainer.
+- P6-D7: Fusion gates restore on `t0_ms`, workload kind, context and protected-namespace state. Security Agent does not publish earliest suspicious Falco `ts` as `t0_ms`; no live restore is reachable yet. Do not substitute event publish time.
+- Focused P6 tests: 273 passed, 1 skipped, 1 failed because this Python 3.13 environment lacks required `shap==0.44.0`; the documented fallback was observed.
+- Broad non-cluster tests excluding the Helm test: 610 passed, 3 skipped, 17 failed. Failures involve missing `torch_geometric`, `shap`, and Health Model server imports/checkpoint tests tied to the unavailable Python 3.11 venv. The Helm test could not collect because Windows denied access to the installed Helm executable. Do not report the full suite as green.
+- No real Redis verification or cluster verification was run.
 
-## Leave these for Claude (do not edit)
+## Next work
 
-- Anything in `agents/fusion_agent/decision_policy.py`.
-- Executor write paths: `agents/executor/` (all of it), `agents/executor/actions.py`, and RBAC: `k8s/rbac/rbac.yaml`, `k8s/kill-switch.yaml`, `scripts/rbac_check.py`, the RBAC static tests.
-- `models/health_model/preprocess.py`, the checkpoint sidecar and the server version guard.
-- Cluster tasks and model training listed below. P6 review/merge is now explicitly authorized for Codex by the owner; this supersedes the prior handoff exclusion.
-- All cluster work: P10-U1 to U7, P10-V2, P10-V3, P11. P12 and P12-H (retraining) are NOT approved: do not start them and do not run `models/train_*.py`.
+1. Commit the tested P8-D5 changes and update the handoff with the resulting commit.
+2. Continue the non-cluster P6 follow-ups or P7 review fixes in checklist order if they are not on the Claude-only list. Do not start cluster tasks.
+3. Remaining Claude-owned cluster work: P10-U1..U4, U6..U7, P10-V2/V3, P11 and P7-RR-7. P12-H training is not approved.
 
-## Pitfalls
-
-- Nothing in the chart (`deploy/helm/kubeheal`) has run on a cluster; do not describe it as verified.
-- Executor settings are chosen defaults, not measurements (`agents/executor/config.py` `DEFAULTS`). The queue-depth HPA target (4) is a chosen default too.
-- Live Health Model scores are not validated on real cluster windows; drift detection relies mainly on the configuration diff. Keep that status line wherever you write demo docs.
-- Edit files with LF line endings preserved (`.gitattributes` is LF for text, CRLF for `.ps1`). Git prints CRLF warnings on Windows; they are harmless.
-
-## Update: P6 builder finished (appended after the handoff)
-
-This section records the builder report, not independent verification. Codex review/merge is currently authorized and in progress; update the review result after completing it.
-
-This supersedes the "may have UNCOMMITTED work" and "P6-D6, P6-D7 not done" wording above and the "STOPPED HERE" notes on the P6 lines in PROGRESS.md.
-
-- Branch `wave/P6`, worktree `C:/Users/PV/AppData/Local/Temp/claude/b422cec1e7851a5a/17647aa4-3fa3-4021-8d2d-0fd5df60e364/scratchpad/wt/P6`, base `218029c`, last commit `7f95f6c`. Everything is committed (5 commits: `3ea4dd7`, `2e3a6b1`, `36d436d`, `b40e9ee`, `7f95f6c`), the worktree is clean, nothing pushed. NOT reviewed, NOT merged, `work` untouched. Claude reviews and merges it later (it will conflict in places because `work` moved on: P9 merge, version guard); Codex must not merge it or edit it.
-- Builder's own report, NOT verified by the orchestrator: 595 passed, 2 skipped in the worktree (base had 423); all checks use in-memory fakes (new `tests/fake_redis.py`), no cluster, no real Redis, DCM HTTP calls faked.
-- Done on the branch (per the builder):
-  - D1, D3, D5 policy: `models_ok` (default False), `namespace_protected` (default True), `metric_samples_seen` (None means burn-in); invalid or NaN confidence widths mean HUMAN; `decision_policy.py` stays pure (a test checks its imports); Fusion deadlines `DCM_DEADLINE_S` 5.0 and `INTERPRETATION_DEADLINE_S` 4.0 (chosen, not measured); protected label through `ModeWatcher.protected_for()` (unreadable or unknown means protected); burn-in counter in Redis ends at 2000.
-  - D4 sliding-window circuit breakers (Redis sorted sets `kubeheal:cbw:*`), recorded after the enqueue, never for dry runs.
-  - D2 OBSERVE sampling contract `agents/common/sampling.py` (factor 3, `OBSERVE_PERIOD_S` 300, chosen).
-  - D6 `interpretation_client.py`: `correlate`, `explain`, T0 parsing and T0 causal chain, attribution normalisation, `kernel_metric_attribution` (tested with a stub model; no explainer wired by default).
-  - D7 initial and complete security events share one incident; after `executed_contain` with outcome `contained` Fusion queues `restore` (with `t0_ms`, `workload_kind`); without T0, an unsupported kind, or a protected namespace it escalates once.
-  - R1 `agents/common/stream_reliability.py` (XAUTOCLAIM, delivery count, `kubeheal.deadletter`, escalation, lease heartbeat) used by Executor and Fusion; the Executor keeps a result marker per incident, action and dry-run flag so a redelivered finished request is acked without re-running.
-- Edits the builder made outside its folders (forced by the fail-closed defaults): `tests/test_killswitch.py`, `tests/test_executor.py`, `tests/test_record_pipeline.py`, `tests/test_remediation_validation.py`, `agents/common/killswitch.py`.
-- Missing or needed elsewhere (not done):
-  - Security Agent must publish `t0_ms` (earliest suspicious Falco `ts`; `timestamp_ms` is publish time and must never be used). Until then every contain escalates `t0_unknown` and no restore is ever requested.
-  - Health and Security agents must read the sampling contract (`sampling_factor`, `scaled_interval`).
-  - `models/interpretation`: a real KernelExplainer in the Health server (today it uses variance); the DCM chain's `T+x s` offsets are hard-coded templates.
-  - `dockerfiles/Dockerfile.fusion` and the chart: new optional env vars with chosen defaults (`DCM_DEADLINE_S`, `INTERPRETATION_DEADLINE_S`, `OBSERVE_PERIOD_S`, `INCIDENT_DEDUP_TTL_S`, `INCIDENT_CONTEXT_TTL_S`, `KUBEHEAL_PENDING_IDLE_MS` 60000, `KUBEHEAL_MAX_DELIVERIES` 5, `KUBEHEAL_RECLAIM_INTERVAL_S`, `KUBEHEAL_RECLAIM_BATCH`, `KUBEHEAL_DEADLETTER_MAXLEN`).
-  - Dashboard should show `incident_update`, `restore_requested`, `fusion_escalation`; it reads only the first `decision` and `detection` record.
-  - P7-RR-10 is only partly covered (finished requests are idempotent; a crash in the middle of a canary is not).
-- Demo impact on a fresh install: burn-in lasts until 2000 health events (thresholds 0.95 and 0.90); heuristic-only security events always go to HUMAN; restore is never requested automatically; `ModeWatcher.protected_for()` returns True until the first namespace list succeeds.
-- Unverified by the builder: whether one health event counts as one metric sample (an assumption); XAUTOCLAIM and XPENDING checked only against its own fake (the Redis chart image is unpinned, `reset.sh` uses `redis:7-alpine`); the interpretation deadline bounds only an injected explainer.
+Never push, never set `ALLOW_PUSH`, never run destructive Git commands. No invented metrics or results.

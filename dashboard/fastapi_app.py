@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
 from agents.common.metrics import KubeHealMetrics, add_metrics_route
-from dashboard.admin_routes import redis_services, router as admin_router
+from dashboard.admin_routes import reconcile_approval_claims, redis_services, router as admin_router
 from dashboard.mode_admin import KubernetesModeStore
 
 logging.basicConfig(level=logging.INFO)
@@ -579,6 +579,11 @@ async def lifespan(app: FastAPI):
         app.state.services = redis_services(
             ledger_from_env(), KubernetesModeStore(),
             lambda: dashboard.redis if dashboard else None)
+        try:
+            counts = await reconcile_approval_claims(app.state.services)
+            logger.info("Approval claim startup reconciliation: %s", counts)
+        except Exception as e:
+            logger.error("Approval claim startup reconciliation failed: %s", type(e).__name__)
     except Exception as e:
         logger.error(f"approvals and kill switch endpoints disabled, ledger not available: {type(e).__name__}")
         app.state.services = None
