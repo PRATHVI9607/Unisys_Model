@@ -64,6 +64,7 @@ class ModeWatcher:
         self.global_mode: Optional[str] = None
         self.readable: bool = False
         self.ns_readable: bool = False   # namespace labels loaded and watch healthy
+        self._ns_unreadable_warned = False
         self.ns_labels: Dict[str, str] = {}
         # every namespace the watcher has seen -> value of kubeheal/protected (None = no such label)
         self.ns_protect: Dict[str, Optional[str]] = {}
@@ -86,6 +87,14 @@ class ModeWatcher:
         if not namespace:
             return True
         return is_protected(namespace in self.ns_protect, self.ns_protect.get(namespace), self.ns_readable)
+
+    def mark_namespaces_unreadable(self, reason: str) -> None:
+        """Fail closed on namespace watch errors and explain why label checks are conservative."""
+        self.ns_readable = False
+        if not self._ns_unreadable_warned:
+            logger.warning("namespace labels have not loaded or the watch failed; mode and protected-namespace checks fail closed")
+            self._ns_unreadable_warned = True
+        logger.warning(f"namespace watch error: {reason}")
 
     # ---- state updates (pure, unit tested) ----------------------------
     def apply_configmap(self, cm) -> None:
@@ -175,6 +184,7 @@ class ModeWatcher:
                 for n in lst.items:
                     self.apply_namespace(n)
                 self.ns_readable = True
+                self._ns_unreadable_warned = False
                 async with watch.Watch() as w:
                     async for ev in w.stream(core_api.list_namespace,
                                              resource_version=lst.metadata.resource_version,
@@ -183,6 +193,5 @@ class ModeWatcher:
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                self.ns_readable = False   # stale labels could hide a `test` override or a protected label: fail safe
-                logger.warning(f"namespace watch error: {e}")
+                self.mark_namespaces_unreadable(str(e))  # stale labels could hide an override: fail safe
                 await asyncio.sleep(2)

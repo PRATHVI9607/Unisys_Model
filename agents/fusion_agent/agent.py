@@ -147,7 +147,7 @@ class FusionAgentV4:
                 config.load_incluster_config()
             except Exception:
                 await config.load_kube_config()
-            await self.mode.start(client.CoreV1Api())   # read-only: kubeheal-mode + namespace labels
+            await self._start_mode_watcher(client.CoreV1Api())   # read-only: kubeheal-mode + namespace labels
         except Exception as e:
             logger.warning(f"kill switch watcher not started ({e}); mode stays 'test'")
         self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
@@ -162,6 +162,13 @@ class FusionAgentV4:
         logger.info(f"Fusion Agent v4 started (consumer={self.consumer}, burn_in_forced={self.burn_in})")
         self.running = True
         await self._consume()
+
+    async def _start_mode_watcher(self, core_api):
+        """Start the read-only watcher; a failure must leave enforcement disabled."""
+        try:
+            await self.mode.start(core_api)
+        except Exception as e:
+            logger.warning(f"kill switch watcher not started ({e}); mode stays 'test'")
 
     async def stop(self):
         self.running = False

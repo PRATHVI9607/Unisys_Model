@@ -115,6 +115,15 @@ def test_namespace_labels_unknown_means_test():
     assert w.mode_for("prod") == "test"
 
 
+def test_namespace_watch_failure_warns_once_and_fails_closed(caplog):
+    w = ks.ModeWatcher()
+    w.apply_configmap(cm("enforce"))
+    w.mark_namespaces_unreadable("api unavailable")
+    w.mark_namespaces_unreadable("still unavailable")
+    assert w.mode_for("prod") == "test" and w.protected_for("prod") is True
+    assert sum("namespace labels have not loaded" in rec.message for rec in caplog.records) == 1
+
+
 # ---- policy ---------------------------------------------------------------------
 def test_policy_default_is_dry_run_and_mode_is_an_input():
     base = dict(health_risk=0.79, sec_risk=0.1, namespace_tier="prod", health_field_top="cpu",

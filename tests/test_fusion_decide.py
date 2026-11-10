@@ -124,6 +124,19 @@ def test_a_failing_interpretation_step_is_human():
     assert decisions(a) == ["human_contain"]
 
 
+def test_mode_watcher_start_failure_keeps_safe_test_mode(caplog):
+    async def broken_start(_core_api):
+        raise RuntimeError("watch startup failed")
+
+    a = make_agent()
+    from agents.common.killswitch import ModeWatcher
+    a.mode = ModeWatcher()
+    a.mode.start = broken_start
+    run(a._start_mode_watcher(object()))
+    assert a.mode.mode_for("prod") == "test"
+    assert "mode stays 'test'" in caplog.text
+
+
 def test_single_signal_incident_needs_no_dcm_call():
     a = make_agent()
     decide(a, sec=sec_event())
