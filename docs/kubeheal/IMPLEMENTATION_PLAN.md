@@ -201,6 +201,8 @@ Acceptance: each script runs end to end on k3d and produces its results file.
 
 ## P12. Model hardening (compute heavy: ask before running training)
 
+- P12-H (not approved, not started): retrain the Health Model on live cluster windows, produced by `models/generate_health_training_data.py` and passed through `models/health_model/preprocess.py` (the same code as serving), then recalibrate. Until then live Health Model scores are not validated on real cluster windows.
+
 - Scenario-stratified split for the drift dataset; report leakage risk.
 - Security generator: held-out ransomware variants (speeds, partial/intermittent encryption,
   rename vs in-place), benign high-entropy hard negatives (gzip, backup, transcoding).

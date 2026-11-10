@@ -9,6 +9,7 @@ COPY agents/ /app/agents/
 # torch-free metric schema the health agent imports (NOT the torch encoder).
 # models/ is a PEP-420 namespace package (no __init__.py needed).
 COPY models/health_model/metric_schema.py /app/models/health_model/metric_schema.py
+COPY models/health_model/preprocess.py /app/models/health_model/preprocess.py
 ENV REDIS_URL=redis://redis-master:6379
 ENV HEALTH_MODEL_URL=http://kubeheal-health-model:8001
 ENV PROMETHEUS_URL=http://prometheus-operated.monitoring.svc.cluster.local:9090

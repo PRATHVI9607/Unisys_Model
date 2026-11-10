@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 
 import numpy as np
 import torch
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 
@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT))
 
 from models.health_model.health_model import HealthModel
 from models.health_model.health_output_head import HEALTH_LABELS
+from models.health_model.preprocess import preprocess_window
 from models.health_model.yaml_gat_encoder import yaml_diff_to_graph
 from models.health_model.health_conformal import ConformalRegressor
 from models.interpretation.field_name_mapper import FieldNameMapper
@@ -44,7 +45,8 @@ METRICS = KubeHealMetrics()
 class ScoreRequest(BaseModel):
     old_spec: Optional[Dict] = None
     new_spec: Optional[Dict] = None
-    metrics: Optional[List[List[float]]] = None
+    metrics: Optional[List[List[float]]] = None    # RAW live-unit window [60,15], scaled below
+    replicas: Optional[float] = None               # Deployment replica count (see models/health_model/preprocess.py)
     request_id: Optional[str] = None
 
 
@@ -85,8 +87,14 @@ def score(req: ScoreRequest):
     t0 = time.time()
     model = STATE["model"]
     graph = yaml_diff_to_graph(req.old_spec or {}, req.new_spec or {})
-    metrics = np.asarray(req.metrics if req.metrics is not None
-                         else np.zeros((60, 15)), dtype=np.float32)
+    raw = np.asarray(req.metrics if req.metrics is not None
+                     else np.zeros((60, 15)), dtype=np.float64)
+    try:
+        # The SAME preprocessing the training code uses (P5-Q2a): training-time scaling, usage/limit proxy in
+        # the throttle channel, zeros where training had no signal. The caller sends raw Prometheus values.
+        metrics = preprocess_window(raw, req.replicas)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     mt = torch.tensor(metrics, dtype=torch.float32)
 
     with torch.no_grad():

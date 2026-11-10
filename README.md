@@ -38,6 +38,8 @@ Falco syscalls + entropy ─► SECURITY MODEL (Transformer + Conv1D-SE) ─► 
 | **Security** (`models/security_model/`) | ≤256 syscalls + 30-step entropy | Transformer (4h×2L, Pre-LN, CLS) + Conv1D-SE (k=3·7·15) → cross-attn | `sec_risk`, 5-class label, syscall attribution, entropy spike, CI, 64-dim emb |
 | **DCM** (`models/dcm/`) | both embeddings | bidirectional cross-modal attention | `correlation_score`, `compound_flag`, causal chain |
 
+> **Status of the drift pipeline:** Drift pipeline complete; inputs now match training preprocessing; live Health Model scores are not yet validated on real cluster windows. Retraining on live cluster data (P12-H) is a future step, not approved yet. The Health Model's metric inputs go through one shared preprocessing (`models/health_model/preprocess.py`) used by training and serving.
+
 ---
 
 ## Decision policy (Fusion Agent v4)

@@ -39,7 +39,8 @@ Real usage is measured later and recorded under `docs/kubeheal/results/`.
 | P5 Sense | done, merged (a6ef46a), see P5 log |
 | P6 Decide | not started |
 | P7 Remediation paths | code done and merged (5bd3558), proven with fakes only; open items P7-RR-9 to RR-11 and P6-D7, RR-7 needs P10 |
-| P8 to P13 | not started |
+| P8 to P11, P13 | P8 and P9 in progress on builders, see checklist |
+| P12 Model hardening | NOT started; P12-H (retraining on live cluster data) is not approved |
 
 ## Task checklist
 
@@ -65,13 +66,11 @@ Each line: ID, goal, files, verify. "needs" lists tasks that must be done first.
 - Executor settings are CHOSEN DEFAULTS, NOT MEASUREMENTS, tunable by environment and Helm values: `PROMETHEUS_URL=http://prometheus-operated.monitoring.svc.cluster.local:9090`, `SNAPSHOT_CLASS=csi-hostpath-snapclass` (P10 must create a VolumeSnapshotClass with exactly this name), `CANARY_WINDOW_S=30`, `ROLLOUT_TIMEOUT_S=180`, `ROLLOUT_POLL_S=5`. In code: `agents/executor/config.py` `DEFAULTS` apply when the variable is absent from the process environment; a variable set but empty or invalid still escalates (fail closed). Helm values: set by the P9 builder (extra brief).
 - Victim app metrics: no guessed names. A small victim app under `demo/victim-app/` (FastAPI with prometheus_client) exports `http_requests_total` (labels method, path, status) and `http_request_duration_seconds` (histogram), with a ServiceMonitor; container inputs use the real series `container_cpu_cfs_throttled_periods_total` / `container_cpu_cfs_periods_total`, `container_memory_working_set_bytes`, `kube_pod_container_status_restarts_total`. See tasks P5-Q1, P10-V1, P10-V2.
 
-### Health inputs: training vs serving (finding, 2026-11-11, not yet fixed)
-The Health Agent's 15 PromQL queries (`agents/health_agent/metric_queries.py`) already use exactly the series names above, so "aligning the names" changes nothing there. Checking them against how the model was trained (`models/train_health_model.py` `build_metric_window`) shows the live windows do NOT have the same meaning as the training windows:
-- Training windows are built from 9 scalar CSV columns, broadcast over 60 steps with noise (not real time series). Six channels are all zero in training: `memory_rss_bytes`, `http_p50_latency_ms`, `http_p999_latency_ms`, `network_receive_bytes`, `network_transmit_bytes`, `disk_io_bytes`.
-- Training divides channels by constants (`NORM`: for example memory by 1e9, latency by 2000); the serving path (`services/health_model_server/main.py`) passes the raw Prometheus values to the model. No scaling was found on the serving side; whether the encoder normalises internally was not checked.
-- Training's `cpu_throttle_percent` is a usage/limit ratio in 0..1 (a proxy), live is the CFS throttle ratio times 100.
-- CSV `cpu_usage_cores` and `cpu_limit` are divided by constants meant for millicores; their real units were not verified.
-Consequence: with real Prometheus windows the Health Model sees inputs outside its training distribution, so its scores on live data are not trustworthy until it is retrained on live windows (P12, `models/generate_health_training_data.py` produces them) or a verified scaling is added. Until then the demo's drift path must not be presented as validated detection (see the "not measured" rule). Task P5-Q2 tracks it.
+### Health inputs: training vs serving (found 2026-11-11, option A done)
+Status: **Drift pipeline complete; inputs now match training preprocessing; live Health Model scores are not yet validated on real cluster windows. Retraining on live cluster data (P12-H) is a future step, not approved yet.**
+Finding. The Health Model was trained on windows built from 9 scalar CSV columns (broadcast over 60 steps with noise), scaled by constants, while serving passed raw Prometheus values. Facts checked in `models/train_health_model.py` and the CSV (4782 rows): units in the CSV are cores (CPU), MiB (memory limit), seconds (latency), bytes (working set), and `app_instance_count` is the replica count; six of the 15 channels are zero in training (`memory_rss_bytes`, `http_p50_latency_ms`, `http_p999_latency_ms`, `network_receive_bytes`, `network_transmit_bytes`, `disk_io_bytes`); the `http_request_rate` channel holds replicas/100 because a dict-key overwrite in the old CSV map replaced `request_rate` with `app_instance_count`; `cpu_throttle_percent` is a usage/limit proxy in 0..1; several scaling constants do not match the CSV units (latency seconds divided by 2000, CPU cores divided by 2000), so those channels sit near zero in training.
+Fix (P5-Q2a, done): one shared module `models/health_model/preprocess.py` reproduces that training scaling exactly. Training (`build_metric_window`) and serving (`services/health_model_server`) both call it; the Health Agent sends the raw window plus the replica count and logs the real CFS throttle ratio separately (`cfs_throttle_percent`, not a model input). Parity: `tests/test_health_preprocess_parity.py` compares against a frozen copy of the old training code, bit for bit on all 4782 CSV rows, and through the real server endpoint.
+What this does not do: it does not validate the model on live data, and the quirks above (six dead channels, replicas in the request-rate channel, constants that do not match units) are kept on purpose because the checkpoint depends on them. P12-H (not approved) would retrain on live windows through the same preprocessing. `models/generate_health_training_data.py` stores raw live windows: they must go through `preprocess_window` before training.
 
 ### P4 Record: ledger and metrics (touches `agents/common/`, `k8s/`, `deploy/grafana/`, `services/`)
 - [x] P4-L1 size: M. Added `Ledger.append(incident_id, step, payload)` with per-incident sequence keys, an in-memory backend, and a MinIO client adapter. Added validation and overwrite refusal tests. Focused tests: 7 passed with system Python 3.13. Full suite collection unavailable because the project venv launcher targets an inaccessible Python 3.11 install and system Python lacks `redis` and `aiohttp`.
@@ -93,7 +92,8 @@ Consequence: with real Prometheus windows the Health Model sees inputs outside i
 - [x] P5-S4 size: S. Remove synthetic syscall fabrication from live paths (keep in tests or replay tooling). Verify: grep test that live code has no fabrication. Needs: P5-S2.
 
 - [ ] P5-Q1 size: M. Align the Health Agent PromQL to the real series (see Owner decisions): keep the 15 column names and meanings, change the `app-guess` rows in `agents/health_agent/metric_queries.py` to the victim-app contract (`http_requests_total{method,path,status}`, `http_request_duration_seconds` histogram, labels `namespace` and `pod` come from the ServiceMonitor), update the module docstring (no longer guesses), tests. Verify in P10-V2. Needs: P10-V1 for the contract.
-- [ ] P5-Q2 size: L. Training/serving skew of the Health Model inputs (finding above): decide between retraining on live windows (P12, owner go) and a verified input scaling; until then document that live drift scores are unvalidated. Files: `services/health_model_server/`, `models/` (training only on owner go).
+- [x] P5-Q2a size: L. Shared Health Model preprocessing for training and serving (`models/health_model/preprocess.py`), parity tests, agent sends replicas and logs the real CFS ratio. Done 2026-11-11 (option A, owner decision). No retraining.
+- [ ] P12-H size: L. NOT APPROVED, not started: retrain on live cluster windows through the shared preprocessing and recalibrate. Waits for the owner's go.
 
 ### P6 Decide: complete policy and fusion (touches `agents/fusion_agent/`, `agents/common/`, `tests/`)
 - [ ] P6-D1 size: L. `models_ok` input to the pure policy: missing or late model response means HUMAN; per-call deadlines in Fusion. Files: `decision_policy.py` (stronger agent only), `agents/fusion_agent/`. Verify: policy tests plus timeout test.
@@ -141,7 +141,7 @@ Ransomware:
 - [ ] P10-U2 size: M. Falco install attempt with automatic replay fallback and clear message. Needs: P5-S2.
 - [ ] P10-U3 size: M. Victim apps in prod (PVC with real files) and one in dev.
 - [ ] P10-U4 size: L. `demo/scripts/demo.ps1` numbered steps covering the full list in the plan. Needs: P6, P7, P8.
-- [ ] P10-U5 size: S. `demo/README.md` (run order, expected output, what to say, limitations).
+- [ ] P10-U5 size: S. `demo/README.md` (run order, expected output, what to say, limitations). It must carry the status line: "Drift pipeline complete; inputs now match training preprocessing; live Health Model scores are not yet validated on real cluster windows. Retraining on live cluster data (P12-H) is a future step, not approved yet."
 - [ ] P10-U6 size: L. Acceptance: `up.ps1`, all demo steps, reset, twice in a row without manual fixes.
 
 - [ ] P10-V1 size: M. `demo/victim-app/`: small FastAPI app with prometheus_client exporting `http_requests_total` (method, path, status) and `http_request_duration_seconds` (histogram), Dockerfile, Deployment and Service for prod and dev, ServiceMonitor. Verify: unit test of the exporter; scrape on k3d in P10-V2. Needs: P9 (chart or manifests), Prometheus operator in P10-U1.

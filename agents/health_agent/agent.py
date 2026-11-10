@@ -258,8 +258,9 @@ class HealthAgent:
                              "no assessment published (fail closed)")
                 return
 
+            replicas = getattr(deployment.spec, "replicas", None) if deployment.spec else None
             assessment = await self._assess_health(
-                namespace, name, old_spec, new_spec, window, blast_radius
+                namespace, name, old_spec, new_spec, window, blast_radius, replicas=replicas
             )
 
             if assessment:
@@ -397,6 +398,7 @@ class HealthAgent:
         new_spec: Dict,
         metrics,                 # MetricWindow (or a bare np.ndarray [60,15], treated as no missing info)
         blast_radius: str,
+        replicas: Optional[int] = None,
     ) -> Optional[Dict]:
         """Score the drift with the v4 Health Model server. Returns a v4 dict
         (the schema the Fusion Agent + dashboard consume), or None when the
@@ -412,6 +414,9 @@ class HealthAgent:
             # Extra keys: the Health Model server ignores them today (ScoreRequest has no such field);
             # they are sent so the server can use the flags once it supports them (see P5 report).
             "metrics_missing": missing,
+            # P5-Q2a: the server scales the RAW window with models/health_model/preprocess.py (the same
+            # code as training). The replica count feeds the channel that held app_instance_count in training.
+            "replicas": replicas,
         }
         result = None
         started = time.perf_counter()
@@ -462,7 +467,19 @@ class HealthAgent:
             # P5: which of the 15 metrics had no real data (their window columns were 0.0 placeholders).
             "metrics_missing": missing,
             "metrics_observed": dict(getattr(metrics, "observed", {}) or {}),
+            **self._throttle_logging(values, missing),
         }
+
+    @staticmethod
+    def _throttle_logging(values, missing) -> Dict:
+        """The REAL CFS throttle ratio is logged on its own: it is not a model input (the model's
+        throttle channel is the usage/limit proxy it was trained with, models/health_model/preprocess.py)."""
+        import numpy as np
+        from models.health_model.preprocess import cfs_throttle_percent
+        arr = np.asarray(values, dtype=np.float64)
+        if arr.ndim != 2 or arr.shape[0] == 0 or "cpu_throttle_percent" in (missing or []):
+            return {"cfs_throttle_percent": None}
+        return {"cfs_throttle_percent": float(cfs_throttle_percent(arr)[-1])}
 
     def _patch_from_field(self, top_field: str, old_spec, new_spec) -> Optional[Dict]:
         """Propose restoring the highest-attribution field to its baseline value."""
@@ -546,6 +563,9 @@ class HealthAgent:
             "inference_method": a.get("inference_method", ""),
             "metrics_missing_json": json.dumps(a.get("metrics_missing", [])),
             "metrics_observed_json": json.dumps(a.get("metrics_observed", {})),
+            # real CFS ratio, last step, logged only ("" when unavailable); not a model input
+            "cfs_throttle_percent": ("" if a.get("cfs_throttle_percent") is None
+                                     else f"{a['cfs_throttle_percent']:.4f}"),
             "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
         }
         await self.redis.xadd("kubeheal.health.events", payload)

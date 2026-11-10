@@ -54,24 +54,10 @@ CSV_LABEL_MAP = {
     "Harmful_Security_Breach": "critical_config_error",
 }
 
-# CSV scalar columns → which of the 15 metric channels they populate
-CSV_METRIC_MAP = {
-    "request_rate": "http_request_rate",
-    "error_rate_5xx": "http_error_rate",
-    "latency_p99": "http_p99_latency_ms",
-    "cpu_usage_cores": "cpu_usage_millicores",
-    "memory_working_set_bytes": "memory_working_set_bytes",
-    "cpu_limit": "cpu_limit_millicores",
-    "memory_limit": "memory_limit_bytes",
-    "restart_count": "pod_restarts_total",
-    "app_instance_count": "http_request_rate",  # weak proxy; harmless
-}
-NORM = {
-    "http_request_rate": 100.0, "http_error_rate": 10.0, "http_p99_latency_ms": 2000.0,
-    "cpu_usage_millicores": 2000.0, "memory_working_set_bytes": 1e9,
-    "cpu_limit_millicores": 2000.0, "memory_limit_bytes": 2e9,
-    "pod_restarts_total": 10.0,
-}
+# CSV scalar columns -> the 15 metric channels, and the per-channel scaling, now live in ONE shared module
+# (models/health_model/preprocess.py) that the serving path uses too (P5-Q2a). The mapping and the constants are
+# unchanged from before; tests/test_health_preprocess_parity.py proves the windows are bit-identical.
+from models.health_model.preprocess import csv_row_to_raw, preprocess_window
 
 
 def _f(row, key, default=0.0):
@@ -81,22 +67,13 @@ def _f(row, key, default=0.0):
         return default
 
 
-def build_metric_window(row: Dict) -> np.ndarray:
-    """Scalar CSV metrics → [60,15], broadcast across time + light noise."""
-    base = np.zeros(NUM_METRICS, dtype=np.float32)
-    for csv_col, metric in CSV_METRIC_MAP.items():
-        if metric in METRIC_COLUMNS:
-            idx = METRIC_COLUMNS.index(metric)
-            base[idx] = _f(row, csv_col) / NORM.get(metric, 1.0)
-    # derive cpu_throttle proxy from usage/limit ratio
-    try:
-        ti = METRIC_COLUMNS.index("cpu_throttle_percent")
-        usage = _f(row, "cpu_usage_cores"); limit = _f(row, "cpu_limit") or 1.0
-        base[ti] = min(1.0, usage / max(limit, 1e-6))
-    except ValueError:
-        pass
-    win = np.tile(base, (INPUT_SEQUENCE_LENGTH, 1))
-    win += np.random.randn(*win.shape).astype(np.float32) * 0.02
+def build_metric_window(row: Dict, noise: float = 0.02) -> np.ndarray:
+    """Scalar CSV metrics -> [60,15] through the shared preprocessing, broadcast across time + light noise
+    (the noise is a training-only augmentation and is not part of the shared preprocessing)."""
+    raw, replicas = csv_row_to_raw(row, INPUT_SEQUENCE_LENGTH)
+    win = preprocess_window(raw, replicas)
+    if noise:
+        win += np.random.randn(*win.shape).astype(np.float32) * noise
     return win.astype(np.float32)
 
 

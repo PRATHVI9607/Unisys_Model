@@ -286,3 +286,45 @@ def test_complete_window_keeps_the_models_ci_width(monkeypatch):
     _, pub = _assess_and_publish(monkeypatch, win)
     assert float(pub["health_ci_width"]) == pytest.approx(0.08)
     assert json.loads(pub["metrics_missing_json"]) == []
+
+
+def test_agent_sends_replicas_and_logs_the_real_cfs_ratio_separately(monkeypatch):
+    """P5-Q2a: the model server scales the RAW window (shared preprocessing); the agent sends the replica
+    count and publishes the real CFS throttle ratio on its own, not as a model input."""
+    from agents.health_agent import agent as ha
+
+    win, _ = fetch(_load("window_full"))
+    seen = {}
+
+    class Resp:
+        status = 200
+        async def json(self): return {"risk_score": 0.7, "label": "drift", "ci_width": 0.1}
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+    class Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        def post(self, url, json=None, timeout=None):
+            seen["payload"] = json
+            return Resp()
+
+    import aiohttp
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda *a, **k: Session())
+    agent = ha.HealthAgent(redis_url="redis://unused")
+    out = run(agent._assess_health("shop", "web", {"a": 1}, {"a": 2}, win, "Low", replicas=3))
+    assert seen["payload"]["replicas"] == 3
+    # raw values are sent unscaled
+    assert np.allclose(np.array(seen["payload"]["metrics"]), win.values)
+    assert out["cfs_throttle_percent"] == pytest.approx(float(win.values[-1, 0]))
+
+    published = {}
+
+    class R:
+        async def xadd(self, stream, payload): published.update(payload)
+        async def hset(self, *a, **k): pass
+        async def expire(self, *a, **k): pass
+
+    agent.redis = R()
+    run(agent._publish_assessment(out))
+    assert float(published["cfs_throttle_percent"]) == pytest.approx(float(win.values[-1, 0]), abs=1e-3)
