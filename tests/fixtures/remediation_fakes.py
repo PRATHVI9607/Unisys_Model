@@ -176,6 +176,7 @@ class Cluster:
         self.pvcs = {}
         self.replica_sets = {}
         self.snapshots = {}      # name -> object
+        self.snapshot_clock = lambda: 10_000_000.0     # stamps creationTimestamp of created snapshots
         self.policies = {}
         self.stuck_rollout = False
         self.stuck_scale_down = False
@@ -312,7 +313,10 @@ class FakeCustom:
         self.c.log.append(("custom", "create_snapshot", name, body))
         if name in self.c.snapshots:
             raise Exists(name)
-        self.c.snapshots[name] = copy.deepcopy(body)
+        obj = copy.deepcopy(body)
+        obj["metadata"]["creationTimestamp"] = datetime.fromtimestamp(
+            self.c.snapshot_clock(), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.c.snapshots[name] = obj
 
     async def list_namespaced_custom_object(self, group, version, ns, plural, label_selector=""):
         return {"items": [copy.deepcopy(s) for s in self.c.snapshots.values()
