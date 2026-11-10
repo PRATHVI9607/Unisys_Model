@@ -12,12 +12,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agents.fusion_agent.decision_policy import (
     make_decision, DecisionInput, Decision,
     Thresholds, TIER_MULTIPLIERS, COMPOUND_ESCALATION,
-    CB_CONTAIN_LIMIT_PER_HOUR, CB_PATCH_LIMIT_PER_HOUR,
+    CB_CONTAIN_LIMIT_PER_HOUR, CB_PATCH_LIMIT_PER_HOUR, BURN_IN_SAMPLES,
 )
+
+# P6: the policy fails closed on missing inputs, so the base case states them explicitly: all models
+# answered, namespace known to be unprotected, burn-in over. Tests for the new rules live in
+# tests/test_policy_rules.py.
+OK = dict(models_ok=True, namespace_protected=False, metric_samples_seen=BURN_IN_SAMPLES)
 
 
 def D(**kw):
-    return make_decision(DecisionInput(**kw))
+    return make_decision(DecisionInput(**{**OK, **kw}))
 
 
 # ── BENIGN / OBSERVE ────────────────────────────────────────
@@ -141,7 +146,7 @@ def test_rationale_present_everywhere():
                dict(sec_risk=0.9),
                dict(health_risk=0.9, sec_risk=0.0),
                dict(health_risk=0.5)]:
-        assert make_decision(DecisionInput(**kw)).rationale
+        assert D(**kw).rationale
 
 def test_autocontain_requires_lock():
     assert D(sec_risk=0.9).requires_incident_lock is True

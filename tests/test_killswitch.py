@@ -117,7 +117,8 @@ def test_namespace_labels_unknown_means_test():
 
 # ---- policy ---------------------------------------------------------------------
 def test_policy_default_is_dry_run_and_mode_is_an_input():
-    base = dict(health_risk=0.79, sec_risk=0.1, namespace_tier="prod", health_field_top="cpu")
+    base = dict(health_risk=0.79, sec_risk=0.1, namespace_tier="prod", health_field_top="cpu",
+                models_ok=True, namespace_protected=False, metric_samples_seen=dp.BURN_IN_SAMPLES)
     out = dp.make_decision(dp.DecisionInput(**base))
     assert out.dry_run is True
     assert dp.make_decision(dp.DecisionInput(mode="enforce", **base)).dry_run is False

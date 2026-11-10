@@ -24,6 +24,7 @@ MODE_CONFIGMAP = "kubeheal-mode"
 MODE_NAMESPACE = "kubeheal"
 MODE_KEY = "mode"
 NAMESPACE_LABEL = "kubeheal/mode"
+PROTECTED_LABEL = "kubeheal/protected"
 TEST, ENFORCE = "test", "enforce"
 
 
@@ -46,12 +47,26 @@ def is_dry_run(mode: str) -> bool:
     return normalize(mode) != ENFORCE
 
 
+def is_protected(known: bool, label: Optional[str], readable: bool) -> bool:
+    """P6-D3 (S-POL-6): a namespace labelled `kubeheal/protected` never gets an automatic action.
+    Fail closed: if the labels are not readable, or the namespace is not in the list the watcher has seen,
+    the namespace counts as protected. A namespace without the label is not protected. A label with any
+    value other than exactly `false` (any case) protects: a typo must not switch protection off."""
+    if not readable or not known:
+        return True
+    if label is None:
+        return False
+    return str(label).strip().lower() != "false"
+
+
 class ModeWatcher:
     def __init__(self, on_change: Optional[Callable[[str, str, str], None]] = None):
         self.global_mode: Optional[str] = None
         self.readable: bool = False
         self.ns_readable: bool = False   # namespace labels loaded and watch healthy
         self.ns_labels: Dict[str, str] = {}
+        # every namespace the watcher has seen -> value of kubeheal/protected (None = no such label)
+        self.ns_protect: Dict[str, Optional[str]] = {}
         self.history: List[dict] = []
         self._on_change = on_change
         self._last_effective: Optional[str] = None
@@ -66,6 +81,12 @@ class ModeWatcher:
     def dry_run_for(self, namespace: Optional[str]) -> bool:
         return is_dry_run(self.mode_for(namespace))
 
+    def protected_for(self, namespace: Optional[str]) -> bool:
+        """True when the namespace carries `kubeheal/protected` or its label state is unknown."""
+        if not namespace:
+            return True
+        return is_protected(namespace in self.ns_protect, self.ns_protect.get(namespace), self.ns_readable)
+
     # ---- state updates (pure, unit tested) ----------------------------
     def apply_configmap(self, cm) -> None:
         data = (getattr(cm, "data", None) or {}) if cm is not None else {}
@@ -79,11 +100,16 @@ class ModeWatcher:
 
     def apply_namespace(self, ns_obj, deleted: bool = False) -> None:
         name = ns_obj.metadata.name
-        label = (ns_obj.metadata.labels or {}).get(NAMESPACE_LABEL)
+        labels = ns_obj.metadata.labels or {}
+        label = labels.get(NAMESPACE_LABEL)
         if deleted or label is None:
             self.ns_labels.pop(name, None)
         else:
             self.ns_labels[name] = label
+        if deleted:
+            self.ns_protect.pop(name, None)
+        else:
+            self.ns_protect[name] = labels.get(PROTECTED_LABEL)
 
     def mark_unreadable(self, reason: str) -> None:
         logger.warning(f"kill switch unreadable ({reason}): treating mode as 'test'")
@@ -145,6 +171,7 @@ class ModeWatcher:
             try:
                 lst = await core_api.list_namespace()
                 self.ns_labels = {}
+                self.ns_protect = {}       # relist: forget stale namespaces and labels
                 for n in lst.items:
                     self.apply_namespace(n)
                 self.ns_readable = True
@@ -156,6 +183,6 @@ class ModeWatcher:
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                self.ns_readable = False   # stale labels could hide a `test` override: fail safe
+                self.ns_readable = False   # stale labels could hide a `test` override or a protected label: fail safe
                 logger.warning(f"namespace watch error: {e}")
                 await asyncio.sleep(2)

@@ -209,6 +209,8 @@ def test_refused_requests_are_counted_as_refused_not_success():
     m.METRICS = M()
     try:
         class R:
+            async def get(self, *a): return None          # P6-R1: result marker lookup
+            async def set(self, *a, **k): return True
             async def xack(self, *a): return 1
             async def xadd(self, *a, **k): return "1-0"
         ex = m.ExecutorService(redis=R(), ledger=type("L", (), {"append": lambda *a, **k: None})())

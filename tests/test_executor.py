@@ -139,7 +139,9 @@ def test_fusion_enqueues_for_executor_and_has_no_kubernetes_client():
     a.redis = FakeRedis()
     assert not hasattr(a, "core_api") and not hasattr(a, "apps_api")
     out = dp.make_decision(dp.DecisionInput(health_risk=0.79, sec_risk=0.1, namespace_tier="prod",
-                                            health_field_top="cpu"))
+                                            health_field_top="cpu", models_ok=True,
+                                            namespace_protected=False,
+                                            metric_samples_seen=dp.BURN_IN_SAMPLES))
     assert out.decision == dp.Decision.AUTO_PATCH
     inp = dp.DecisionInput(health_field_top="cpu", namespace_tier="prod")
     run(a._execute("prod", "web", "web-abc-1", out, inp, []))

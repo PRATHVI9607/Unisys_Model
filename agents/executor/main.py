@@ -27,6 +27,7 @@ from kubernetes_asyncio import client, config
 from agents.common.killswitch import ModeWatcher
 from agents.common.ledger import Ledger, ledger_from_env
 from agents.common.metrics import KubeHealMetrics
+from agents.common.stream_reliability import ReliabilityConfig, StreamReliability
 from agents.executor import drift, quarantine, restore
 from agents.executor.config import ExecConfig
 from agents.executor.guard import check_target
@@ -44,6 +45,11 @@ EXEC_STREAM = "kubeheal.exec"
 ACTIONS_STREAM = "kubeheal.actions"
 ESCALATIONS_STREAM = "kubeheal.escalations"
 GROUP = "executor"
+DONE_PREFIX = "kubeheal:exec:done"       # result marker per incident, action and dry-run flag (P6-R1)
+DONE_TTL_S = 7 * 24 * 3600               # chosen, not measured: how long a finished request is remembered
+# Outcomes that are not final: a later request for the same incident may legitimately run again.
+# Refused and escalated-before-running outcomes wrote nothing; a corrected request must be able to follow.
+NOT_FINAL_PREFIXES = ("DRY RUN:", "stopped_mode_test", "refused:", "escalated:", "no_baseline_escalated")
 
 
 class RequestGate:
@@ -83,6 +89,9 @@ class ExecutorService:
         self.consumer = os.environ.get("HOSTNAME") or f"executor-{uuid.uuid4().hex[:6]}"
         self.mode = mode or ModeWatcher(on_change=self._mode_changed)
         self.running = False
+        # P6-R1: reclaim of stale pending entries, dead letter after N deliveries, lease while handling
+        self.reliability = StreamReliability(lambda: self.redis, GROUP, self.consumer,
+                                             ReliabilityConfig.from_env())
 
     def _mode_changed(self, old, new, source):
         logger.warning(f"executor mode {old} -> {new} ({source})")
@@ -146,8 +155,13 @@ class ExecutorService:
             await self.redis.aclose()
 
     async def _consume(self):
+        last_sweep = None
         while self.running:
             try:
+                now = self.clock()
+                if last_sweep is None or now - last_sweep >= self.reliability.cfg.reclaim_interval_s:
+                    last_sweep = now
+                    await self.reclaim_pending()
                 msgs = await self.redis.xreadgroup(GROUP, self.consumer, {EXEC_STREAM: ">"},
                                                    count=5, block=1000)
                 for stream, entries in msgs or []:
@@ -163,31 +177,101 @@ class ExecutorService:
                 logger.warning(f"consume error: {e}")
                 await asyncio.sleep(1)
 
-    async def handle_entry(self, stream: str, msg_id: str, fields: Dict) -> bool:
+    async def reclaim_pending(self):
+        """XAUTOCLAIM the entries another executor (or an earlier run of this one) left unacknowledged.
+        Reclaimed entries run as tasks like new ones; after N failed deliveries the entry is dead-lettered
+        and escalated instead (P6-R1)."""
+        async def run(stream, msg_id, fields):
+            t = asyncio.create_task(self.handle_entry(stream, msg_id, fields))
+            self._tasks.add(t)
+            t.add_done_callback(self._tasks.discard)
+            return True
+
+        return await self.reliability.reclaim(EXEC_STREAM, run, self._dead_letter)
+
+    async def _dead_letter(self, stream: str, msg_id: str, fields: Dict, deliveries: int, reason: str):
+        """The request failed `deliveries` times. It may have run partly, so a human must look at it."""
+        METRICS.record_action(fields.get("action", "unknown"), "escalated")
+        METRICS.record_escalation("dead_lettered")
+        await self._escalate(fields, reason)
+        await self._record(fields, reason)
+
+    @staticmethod
+    def _done_key(f: Dict, msg_id: str) -> str:
+        """Marker key. Contain and restore share an incident id, and a dry-run approval is followed by a
+        real one under the same id, so action and the dry-run flag are part of the key. A request without
+        an incident id (allowed on the drift path) falls back to the stream entry id."""
+        incident = f.get("incident_id") or ""
+        who = incident if incident else f"msg-{msg_id}"
+        dry = "dry" if str(f.get("dry_run", "false")).lower() == "true" else "live"
+        return f"{DONE_PREFIX}:{who}:{f.get('action', 'unknown')}:{dry}"
+
+    async def _read_marker(self, key: str) -> Optional[Dict]:
+        raw = await self.redis.get(key)
+        if not raw:
+            return None
         try:
+            marker = json.loads(raw)
+            return marker if isinstance(marker, dict) else None
+        except (TypeError, ValueError):
+            return {"outcome": "unknown_marker", "recorded": True}
+
+    async def _write_marker(self, key: str, outcome: str, recorded: bool) -> None:
+        await self.redis.set(key, json.dumps({"outcome": outcome, "recorded": recorded}), ex=DONE_TTL_S)
+
+    async def handle_entry(self, stream: str, msg_id: str, fields: Dict) -> bool:
+        async with self.reliability.lease(stream, msg_id):
+            return await self._handle_entry(stream, msg_id, fields)
+
+    async def _handle_entry(self, stream: str, msg_id: str, fields: Dict) -> bool:
+        try:
+            key = self._done_key(fields, msg_id)
+            marker = await self._read_marker(key)
+            if marker is not None:
+                # Redelivery of a request that already ran (the ack was lost, or a second request for the
+                # same incident and action). Never run it again. If the result was not recorded yet
+                # (crash between the action and the record), finish the record from the stored outcome.
+                outcome = str(marker.get("outcome", ""))
+                if not marker.get("recorded"):
+                    await self._finish(fields, outcome, key)
+                else:
+                    await Recorder(self.record_step, fields.get("incident_id") or f"inc-{uuid.uuid4().hex}")(
+                        "redelivery_skipped", {"action": fields.get("action", "unknown"),
+                                               "stream_id": msg_id, "recorded_outcome": outcome})
+                await self.redis.xack(stream, GROUP, msg_id)
+                return True
             outcome = await self.execute(fields)
-            action = fields.get("action", "unknown")
-            if outcome.startswith("DRY RUN:"):
-                METRICS.record_action(action, "dry_run")
-                METRICS.record_dry_run_action(action)
-            elif needs_escalation(outcome):
-                METRICS.record_action(action, "escalated")
-            elif outcome.startswith("refused:"):
-                METRICS.record_action(action, "refused")
-            elif ("failed" in outcome or outcome.startswith("unknown_action")
-                  or outcome == "no_kube_client"):
-                METRICS.record_action(action, "failure")
-            else:
-                METRICS.record_action(action, "success")
-            if needs_escalation(outcome):
-                METRICS.record_escalation(outcome.split(":", 1)[0])
-                await self._escalate(fields, outcome)
-            await self._record(fields, outcome)
+            # The outcome is stored BEFORE the ledger and the actions entry, and both before the ack.
+            final = not outcome.startswith(NOT_FINAL_PREFIXES)
+            if final:
+                await self._write_marker(key, outcome, recorded=False)
+            await self._finish(fields, outcome, key if final else None)
         except Exception as e:
             logger.error(f"executing {msg_id} failed, left pending: {e}", exc_info=True)
             return False
         await self.redis.xack(stream, GROUP, msg_id)
         return True
+
+    async def _finish(self, fields: Dict, outcome: str, marker_key: Optional[str]) -> None:
+        action = fields.get("action", "unknown")
+        if outcome.startswith("DRY RUN:"):
+            METRICS.record_action(action, "dry_run")
+            METRICS.record_dry_run_action(action)
+        elif needs_escalation(outcome):
+            METRICS.record_action(action, "escalated")
+        elif outcome.startswith("refused:"):
+            METRICS.record_action(action, "refused")
+        elif ("failed" in outcome or outcome.startswith("unknown_action")
+              or outcome == "no_kube_client"):
+            METRICS.record_action(action, "failure")
+        else:
+            METRICS.record_action(action, "success")
+        if needs_escalation(outcome):
+            METRICS.record_escalation(outcome.split(":", 1)[0])
+            await self._escalate(fields, outcome)
+        await self._record(fields, outcome)
+        if marker_key:
+            await self._write_marker(marker_key, outcome, recorded=True)
 
     def _lock(self, namespace: str, workload: str) -> asyncio.Lock:
         return self._locks.setdefault(f"{namespace}/{workload}", asyncio.Lock())
