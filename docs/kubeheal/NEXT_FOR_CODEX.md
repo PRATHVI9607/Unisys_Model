@@ -56,3 +56,27 @@ Never push, never set `ALLOW_PUSH`, no destructive git commands, no invented num
 - Executor settings are chosen defaults, not measurements (`agents/executor/config.py` `DEFAULTS`). The queue-depth HPA target (4) is a chosen default too.
 - Live Health Model scores are not validated on real cluster windows; drift detection relies mainly on the configuration diff. Keep that status line wherever you write demo docs.
 - Edit files with LF line endings preserved (`.gitattributes` is LF for text, CRLF for `.ps1`). Git prints CRLF warnings on Windows; they are harmless.
+
+## Update: P6 builder finished (appended after the handoff)
+
+This supersedes the "may have UNCOMMITTED work" and "P6-D6, P6-D7 not done" wording above and the "STOPPED HERE" notes on the P6 lines in PROGRESS.md.
+
+- Branch `wave/P6`, worktree `C:/Users/PV/AppData/Local/Temp/claude/b422cec1e7851a5a/17647aa4-3fa3-4021-8d2d-0fd5df60e364/scratchpad/wt/P6`, base `218029c`, last commit `7f95f6c`. Everything is committed (5 commits: `3ea4dd7`, `2e3a6b1`, `36d436d`, `b40e9ee`, `7f95f6c`), the worktree is clean, nothing pushed. NOT reviewed, NOT merged, `work` untouched. Claude reviews and merges it later (it will conflict in places because `work` moved on: P9 merge, version guard); Codex must not merge it or edit it.
+- Builder's own report, NOT verified by the orchestrator: 595 passed, 2 skipped in the worktree (base had 423); all checks use in-memory fakes (new `tests/fake_redis.py`), no cluster, no real Redis, DCM HTTP calls faked.
+- Done on the branch (per the builder):
+  - D1, D3, D5 policy: `models_ok` (default False), `namespace_protected` (default True), `metric_samples_seen` (None means burn-in); invalid or NaN confidence widths mean HUMAN; `decision_policy.py` stays pure (a test checks its imports); Fusion deadlines `DCM_DEADLINE_S` 5.0 and `INTERPRETATION_DEADLINE_S` 4.0 (chosen, not measured); protected label through `ModeWatcher.protected_for()` (unreadable or unknown means protected); burn-in counter in Redis ends at 2000.
+  - D4 sliding-window circuit breakers (Redis sorted sets `kubeheal:cbw:*`), recorded after the enqueue, never for dry runs.
+  - D2 OBSERVE sampling contract `agents/common/sampling.py` (factor 3, `OBSERVE_PERIOD_S` 300, chosen).
+  - D6 `interpretation_client.py`: `correlate`, `explain`, T0 parsing and T0 causal chain, attribution normalisation, `kernel_metric_attribution` (tested with a stub model; no explainer wired by default).
+  - D7 initial and complete security events share one incident; after `executed_contain` with outcome `contained` Fusion queues `restore` (with `t0_ms`, `workload_kind`); without T0, an unsupported kind, or a protected namespace it escalates once.
+  - R1 `agents/common/stream_reliability.py` (XAUTOCLAIM, delivery count, `kubeheal.deadletter`, escalation, lease heartbeat) used by Executor and Fusion; the Executor keeps a result marker per incident, action and dry-run flag so a redelivered finished request is acked without re-running.
+- Edits the builder made outside its folders (forced by the fail-closed defaults): `tests/test_killswitch.py`, `tests/test_executor.py`, `tests/test_record_pipeline.py`, `tests/test_remediation_validation.py`, `agents/common/killswitch.py`.
+- Missing or needed elsewhere (not done):
+  - Security Agent must publish `t0_ms` (earliest suspicious Falco `ts`; `timestamp_ms` is publish time and must never be used). Until then every contain escalates `t0_unknown` and no restore is ever requested.
+  - Health and Security agents must read the sampling contract (`sampling_factor`, `scaled_interval`).
+  - `models/interpretation`: a real KernelExplainer in the Health server (today it uses variance); the DCM chain's `T+x s` offsets are hard-coded templates.
+  - `dockerfiles/Dockerfile.fusion` and the chart: new optional env vars with chosen defaults (`DCM_DEADLINE_S`, `INTERPRETATION_DEADLINE_S`, `OBSERVE_PERIOD_S`, `INCIDENT_DEDUP_TTL_S`, `INCIDENT_CONTEXT_TTL_S`, `KUBEHEAL_PENDING_IDLE_MS` 60000, `KUBEHEAL_MAX_DELIVERIES` 5, `KUBEHEAL_RECLAIM_INTERVAL_S`, `KUBEHEAL_RECLAIM_BATCH`, `KUBEHEAL_DEADLETTER_MAXLEN`).
+  - Dashboard should show `incident_update`, `restore_requested`, `fusion_escalation`; it reads only the first `decision` and `detection` record.
+  - P7-RR-10 is only partly covered (finished requests are idempotent; a crash in the middle of a canary is not).
+- Demo impact on a fresh install: burn-in lasts until 2000 health events (thresholds 0.95 and 0.90); heuristic-only security events always go to HUMAN; restore is never requested automatically; `ModeWatcher.protected_for()` returns True until the first namespace list succeeds.
+- Unverified by the builder: whether one health event counts as one metric sample (an assumption); XAUTOCLAIM and XPENDING checked only against its own fake (the Redis chart image is unpinned, `reset.sh` uses `redis:7-alpine`); the interpretation deadline bounds only an injected explainer.
