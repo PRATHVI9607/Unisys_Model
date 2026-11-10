@@ -10,8 +10,10 @@ call (S-KS-3). A blocked write raises ModeBlocked; the action function turns tha
 
 tests/test_no_writes_outside_executor.py proves that no write call exists outside this package and
 that inside it every write method is only ever passed to `_write`, never called directly.
-P7 replaces the namespace-wide quarantine with the labelled-pod quarantine and adds the snapshot
-and restore paths.
+P7 paths live next to this module and use the same `_write` choke point: drift.py (canary patch),
+quarantine.py (labelled-pod quarantine and forensic snapshot), restore.py, snapshots.py (rolling
+snapshots). `contain` and `patch_to_baseline` below are the P2 interim functions: DEPRECATED, no longer
+dispatched by the Executor service, kept only because tests/test_killswitch.py exercises them directly.
 """
 
 import logging
@@ -31,12 +33,13 @@ class ModeBlocked(Exception):
 
 
 def quarantine_policy_manifest() -> dict:
-    """Egress NetworkPolicy used as the interim containment (replaced in P7)."""
+    """Deny-all policy for pods labelled `kubeheal/quarantine=true` ONLY (never the whole namespace).
+    Used by the deprecated interim `contain`; the P7 path uses quarantine.quarantine_policy(incident)."""
     return {
         "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
         "metadata": {"name": QUARANTINE_POLICY_NAME},
-        "spec": {"podSelector": {}, "policyTypes": ["Egress"],
-                 "egress": [{"to": [{"podSelector": {}}]}]},
+        "spec": {"podSelector": {"matchLabels": {"kubeheal/quarantine": "true"}},
+                 "policyTypes": ["Ingress", "Egress"]},
     }
 
 
@@ -67,7 +70,7 @@ def _blocked_outcome(what: str, planned: List[str], done: List[str], blocked: Mo
 
 
 async def contain(gate, core_api, networking_api, namespace: str, pod: str) -> str:
-    """Contain a pod: egress quarantine, then delete the pod."""
+    """DEPRECATED interim containment (not dispatched by the Executor): policy, then delete the pod."""
     planned = ["create_quarantine_policy", "delete_pod"]
     what = f"CONTAIN {namespace}/{pod}"
     if not core_api or not networking_api:
@@ -102,7 +105,7 @@ async def contain(gate, core_api, networking_api, namespace: str, pod: str) -> s
 
 async def patch_to_baseline(gate, apps_api, namespace: str, deployment: str,
                             baseline: Optional[dict]) -> str:
-    """Restore a Deployment's pod template to the recorded golden baseline."""
+    """DEPRECATED (not dispatched by the Executor): overwrites the whole pod template. Use drift.canary_patch."""
     if not apps_api:
         logger.warning("No kube client - patch not executed")
         return "no_kube_client"

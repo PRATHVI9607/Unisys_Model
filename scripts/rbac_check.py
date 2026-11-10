@@ -17,8 +17,16 @@ CONTEXT = os.environ.get("KUBEHEAL_CONTEXT", "k3d-kubeheal")
 NS_PREFIX = "system:serviceaccount:kubeheal:"
 READERS = ["health-agent", "security-agent", "fusion-agent", "dashboard",
            "health-model", "security-model", "dcm"]
-WRITERS_TO_TEST = ["patch deployments.apps", "delete pods", "create networkpolicies.networking.k8s.io",
-                   "create volumesnapshots.snapshot.storage.k8s.io", "patch deployments.apps/scale"]
+WRITERS_TO_TEST = [
+    "patch deployments.apps", "update deployments.apps",
+    "patch statefulsets.apps", "update statefulsets.apps",
+    "patch pods", "delete pods",
+    "create persistentvolumeclaims", "patch persistentvolumeclaims",
+    "create networkpolicies.networking.k8s.io", "delete networkpolicies.networking.k8s.io",
+    "create volumesnapshots.snapshot.storage.k8s.io", "delete volumesnapshots.snapshot.storage.k8s.io",
+    "patch deployments.apps/scale", "update deployments.apps/scale",
+    "patch statefulsets.apps/scale", "update statefulsets.apps/scale",
+]
 
 # (service account, verb+resource, namespace or None for cluster scope, expected answer)
 EXPECT = []

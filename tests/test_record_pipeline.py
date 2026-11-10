@@ -84,6 +84,7 @@ def test_fusion_and_executor_records_share_one_incident_ledger():
     executor = ExecutorService(
         redis=executor_redis,
         core_api=core,
+        apps_api=_KubeApi(),
         networking_api=network,
         mode=_Mode(),
         ledger=ledger,
@@ -97,7 +98,9 @@ def test_fusion_and_executor_records_share_one_incident_ledger():
         "detection",
         "scores",
         "decision",
-        "executor_create_quarantine_policy",
+        "request_accepted",
+        "blocked",
+        "result",
         "executor_result",
     ]
     assert records[2]["payload"]["decision"] == "auto_contain"

@@ -2,17 +2,21 @@
 Remediation Executor - the only KubeHeal component with Kubernetes write permissions (S-EX-1).
 ==============================================================================================
 Consumes approved actions from the Redis stream `kubeheal.exec` (consumer group `executor`),
-applies the target guard, performs the action through `agents.executor.actions`, and records the
-outcome on `kubeheal.actions`. A message is acknowledged only after it was handled.
+applies the target guard and request validation, performs the action and records the outcome on
+`kubeheal.actions`. A message is acknowledged only after it was handled.
 
-P3 adds the kill-switch gate in front of every write call, P4 the ledger, P7 the full drift and
-ransomware remediation paths.
+P3 adds the kill-switch gate in front of every write call, P4 the ledger. P7 adds three actions, each
+in its own module: `patch` (drift.py, canary), `contain` (quarantine.py) and `restore` (restore.py),
+plus the rolling snapshot scheduler (snapshots.py). Requests are validated first (validation.py).
+Every step is reported through the injectable `record_step(incident_id, step, payload)`; P4 connects
+it to the ledger, the default is a no-op.
 """
 
 import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime
 from typing import Dict, Optional
@@ -23,8 +27,13 @@ from kubernetes_asyncio import client, config
 from agents.common.killswitch import ModeWatcher
 from agents.common.ledger import Ledger, ledger_from_env
 from agents.common.metrics import KubeHealMetrics
-from agents.executor import actions
+from agents.executor import drift, quarantine, restore
+from agents.executor.config import ExecConfig
 from agents.executor.guard import check_target
+from agents.executor.metrics_source import PrometheusMetricSource
+from agents.executor.snapshots import SnapshotFreeze, SnapshotScheduler
+from agents.executor.support import Recorder, needs_escalation
+from agents.executor.validation import parse_request
 from agents.health_agent.baseline import load_baseline
 
 logging.basicConfig(level=logging.INFO)
@@ -54,13 +63,23 @@ class RequestGate:
 
 class ExecutorService:
     def __init__(self, redis=None, core_api=None, apps_api=None, networking_api=None, mode=None,
-                 ledger: Optional[Ledger] = None):
+                 custom_api=None, record_step=None, metric_source=None, entropy_check=None,
+                 cfg=None, sleep=asyncio.sleep, clock=time.monotonic, ledger: Optional[Ledger] = None):
         self.redis_url = os.environ.get("REDIS_URL", "redis://redis-master:6379")
         self.redis = redis
         self.core_api = core_api
         self.apps_api = apps_api
         self.networking_api = networking_api
         self.ledger = ledger if ledger is not None else ledger_from_env()
+        self.custom_api = custom_api
+        self.record_step = record_step or self._append_ledger_step
+        self.metric_source = metric_source      # async (namespace, deployment, window_s) -> dict
+        self.entropy_check = entropy_check      # async (namespace, workload, pvcs) -> True/False/None
+        self.cfg = cfg or ExecConfig()
+        self.sleep, self.clock = sleep, clock
+        self.scheduler = None
+        self._locks: Dict[str, asyncio.Lock] = {}
+        self._tasks = set()
         self.consumer = os.environ.get("HOSTNAME") or f"executor-{uuid.uuid4().hex[:6]}"
         self.mode = mode or ModeWatcher(on_change=self._mode_changed)
         self.running = False
@@ -85,6 +104,9 @@ class ExecutorService:
         except Exception as e:
             logger.error(f"mode change ledger write failed: {e}")
 
+    async def _append_ledger_step(self, incident_id: str, step: str, payload: Dict):
+        await asyncio.to_thread(self.ledger.append, incident_id, step, payload)
+
     async def start(self):
         try:
             config.load_incluster_config()
@@ -93,8 +115,15 @@ class ExecutorService:
         self.core_api = client.CoreV1Api()
         self.apps_api = client.AppsV1Api()
         self.networking_api = client.NetworkingV1Api()
+        self.custom_api = client.CustomObjectsApi()
         await self.mode.start(self.core_api)
         self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
+        if self.metric_source is None and self.cfg.prometheus_url:
+            self.metric_source = PrometheusMetricSource(self.cfg.prometheus_url)
+        self.scheduler = SnapshotScheduler(
+            self.core_api, self.custom_api, RequestGate(self.mode), cfg=self.cfg,
+            is_frozen=SnapshotFreeze(self.redis).is_frozen, record_step=self.record_step)
+        self._tasks.add(asyncio.create_task(self.scheduler.run_forever()))
         try:
             await self.redis.xgroup_create(EXEC_STREAM, GROUP, id="0", mkstream=True)
         except Exception as e:
@@ -106,6 +135,13 @@ class ExecutorService:
 
     async def stop(self):
         self.running = False
+        if self.scheduler:
+            self.scheduler.stop()
+        for t in list(self._tasks):
+            t.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        await self.mode.stop()
         if self.redis:
             await self.redis.aclose()
 
@@ -116,7 +152,11 @@ class ExecutorService:
                                                    count=5, block=1000)
                 for stream, entries in msgs or []:
                     for msg_id, fields in entries:
-                        await self.handle_entry(stream, msg_id, fields)
+                        # One task per entry: a canary watch lasts several windows and must not
+                        # hold up a containment request queued behind it.
+                        t = asyncio.create_task(self.handle_entry(stream, msg_id, fields))
+                        self._tasks.add(t)
+                        t.add_done_callback(self._tasks.discard)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -130,45 +170,70 @@ class ExecutorService:
             if outcome.startswith("DRY RUN:"):
                 METRICS.record_action(action, "dry_run")
                 METRICS.record_dry_run_action(action)
-            elif outcome.startswith(("stopped_mode_test", "no_baseline_escalated")):
+            elif needs_escalation(outcome):
                 METRICS.record_action(action, "escalated")
             elif "failed" in outcome or outcome.startswith("unknown_action"):
                 METRICS.record_action(action, "failure")
             else:
                 METRICS.record_action(action, "success")
-            await self._record(fields, outcome)
-            if outcome.startswith("stopped_mode_test"):
-                METRICS.record_escalation("mode_switched_to_test")
+            if needs_escalation(outcome):
+                METRICS.record_escalation(outcome.split(":", 1)[0])
                 await self._escalate(fields, outcome)
+            await self._record(fields, outcome)
         except Exception as e:
             logger.error(f"executing {msg_id} failed, left pending: {e}", exc_info=True)
             return False
         await self.redis.xack(stream, GROUP, msg_id)
         return True
 
+    def _lock(self, namespace: str, workload: str) -> asyncio.Lock:
+        return self._locks.setdefault(f"{namespace}/{workload}", asyncio.Lock())
+
     async def execute(self, f: Dict) -> str:
+        incident_id = f.get("incident_id") or f.get("_ledger_incident_id") or f"inc-{uuid.uuid4().hex}"
+        f.setdefault("_ledger_incident_id", incident_id)
+        rec = Recorder(self.record_step, incident_id)
         namespace = f.get("namespace", "")
         ok, reason = check_target(namespace)
         if not ok:
             logger.warning(f"REFUSED {f.get('action')} {namespace}/{f.get('deployment')}: {reason}")
+            await rec("refused", {"reason": reason})
             return f"refused:{reason}"
-        action = f.get("action")
-        gate = RequestGate(
-            self.mode,
-            force_dry=str(f.get("dry_run", "false")).lower() == "true",
-            on_step=lambda ns, step, result: self._record_step(f, ns, step, result),
-        )
-        if action == "contain":
-            return await actions.contain(gate, self.core_api, self.networking_api, namespace,
-                                         f.get("pod", ""))
-        if action == "patch":
-            baseline = await load_baseline(self.redis, namespace, f.get("deployment", ""))
-            return await actions.patch_to_baseline(gate, self.apps_api, namespace,
-                                                   f.get("deployment", ""), baseline)
-        return f"unknown_action:{action}"
+        status, reason, req = parse_request(f)
+        if status == "refused":
+            logger.warning(f"REFUSED {f.get('action')} {namespace}: {reason}")
+            await rec("refused", {"reason": reason})
+            return f"refused:{reason}"
+        if status == "escalate":
+            if req.action == "patch" and not await load_baseline(self.redis, namespace, req.deployment):
+                await rec("no_baseline", {})
+                return "no_baseline_escalated"      # the more fundamental gap is reported first
+            await rec("escalated", {"reason": reason})
+            return f"escalated:{reason}"
+        await rec("request_accepted", {"action": req.action, "namespace": req.namespace,
+                                       "deployment": req.deployment, "pod": req.pod,
+                                       "dry_run_requested": req.dry_run})
+        gate = RequestGate(self.mode, force_dry=req.dry_run)
+        freeze = SnapshotFreeze(self.redis)
+        if req.action == "contain":
+            outcome = await quarantine.contain(gate, self.core_api, self.networking_api, self.apps_api,
+                                               self.custom_api, req, rec, self.cfg, freeze)
+        elif req.action == "patch":
+            golden = await load_baseline(self.redis, namespace, req.deployment)
+            async with self._lock(namespace, req.deployment):
+                outcome = await drift.canary_patch(
+                    gate, self.apps_api, req, golden, rec, self.metric_source,
+                    drift.RollbackStore(self.redis), self.cfg, self.sleep, self.clock)
+        else:
+            async with self._lock(namespace, req.deployment):
+                outcome = await restore.restore(
+                    gate, self.core_api, self.apps_api, self.networking_api, self.custom_api, req, rec,
+                    self.cfg, freeze, self.entropy_check, self.sleep, self.clock)
+        await rec("result", {"outcome": outcome})
+        return outcome
 
     async def _escalate(self, f: Dict, outcome: str):
-        incident_id = f.get("incident_id") or f"inc-{uuid.uuid4().hex}"
+        incident_id = f.get("incident_id") or f.get("_ledger_incident_id") or f"inc-{uuid.uuid4().hex}"
         await self._append_ledger(incident_id, "executor_escalation", {
             "namespace": f.get("namespace", ""),
             "deployment": f.get("deployment", ""),
@@ -185,7 +250,7 @@ class ExecutorService:
         })
 
     async def _record(self, f: Dict, outcome: str):
-        incident_id = f.get("incident_id") or f"inc-{uuid.uuid4().hex}"
+        incident_id = f.get("incident_id") or f.get("_ledger_incident_id") or f"inc-{uuid.uuid4().hex}"
         await self._append_ledger(incident_id, "executor_result", {
             "action": f.get("action", "unknown"),
             "namespace": f.get("namespace", ""),

@@ -139,6 +139,13 @@ class Net:
 class Core:
     def __init__(self):
         self.deleted = []
+        self.patched = []
+
+    async def read_namespaced_pod(self, name, ns):
+        return {"metadata": {"ownerReferences": []}, "spec": {"volumes": []}}
+
+    async def patch_namespaced_pod(self, name, ns, body):
+        self.patched.append((name, body))
 
     async def delete_namespaced_pod(self, name, ns, grace_period_seconds=None):
         self.deleted.append(name)
@@ -277,15 +284,16 @@ def test_executor_records_dry_run_step_and_result():
 
     records = [json.loads(store.objects[key]) for key in sorted(store.objects)]
     assert [record["step"] for record in records] == [
-        "executor_create_quarantine_policy", "executor_result"
+        "request_accepted", "blocked", "result", "executor_result"
     ]
-    assert records[0]["payload"]["outcome"] == "blocked_by_kill_switch"
-    assert records[1]["payload"]["outcome"].startswith("DRY RUN: would have CONTAIN")
+    assert records[1]["payload"]["step"] == "create_quarantine_policy"
+    assert records[2]["payload"]["outcome"].startswith("DRY RUN: would have CONTAIN")
 
 
 def test_executor_records_mid_action_steps_and_escalation():
     store = InMemoryLedgerStore()
-    ex = ExecutorService(redis=Redis(), core_api=Core(), networking_api=Net(),
+    core = Core()
+    ex = ExecutorService(redis=Redis(), core_api=core, networking_api=Net(),
                          mode=FlippingMode(1), ledger=Ledger(store))
     run(ex.handle_entry("kubeheal.exec", "5-0", {
         "action": "contain", "namespace": "prod", "pod": "p", "incident_id": "inc-stop",
@@ -293,12 +301,12 @@ def test_executor_records_mid_action_steps_and_escalation():
 
     records = [json.loads(store.objects[key]) for key in sorted(store.objects)]
     assert [record["step"] for record in records] == [
-        "executor_create_quarantine_policy", "executor_delete_pod",
-        "executor_result", "executor_escalation",
+        "request_accepted", "quarantine_policy_created", "blocked",
+        "result", "executor_escalation", "executor_result",
     ]
-    assert records[0]["payload"]["outcome"] == "succeeded"
-    assert records[1]["payload"]["outcome"] == "blocked_by_kill_switch"
-    assert records[3]["payload"]["required"] == "human"
+    assert records[2]["payload"]["step"] == "label_pod"
+    assert records[4]["payload"]["required"] == "human"
+    assert core.patched == [] and core.deleted == []
 
 
 def test_executor_mode_watcher_change_is_written_to_ledger():
