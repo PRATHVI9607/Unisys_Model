@@ -61,9 +61,17 @@ Each line: ID, goal, files, verify. "needs" lists tasks that must be done first.
 - [x] REV-4 P7 review (work 1ba19b2): legacy `actions.contain` and `patch_to_baseline` removed (they held a `delete pods` call that RBAC does not grant; tests migrated to `_write` gate tests), canary metric-source exception rolls back, `refused` outcomes counted as refused, unused `_record_step` removed, snapshot skip recorded once. Live RBAC check on k3d-kubeheal after applying the manifest: 696 checks, 0 failures (2026-11-10, this machine; VolumeSnapshot checks skipped, CRD not installed until P10). Remaining items are P7-RR-9 to RR-11 and P6-D7.
 - [ ] REV-3 deferred, small: log a warning when namespace labels never load in `ModeWatcher`; unit test for Fusion mode-watcher start failure; document that a drifted spec seen first becomes the golden baseline; camelCase/snake_case parity test for `yaml_diff_to_graph`; owner decision on tightening `.claude/settings.json` deny patterns (`git checkout .*`, `git restore *`, narrower `Remove-Item *.git*`) and removing the inactive `.git/hooks/pre-push`.
 
-### Open owner decisions (do not invent values)
-- Executor env vars have no defaults and no values yet: `CANARY_WINDOW_S`, `ROLLOUT_TIMEOUT_S`, `ROLLOUT_POLL_S`, `SNAPSHOT_CLASS` (VolumeSnapshotClass name, cluster specific), `PROMETHEUS_URL`. Without them every patch and restore escalates `config_missing` and the scheduler takes no snapshots. They are set in P9 (chart values) and P10 (k3d demo values); the demo values must come from a measurement or be labelled as demo choices.
-- Victim apps for the demo must export the `http_*` metrics the Health Agent queries (names are marked `app-guess` in `agents/health_agent/metric_queries.py`), otherwise health events carry maximum uncertainty and drift goes to HUMAN.
+### Owner decisions (2026-11-11)
+- Executor settings are CHOSEN DEFAULTS, NOT MEASUREMENTS, tunable by environment and Helm values: `PROMETHEUS_URL=http://prometheus-operated.monitoring.svc.cluster.local:9090`, `SNAPSHOT_CLASS=csi-hostpath-snapclass` (P10 must create a VolumeSnapshotClass with exactly this name), `CANARY_WINDOW_S=30`, `ROLLOUT_TIMEOUT_S=180`, `ROLLOUT_POLL_S=5`. In code: `agents/executor/config.py` `DEFAULTS` apply when the variable is absent from the process environment; a variable set but empty or invalid still escalates (fail closed). Helm values: set by the P9 builder (extra brief).
+- Victim app metrics: no guessed names. A small victim app under `demo/victim-app/` (FastAPI with prometheus_client) exports `http_requests_total` (labels method, path, status) and `http_request_duration_seconds` (histogram), with a ServiceMonitor; container inputs use the real series `container_cpu_cfs_throttled_periods_total` / `container_cpu_cfs_periods_total`, `container_memory_working_set_bytes`, `kube_pod_container_status_restarts_total`. See tasks P5-Q1, P10-V1, P10-V2.
+
+### Health inputs: training vs serving (finding, 2026-11-11, not yet fixed)
+The Health Agent's 15 PromQL queries (`agents/health_agent/metric_queries.py`) already use exactly the series names above, so "aligning the names" changes nothing there. Checking them against how the model was trained (`models/train_health_model.py` `build_metric_window`) shows the live windows do NOT have the same meaning as the training windows:
+- Training windows are built from 9 scalar CSV columns, broadcast over 60 steps with noise (not real time series). Six channels are all zero in training: `memory_rss_bytes`, `http_p50_latency_ms`, `http_p999_latency_ms`, `network_receive_bytes`, `network_transmit_bytes`, `disk_io_bytes`.
+- Training divides channels by constants (`NORM`: for example memory by 1e9, latency by 2000); the serving path (`services/health_model_server/main.py`) passes the raw Prometheus values to the model. No scaling was found on the serving side; whether the encoder normalises internally was not checked.
+- Training's `cpu_throttle_percent` is a usage/limit ratio in 0..1 (a proxy), live is the CFS throttle ratio times 100.
+- CSV `cpu_usage_cores` and `cpu_limit` are divided by constants meant for millicores; their real units were not verified.
+Consequence: with real Prometheus windows the Health Model sees inputs outside its training distribution, so its scores on live data are not trustworthy until it is retrained on live windows (P12, `models/generate_health_training_data.py` produces them) or a verified scaling is added. Until then the demo's drift path must not be presented as validated detection (see the "not measured" rule). Task P5-Q2 tracks it.
 
 ### P4 Record: ledger and metrics (touches `agents/common/`, `k8s/`, `deploy/grafana/`, `services/`)
 - [x] P4-L1 size: M. Added `Ledger.append(incident_id, step, payload)` with per-incident sequence keys, an in-memory backend, and a MinIO client adapter. Added validation and overwrite refusal tests. Focused tests: 7 passed with system Python 3.13. Full suite collection unavailable because the project venv launcher targets an inaccessible Python 3.11 install and system Python lacks `redis` and `aiohttp`.
@@ -83,6 +91,9 @@ Each line: ID, goal, files, verify. "needs" lists tasks that must be done first.
 - [x] P5-S2 size: M. Falco consumer (enabled when available) and replay mode streaming recorded Falco JSON traces from files. Files: `agents/security_agent/`. Verify: test replays a fixture into the event pipeline. Needs: none.
 - [x] P5-S3 size: S. Recorded Falco fixtures under `tests/fixtures/falco/` and a test that replay feeds the Security Model input. Verify: pytest. Needs: P5-S2.
 - [x] P5-S4 size: S. Remove synthetic syscall fabrication from live paths (keep in tests or replay tooling). Verify: grep test that live code has no fabrication. Needs: P5-S2.
+
+- [ ] P5-Q1 size: M. Align the Health Agent PromQL to the real series (see Owner decisions): keep the 15 column names and meanings, change the `app-guess` rows in `agents/health_agent/metric_queries.py` to the victim-app contract (`http_requests_total{method,path,status}`, `http_request_duration_seconds` histogram, labels `namespace` and `pod` come from the ServiceMonitor), update the module docstring (no longer guesses), tests. Verify in P10-V2. Needs: P10-V1 for the contract.
+- [ ] P5-Q2 size: L. Training/serving skew of the Health Model inputs (finding above): decide between retraining on live windows (P12, owner go) and a verified input scaling; until then document that live drift scores are unvalidated. Files: `services/health_model_server/`, `models/` (training only on owner go).
 
 ### P6 Decide: complete policy and fusion (touches `agents/fusion_agent/`, `agents/common/`, `tests/`)
 - [ ] P6-D1 size: L. `models_ok` input to the pure policy: missing or late model response means HUMAN; per-call deadlines in Fusion. Files: `decision_policy.py` (stronger agent only), `agents/fusion_agent/`. Verify: policy tests plus timeout test.
@@ -132,6 +143,10 @@ Ransomware:
 - [ ] P10-U4 size: L. `demo/scripts/demo.ps1` numbered steps covering the full list in the plan. Needs: P6, P7, P8.
 - [ ] P10-U5 size: S. `demo/README.md` (run order, expected output, what to say, limitations).
 - [ ] P10-U6 size: L. Acceptance: `up.ps1`, all demo steps, reset, twice in a row without manual fixes.
+
+- [ ] P10-V1 size: M. `demo/victim-app/`: small FastAPI app with prometheus_client exporting `http_requests_total` (method, path, status) and `http_request_duration_seconds` (histogram), Dockerfile, Deployment and Service for prod and dev, ServiceMonitor. Verify: unit test of the exporter; scrape on k3d in P10-V2. Needs: P9 (chart or manifests), Prometheus operator in P10-U1.
+- [ ] P10-V2 size: M. On k3d verify that each of the 15 Health Agent queries returns data for the victim Deployment and record the result per query in this file (query, series returned yes/no, sample value, date). Needs: P10-V1, P10-U1.
+- [ ] P10-V3 size: S. Create the VolumeSnapshotClass `csi-hostpath-snapclass` (exact name, owner decision) in `up.ps1`; check `scripts/rbac_check.py` snapshot checks once the CRD exists.
 
 ### P11 Evaluation harness (touches `eval/`, `docs/kubeheal/results/`; cluster owner runs)
 - [ ] P11-E1 size: M. k6 load test 10 to 200 simulated pods, p50 and p95 vs replicas.

@@ -217,3 +217,34 @@ def test_refused_requests_are_counted_as_refused_not_success():
     finally:
         m.METRICS = old
     assert ok is True and seen == [("patch", "refused")]
+
+
+# ---- owner-chosen Executor defaults (2026-11-11): chosen, not measured; fail closed if set empty ----
+def test_process_environment_gets_the_chosen_defaults(monkeypatch):
+    from agents.executor.config import ExecConfig
+    for name in ("CANARY_WINDOW_S", "ROLLOUT_TIMEOUT_S", "ROLLOUT_POLL_S", "SNAPSHOT_CLASS", "PROMETHEUS_URL"):
+        monkeypatch.delenv(name, raising=False)
+    c = ExecConfig()
+    assert (c.canary_window_s, c.rollout_timeout_s, c.rollout_poll_s) == (30.0, 180.0, 5.0)
+    assert c.snapshot_class == "csi-hostpath-snapclass"
+    assert c.prometheus_url == "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+
+
+def test_defaults_are_tunable_and_an_empty_value_still_fails_closed(monkeypatch):
+    from agents.executor.config import ConfigMissing, ExecConfig
+    monkeypatch.setenv("CANARY_WINDOW_S", "12")
+    monkeypatch.setenv("SNAPSHOT_CLASS", "")          # set but empty: not replaced by the default
+    c = ExecConfig()
+    assert c.canary_window_s == 12.0
+    with pytest.raises(ConfigMissing):
+        c.snapshot_class
+    monkeypatch.setenv("ROLLOUT_POLL_S", "0")
+    with pytest.raises(ConfigMissing):
+        c.rollout_poll_s
+
+
+def test_an_explicit_mapping_has_no_defaults():
+    from agents.executor.config import ConfigMissing, ExecConfig
+    with pytest.raises(ConfigMissing):
+        ExecConfig({}).canary_window_s
+    assert ExecConfig({}, use_defaults=True).canary_window_s == 30.0
