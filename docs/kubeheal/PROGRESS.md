@@ -35,7 +35,7 @@ Real usage is measured later and recorded under `docs/kubeheal/results/`.
 | P1 Core correctness | done, see log |
 | P2 Executor and least-privilege RBAC | done, see log |
 | P3 Kill switch | done, see log |
-| P4 Record | in progress |
+| P4 Record | done, see P4 checklist |
 | P5 Sense | in progress on `wave/P5` |
 | P6 to P13 | not started |
 
@@ -67,7 +67,7 @@ Each line: ID, goal, files, verify. "needs" lists tasks that must be done first.
 - [x] P4-M1 size: S. Added component-local Prometheus metric registry and helpers for decisions, actions/outcomes, escalations, dry-run actions, model latency, queue depth, and stream lag. Added `prometheus-client>=0.20.0` to requirements. Focused metrics and ledger tests: 9 passed with system Python 3.13.
 - [x] P4-G1 size: S. Added `deploy/grafana/kubeheal-overview.json` with decision/action rates, model latency, queue depth/stream lag, available KubeHeal replicas, dry-run actions, and escalations. Test validates JSON and confirms every queried metric exists in P4-M1 or the scraped kube-state-metrics set. Dashboard test: 1 passed.
 - [x] P4-R1 size: M. All three model servers now try the configured `MODEL_REGISTRY_OBJECT` in MinIO at startup, then fall back to the baked-in checkpoint if the object is absent, unreadable, or invalid. The selected source is exposed in `/health`; temporary downloads are removed. Model deployments reference the existing `kubeheal-minio-client` Secret optionally (owner approved 2026-11-10), use `kubeheal-ledger` object prefixes, and therefore still start without MinIO. Fake-store tests: 5 passed, including success, missing credentials, download failure, corrupt object fallback, and manifest wiring. `py_compile`, model manifest parsing, and `git diff --check` passed. Limitation: the existing shared ledger credential also has `PutObject` access; model-server access is not read-only.
-- [~] Codex P4-I1 size: M. Integration test/script: drive a Fusion incident through Executor using a shared ledger and verify records are linked; the k3d `scripts/ledger_check.py` already confirms MinIO object visibility and locked-version delete refusal. Verify: focused integration test plus existing script result. Needs: P4-L2, P4-L3, P4-L4.
+- [x] P4-I1 size: M. Added `tests/test_record_pipeline.py`: a high-risk incident passes through Fusion and the Executor with one shared ledger; detection, scores, decision, Executor dry-run step, and result all share an incident ID, and the dry-run causes no Kubernetes writes. Focused integration test: 1 passed. Live k3d `scripts/ledger_check.py` result from 2026-11-10: created object version with COMPLIANCE retention; exact-version delete refused (`InvalidRequest`). Needs: P4-L2, P4-L3, P4-L4.
 
 ### P5 Sense: real signals (touches `agents/health_agent/`, `agents/security_agent/`, `tests/fixtures/`)
 - [~] builder-B (wave/P5) P5-H1 size: M. Health Agent real Prometheus `query_range`, 60 steps of 5 s per pod, 15 metrics, missing metrics flagged (not 0). Files: `agents/health_agent/`. Verify: unit tests with a fake Prometheus response. Needs: none.
