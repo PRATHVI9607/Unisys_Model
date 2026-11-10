@@ -35,8 +35,17 @@ class KubeHealMetrics:
         self.model_latency = Histogram(
             "kubeheal_model_latency_seconds", "Model request latency", ["model"], registry=self.registry
         )
+        # Depth of a Redis stream queue (label: stream). Not the model server request gauge below.
         self.queue_depth = Gauge(
             "kubeheal_queue_depth", "Current queue depth", ["stream"], registry=self.registry
+        )
+        # Model servers: scoring requests that arrived and have not finished, i.e. running PLUS waiting
+        # for a worker thread. This is the HPA signal (prometheus-adapter, per pod). See
+        # add_inflight_middleware.
+        self.inflight_requests = Gauge(
+            "kubeheal_model_inflight_requests",
+            "Scoring requests in flight or waiting for a worker in this pod",
+            registry=self.registry,
         )
         self.stream_lag = Gauge(
             "kubeheal_stream_lag", "Current consumer stream lag", ["stream"], registry=self.registry
@@ -70,6 +79,26 @@ class KubeHealMetrics:
     def start_server(self, port: int, addr: str = "0.0.0.0"):
         """Start a standalone HTTP listener exposing this component's registry."""
         return start_http_server(port, addr=addr, registry=self.registry)
+
+
+def add_inflight_middleware(app, metrics: KubeHealMetrics, paths) -> None:
+    """Count requests to the given scoring `paths` in `metrics.inflight_requests`.
+
+    The gauge is incremented when the request arrives and decremented in a `finally` when the response
+    is done (also when the handler raises), so requests queued behind busy worker threads are counted
+    too. Other paths (/health, /metrics) are never counted.
+    """
+    scoring = frozenset(paths)
+
+    @app.middleware("http")
+    async def _count_inflight(request, call_next):
+        if request.url.path not in scoring:
+            return await call_next(request)
+        metrics.inflight_requests.inc()
+        try:
+            return await call_next(request)
+        finally:
+            metrics.inflight_requests.dec()
 
 
 def add_metrics_route(app, metrics: KubeHealMetrics) -> None:

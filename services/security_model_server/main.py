@@ -29,7 +29,7 @@ from models.security_model.security_output_head import SECURITY_LABELS
 from models.security_model.security_conformal import ConformalRegressor
 from models.interpretation.shap_explainer import SecurityModelSHAPExplainer
 from services.ckpt import load_model_checkpoint, health_payload, require_ready, pt_only_status
-from agents.common.metrics import KubeHealMetrics, add_metrics_route
+from agents.common.metrics import KubeHealMetrics, add_inflight_middleware, add_metrics_route
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -73,6 +73,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="KubeHeal Security Model", version="4.0.0", lifespan=lifespan)
 add_metrics_route(app, METRICS)
+add_inflight_middleware(app, METRICS, ["/security/score"])
 
 
 @app.get("/health")

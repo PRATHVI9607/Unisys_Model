@@ -31,7 +31,7 @@ from models.health_model.health_conformal import ConformalRegressor
 from models.interpretation.field_name_mapper import FieldNameMapper
 from models.interpretation.shap_explainer import HealthModelSHAPExplainer
 from services.ckpt import load_model_checkpoint, health_payload, require_ready, pt_only_status
-from agents.common.metrics import KubeHealMetrics, add_metrics_route
+from agents.common.metrics import KubeHealMetrics, add_inflight_middleware, add_metrics_route
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -77,6 +77,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="KubeHeal Health Model", version="4.0.0", lifespan=lifespan)
 add_metrics_route(app, METRICS)
+add_inflight_middleware(app, METRICS, ["/health/score"])
 
 
 @app.get("/health")

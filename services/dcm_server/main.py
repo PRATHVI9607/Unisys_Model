@@ -28,7 +28,7 @@ from models.dcm.correlation_head import COMPOUND_THRESHOLD, is_compound
 from services.ckpt import (load_model_checkpoint, health_payload, require_ready, model_format,
                            not_ready_status, load_onnx_session)
 from models.interpretation.nl_summary_generator import generate_incident_summary
-from agents.common.metrics import KubeHealMetrics, add_metrics_route
+from agents.common.metrics import KubeHealMetrics, add_inflight_middleware, add_metrics_route
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -105,6 +105,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="KubeHeal DCM", version="4.0.0", lifespan=lifespan)
 add_metrics_route(app, METRICS)
+add_inflight_middleware(app, METRICS, ["/dcm/correlate"])
 
 
 @app.get("/health")
