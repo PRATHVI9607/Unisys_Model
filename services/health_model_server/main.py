@@ -26,12 +26,12 @@ sys.path.insert(0, str(ROOT))
 
 from models.health_model.health_model import HealthModel
 from models.health_model.health_output_head import HEALTH_LABELS
-from models.health_model.preprocess import preprocess_window
+from models.health_model.preprocess import PREPROCESS_VERSION, check_version, preprocess_window
 from models.health_model.yaml_gat_encoder import yaml_diff_to_graph
 from models.health_model.health_conformal import ConformalRegressor
 from models.interpretation.field_name_mapper import FieldNameMapper
 from models.interpretation.shap_explainer import HealthModelSHAPExplainer
-from services.ckpt import load_model_checkpoint, health_payload, require_ready
+from services.ckpt import expected_preprocess_version, load_model_checkpoint, health_payload, require_ready
 from agents.common.metrics import KubeHealMetrics, add_metrics_route
 
 logging.basicConfig(level=logging.INFO)
@@ -56,6 +56,10 @@ def _load_model():
     m = HealthModel()
     status = load_model_checkpoint(m, ckpt, "health model")
     if status["loaded"] and not status["random_weights"]:
+        # Fail closed at startup: the checkpoint and this code must agree on the metric preprocessing
+        # (models/health_model/preprocess.py). A mismatch raises and the process does not start.
+        check_version(expected_preprocess_version(status, ckpt))
+        logger.info(f"Health model preprocessing {PREPROCESS_VERSION} matches the checkpoint")
         logger.info(f"Loaded health model from {status['source']}:{status['checkpoint']} ({m.param_count():,} params)")
     STATE["status"] = status
     m.eval()

@@ -47,8 +47,8 @@ def load_checkpoint(model, path: str, name: str) -> dict:
     return status
 
 
-def _download_registry_checkpoint(env, client_factory=None):
-    object_name = (env.get("MODEL_REGISTRY_OBJECT") or "").strip()
+def _download_registry_checkpoint(env, client_factory=None, object_name=None):
+    object_name = (object_name or env.get("MODEL_REGISTRY_OBJECT") or "").strip()
     if not object_name:
         return None
     endpoint = env.get("MINIO_ENDPOINT", "minio.kubeheal.svc.cluster.local:9000")
@@ -125,6 +125,27 @@ def load_model_checkpoint(model, fallback_path: str, name: str, env=None, client
     status = load_checkpoint(model, fallback_path, name)
     status["source"] = "baked_in" if status["loaded"] and not status["random_weights"] else None
     return status
+
+
+def expected_preprocess_version(status: dict, fallback_path: str, env=None, client_factory=None):
+    """Preprocessing version the loaded Health Model checkpoint expects, from its sidecar file: next to the
+    baked-in checkpoint, or the registry object `<stem>.preprocess.json` for a MinIO checkpoint. None when
+    the sidecar cannot be read (the caller then refuses to start)."""
+    from models.health_model.preprocess import parse_sidecar, read_sidecar_version, sidecar_object_name
+    env = os.environ if env is None else env
+    if status.get("source") == "minio":
+        obj = sidecar_object_name(env.get("MODEL_REGISTRY_OBJECT", ""))
+        local = _download_registry_checkpoint(env, client_factory, object_name=obj)
+        if not local:
+            return None
+        try:
+            return parse_sidecar(Path(local).read_text(encoding="utf-8"))
+        finally:
+            try:
+                os.unlink(local)
+            except OSError:
+                pass
+    return read_sidecar_version(fallback_path)
 
 
 def health_payload(status: dict, extra: dict = None):

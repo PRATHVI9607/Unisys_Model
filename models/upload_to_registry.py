@@ -79,6 +79,14 @@ def main():
         obj = f"{args.version}/{p.name}"
         client.fput_object(args.bucket, obj, str(p))
         print(f"  uploaded → s3://{args.bucket}/{obj}")
+        if art == args.health_model:
+            from models.health_model.preprocess import SIDECAR_SUFFIX, sidecar_path
+            side = sidecar_path(p)
+            if side.exists():
+                client.fput_object(args.bucket, f"{args.version}/{side.name}", str(side))
+                print(f"  uploaded → s3://{args.bucket}/{args.version}/{side.name}")
+            else:
+                print(f"  WARNING: {side.name} is missing; the Health Model server will refuse this checkpoint")
     print(f"registry upload complete (version {args.version})")
 
 

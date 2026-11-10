@@ -52,11 +52,70 @@ The constants in `NORM` are the training constants. Several of them do not match
 near zero in training); they are kept as they are because the checkpoint depends on them.
 """
 
+import json
+from pathlib import Path
 from typing import Mapping, Optional, Tuple, Union
 
 import numpy as np
 
 from models.health_model.metric_schema import INPUT_SEQUENCE_LENGTH, METRIC_COLUMNS, NUM_METRICS
+
+# Version of THIS preprocessing. "v1-legacy" is the quirk-preserving behaviour the current checkpoint was
+# trained with (see the module docstring). A checkpoint records the version it expects in a sidecar file next
+# to it (`<checkpoint stem>.preprocess.json`); the Health Model server refuses to start when that version and
+# this one differ, so a retrained checkpoint (new preprocessing, new version) cannot be served with the old
+# code, and the old checkpoint cannot be served with new code.
+PREPROCESS_VERSION = "v1-legacy"
+SIDECAR_SUFFIX = ".preprocess.json"
+
+
+class PreprocessVersionMismatch(RuntimeError):
+    """The checkpoint's expected preprocessing version is missing or differs from the code's."""
+
+
+def sidecar_path(checkpoint_path) -> Path:
+    p = Path(checkpoint_path)
+    return p.with_name(p.stem + SIDECAR_SUFFIX)
+
+
+def sidecar_object_name(checkpoint_object: str) -> str:
+    """Registry object name of the sidecar that belongs to a checkpoint object."""
+    head, _, tail = checkpoint_object.rpartition("/")
+    stem = tail.rsplit(".", 1)[0] if "." in tail else tail
+    return (head + "/" if head else "") + stem + SIDECAR_SUFFIX
+
+
+def write_sidecar(checkpoint_path, version: str = PREPROCESS_VERSION) -> Path:
+    """Record the preprocessing version a checkpoint was trained with (call after saving it)."""
+    out = sidecar_path(checkpoint_path)
+    out.write_text(json.dumps({"preprocess_version": version, "checkpoint": Path(checkpoint_path).name},
+                              indent=2) + "\n", encoding="utf-8")
+    return out
+
+
+def parse_sidecar(text) -> Optional[str]:
+    """Version string from sidecar content, or None when absent or unreadable."""
+    try:
+        v = json.loads(text).get("preprocess_version")
+    except Exception:
+        return None
+    return v if isinstance(v, str) and v.strip() else None
+
+
+def read_sidecar_version(checkpoint_path) -> Optional[str]:
+    p = sidecar_path(checkpoint_path)
+    return parse_sidecar(p.read_text(encoding="utf-8")) if p.exists() else None
+
+
+def check_version(expected: Optional[str], code_version: str = PREPROCESS_VERSION) -> None:
+    """Fail closed: raise unless the checkpoint expects exactly the code's preprocessing version."""
+    if expected is None:
+        raise PreprocessVersionMismatch(
+            f"checkpoint has no preprocessing version sidecar (code is {code_version!r}); refusing to start")
+    if expected != code_version:
+        raise PreprocessVersionMismatch(
+            f"checkpoint expects preprocessing {expected!r} but the code is {code_version!r}; refusing to start")
+
 
 # Training constants (models/train_health_model.py before P5-Q2a).
 NORM = {

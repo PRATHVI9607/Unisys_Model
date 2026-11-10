@@ -57,7 +57,7 @@ CSV_LABEL_MAP = {
 # CSV scalar columns -> the 15 metric channels, and the per-channel scaling, now live in ONE shared module
 # (models/health_model/preprocess.py) that the serving path uses too (P5-Q2a). The mapping and the constants are
 # unchanged from before; tests/test_health_preprocess_parity.py proves the windows are bit-identical.
-from models.health_model.preprocess import csv_row_to_raw, preprocess_window
+from models.health_model.preprocess import csv_row_to_raw, preprocess_window, write_sidecar
 
 
 def _f(row, key, default=0.0):
@@ -230,6 +230,7 @@ def main():
         if improved or not ckpt.exists():   # always keep at least one checkpoint
             best_f1 = max(best_f1, vf); no_imp = 0 if improved else no_imp + 1
             torch.save(model.state_dict(), ckpt)
+            write_sidecar(ckpt)     # records PREPROCESS_VERSION next to the checkpoint
             if vp:
                 last = (vp, vy)
         else:

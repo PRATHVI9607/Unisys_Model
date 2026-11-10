@@ -2,7 +2,7 @@
 # =============================================================================
 # KubeHeal v4 — guided demo driver.
 # Two scenarios: (A) config drift -> AUTO-PATCH, (B) ransomware -> AUTO-CONTAIN.
-# NOTE: Drift pipeline complete; inputs now match training preprocessing; live Health Model scores are not yet validated on real cluster windows. Retraining on live cluster data (P12-H) is a future step, not approved yet.
+# NOTE: Drift pipeline complete; inputs now match training preprocessing; live Health Model scores are not yet validated on real cluster windows. Retraining on live cluster data (P12-H) is a future step, not approved yet. Drift detection currently relies mainly on the configuration diff; metric-based evidence is limited in the current checkpoint and is addressed by P12-H.
 # The visible action happens on the DASHBOARD, so this script also brings up the
 # port-forward and (optionally) seeds baseline events so the screen is never blank.
 #

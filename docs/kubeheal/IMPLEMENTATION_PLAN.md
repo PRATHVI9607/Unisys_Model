@@ -201,7 +201,8 @@ Acceptance: each script runs end to end on k3d and produces its results file.
 
 ## P12. Model hardening (compute heavy: ask before running training)
 
-- P12-H (not approved, not started): retrain the Health Model on live cluster windows, produced by `models/generate_health_training_data.py` and passed through `models/health_model/preprocess.py` (the same code as serving), then recalibrate. Until then live Health Model scores are not validated on real cluster windows.
+- P12-H (not approved, not started): retrain the Health Model on live cluster windows, produced by `models/generate_health_training_data.py` and passed through `models/health_model/preprocess.py` (the same code as serving), then recalibrate. Until then live Health Model scores are not validated on real cluster windows, and drift detection relies mainly on the configuration diff.
+  Fix list: correct the CSV-map dict-key overwrite (the request-rate channel holds replicas/100 today), fill the six zeroed channels from live windows, use scaling constants that match real units, then bump `PREPROCESS_VERSION` (the checkpoint's sidecar must match or the server refuses to start).
 
 - Scenario-stratified split for the drift dataset; report leakage risk.
 - Security generator: held-out ransomware variants (speeds, partial/intermittent encryption,

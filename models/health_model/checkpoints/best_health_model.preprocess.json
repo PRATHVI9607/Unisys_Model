@@ -1,0 +1,4 @@
+{
+  "preprocess_version": "v1-legacy",
+  "checkpoint": "best_health_model.pt"
+}
