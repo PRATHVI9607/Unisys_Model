@@ -79,3 +79,36 @@ prometheus.io/scrape: "true"
 prometheus.io/path: /metrics
 prometheus.io/port: {{ .port | quote }}
 {{- end -}}
+
+{{/*
+Container securityContext: the global baseline plus the optional per-component hardening switches
+(off by default, must be verified on k3d before use). Arg: dict "root" $ "h" <hardening map or nil>.
+*/}}
+{{- define "kubeheal.ctx" -}}
+{{- $base := deepCopy .root.Values.global.containerSecurityContext -}}
+{{- if .h -}}
+{{- if .h.runAsNonRoot -}}
+{{- $_ := set $base "runAsNonRoot" true -}}
+{{- with .h.runAsUser }}{{- $_ := set $base "runAsUser" . -}}{{- end -}}
+{{- end -}}
+{{- if .h.readOnlyRootFilesystem -}}
+{{- $_ := set $base "readOnlyRootFilesystem" true -}}
+{{- end -}}
+{{- end -}}
+{{ toYaml $base }}
+{{- end -}}
+
+{{/* /tmp emptyDir, only when the root filesystem is read-only. Arg: the hardening map or nil. */}}
+{{- define "kubeheal.tmpMount" -}}
+{{- if . }}{{- if .readOnlyRootFilesystem }}
+volumeMounts:
+  - {name: tmp, mountPath: /tmp}
+{{- end }}{{- end }}
+{{- end -}}
+{{- define "kubeheal.tmpVolume" -}}
+{{- if . }}{{- if .readOnlyRootFilesystem }}
+volumes:
+  - name: tmp
+    emptyDir: {}
+{{- end }}{{- end }}
+{{- end -}}

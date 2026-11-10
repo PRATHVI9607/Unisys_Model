@@ -47,8 +47,10 @@ spec:
             - {name: LOG_LEVEL, value: {{ $ha.logLevel | quote }}}
             {{- include "kubeheal.extraEnv" $ha.extraEnv | nindent 12 }}
           securityContext:
-{{ toYaml $g.containerSecurityContext | indent 12 }}
+{{ include "kubeheal.ctx" (dict "root" $ "h" $ha.hardening) | indent 12 }}
 {{- include "kubeheal.resources" $ha.resources | nindent 10 }}
+{{- include "kubeheal.tmpMount" $ha.hardening | nindent 10 }}
+{{- include "kubeheal.tmpVolume" $ha.hardening | nindent 6 }}
       nodeSelector:
 {{ toYaml $g.nodeSelector | indent 8 }}
 {{- $sa := .Values.securityAgent }}
@@ -163,8 +165,10 @@ spec:
             - {name: LOG_LEVEL, value: {{ $fu.logLevel | quote }}}
             {{- include "kubeheal.extraEnv" $fu.extraEnv | nindent 12 }}
           securityContext:
-{{ toYaml $g.containerSecurityContext | indent 12 }}
+{{ include "kubeheal.ctx" (dict "root" $ "h" $fu.hardening) | indent 12 }}
 {{- include "kubeheal.resources" $fu.resources | nindent 10 }}
+{{- include "kubeheal.tmpMount" $fu.hardening | nindent 10 }}
+{{- include "kubeheal.tmpVolume" $fu.hardening | nindent 6 }}
       nodeSelector:
 {{ toYaml $g.nodeSelector | indent 8 }}
 {{- $ex := .Values.executor }}
@@ -286,8 +290,9 @@ spec:
             - {name: LOG_LEVEL, value: {{ $d.logLevel | quote }}}
             {{- include "kubeheal.extraEnv" $d.extraEnv | nindent 12 }}
           securityContext:
-{{ toYaml $g.containerSecurityContext | indent 12 }}
+{{ include "kubeheal.ctx" (dict "root" $ "h" $d.hardening) | indent 12 }}
 {{- include "kubeheal.resources" $d.resources | nindent 10 }}
+{{- include "kubeheal.tmpMount" $d.hardening | nindent 10 }}
           # Probe timings below: same as k8s/dashboard-deployment.yaml.
           livenessProbe:
             httpGet: {path: /health, port: {{ $d.port }}}
@@ -297,5 +302,6 @@ spec:
             httpGet: {path: /ready, port: {{ $d.port }}}
             initialDelaySeconds: 5
             periodSeconds: 5
+{{- include "kubeheal.tmpVolume" $d.hardening | nindent 6 }}
       nodeSelector:
 {{ toYaml $g.nodeSelector | indent 8 }}

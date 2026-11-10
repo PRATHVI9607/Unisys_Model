@@ -18,7 +18,7 @@ data:
     The adapter needs `namespace` and `pod` labels on the series: see the ConfigMap
     kubeheal-prometheus-scrape-snippet.
 {{- if eq $mode "queue" }}
-    Series: the per-pod gauge kubeheal_model_inflight_requests exported by every model server. It counts
+    Series: the per-pod gauge {{ $q.seriesName }} exported by every model server. It counts
     scoring requests running plus waiting for a worker (health and metrics routes are not counted).
 {{- else }}
     FALLBACK rule. Series: the histogram sum {{ $q.seriesName }}. Its rate is the mean number of requests being
@@ -26,14 +26,14 @@ data:
 {{- end }}
   rule.yaml: |
 {{- if eq $mode "queue" }}
-    - seriesQuery: 'kubeheal_model_inflight_requests{namespace!="",pod!=""}'
+    - seriesQuery: '{{ $q.seriesName }}{namespace!="",pod!=""}'
       resources:
         overrides:
           namespace: {resource: namespace}
           pod: {resource: pod}
       name:
         as: "{{ $q.metricName }}"
-      metricsQuery: {{ default "sum(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)" $q.metricsQuery | quote }}
+      metricsQuery: {{ default "avg(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)" $q.metricsQuery | quote }}
 {{- else }}
     - seriesQuery: '{{ $q.seriesName }}{namespace!="",pod!=""}'
       resources:

@@ -56,11 +56,14 @@ spec:
             {{- end }}
             {{- include "kubeheal.extraEnv" $s.extraEnv | nindent 12 }}
           securityContext:
-{{ toYaml $.Values.global.containerSecurityContext | indent 12 }}
+{{ include "kubeheal.ctx" (dict "root" $ "h" $s.hardening) | indent 12 }}
 {{- include "kubeheal.resources" $s.resources | nindent 10 }}
+{{- include "kubeheal.tmpMount" $s.hardening | nindent 10 }}
+          # Probe timings: copied from k8s/*-deployment.yaml, chosen, not measured.
           startupProbe: {httpGet: {path: /health, port: {{ $s.port }}}, periodSeconds: 5, failureThreshold: 40}
           readinessProbe: {httpGet: {path: /health, port: {{ $s.port }}}, periodSeconds: 5}
           livenessProbe: {httpGet: {path: /health, port: {{ $s.port }}}, periodSeconds: 15, failureThreshold: 3}
+{{- include "kubeheal.tmpVolume" $s.hardening | nindent 6 }}
       nodeSelector:
 {{ toYaml $.Values.global.nodeSelector | indent 8 }}
 ---

@@ -1,6 +1,10 @@
 {{- /*
 S-CL-5 and P9-H5: NetworkPolicy around the kubeheal namespace. Default-deny ingress for every pod, then
-explicit allows. Only ingress is restricted (no egress policy is created, so DNS egress keeps working).
+explicit allows. Only ingress is restricted by default (no egress policy is created, so DNS egress keeps working; an
+optional egress lockdown is in networkpolicy-egress.yaml).
+These policies rely on the CNI allowing node-to-pod traffic, which is where kubelet probes come from. This
+has not been checked on a cluster; check it on k3d in P10 (probes failing under default-deny means the
+CNI blocks them).
   model servers : agents (health, security, fusion), dashboard, Prometheus
   redis         : the five KubeHeal components that use it (see the note on the Executor in values.yaml)
   dashboard     : the ingress controller namespace, Prometheus

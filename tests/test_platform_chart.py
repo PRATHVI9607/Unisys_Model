@@ -259,7 +259,7 @@ def test_adapter_rule_and_scrape_snippet(fixture_file):
     assert rule[0]["name"]["as"] == "kubeheal_model_inflight_requests"
     assert rule[0]["seriesQuery"].startswith("kubeheal_model_inflight_requests{")
     assert rule[0]["resources"]["overrides"] == {"namespace": {"resource": "namespace"}, "pod": {"resource": "pod"}}
-    assert rule[0]["metricsQuery"].startswith("sum(<<.Series>>") and "rate(" not in rule[0]["metricsQuery"]
+    assert rule[0]["metricsQuery"].startswith("avg(<<.Series>>") and "rate(" not in rule[0]["metricsQuery"]
     scrape = yaml.safe_load(get(docs, "ConfigMap", "kubeheal-prometheus-scrape-snippet")["data"]["scrape-job.yaml"])
     assert scrape[0]["job_name"] == "kubeheal-pods"
     assert not by_kind(docs, "ServiceMonitor")
@@ -525,3 +525,117 @@ def test_no_em_dashes_in_chart_and_eval_files():
     files = [p for p in CHART.rglob("*") if p.is_file()] + [ROOT / "eval" / "resource_profile.py"]
     for p in files:
         assert "—" not in p.read_text(encoding="utf-8"), p
+
+
+# ---- queue-depth chain: the series the chart reads exists on every server --------------------------
+
+def test_series_used_by_the_chart_is_exported_by_each_model_server():
+    import importlib
+    from fastapi.testclient import TestClient
+    values = yaml.safe_load((CHART / "values.yaml").read_text(encoding="utf-8"))
+    series = values["hpa"]["queue"]["seriesName"]
+    assert series == values["hpa"]["queue"]["metricName"] == "kubeheal_model_inflight_requests"
+    for mod in ("services.health_model_server.main", "services.security_model_server.main",
+                "services.dcm_server.main"):
+        text = TestClient(importlib.import_module(mod).app).get("/metrics").text
+        assert any(line.startswith(series + " ") for line in text.splitlines()), mod
+
+
+def test_scoring_paths_counted_not_health_or_metrics():
+    import re
+    for f, path in (("health_model_server", "/health/score"), ("security_model_server", "/security/score"),
+                    ("dcm_server", "/dcm/correlate")):
+        text = (ROOT / "services" / f / "main.py").read_text(encoding="utf-8")
+        assert f'add_inflight_middleware(app, METRICS, ["{path}"])' in text
+        assert not re.search(r'add_inflight_middleware\([^)]*"/(health|metrics)"', text)
+
+
+# ---- optional egress lockdown ---------------------------------------------------------------------
+
+def test_egress_policy_off_by_default_and_on_when_asked(fixture_file):
+    docs = render("k3d-demo", fixture_file)
+    assert not any("Egress" in p["spec"]["policyTypes"] for p in by_kind(docs, "NetworkPolicy"))
+    docs = render("k3d-demo", fixture_file, "networkPolicy.egress.enabled=true",
+                  "networkPolicy.egress.apiServerCIDR=192.0.2.1/32")
+    pols = {p["metadata"]["name"]: p for p in by_kind(docs, "NetworkPolicy")
+            if "Egress" in p["spec"]["policyTypes"]}
+    assert set(pols) == {"default-deny-egress", "allow-dns-egress", "allow-api-server-egress",
+                         "allow-redis-egress", "allow-minio-egress", "allow-model-server-egress",
+                         "allow-prometheus-egress"}
+    assert pols["default-deny-egress"]["spec"]["podSelector"] == {} and "egress" not in pols["default-deny-egress"]["spec"]
+    dns = pols["allow-dns-egress"]["spec"]["egress"][0]
+    assert {(p["protocol"], p["port"]) for p in dns["ports"]} == {("UDP", 53), ("TCP", 53)}
+    assert dns["to"][0]["podSelector"]["matchLabels"] == {"k8s-app": "kube-dns"}
+    api = pols["allow-api-server-egress"]["spec"]["egress"][0]
+    assert api["to"][0]["ipBlock"]["cidr"] == "192.0.2.1/32"
+    assert pols["allow-redis-egress"]["spec"]["egress"][0]["ports"] == [{"protocol": "TCP", "port": 6379}]
+    assert {p["port"] for p in pols["allow-model-server-egress"]["spec"]["egress"][0]["ports"]} ==         set(MODEL_SERVERS.values())
+
+
+def test_egress_needs_the_api_server_address(fixture_file):
+    res = helm("template", "k", str(CHART), "-f", str(values_path("k3d-demo")),
+               "--set", "networkPolicy.egress.enabled=true", check=False)
+    assert res.returncode != 0 and "networkPolicy.egress.apiServerCIDR is required" in res.stderr
+
+
+def test_networkpolicy_documents_the_probe_assumption():
+    text = (CHART / "templates" / "networkpolicy.yaml").read_text(encoding="utf-8")
+    assert "node-to-pod" in text and "kubelet probes" in text and "P10" in text
+
+
+# ---- optional securityContext hardening -----------------------------------------------------------
+
+HARDENED = [("Deployment", "health-agent", "healthAgent"), ("Deployment", "fusion-agent", "fusionAgent"),
+            ("Deployment", "kubeheal-dashboard", "dashboard"),
+            ("Deployment", "kubeheal-health-model", "modelServers.health"),
+            ("Deployment", "kubeheal-security-model", "modelServers.security"),
+            ("Deployment", "kubeheal-dcm", "modelServers.dcm")]
+
+
+def test_hardening_switches_are_off_by_default_and_render_when_on(fixture_file):
+    off = render("k3d-demo", fixture_file)
+    for kind, name, _key in HARDENED:
+        sc = get(off, kind, name)["spec"]["template"]["spec"]["containers"][0]["securityContext"]
+        assert "runAsNonRoot" not in sc and "readOnlyRootFilesystem" not in sc
+        assert "volumes" not in get(off, kind, name)["spec"]["template"]["spec"]
+    sets = []
+    for _k, _n, key in HARDENED:
+        sets += [f"{key}.hardening.runAsNonRoot=true", f"{key}.hardening.readOnlyRootFilesystem=true",
+                 f"{key}.hardening.runAsUser=1000"]
+    on = render("k3d-demo", fixture_file, *sets)
+    for kind, name, _key in HARDENED:
+        pod = get(on, kind, name)["spec"]["template"]["spec"]
+        c = pod["containers"][0]
+        assert c["securityContext"]["runAsNonRoot"] is True and c["securityContext"]["runAsUser"] == 1000
+        assert c["securityContext"]["readOnlyRootFilesystem"] is True
+        assert c["securityContext"]["allowPrivilegeEscalation"] is False      # baseline kept
+        assert {"name": "tmp", "mountPath": "/tmp"} in c["volumeMounts"]
+        assert {"name": "tmp", "emptyDir": {}} in pod["volumes"]
+
+
+def test_model_server_probes_are_labelled_as_copied_not_measured():
+    text = (CHART / "templates" / "model-servers.yaml").read_text(encoding="utf-8")
+    assert "copied from k8s/*-deployment.yaml, chosen, not measured" in text
+
+
+# ---- requirements and Executor defaults drift -----------------------------------------------------
+
+def test_onnxruntime_is_pinned_with_both_bounds():
+    reqs = (ROOT / "services" / "dcm_server" / "requirements.txt").read_text(encoding="utf-8")
+    line = next(l for l in reqs.splitlines() if l.startswith("onnxruntime"))
+    spec = line.split("#")[0].strip()
+    assert ">=" in spec and "<" in spec
+
+
+def test_executor_env_matches_config_defaults():
+    """The chart values must not drift from agents/executor/config.py DEFAULTS (the owner's chosen defaults)."""
+    config = ROOT / "agents" / "executor" / "config.py"
+    if "DEFAULTS" not in config.read_text(encoding="utf-8"):
+        pytest.skip("agents/executor/config.py has no DEFAULTS on this branch (they arrive with the P7 fix on work)")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("exec_config_for_chart_test", config)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for f in ("values.yaml", "values-k3d-demo.yaml"):
+        env = yaml.safe_load((CHART / f).read_text(encoding="utf-8"))["executor"]["env"]
+        assert env == mod.DEFAULTS, f

@@ -1,0 +1,146 @@
+{{- /*
+OPTIONAL egress lockdown (networkPolicy.egress.enabled, off by default). Default-deny egress for every pod
+in the namespace, then explicit allows: kube-dns (UDP and TCP 53), the API server (needs
+networkPolicy.egress.apiServerCIDR), Redis, MinIO, the model servers and Prometheus. The Falco socket is a
+hostPath file and needs no network rule. Not verified on a cluster yet (check on k3d in P10).
+*/ -}}
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.egress.enabled }}
+{{- $ns := include "kubeheal.namespace" . }}
+{{- $np := .Values.networkPolicy }}
+{{- $eg := $np.egress }}
+{{- $ms := .Values.modelServers }}
+{{- $cidr := required "networkPolicy.egress.apiServerCIDR is required when networkPolicy.egress.enabled (cluster specific)" $eg.apiServerCIDR }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: {{ $ns }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: {{ $ns }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $eg.dnsNamespace }}
+          podSelector:
+            matchLabels:
+{{ toYaml $eg.dnsPodLabel | indent 14 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-server-egress
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [health-agent, security-agent, fusion-agent, executor, kubeheal-dashboard]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: {{ $cidr | quote }}
+      ports:
+        {{- range $eg.apiServerPorts }}
+        - {protocol: TCP, port: {{ . }}}
+        {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis-egress
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [health-agent, security-agent, fusion-agent, executor, kubeheal-dashboard]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app: redis}
+      ports:
+        - {protocol: TCP, port: 6379}
+{{- if .Values.minio.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-minio-egress
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [fusion-agent, executor, minio-bootstrap, kubeheal-dashboard, {{ $ms.health.name }}, {{ $ms.security.name }}, {{ $ms.dcm.name }}]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app: minio}
+      ports:
+        - {protocol: TCP, port: 9000}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-model-server-egress
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [health-agent, security-agent, fusion-agent, kubeheal-dashboard]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [{{ $ms.health.name }}, {{ $ms.security.name }}, {{ $ms.dcm.name }}]
+      ports:
+        - {protocol: TCP, port: {{ $ms.health.port }}}
+        - {protocol: TCP, port: {{ $ms.security.port }}}
+        - {protocol: TCP, port: {{ $ms.dcm.port }}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-egress
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [health-agent, executor]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.prometheusNamespace }}
+      ports:
+        - {protocol: TCP, port: {{ $eg.prometheusPort }}}
+{{- end }}

@@ -6,4 +6,4 @@ pydantic==2.6.0
 prometheus-client>=0.20.0
 minio>=7.2.0
 numpy<2
-onnxruntime>=1.17.0   # only needed when MODEL_FORMAT=onnx
+onnxruntime>=1.17.0,<2   # only needed when MODEL_FORMAT=onnx; needs a .onnx file in the image or a mounted volume

@@ -109,6 +109,9 @@ healthAgent:
   port: 8080
   prometheusUrl: http://prometheus-operated.monitoring.svc.cluster.local:9090
   logLevel: INFO
+  # Optional hardening, OFF by default and not verified on a cluster yet: verify on k3d before enabling.
+  # runAsNonRoot needs a numeric runAsUser unless the image already sets a non-root USER.
+  hardening: {runAsNonRoot: false, readOnlyRootFilesystem: false, runAsUser: ""}
   resources: {}
   extraEnv: {}
 
@@ -127,6 +130,9 @@ fusionAgent:
   port: 8081
   burnInMode: "false"
   logLevel: INFO
+  # Optional hardening, OFF by default and not verified on a cluster yet: verify on k3d before enabling.
+  # runAsNonRoot needs a numeric runAsUser unless the image already sets a non-root USER.
+  hardening: {runAsNonRoot: false, readOnlyRootFilesystem: false, runAsUser: ""}
   resources: {}
   extraEnv: {}
 
@@ -164,6 +170,9 @@ dashboard:
   adminTokenSecret: {name: kubeheal-dashboard-admin, key: token}
   # Optional KUBEHEAL_ADMIN_IDENTITY (who the ledger records for admin actions); rendered only when set.
   adminIdentity: ""
+  # Optional hardening, OFF by default and not verified on a cluster yet: verify on k3d before enabling.
+  # runAsNonRoot needs a numeric runAsUser unless the image already sets a non-root USER.
+  hardening: {runAsNonRoot: false, readOnlyRootFilesystem: false, runAsUser: ""}
   resources: {}
   extraEnv: {}
 
@@ -180,7 +189,8 @@ modelServers:
   # modelFormat is MODEL_FORMAT: pt (default) or onnx. onnx is supported by the DCM only (one output,
   # parity tested). The health and security servers fail closed (503) if asked for onnx because their
   # ONNX export drops the embeddings and attributions they return. The ONNX file must exist at
-  # MODEL_ONNX_PATH inside the image or a mounted volume; a missing file fails closed, there is no
+  # MODEL_ONNX_PATH inside the image or a mounted volume; nothing in this repo builds one into the image,
+  # and the MinIO registry download is ignored in ONNX mode. A missing file fails closed, there is no
   # silent fall back to .pt.
   health:
     name: kubeheal-health-model
@@ -191,6 +201,9 @@ modelServers:
     modelPath: /app/models/health_model/checkpoints/best_health_model.pt
     registryObject: models/health/best_health_model.pt
     enableShap: "true"
+    # Optional hardening, OFF by default and not verified on a cluster yet: verify on k3d before enabling.
+    # runAsNonRoot needs a numeric runAsUser unless the image already sets a non-root USER.
+    hardening: {runAsNonRoot: false, readOnlyRootFilesystem: false, runAsUser: ""}
     resources: {}
     extraEnv: {}
   security:
@@ -202,6 +215,9 @@ modelServers:
     modelPath: /app/models/security_model/checkpoints/best_security_model.pt
     registryObject: models/security/best_security_model.pt
     enableShap: "true"
+    # Optional hardening, OFF by default and not verified on a cluster yet: verify on k3d before enabling.
+    # runAsNonRoot needs a numeric runAsUser unless the image already sets a non-root USER.
+    hardening: {runAsNonRoot: false, readOnlyRootFilesystem: false, runAsUser: ""}
     resources: {}
     extraEnv: {}
   dcm:
@@ -213,6 +229,9 @@ modelServers:
     modelPath: /app/models/dcm/checkpoints/best_dcm.pt
     onnxPath: /app/models/dcm_v4.onnx
     registryObject: models/dcm/best_dcm.pt
+    # Optional hardening, OFF by default and not verified on a cluster yet: verify on k3d before enabling.
+    # runAsNonRoot needs a numeric runAsUser unless the image already sets a non-root USER.
+    hardening: {runAsNonRoot: false, readOnlyRootFilesystem: false, runAsUser: ""}
     resources: {}
     extraEnv: {}
 
@@ -232,8 +251,10 @@ hpa:
   maxReplicas: 8
   queue:
     metricName: kubeheal_model_inflight_requests
+    # Series the adapter rule reads. Exported by every model server on /metrics (tests check this).
+    seriesName: kubeheal_model_inflight_requests
     # Optional full override of the adapter metricsQuery (adapter template syntax).
-    metricsQuery: ""
+    metricsQuery: ""          # default: avg(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>), one value per pod
     # CHOSEN DEFAULT, not a measurement: target average in-flight plus waiting requests per pod.
     # Tunable; P11 (load tests) is where it gets tuned.
     targetAverageValue: "4"
@@ -264,8 +285,18 @@ networkPolicy:
   prometheusNamespace: monitoring
   # Namespace of the ingress controller that may reach the dashboard.
   ingressControllerNamespace: ingress-nginx
-  # Only ingress is restricted. No egress policy is created, so DNS, the API server, Prometheus and
-  # MinIO egress are unaffected.
+  # Ingress is restricted by default. The policies rely on the CNI letting the node reach pods for kubelet
+  # probes (probe traffic comes from the node, which most CNIs allow); to be checked on k3d in P10.
+  # Optional egress lockdown, OFF by default: default-deny egress plus allows for kube-dns, the API server,
+  # Redis, MinIO, the model servers and Prometheus. The Falco socket is a hostPath file, not network traffic,
+  # so no rule is needed for it.
+  egress:
+    enabled: false
+    dnsNamespace: kube-system
+    dnsPodLabel: {k8s-app: kube-dns}
+    apiServerCIDR: ""          # REQUIRED when egress.enabled: the API server address as a CIDR (cluster specific)
+    apiServerPorts: [443, 6443]   # standard API server ports (443 service, 6443 k3s and kubeadm)
+    prometheusPort: 9090       # port of the default PROMETHEUS_URL
 
 # ---- Ingress for the dashboard ----------------------------------------------------
 ingress:
