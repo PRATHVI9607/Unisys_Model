@@ -129,6 +129,8 @@ Ransomware:
 - [x] P8-D3 size: M. Kill switch status and toggle with admin token, mode history. Verify: API test for toggle with and without token.
 - [~] builder-C (wave/P9, as Helm chart template) P8-D4 size: S. Ingress manifests (Traefik on k3d, NGINX in generic values). Verify: `kubectl apply --dry-run=client`.
 
+- [ ] P8-D5 size: M. Owner request 2026-11-11, do on `work` AFTER the P9 and P6 merges and BEFORE P10: the dashboard approval claim (`CLAIM_TTL_S`, now 30 days) gets a short chosen default TTL (about 10 minutes, documented as tunable, labelled chosen not measured); startup reconciliation in the dashboard that scans claims against the exec stream and the ledger and completes (writes the missing `approved`) or releases claims with no matching record; an admin-only 'release claim' action that writes a ledger entry (`claim_released`, actor). Files: `dashboard/`, tests `tests/test_dashboard_*.py`. Tests for each (short TTL, reconciliation complete and release, release action needs the token and writes the ledger entry).
+
 ### P9 Cloud platform (touches `deploy/helm/`, `k8s/`, `eval/`)
 - [~] builder-C (wave/P9) P9-H1 size: M. Helm chart `deploy/helm/kubeheal` replacing `scripts/install.sh`; values-dev, staging, prod, k3d-demo. Verify: `helm lint` and `helm template` for all four.
 - [~] builder-C (wave/P9) P9-H2 size: S. Namespaces prod, staging, dev with ResourceQuota, LimitRange, `kubeheal/tier` label. Verify: `helm template`.
