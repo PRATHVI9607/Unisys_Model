@@ -22,12 +22,13 @@ Read `AGENTS.md`, `docs/kubeheal/PROJECT_SPEC.md`, `docs/kubeheal/IMPLEMENTATION
 
 - Keep Health Agent OBSERVE event-driven for now. The OBSERVE TTL is a freshness limit and does not define sampling cadence. Do not claim a 100-second interval from a 300-second TTL and factor 3. Design sampling cadence, incident correlation, and cooldown together before implementing periodic scoring.
 - P7-RR-9 now uses an Executor-created Job to scan restored PVCs read-only. Any incomplete or unreadable scan stays unknown and isolated. The Job uses the Executor image by default; verify it can be pulled from prod/staging/dev and provision pull secrets there if needed. The scanner deadline and resource settings are chosen defaults, not measured performance.
+- P7-RR-10 is partially implemented in `65b3585`. The focused local suite passed 106 tests (11 datetime deprecation warnings). The checklist and `.ai/handoff.md` list the exact completed and remaining portions.
 - Local scanner/remediation/static/no-writes test run passed 73 tests with 4 datetime deprecation warnings; `py_compile` passed. The chart test could not collect because Windows denied access to the installed Helm executable under the user WinGet directory. Do not claim chart parity or cluster verification.
 - Full-suite status is not green in the current shell; see the older environment/test details in `PROGRESS.md`.
 
 ## Next work
 
-- P7-RR-10 is eligible because its declared dependency P6-R1 is marked complete. Review the list in `PROGRESS.md`; make small, tested changes and do not run Kubernetes tests.
+- Continue P7-RR-10 only after getting the owner decision on ledger failures and approval for an operator flow that removes a Redis freeze key. Then review restore crash recovery and remaining per-incident behavior. Do not run Kubernetes tests.
 - P7-RR-11 follows P7-RR-9. P7-RR-7 and P10/P11 require cluster verification and stay with Claude.
 - P6-D6 still lacks a legitimate KernelExplainer background-data source; do not invent one.
 
