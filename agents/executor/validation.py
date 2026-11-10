@@ -33,6 +33,7 @@ class Request:
     pod: str = ""
     patch_field: str = ""
     kind: str = "Deployment"
+    kind_given: bool = False      # False: contain accepts either owner chain
     t0_ms: Optional[int] = None
     dry_run: bool = False
 
@@ -77,6 +78,7 @@ def parse_request(f: Dict) -> Tuple[str, str, Optional[Request]]:
 
     req = Request(action=action, namespace=namespace, incident_id=incident_id, deployment=deployment,
                   pod=pod, patch_field=(f.get("patch_field") or "").strip(), kind=kind,
+                  kind_given=bool(f.get("workload_kind")),
                   dry_run=str(f.get("dry_run", "false")).lower() == "true")
 
     raw_t0 = f.get("t0_ms")

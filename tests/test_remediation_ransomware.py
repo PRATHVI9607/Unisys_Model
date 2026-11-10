@@ -420,3 +420,46 @@ def test_executor_escalates_when_the_restore_stays_isolated():
                                                  "pod": "db-abc-1", "incident_id": INC, "t0_ms": str(T0 * 1000)}))
     esc = r.redis.stream(ESCALATIONS_STREAM)
     assert len(esc) == 1 and esc[0]["required"] == "human" and esc[0]["reason"].startswith("restored_kept_isolated")
+
+
+# ---- review findings: retention, digest form, StatefulSet containment ----------------------------------------
+def test_prune_never_deletes_the_newest_ready_snapshot_even_when_the_newest_twelve_are_unready():
+    t = Sched()
+    for i in range(3):                                   # older, ready
+        t.c.snapshots[f"ready-{i}"] = fk.snapshot_obj(f"ready-{i}", "data", 1000 + i * 300)
+    for i in range(12):                                  # newer, all stuck unready
+        t.c.snapshots[f"stuck-{i}"] = fk.snapshot_obj(f"stuck-{i}", "data", 4000 + i * 300, ready=False)
+    run(t.s.run_once())
+    assert "ready-2" in t.c.snapshots                    # the newest ready one survives
+    assert "ready-0" not in t.c.snapshots and "ready-1" not in t.c.snapshots
+
+
+def test_digest_is_only_taken_from_the_pullable_repo_at_sha256_form():
+    good = "sha256:" + "ab" * 32
+    assert restore.image_digest(f"docker.io/reg/db@{good}") == good
+    assert restore.image_digest(f"docker-pullable://reg/db@{good}") == good
+    assert restore.image_digest(good) is None            # bare config id (k3d image import)
+    assert restore.image_digest("") is None
+
+
+def test_restore_escalates_on_a_bare_image_id_without_writing():
+    r = R()
+    r.c.pods[r.pod]["status"]["containerStatuses"][0]["imageID"] = "sha256:" + "cd" * 32
+    assert r.go().startswith("escalated:image_digest_unavailable") and r.c.log == []
+
+
+def test_contain_isolates_a_statefulset_pod_when_the_kind_was_not_given():
+    c = fk.Cluster()
+    pod = fk.add_db_workload(c, kind="StatefulSet")
+    rec_list = []
+    redis = fk.Redis()
+    out = do_contain(c, Recorder(lambda i, s, p: rec_list.append(s), INC), redis)     # Fusion sends no kind
+    assert out == "contained" and c.pods[pod]["metadata"]["labels"]["kubeheal/quarantine"] == "true"
+
+
+def test_contain_with_an_explicit_wrong_kind_does_not_label_the_pod():
+    c = fk.Cluster()
+    pod = fk.add_db_workload(c, kind="StatefulSet")
+    redis = fk.Redis()
+    out = do_contain(c, Recorder(None, INC), redis, kind="Deployment", kind_given=True)
+    assert out.startswith("contain_failed:pod") and "patch_pod" not in [e[1] for e in c.log]

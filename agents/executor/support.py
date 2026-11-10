@@ -8,6 +8,8 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+_serializer = None
+
 # Outcome prefixes that must be sent to a human on kubeheal.escalations.
 ESCALATE_PREFIXES = (
     "stopped_mode_test", "escalated:", "rolled_back", "kept_unverified", "patch_failed",
@@ -26,8 +28,11 @@ def to_dict(obj: Any) -> Dict:
         return {}
     if isinstance(obj, dict):
         return obj
-    from kubernetes_asyncio import client
-    return client.ApiClient().sanitize_for_serialization(obj)
+    global _serializer
+    if _serializer is None:       # ApiClient() opens an aiohttp session: build ONE, not one per call
+        from kubernetes_asyncio import client
+        _serializer = client.ApiClient()
+    return _serializer.sanitize_for_serialization(obj)
 
 
 async def noop_record(incident_id: str, step: str, payload: dict) -> None:

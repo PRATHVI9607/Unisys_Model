@@ -178,7 +178,12 @@ class SnapshotScheduler:
         items = [s for s in items
                  if ((s.get("metadata") or {}).get("labels") or {}).get(LABEL_KIND) == KIND_ROLLING]
         items.sort(key=_order_time, reverse=True)
+        # Never delete the newest ready snapshot: if the snapshotter stalls and the newest KEEP are
+        # all unready, the last usable restore point must survive.
+        newest_ready = next((s for s in items if (s.get("status") or {}).get("readyToUse") is True), None)
         for s in items[self.keep:]:
+            if s is newest_ready:
+                continue
             sname = s["metadata"]["name"]
             try:
                 await _write(self.gate, ns, "delete_old_rolling_snapshot",

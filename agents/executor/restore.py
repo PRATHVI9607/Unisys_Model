@@ -43,7 +43,10 @@ from agents.executor.validation import Request
 logger = logging.getLogger(__name__)
 
 REPLICAS_ANNOTATION = "kubeheal/original-replicas"
-_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+# Only the pullable `<repo>@sha256:<64 hex>` form counts. A bare `sha256:<id>` (containerd reports the
+# image config id for images loaded without a registry, e.g. `k3d image import`) is not a manifest
+# digest and `repo@<id>` would not pull.
+_DIGEST = re.compile(r"@(sha256:[0-9a-f]{64})")
 _UNITS = {"Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40, "Pi": 2**50, "Ei": 2**60,
           "k": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15, "E": 10**18, "": 1}
 
@@ -69,7 +72,7 @@ def pin_image(image: str, digest: str) -> str:
 
 def image_digest(image_id: str) -> Optional[str]:
     m = _DIGEST.search(image_id or "")
-    return m.group(0) if m else None
+    return m.group(1) if m else None
 
 
 async def _read_workload(apps_api, kind: str, ns: str, name: str) -> Dict:

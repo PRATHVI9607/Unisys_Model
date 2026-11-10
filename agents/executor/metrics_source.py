@@ -29,6 +29,7 @@ def queries(namespace: str, deployment: str, window_s: float) -> Dict[str, str]:
 async def _aiohttp_get(url: str, params: dict) -> dict:
     import aiohttp
     async with aiohttp.ClientSession() as s:
+        # 5 s total: same per-call deadline as the Fusion Agent's DCM call (fusion_agent/agent.py)
         async with s.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as r:
             r.raise_for_status()
             return await r.json()

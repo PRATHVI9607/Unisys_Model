@@ -104,10 +104,11 @@ async def contain(gate, core_api, networking_api, apps_api, custom_api, req: Req
         await record("quarantine_policy_created", {"policy": policy_name(req.incident_id)})
 
         pod = to_dict(await core_api.read_namespaced_pod(pod_name, ns))
-        if req.deployment and apps_api is not None and not await workload_owns_pod(
-                apps_api, ns, pod, req.deployment, req.kind):
+        kinds = [req.kind] if req.kind_given else ["Deployment", "StatefulSet"]
+        if req.deployment and apps_api is not None and not any(
+                [await workload_owns_pod(apps_api, ns, pod, req.deployment, k) for k in kinds]):
             await record("ownership_mismatch", {"pod": pod_name, "workload": req.deployment})
-            return (f"contain_failed:pod {pod_name} is not owned by {req.kind} {req.deployment} "
+            return (f"contain_failed:pod {pod_name} is not owned by {'/'.join(kinds)} {req.deployment} "
                     f"(policy {policy_name(req.incident_id)} was created and selects no pod)")
 
         await _write(gate, ns, planned[1], core_api.patch_namespaced_pod, pod_name, ns,

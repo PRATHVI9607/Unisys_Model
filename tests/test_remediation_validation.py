@@ -159,3 +159,34 @@ def test_the_consume_loop_does_not_serialise_requests():
 def test_concurrent_patch_and_restore_on_one_workload_are_serialised():
     ex, *_ = make_ex()
     assert ex._lock("prod", "web") is ex._lock("prod", "web") and ex._lock("prod", "web") is not ex._lock("prod", "db")
+
+
+def test_to_dict_reuses_one_serializer_instead_of_opening_a_session_per_call():
+    from agents.executor import support
+    from kubernetes_asyncio import client
+
+    built = []
+
+    class Spy(client.ApiClient):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            built.append(self)
+
+    async def go():
+        support._serializer = None
+        orig, client.ApiClient = client.ApiClient, Spy
+        try:
+            pod = client.V1Pod(metadata=client.V1ObjectMeta(name="x", labels={"a": "b"}))
+            for _ in range(3):
+                assert support.to_dict(pod)["metadata"]["name"] == "x"
+        finally:
+            client.ApiClient = orig
+            await support._serializer.close()
+            support._serializer = None
+    run(go())
+    assert len(built) == 1
+
+
+def test_kind_given_is_tracked():
+    assert parse_request(ok_fields())[2].kind_given is False
+    assert parse_request(ok_fields(workload_kind="StatefulSet"))[2].kind_given is True
