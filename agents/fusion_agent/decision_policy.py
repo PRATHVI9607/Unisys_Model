@@ -42,6 +42,10 @@ class DecisionInput:
     burn_in_mode: bool = False
     nl_summary: Optional[str] = None
 
+    # Kill switch (P3): the mode is an input, the policy stays pure. Anything other than
+    # exactly "enforce" is a dry run, so the safe value is also the default.
+    mode: str = "test"
+
 
 @dataclass
 class DecisionOutput:
@@ -50,6 +54,7 @@ class DecisionOutput:
     rationale: str
     requires_incident_lock: bool
     action_params: dict = field(default_factory=dict)
+    dry_run: bool = True
 
 
 TIER_MULTIPLIERS = {"prod": 1.20, "staging": 1.00, "dev": 0.70}
@@ -68,6 +73,14 @@ class Thresholds:
 
 
 def make_decision(inp: DecisionInput) -> DecisionOutput:
+    """Pure. The decision itself does not depend on the mode (Sense, Score and Decide always run);
+    the result carries `dry_run` so every later step knows no write may happen."""
+    out = _decide(inp)
+    out.dry_run = str(inp.mode).strip().lower() != "enforce"
+    return out
+
+
+def _decide(inp: DecisionInput) -> DecisionOutput:
     t = Thresholds()
     tier_mult = TIER_MULTIPLIERS.get(inp.namespace_tier, 1.00)
 

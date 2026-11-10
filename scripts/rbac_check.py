@@ -40,6 +40,18 @@ EXPECT += [
     ("health-model", "list pods", "prod", False),
 ]
 
+# kill switch ConfigMap: read by fusion, executor, dashboard; written only by the dashboard admin role
+for sa in ("fusion-agent", "executor", "dashboard"):
+    EXPECT.append((sa, "get configmaps/kubeheal-mode", "kubeheal", True))
+    EXPECT.append((sa, "watch configmaps/kubeheal-mode", "kubeheal", True))
+for sa in ("health-agent", "security-agent", "health-model", "security-model", "dcm"):
+    EXPECT.append((sa, "get configmaps/kubeheal-mode", "kubeheal", False))
+for sa in ("fusion-agent", "executor", "health-agent", "security-agent"):
+    EXPECT.append((sa, "patch configmaps/kubeheal-mode", "kubeheal", False))
+    EXPECT.append((sa, "update configmaps/kubeheal-mode", "kubeheal", False))
+EXPECT.append(("dashboard", "patch configmaps/kubeheal-mode", "kubeheal", True))
+EXPECT.append(("dashboard", "patch configmaps/other", "kubeheal", False))
+
 # executor: write only in the protected namespaces, never in kube-system or kubeheal
 for ns in ("prod", "staging", "dev"):
     for w in WRITERS_TO_TEST:

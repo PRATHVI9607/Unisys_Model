@@ -25,6 +25,7 @@ import aiohttp
 import numpy as np
 import redis.asyncio as aioredis
 
+from agents.common.killswitch import ModeWatcher
 from agents.fusion_agent.decision_policy import (
     make_decision, DecisionInput, Decision,
 )
@@ -64,12 +65,22 @@ class FusionAgentV4:
         self.burn_in = os.environ.get("BURN_IN_MODE", "false").lower() == "true"
         self.redis: Optional[aioredis.Redis] = None
         self.consumer = os.environ.get("HOSTNAME") or f"fusion-{uuid.uuid4().hex[:6]}"
+        self.mode = ModeWatcher()
         self.running = False
         # short-term correlation buffer: "<ns>:<workload>" -> (event_fields, recv_monotonic)
         self.pending_health: Dict[str, tuple] = {}
         self.pending_sec: Dict[str, tuple] = {}
 
     async def start(self):
+        try:
+            from kubernetes_asyncio import client, config
+            try:
+                config.load_incluster_config()
+            except Exception:
+                await config.load_kube_config()
+            await self.mode.start(client.CoreV1Api())   # read-only: kubeheal-mode + namespace labels
+        except Exception as e:
+            logger.warning(f"kill switch watcher not started ({e}); mode stays 'test'")
         self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
         for stream in (HEALTH_STREAM, SEC_STREAM):
             try:
@@ -185,6 +196,7 @@ class FusionAgentV4:
             circuit_breaker_patches=await self._cb_count(f"kubeheal:cb:patch:{namespace}:{workload}"),
             burn_in_mode=self.burn_in,
             nl_summary=nl,
+            mode=self.mode.mode_for(namespace),
         )
         out = make_decision(inp)
 
@@ -225,6 +237,7 @@ class FusionAgentV4:
             "nl_summary": out.action_params.get("nl_summary") or "",
             "causal_chain": json.dumps(causal_chain),
             "outcome": outcome,
+            "dry_run": str(out.dry_run).lower(),
             "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
         })
 
@@ -238,6 +251,7 @@ class FusionAgentV4:
             "patch_field": inp.health_field_top if action == "patch" else "",
             "namespace_tier": inp.namespace_tier,
             "approved_by": "auto",
+            "dry_run": str(out.dry_run).lower(),
             "source": "fusion",
             "rationale": out.rationale,
             "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),

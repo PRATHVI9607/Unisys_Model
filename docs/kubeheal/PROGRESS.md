@@ -34,7 +34,8 @@ Real usage is measured later and recorded under `docs/kubeheal/results/`.
 | P0 Environment and guardrails | done (deny rules not proven enforced in-session; git-level push block verified) |
 | P1 Core correctness | done, see log |
 | P2 Executor and least-privilege RBAC | done, see log |
-| P3 to P13 | not started |
+| P3 Kill switch | done, see log |
+| P4 to P13 | not started |
 
 ## P0 log
 
@@ -95,3 +96,28 @@ Done:
 Acceptance: 79 tests pass (2026-11-10, this machine). RBAC matrix proven on k3d.
 Deferred: VolumeSnapshot verbs checked only after the CRD exists (P10). The Executor image is not built or deployed yet (P9/P10).
 Next step: P3 kill switch (ConfigMap `kubeheal-mode`, Watch API, policy input, Executor gate).
+
+## P3 log (kill switch)
+
+Plan: ConfigMap `kubeheal-mode` + namespace label, Watch API (not polling), unreadable means test, fresh
+install `test`, pure policy with `mode` input and `dry_run` result, Executor hard gate before every
+write, mid-action stop with escalation, read-only components, admin-only write Role.
+
+Done:
+- `agents/common/killswitch.py`: pure `normalize` / `effective_mode` / `is_dry_run`, and `ModeWatcher` (Watch API on the single ConfigMap via field selector, and on namespaces; reconnect loops; unreadable, missing key, deleted ConfigMap or any value other than exactly `enforce` mean `test`; namespace labels not loaded or watch broken also mean `test`; history of mode changes with an `on_change` hook that P4 connects to the ledger).
+- Semantics decision (within spec S-KS-2): the global mode is absolute. The label `kubeheal/mode=test` makes one namespace stricter while the global mode is `enforce`. The label can never enable enforcement while the global mode is `test`. Recorded here as an interpretation, not a spec change.
+- Policy stays pure: `DecisionInput.mode` (default `test`), `DecisionOutput.dry_run`. The decision itself is identical in both modes (Sense, Score, Decide always run).
+- Fusion Agent watches the mode (read only), passes it to the policy, marks queued requests `dry_run`.
+- Executor: its own `ModeWatcher`; `RequestGate` combines its own reading with the request's `dry_run` flag (can only get stricter); `actions._write` is the single choke point and asks the gate right before every write. Outcomes: `DRY RUN: would have CONTAIN prod/pod (create_quarantine_policy, delete_pod)` and, when the mode flips between steps, `stopped_mode_test: ...` plus an entry on stream `kubeheal.escalations` (`required: human`). A missing gate blocks.
+- `k8s/kill-switch.yaml`: ConfigMap `kubeheal-mode` (`mode: test`), Role `kubeheal-mode-reader` (get/list/watch of that one ConfigMap) for fusion-agent, executor, dashboard; Role `kubeheal-mode-admin` (get/patch/update of that one ConfigMap) bound to the dashboard ServiceAccount only (its toggle endpoint will require an admin token in P8). Applied to the cluster; `scripts/rbac_check.py` now has 245 checks, 0 failures.
+- Security Agent: it has no write call at all (P1), so the gate covers it by construction; the static tests prove it.
+- Tests: `tests/test_killswitch.py` (pure rules, watcher state, policy, actions gate, mid-action stop, Executor escalation, static check that every write method is only passed to `_write`, and a live Watch-API test on k3d that flips the ConfigMap and a namespace label and restores them). The cluster ConfigMap was restored to `test` after the test.
+- Mode changes are logged now (`KILL SWITCH mode a -> b`); the ledger entry is added in P4 through the `on_change` hook.
+
+Acceptance: 108 tests pass (2026-11-10, this machine), including the live test on k3d. Tests cover gate, fallback, override, mid-action stop.
+Deferred: ledger entry for mode changes (P4); dashboard toggle with admin token (P8).
+Next step: P4 Record (MinIO with object lock, ledger writer used by every component, Prometheus metrics, Grafana JSON).
+
+## Session note (context length)
+
+Context is long after P0 to P3. Start a new session with `prompts/06-resume.md` to continue at P4.

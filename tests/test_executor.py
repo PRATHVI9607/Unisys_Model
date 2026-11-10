@@ -17,6 +17,15 @@ def run(c):
     return asyncio.run(c)
 
 
+class Mode:
+    # stand-in for ModeWatcher: enforce unless dry=True
+    def __init__(self, dry=False):
+        self.dry = dry
+
+    def dry_run_for(self, namespace):
+        return self.dry
+
+
 class FakeRedis:
     def __init__(self, store=None):
         self.store = store or {}
@@ -83,7 +92,7 @@ def test_guard_never_acts_on_system_or_kubeheal_namespaces():
 
 def test_executor_refuses_forbidden_namespace_without_calling_kubernetes():
     apps, core, net = FakeApps(), FakeCore(), FakeNet()
-    ex = ExecutorService(redis=FakeRedis(), core_api=core, apps_api=apps, networking_api=net)
+    ex = ExecutorService(redis=FakeRedis(), core_api=core, apps_api=apps, networking_api=net, mode=Mode())
     out = run(ex.execute({"action": "contain", "namespace": "kube-system", "pod": "coredns-1"}))
     assert out.startswith("refused:")
     assert core.deleted == [] and net.created == []
@@ -95,7 +104,7 @@ def test_executor_patch_uses_golden_baseline():
     baseline = {"template": {"spec": {"containers": [{"name": "app", "resources": {"limits": {"cpu": "500m"}}}]}}}
     r = FakeRedis({"kubeheal:baseline:prod:web": json.dumps(baseline)})
     apps = FakeApps()
-    ex = ExecutorService(redis=r, apps_api=apps)
+    ex = ExecutorService(redis=r, apps_api=apps, mode=Mode())
     out = run(ex.execute({"action": "patch", "namespace": "prod", "deployment": "web"}))
     assert out == "patched_to_baseline"
     assert apps.patched[0][0] == "web" and apps.patched[0][2]["spec"]["template"] == baseline["template"]
@@ -103,14 +112,14 @@ def test_executor_patch_uses_golden_baseline():
 
 def test_executor_patch_without_baseline_escalates_and_does_not_write():
     apps = FakeApps()
-    ex = ExecutorService(redis=FakeRedis(), apps_api=apps)
+    ex = ExecutorService(redis=FakeRedis(), apps_api=apps, mode=Mode())
     out = run(ex.execute({"action": "patch", "namespace": "prod", "deployment": "web"}))
     assert out == "no_baseline_escalated" and apps.patched == []
 
 
 def test_executor_acks_only_after_success_and_records_outcome():
     r = FakeRedis()
-    ex = ExecutorService(redis=r, core_api=FakeCore(), networking_api=FakeNet())
+    ex = ExecutorService(redis=r, core_api=FakeCore(), networking_api=FakeNet(), mode=Mode())
     ok = run(ex.handle_entry(EXEC_STREAM, "9-0", {"action": "contain", "namespace": "prod", "pod": "p1",
                                                  "incident_id": "inc-1"}))
     assert ok and r.acked == ["9-0"]

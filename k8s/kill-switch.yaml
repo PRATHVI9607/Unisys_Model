@@ -1,0 +1,48 @@
+# Kill switch (P3). A fresh install starts in `test` (dry run): nothing writes to the cluster until
+# a cluster admin flips this to `enforce`.
+#   kubectl --context k3d-kubeheal -n kubeheal patch configmap kubeheal-mode --type merge -p '{"data":{"mode":"enforce"}}'
+# Per-namespace override (can only make a namespace stricter):  kubectl label ns prod kubeheal/mode=test
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubeheal-mode
+  namespace: kubeheal
+data:
+  mode: test
+---
+# Components read it (get/list/watch limited to this one ConfigMap).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: kubeheal-mode-reader, namespace: kubeheal}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [kubeheal-mode]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kubeheal-mode-reader, namespace: kubeheal}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: kubeheal-mode-reader}
+subjects:
+  - {kind: ServiceAccount, name: fusion-agent, namespace: kubeheal}
+  - {kind: ServiceAccount, name: executor, namespace: kubeheal}
+  - {kind: ServiceAccount, name: dashboard, namespace: kubeheal}
+---
+# Only this admin Role may modify it. It is bound to the dashboard ServiceAccount, whose toggle
+# endpoint requires the admin token (P8); every other component has read access only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: kubeheal-mode-admin, namespace: kubeheal}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [kubeheal-mode]
+    verbs: [get, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kubeheal-mode-admin, namespace: kubeheal}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: kubeheal-mode-admin}
+subjects:
+  - {kind: ServiceAccount, name: dashboard, namespace: kubeheal}
