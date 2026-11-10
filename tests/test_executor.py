@@ -100,14 +100,15 @@ def test_executor_refuses_forbidden_namespace_without_calling_kubernetes():
     assert out.startswith("refused:") and apps.patched == []
 
 
-def test_executor_patch_uses_golden_baseline():
+def test_executor_patch_never_overwrites_the_whole_template():
+    # P7-RR-8: the P2 interim behaviour (whole golden template) is gone. A patch request needs a
+    # patch_field; the field-level canary path is tested in tests/test_remediation_drift.py.
     baseline = {"template": {"spec": {"containers": [{"name": "app", "resources": {"limits": {"cpu": "500m"}}}]}}}
     r = FakeRedis({"kubeheal:baseline:prod:web": json.dumps(baseline)})
     apps = FakeApps()
     ex = ExecutorService(redis=r, apps_api=apps, mode=Mode())
     out = run(ex.execute({"action": "patch", "namespace": "prod", "deployment": "web"}))
-    assert out == "patched_to_baseline"
-    assert apps.patched[0][0] == "web" and apps.patched[0][2]["spec"]["template"] == baseline["template"]
+    assert out.startswith("escalated:no_patch_field") and apps.patched == []
 
 
 def test_executor_patch_without_baseline_escalates_and_does_not_write():
