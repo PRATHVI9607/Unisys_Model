@@ -36,8 +36,10 @@ Real usage is measured later and recorded under `docs/kubeheal/results/`.
 | P2 Executor and least-privilege RBAC | done, see log |
 | P3 Kill switch | done, see log |
 | P4 Record | done, see P4 checklist |
-| P5 Sense | in progress on `wave/P5` |
-| P6 to P13 | not started |
+| P5 Sense | done, merged (a6ef46a), see P5 log |
+| P6 Decide | not started |
+| P7 Remediation paths | code done and merged (5bd3558), proven with fakes only; open items P7-RR-9 to RR-11 and P6-D7, RR-7 needs P10 |
+| P8 to P13 | not started |
 
 ## Task checklist
 
@@ -75,12 +77,12 @@ Each line: ID, goal, files, verify. "needs" lists tasks that must be done first.
 - [x] P4-I1 size: M. Added `tests/test_record_pipeline.py`: a high-risk incident passes through Fusion and the Executor with one shared ledger; detection, scores, decision, Executor dry-run step, and result all share an incident ID, and the dry-run causes no Kubernetes writes. Focused integration test: 1 passed. Live k3d `scripts/ledger_check.py` result from 2026-11-10: created object version with COMPLIANCE retention; exact-version delete refused (`InvalidRequest`). Needs: P4-L2, P4-L3, P4-L4.
 
 ### P5 Sense: real signals (touches `agents/health_agent/`, `agents/security_agent/`, `tests/fixtures/`)
-- [~] builder-B (wave/P5) P5-H1 size: M. Health Agent real Prometheus `query_range`, 60 steps of 5 s per pod, 15 metrics, missing metrics flagged (not 0). Files: `agents/health_agent/`. Verify: unit tests with a fake Prometheus response. Needs: none.
-- [~] builder-B (wave/P5) P5-H2 size: S. Fixtures and tests for P5-H1 (full window, missing metric, short window). Verify: pytest. Needs: P5-H1.
-- [~] builder-B (wave/P5) P5-S1 size: M. Security Agent entropy sampler: 30 samples, 2 s apart, of data written by the suspect process via `/proc/<pid>/fd` targets on the pod volume, bounded read size. Files: `agents/security_agent/`. Verify: unit test on a temp directory. Needs: none.
-- [~] builder-B (wave/P5) P5-S2 size: M. Falco consumer (enabled when available) and replay mode streaming recorded Falco JSON traces from files. Files: `agents/security_agent/`. Verify: test replays a fixture into the event pipeline. Needs: none.
-- [~] builder-B (wave/P5) P5-S3 size: S. Recorded Falco fixtures under `tests/fixtures/falco/` and a test that replay feeds the Security Model input. Verify: pytest. Needs: P5-S2.
-- [~] builder-B (wave/P5) P5-S4 size: S. Remove synthetic syscall fabrication from live paths (keep in tests or replay tooling). Verify: grep test that live code has no fabrication. Needs: P5-S2.
+- [x] P5-H1 size: M. Health Agent real Prometheus `query_range`, 60 steps of 5 s per pod, 15 metrics, missing metrics flagged (not 0). Files: `agents/health_agent/`. Verify: unit tests with a fake Prometheus response. Needs: none.
+- [x] P5-H2 size: S. Fixtures and tests for P5-H1 (full window, missing metric, short window). Verify: pytest. Needs: P5-H1.
+- [x] P5-S1 size: M. Security Agent entropy sampler: 30 samples, 2 s apart, of data written by the suspect process via `/proc/<pid>/fd` targets on the pod volume, bounded read size. Files: `agents/security_agent/`. Verify: unit test on a temp directory. Needs: none.
+- [x] P5-S2 size: M. Falco consumer (enabled when available) and replay mode streaming recorded Falco JSON traces from files. Files: `agents/security_agent/`. Verify: test replays a fixture into the event pipeline. Needs: none.
+- [x] P5-S3 size: S. Recorded Falco fixtures under `tests/fixtures/falco/` and a test that replay feeds the Security Model input. Verify: pytest. Needs: P5-S2.
+- [x] P5-S4 size: S. Remove synthetic syscall fabrication from live paths (keep in tests or replay tooling). Verify: grep test that live code has no fabrication. Needs: P5-S2.
 
 ### P6 Decide: complete policy and fusion (touches `agents/fusion_agent/`, `agents/common/`, `tests/`)
 - [ ] P6-D1 size: L. `models_ok` input to the pure policy: missing or late model response means HUMAN; per-call deadlines in Fusion. Files: `decision_policy.py` (stronger agent only), `agents/fusion_agent/`. Verify: policy tests plus timeout test.
@@ -221,6 +223,24 @@ Acceptance: 108 tests pass (2026-11-10, this machine), including the live test o
 Deferred: ledger entry for mode changes (P4); dashboard toggle with admin token (P8).
 Next step: P4 Record (MinIO with object lock, ledger writer used by every component, Prometheus metrics, Grafana JSON).
 
-## Session note (context length)
+## P5 log (Sense: real signals)
 
-Context is long after P0 to P3. Start a new session with `prompts/06-resume.md` to continue at P4.
+Built on `wave/P5`, reviewed, fixed, merged into `work` (a6ef46a). Done:
+- Health: 15 concurrent `query_range` calls, 60 steps of 5 s per pod, `MetricWindow` with mask and missing list; no usable metric at all raises `PrometheusUnavailable` and publishes nothing; with any missing metric the event carries `health_ci_width` 1.0 (the Health Model server drops the mask and scores zero-filled columns; a mask-aware server is open work). PromQL table in `metric_queries.py`; the three `http_*` queries are marked `app-guess` (names appear nowhere else in the repo).
+- Security: entropy sampler (30 samples, 2 s apart, bounded reads, `O_NONBLOCK|O_NOFOLLOW`, fstat, off the event loop); unknown entropy is empty, never 0; events without a model score carry `sec_ci_width` 1.0 and `model_scored=false`, so they cannot reach AUTO_CONTAIN.
+- Falco: `FALCO_MODE=auto|live|replay|off`; replay only by explicit `FALCO_MODE=replay` plus `FALCO_REPLAY_PATH`; hand-written fixtures in `tests/fixtures/falco/` (README says they are not captures); a CRITICAL rule triggers alone, WARNING rules need a burst; synthetic event fabrication removed from live paths.
+- Merge work on `work`: `evt.type=%evt.type` added to the Falco rule outputs, DaemonSet and image use `FALCO_MODE=auto`, Falco priority table pinned by a test (source: falcosecurity/client-go pkg/api/schema, values as given by the owner).
+- Not measured: anything against a real Prometheus or Falco. The ransomware simulator writes low-entropy bytes, so the entropy signal will not fire on it (Falco and write-byte triggers still work). Entropy only sees descriptors open at sample time.
+
+## P7 log (remediation paths)
+
+Built on `wave/P7`, merged with P4 (5bd3558), reviewed, fixed (33410dd). Done: canary drift patch (field-level JSON Patch with test guards, rollback point in Redis, maxUnavailable 0, 3 windows, roll back and escalate), per-incident pod-label quarantine, rolling and forensic snapshots (every 300 s, keep 12), restore to a new PVC from the newest snapshot before `t0_ms` with digest-pinned image, entropy re-check, request validation, injectable `record_step`. Executor write RBAC is exactly the verbs these paths use; static tests tie every write method to a permission and allow write verbs only for the Executor and the one-ConfigMap kill-switch toggle (dashboard). Live RBAC check after applying the manifest to `k3d-kubeheal`: 696 checks, 0 failures (2026-11-10; VolumeSnapshot checks skipped until the CRD exists in P10).
+Not proven: everything that needs a real API server, CSI snapshots or Prometheus (fakes only). With the shipped Deployment (no env values, no entropy check wired) every patch and restore escalates and no snapshots are taken, by design: see "Open owner decisions".
+
+## Test status
+
+2026-11-10, this machine, `.venv` Python 3.11.9: full suite `pytest tests/ -q` (pytest.ini sets the basetemp to `.pytest-tmp/run`): 337 passed, 2 skipped (the symlink and FIFO tests, which Windows cannot create), 0 failed, including the live k3d tests. Note for other tools: the venv's interpreter is the Microsoft Store Python 3.11 (`pyvenv.cfg`); it runs from Claude Code's shell but a sandboxed Codex session could not execute it.
+
+## Session note
+
+Wave 2 batch 1 (P7, P5) and the review fixes are merged. Next: P9 with P8 in parallel (two builders), then P6; P10 and P11 are sequential and owned by the orchestrator (cluster owner).
