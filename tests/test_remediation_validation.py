@@ -195,3 +195,25 @@ def test_to_dict_reuses_one_serializer_instead_of_opening_a_session_per_call():
 def test_kind_given_is_tracked():
     assert parse_request(ok_fields())[2].kind_given is False
     assert parse_request(ok_fields(workload_kind="StatefulSet"))[2].kind_given is True
+
+
+def test_refused_requests_are_counted_as_refused_not_success():
+    import agents.executor.main as m
+    from agents.common.metrics import KubeHealMetrics
+    seen = []
+
+    class M(KubeHealMetrics):
+        def record_action(self, action, outcome):
+            seen.append((action, outcome))
+    old = m.METRICS
+    m.METRICS = M()
+    try:
+        class R:
+            async def xack(self, *a): return 1
+            async def xadd(self, *a, **k): return "1-0"
+        ex = m.ExecutorService(redis=R(), ledger=type("L", (), {"append": lambda *a, **k: None})())
+        ok = asyncio.run(ex.handle_entry("kubeheal.exec", "1-0",
+                                          {"action": "patch", "namespace": "kube-system", "deployment": "x"}))
+    finally:
+        m.METRICS = old
+    assert ok is True and seen == [("patch", "refused")]

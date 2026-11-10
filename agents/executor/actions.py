@@ -10,19 +10,16 @@ call (S-KS-3). A blocked write raises ModeBlocked; the action function turns tha
 
 tests/test_no_writes_outside_executor.py proves that no write call exists outside this package and
 that inside it every write method is only ever passed to `_write`, never called directly.
-P7 paths live next to this module and use the same `_write` choke point: drift.py (canary patch),
+The write paths live next to this module and use the same `_write` choke point: drift.py (canary patch),
 quarantine.py (labelled-pod quarantine and forensic snapshot), restore.py, snapshots.py (rolling
-snapshots). `contain` and `patch_to_baseline` below are the P2 interim functions: DEPRECATED, no longer
-dispatched by the Executor service, kept only because tests/test_killswitch.py exercises them directly.
+snapshots). The P2 interim `contain` (which deleted the pod) and `patch_to_baseline` were removed in the
+P7 integration: the RBAC role no longer grants `delete pods` and the plan's design is quarantine, not delete.
 """
 
 import logging
-from typing import Awaitable, Callable, List, Optional
+from typing import Awaitable, Callable, List
 
 logger = logging.getLogger(__name__)
-
-QUARANTINE_POLICY_NAME = "kubeheal-quarantine"
-
 
 class ModeBlocked(Exception):
     """The kill-switch gate refused a write."""
@@ -30,17 +27,6 @@ class ModeBlocked(Exception):
     def __init__(self, step: str):
         super().__init__(step)
         self.step = step
-
-
-def quarantine_policy_manifest() -> dict:
-    """Deny-all policy for pods labelled `kubeheal/quarantine=true` ONLY (never the whole namespace).
-    Used by the deprecated interim `contain`; the P7 path uses quarantine.quarantine_policy(incident)."""
-    return {
-        "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
-        "metadata": {"name": QUARANTINE_POLICY_NAME},
-        "spec": {"podSelector": {"matchLabels": {"kubeheal/quarantine": "true"}},
-                 "policyTypes": ["Ingress", "Egress"]},
-    }
 
 
 async def _write(gate, namespace: str, step: str, fn: Callable[..., Awaitable], *args, **kwargs):
@@ -67,60 +53,3 @@ def _blocked_outcome(what: str, planned: List[str], done: List[str], blocked: Mo
         return f"DRY RUN: would have {what} ({', '.join(planned)})"
     return (f"stopped_mode_test: mode switched to test before '{blocked.step}'; "
             f"completed {done}; escalated to HUMAN")
-
-
-async def contain(gate, core_api, networking_api, namespace: str, pod: str) -> str:
-    """DEPRECATED interim containment (not dispatched by the Executor): policy, then delete the pod."""
-    planned = ["create_quarantine_policy", "delete_pod"]
-    what = f"CONTAIN {namespace}/{pod}"
-    if not core_api or not networking_api:
-        logger.warning("No kube client - containment not executed")
-        return "no_kube_client"
-    done: List[str] = []
-    try:
-        try:
-            await _write(gate, namespace, planned[0],
-                         networking_api.create_namespaced_network_policy,
-                         namespace, quarantine_policy_manifest())
-            done.append(planned[0])
-        except ModeBlocked:
-            raise
-        except Exception as e:
-            if "already exists" not in str(e).lower() and "conflict" not in str(e).lower():
-                # Containment without isolation is not containment: stop before deleting the pod.
-                logger.error(f"quarantine policy failed for {namespace}/{pod}: {e}")
-                return f"contain_failed:quarantine_policy:{e}"
-            done.append(planned[0])
-        await _write(gate, namespace, planned[1], core_api.delete_namespaced_pod,
-                     pod, namespace, grace_period_seconds=0)
-        done.append(planned[1])
-        logger.warning(f"CONTAIN: deleted pod {namespace}/{pod}")
-        return "contained"
-    except ModeBlocked as b:
-        return _blocked_outcome(what, planned, done, b)
-    except Exception as e:
-        logger.error(f"CONTAIN failed for {namespace}/{pod}: {e}")
-        return f"contain_failed:{e}"
-
-
-async def patch_to_baseline(gate, apps_api, namespace: str, deployment: str,
-                            baseline: Optional[dict]) -> str:
-    """DEPRECATED (not dispatched by the Executor): overwrites the whole pod template. Use drift.canary_patch."""
-    if not apps_api:
-        logger.warning("No kube client - patch not executed")
-        return "no_kube_client"
-    if not baseline:
-        logger.info(f"No baseline for {namespace}/{deployment}; escalating to human")
-        return "no_baseline_escalated"
-    planned = ["patch_deployment"]
-    try:
-        body = {"spec": {"template": baseline.get("template", baseline)}}
-        await _write(gate, namespace, planned[0], apps_api.patch_namespaced_deployment,
-                     deployment, namespace, body)
-        logger.info(f"PATCH: restored {namespace}/{deployment} to baseline")
-        return "patched_to_baseline"
-    except ModeBlocked as b:
-        return _blocked_outcome(f"PATCH {namespace}/{deployment}", planned, [], b)
-    except Exception as e:
-        logger.error(f"PATCH failed for {namespace}/{deployment}: {e}")
-        return f"patch_failed:{e}"

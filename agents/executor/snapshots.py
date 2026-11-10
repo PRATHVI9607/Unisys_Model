@@ -139,7 +139,9 @@ class SnapshotScheduler:
         try:
             klass = self.cfg.snapshot_class
         except ConfigMissing as e:
-            await self.record("snapshot_run_skipped", {"reason": f"config {e.name}"})
+            if not getattr(self, "_skip_recorded", False):      # once, not every cycle
+                self._skip_recorded = True
+                await self.record("snapshot_run_skipped", {"reason": f"config {e.name}"})
             out["skipped"].append(f"config:{e.name}")
             return out
         now = int(self.clock())

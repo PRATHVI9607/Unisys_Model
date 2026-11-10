@@ -463,3 +463,10 @@ def test_contain_with_an_explicit_wrong_kind_does_not_label_the_pod():
     redis = fk.Redis()
     out = do_contain(c, Recorder(None, INC), redis, kind="Deployment", kind_given=True)
     assert out.startswith("contain_failed:pod") and "patch_pod" not in [e[1] for e in c.log]
+
+
+def test_missing_snapshot_class_is_recorded_once_not_every_cycle():
+    t = Sched(env={})
+    for _ in range(4):
+        run(t.s.run_once())
+    assert t.records.count("snapshot_run_skipped") == 1

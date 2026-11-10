@@ -18,7 +18,6 @@ EXEC = ROOT / "agents" / "executor"
 WRITE = re.compile(r"^(create|patch|delete|replace|deletecollection|delete_collection)_"
                    r"(namespaced_\w+|namespace|node|persistent_volume\w*|cluster_\w+|custom_object\w*)$")
 DISPATCHED = ["drift.py", "quarantine.py", "restore.py", "snapshots.py"]
-DEPRECATED_INTERIM = {"contain", "patch_to_baseline"}      # functions in actions.py not dispatched any more
 
 
 def _files():
@@ -100,19 +99,31 @@ def test_dispatched_paths_use_exactly_these_write_methods():
     }
 
 
-def test_main_does_not_dispatch_the_deprecated_interim_functions():
-    src = (EXEC / "main.py").read_text(encoding="utf-8")
-    assert "actions." not in src
-    for name in DEPRECATED_INTERIM:
-        assert f"{name}(" not in src.replace("quarantine.contain(", "")
+def test_the_p2_interim_functions_are_gone():
+    from agents.executor import actions
+    for name in ("contain", "patch_to_baseline", "quarantine_policy_manifest"):
+        assert not hasattr(actions, name), f"actions.{name} should have been removed"
+    assert "actions." not in (EXEC / "main.py").read_text(encoding="utf-8")
+
+
+def test_nothing_in_the_executor_can_delete_a_pod():
+    """The design is quarantine, not delete (deleting a pod does not stop a ReplicaSet remount), and
+    RBAC does not grant `delete pods`."""
+    for f in _files():
+        assert "delete_namespaced_pod" not in f.read_text(encoding="utf-8"), f.name
 
 
 def test_no_namespace_wide_quarantine_policy_remains():
-    from agents.executor import actions, quarantine
-    for manifest in (actions.quarantine_policy_manifest(), quarantine.quarantine_policy("inc-1")):
-        assert manifest["spec"]["podSelector"] != {}
-        assert manifest["spec"]["podSelector"]["matchLabels"]["kubeheal/quarantine"] == "true"
-    assert "podSelector: {}" not in (EXEC / "actions.py").read_text(encoding="utf-8")
+    from agents.executor import quarantine
+    manifest = quarantine.quarantine_policy("inc-1")
+    assert manifest["spec"]["podSelector"] != {}
+    assert manifest["spec"]["podSelector"]["matchLabels"]["kubeheal/quarantine"] == "true"
+    for f in _files():           # no dict literal {"podSelector": {}} anywhere in the Executor code
+        for n in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+            if isinstance(n, ast.Dict):
+                for k, v in zip(n.keys, n.values):
+                    assert not (isinstance(k, ast.Constant) and k.value == "podSelector"
+                                and isinstance(v, ast.Dict) and not v.keys), f"{f.name}:{n.lineno}"
 
 
 def test_executor_write_rbac_matches_dispatched_write_verbs():
@@ -217,17 +228,8 @@ def test_only_the_executor_and_the_mode_toggle_have_write_verbs():
                 assert d["metadata"]["namespace"] in {"prod", "staging", "dev"}
 
 
-def test_write_methods_outside_dispatched_modules_are_only_the_deprecated_interim_functions():
-    """actions.py still holds the P2 functions (deprecated, not dispatched). Their delete_namespaced_pod
-    is NOT granted by RBAC, so they must stay unreachable until they are removed."""
+def test_no_write_method_is_referenced_outside_the_dispatched_modules():
     for f in _files():
         if f.name in DISPATCHED:
             continue
-        tree = ast.parse(f.read_text(encoding="utf-8"))
-        covered = set()
-        for fn in ast.walk(tree):
-            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name in DEPRECATED_INTERIM:
-                covered |= {id(n) for n in ast.walk(fn)}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and WRITE.match(node.attr):
-                assert id(node) in covered, f"{f.name}:{node.lineno} {node.attr} outside the dispatched modules"
+        assert not list(_write_attrs(f)), f"{f.name} references a Kubernetes write method"

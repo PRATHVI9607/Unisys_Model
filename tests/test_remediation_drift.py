@@ -295,3 +295,18 @@ def test_prometheus_source_builds_range_queries_and_never_turns_missing_into_zer
     assert all(u == "http://prom:9090/api/v1/query" for u, _ in seen)
     q = queries("prod", "web", 60)
     assert "[60s]" in q["http_p99_latency_ms"] and 'pod=~"web-.*"' in q["cpu_throttle_percent"]
+
+
+def test_a_metric_source_that_raises_during_a_canary_window_rolls_back():
+    s = Scenario()
+    state = {"n": 0}
+
+    async def flaky(ns, dep, w):
+        state["n"] += 1
+        if state["n"] == 1:
+            return s.before
+        raise RuntimeError("prometheus down")
+    out = s.go(source=flaky)
+    assert out.startswith("rolled_back:window 1")
+    assert "canary_metric_error" in s.steps() and s.steps()[-1] == "rolled_back"
+    assert s.live_spec() == s.live_before            # the rollback restored the live spec

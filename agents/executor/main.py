@@ -172,7 +172,10 @@ class ExecutorService:
                 METRICS.record_dry_run_action(action)
             elif needs_escalation(outcome):
                 METRICS.record_action(action, "escalated")
-            elif "failed" in outcome or outcome.startswith("unknown_action"):
+            elif outcome.startswith("refused:"):
+                METRICS.record_action(action, "refused")
+            elif ("failed" in outcome or outcome.startswith("unknown_action")
+                  or outcome == "no_kube_client"):
                 METRICS.record_action(action, "failure")
             else:
                 METRICS.record_action(action, "success")
@@ -268,16 +271,6 @@ class ExecutorService:
             "outcome": outcome,
             "approved_by": f.get("approved_by", ""),
             "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
-        })
-
-    async def _record_step(self, f: Dict, namespace: str, step: str, outcome: str):
-        incident_id = f.get("incident_id") or f"inc-{uuid.uuid4().hex}"
-        await self._append_ledger(incident_id, f"executor_{step}", {
-            "namespace": namespace,
-            "deployment": f.get("deployment", ""),
-            "pod": f.get("pod", ""),
-            "action": f.get("action", "unknown"),
-            "outcome": outcome,
         })
 
     async def _append_ledger(self, incident_id: str, step: str, payload: Dict):

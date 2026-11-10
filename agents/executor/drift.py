@@ -268,7 +268,11 @@ async def canary_patch(gate, apps_api, req: Request, golden: Optional[Dict], rec
                 return (f"stopped_mode_test: mode switched to test before canary window {i}; "
                         f"completed {done}; patched but unverified, escalated to HUMAN")
             await sleep(window_s)
-            after = await metric_source(ns, name, window_s)
+            try:
+                after = await metric_source(ns, name, window_s)
+            except Exception as e:      # a failing metric source is "not improved": roll back
+                after = None
+                await record("canary_metric_error", {"window": i, "error": str(e)})
             good, why = improved(before, after or {})
             await record("canary_window", {"window": i, "metrics": after, "improved": good, "why": why})
             if not good:

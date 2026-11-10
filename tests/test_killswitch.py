@@ -168,55 +168,46 @@ class Gate:
         return self.calls <= self.allow_calls
 
 
-def test_test_mode_blocks_every_write_and_records_would_have():
-    core, net, apps = Core(), Net(), Apps()
-    out = run(actions.contain(Gate(0), core, net, "prod", "web-1"))
-    assert out.startswith("DRY RUN: would have CONTAIN prod/web-1")
-    assert core.deleted == [] and net.created == []
-    out = run(actions.patch_to_baseline(Gate(0), apps, "prod", "web", {"template": {}}))
-    assert out.startswith("DRY RUN: would have PATCH prod/web") and apps.patched == []
+async def _noop_write(log, name):
+    log.append(name)
+    return name
+
+
+def test_write_gate_blocks_in_test_mode_and_never_calls_the_api():
+    calls = []
+    gate = Gate(0)
+    with pytest.raises(actions.ModeBlocked) as e:
+        run(actions._write(gate, "prod", "patch_deployment", _noop_write, calls, "x"))
+    assert e.value.step == "patch_deployment" and calls == []
 
 
 def test_missing_gate_blocks():
-    core, net = Core(), Net()
-    assert run(actions.contain(None, core, net, "prod", "p")).startswith("DRY RUN")
-    assert core.deleted == [] and net.created == []
+    calls = []
+    with pytest.raises(actions.ModeBlocked):
+        run(actions._write(None, "prod", "step", _noop_write, calls, "x"))
+    assert calls == []
 
 
-def test_gate_is_checked_before_every_write_and_mid_action_switch_stops():
-    core, net = Core(), Net()
+def test_gate_is_checked_before_every_write_and_a_mid_sequence_switch_stops_the_next_one():
+    calls = []
     gate = Gate(allow_calls=1)          # first write allowed, mode flips to test before the second
-    out = run(actions.contain(gate, core, net, "prod", "web-1"))
-    assert out.startswith("stopped_mode_test")
-    assert net.created == ["prod"] and core.deleted == []     # pod delete never ran
-    assert gate.calls == 2
+    assert run(actions._write(gate, "prod", "one", _noop_write, calls, "a")) == "a"
+    with pytest.raises(actions.ModeBlocked) as e:
+        run(actions._write(gate, "prod", "two", _noop_write, calls, "b"))
+    assert e.value.step == "two" and calls == ["a"] and gate.calls == 2
 
 
-def test_enforce_runs_all_steps():
-    core, net = Core(), Net()
-    assert run(actions.contain(Gate(99), core, net, "prod", "web-1")) == "contained"
-    assert net.created == ["prod"] and core.deleted == ["web-1"]
+def test_blocked_outcome_text_dry_run_vs_mid_action():
+    b = actions.ModeBlocked("create_networkpolicy")
+    assert actions._blocked_outcome("CONTAIN prod/web-1", ["a", "b"], [], b).startswith(
+        "DRY RUN: would have CONTAIN prod/web-1")
+    assert actions._blocked_outcome("CONTAIN prod/web-1", ["a", "b"], ["a"], b).startswith(
+        "stopped_mode_test")
 
 
-def test_quarantine_failure_does_not_delete_the_pod():
-    class BadNet(Net):
-        async def create_namespaced_network_policy(self, ns, body):
-            raise RuntimeError("forbidden: cannot create networkpolicies")
-
-    core = Core()
-    out = run(actions.contain(Gate(99), core, BadNet(), "prod", "web-1"))
-    assert out.startswith("contain_failed:quarantine_policy")
-    assert core.deleted == []
-
-
-def test_quarantine_already_exists_still_proceeds():
-    class DupNet(Net):
-        async def create_namespaced_network_policy(self, ns, body):
-            raise RuntimeError("networkpolicies already exists")
-
-    core = Core()
-    assert run(actions.contain(Gate(99), core, DupNet(), "prod", "web-1")) == "contained"
-    assert core.deleted == ["web-1"]
+# Dry run, mid-action stop and fail-safe for the dispatched paths are tested next to them:
+# tests/test_remediation_drift.py (canary patch) and tests/test_remediation_ransomware.py
+# (contain, restore, snapshot scheduler).
 
 
 # ---- Executor integration ---------------------------------------------------------------
