@@ -96,7 +96,7 @@ def test_dotted_label_keys_are_escaped_in_the_pointer():
     assert "/spec/template/metadata/labels/app.kubernetes.io~1name" in [o["path"] for o in plan.forward]
 
 
-def test_rollback_patch_restores_the_exact_live_spec():
+def test_rollback_patch_restores_the_original_spec_exactly():
     s = Scenario()
     plan = drift.build_patch(s.golden["spec"], s.live_before, CPU)
     doc = {"spec": copy.deepcopy(s.live_before)}
