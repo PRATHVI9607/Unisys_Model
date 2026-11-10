@@ -37,9 +37,11 @@ Real usage is measured later and recorded under `docs/kubeheal/results/`.
 | P3 Kill switch | done, see log |
 | P4 Record | done, see P4 checklist |
 | P5 Sense | done, merged (a6ef46a), see P5 log |
-| P6 Decide | not started |
+| P6 Decide | in progress on builder wave/P6 |
 | P7 Remediation paths | code done and merged (5bd3558), proven with fakes only; open items P7-RR-9 to RR-11 and P6-D7, RR-7 needs P10 |
-| P8 to P11, P13 | P8 and P9 in progress on builders, see checklist |
+| P8 Dashboard | done, merged (218029c) |
+| P9 Platform | built on wave/P9, reviewed, fixes in progress (queue-depth gauge and HPA, lab example values) |
+| P10, P11, P13 | not started |
 | P12 Model hardening | NOT started; P12-H (retraining on live cluster data) is not approved |
 
 ## Task checklist
@@ -97,14 +99,14 @@ What this does not do: it does not validate the model on live data, and the quir
 - [ ] P12-H size: L. NOT APPROVED, not started: retrain on live cluster windows through the shared preprocessing and recalibrate. Waits for the owner's go. P12-H fix list for the retrain (checkpoint then gets a NEW preprocessing version, for example `v2`, and a sidecar to match): (1) correct the dict-key overwrite in the CSV map so the `http_request_rate` channel holds the real request rate (today it holds replicas/100); (2) fill the six zeroed channels (`memory_rss_bytes`, `http_p50_latency_ms`, `http_p999_latency_ms`, `network_receive_bytes`, `network_transmit_bytes`, `disk_io_bytes`) from live windows; (3) use scaling constants that match the real units (latency in ms or s consistently, CPU in cores or millicores consistently, memory in bytes), and make `cpu_throttle_percent` the real CFS ratio if that is what is wanted; (4) bump `PREPROCESS_VERSION` in `models/health_model/preprocess.py` and keep `v1-legacy` readable only for the old checkpoint; (5) the trainer writes the sidecar (already wired in `train_health_model.py`), `upload_to_registry.py` ships it, and the server refuses a mismatch.
 
 ### P6 Decide: complete policy and fusion (touches `agents/fusion_agent/`, `agents/common/`, `tests/`)
-- [ ] P6-D1 size: L. `models_ok` input to the pure policy: missing or late model response means HUMAN; per-call deadlines in Fusion. Files: `decision_policy.py` (stronger agent only), `agents/fusion_agent/`. Verify: policy tests plus timeout test.
-- [ ] P6-D2 size: M. OBSERVE triples sampling for that pod for a bounded period. Verify: test on sampling rate and expiry. Needs: P5-H1.
-- [ ] P6-D3 size: L. Protected-namespace label guard: `kubeheal/protected=true` means never automatic. Files: `decision_policy.py`, Fusion. Verify: policy test.
-- [ ] P6-D4 size: L. Circuit breakers as sliding windows: patches per Deployment 10/hour, containments per namespace 3/hour. Verify: window tests.
-- [ ] P6-D5 size: M. Burn-in driven by a real counter of metric samples (2000), not only an env var. Verify: test with counter below and above.
-- [ ] P6-D6 size: M. Wire `interpretation_client.py`: field mapper, SHAP (KernelExplainer for metrics, attention fallback documented), causal chain with attack onset T0. Verify: tests with a stub model.
-- [ ] P6-D7 size: M. From the P7 review: Fusion emits a `restore` request after contain (or after human approval) with `t0_ms` (attack onset from the causal chain) and `workload_kind`. Today no Fusion code sets them, so every restore escalates `t0_missing`. Also handle the two security events per incident from P5 (initial and complete) and read `model_scored`, `syscall_source`, `entropy_valid_samples`. Files: `agents/fusion_agent/`.
-- [ ] P6-R1 size: M. Redis stream reliability for Fusion AND the Executor (`agents/executor/main.py` also never reads its pending list): `XAUTOCLAIM` of stale pending entries, dead-letter stream after N failures, escalate after N tries. Verify: pending-reclaim test with two consumers for both consumers. (From P1 and P2 reviews.)
+- [~] builder-E (wave/P6) P6-D1 size: L. `models_ok` input to the pure policy: missing or late model response means HUMAN; per-call deadlines in Fusion. Files: `decision_policy.py` (stronger agent only), `agents/fusion_agent/`. Verify: policy tests plus timeout test.
+- [~] builder-E (wave/P6) P6-D2 size: M. OBSERVE triples sampling for that pod for a bounded period. Verify: test on sampling rate and expiry. Needs: P5-H1.
+- [~] builder-E (wave/P6) P6-D3 size: L. Protected-namespace label guard: `kubeheal/protected=true` means never automatic. Files: `decision_policy.py`, Fusion. Verify: policy test.
+- [~] builder-E (wave/P6) P6-D4 size: L. Circuit breakers as sliding windows: patches per Deployment 10/hour, containments per namespace 3/hour. Verify: window tests.
+- [~] builder-E (wave/P6) P6-D5 size: M. Burn-in driven by a real counter of metric samples (2000), not only an env var. Verify: test with counter below and above.
+- [~] builder-E (wave/P6) P6-D6 size: M. Wire `interpretation_client.py`: field mapper, SHAP (KernelExplainer for metrics, attention fallback documented), causal chain with attack onset T0. Verify: tests with a stub model.
+- [~] builder-E (wave/P6) P6-D7 size: M. From the P7 review: Fusion emits a `restore` request after contain (or after human approval) with `t0_ms` (attack onset from the causal chain) and `workload_kind`. Today no Fusion code sets them, so every restore escalates `t0_missing`. Also handle the two security events per incident from P5 (initial and complete) and read `model_scored`, `syscall_source`, `entropy_valid_samples`. Files: `agents/fusion_agent/`.
+- [~] builder-E (wave/P6) P6-R1 size: M. Redis stream reliability for Fusion AND the Executor (`agents/executor/main.py` also never reads its pending list): `XAUTOCLAIM` of stale pending entries, dead-letter stream after N failures, escalate after N tries. Verify: pending-reclaim test with two consumers for both consumers. (From P1 and P2 reviews.)
 
 ### P7 Remediation paths (touches `agents/executor/` only; write paths: stronger agent)
 Drift (canary):
