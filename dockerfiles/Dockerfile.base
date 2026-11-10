@@ -11,5 +11,5 @@ COPY agents/common/ /app/agents/common/
 RUN uv pip install --system "numpy<2" torch==2.2.0 \
         --index-url https://download.pytorch.org/whl/cpu && \
     uv pip install --system \
-        torch-geometric==2.5.0 fastapi==0.110.0 uvicorn==0.27.0 pydantic==2.6.0 "prometheus-client>=0.20.0" "minio>=7.2.0"
+        torch-geometric==2.5.0 fastapi==0.110.0 uvicorn==0.27.0 pydantic==2.6.0 "prometheus-client>=0.20.0" "minio>=7.2.0" "onnxruntime>=1.17.0,<2"
 ENV PYTHONPATH=/app
