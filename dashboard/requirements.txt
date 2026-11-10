@@ -16,3 +16,9 @@ python-multipart==0.0.6
 
 # Prometheus /metrics endpoint
 prometheus-client>=0.20.0
+
+# Approvals, incident page and kill switch (P8)
+# kubernetes-asyncio: read and patch the kubeheal-mode ConfigMap (dashboard/mode_admin.py)
+kubernetes-asyncio==29.0.1
+# minio: read and append the audit ledger when LEDGER_BACKEND=minio (agents/common/ledger.py)
+minio>=7.2.0
