@@ -11,3 +11,6 @@ data/*.jsonl
 !models/*/checkpoints/*.json
 !models/health_model/dit-merged-complete.csv
 .DS_Store
+
+# local Claude Code settings
+.claude/settings.local.json

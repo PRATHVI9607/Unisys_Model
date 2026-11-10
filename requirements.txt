@@ -28,6 +28,7 @@ minio>=7.2.0  # optional: model registry upload
 # Testing
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
+httpx>=0.25.0,<0.28   # required by the starlette TestClient; 0.28 removed the `app` kwarg it uses
 
 # NOTE: mamba-ssm and causal-conv1d intentionally removed in v4 (BiLSTM replaces Mamba)
 # NOTE: Kafka removed in v4 (Redis Streams + consumer groups replace it)

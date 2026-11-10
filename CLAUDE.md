@@ -60,8 +60,16 @@ Do not implement it until asked; first report what exists.
 
 ## Working rules for Claude Code in this repo
 
-- **Scan and report before changing anything.** When asked to analyse, do not edit, commit, push,
-  create branches, or run destructive git commands (`reset --hard`, `clean`, `checkout -- .`, force push).
+- **Autonomous build rules (in force since 2026-11-10).**
+  - Work phase by phase from `docs/kubeheal/IMPLEMENTATION_PLAN.md`; track state in `docs/kubeheal/PROGRESS.md`.
+  - Make small commits on `work` (or on `demo` for demo-only files) after tests pass. Never push.
+  - Never run destructive git commands. Never delete user data. Never touch Kubernetes contexts other
+    than the k3d cluster named `kubeheal` (always pass `--context k3d-kubeheal`).
+  - No invented numbers anywhere. Metrics in docs come only from scripts that were run, with date and machine.
+  - Before training models (phase P12), stop and ask.
+  - Decided: base branch is local `main`, work happens on `work`, `demo` is branched from `work` in P10.
+    Kill switch semantics are decided (see the section below and the plan); the "pending" wording in that
+    section is superseded.
 - **Ask before pushing** to any remote branch, every time.
 - **Do not run model training** (`models/train_*.py`) unless explicitly asked. It is slow and GPU-bound.
 - **No invented numbers.** Never write a metric, latency, F1, AUROC or cost into code comments, docs,
