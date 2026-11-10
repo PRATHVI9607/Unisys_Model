@@ -1,5 +1,6 @@
 """F3 (explicit workload), F4 (ack only on success), F5 (unique lock token), F8 (CONTAIN naming)."""
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -8,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agents.fusion_agent import agent as fusion
 from agents.fusion_agent import decision_policy as dp
 from agents.fusion_agent.incident_lock import acquire_incident_lock, LOCK_PREFIX
+from agents.common.ledger import InMemoryLedgerStore, Ledger
 
 
 class FakeRedis:
@@ -139,3 +141,26 @@ def test_contain_without_pod_is_not_queued():
     run(a._execute("prod", "web", "", _out(dp.Decision.AUTO_CONTAIN, False), _inp(), []))
     assert a.redis.store.get("kubeheal:cb:contain:prod") is None
     assert not any(s == fusion.EXEC_STREAM for s, _ in getattr(a.redis, "added", []))
+
+
+def test_fusion_writes_detection_scores_decision_and_approval_to_ledger():
+    store = InMemoryLedgerStore()
+    a = fusion.FusionAgentV4(ledger=Ledger(store))
+    a.redis = FakeRedis()
+
+    run(a._decide("prod:payments", None, {
+        "event_id": "sec-1", "namespace": "prod", "deployment": "payments",
+        "pod_name": "payments-abc", "sec_risk": "0.70", "sec_label": "suspicious",
+        "sec_ci_width": "0.02", "top_syscall": "write",
+    }))
+
+    records = [json.loads(store.objects[key]) for key in sorted(store.objects)]
+    steps = [record["step"] for record in records]
+    assert steps == ["detection", "scores", "decision", "approval_requested"]
+    assert records[0]["payload"]["security_event_id"] == "sec-1"
+    assert records[1]["payload"]["security"]["sec_risk"] == "0.70"
+    assert records[2]["payload"]["decision"] == dp.Decision.HUMAN_CONTAIN.value
+    assert records[2]["payload"]["rationale"]
+    assert records[3]["payload"]["status"] == "pending"
+    action = next(fields for stream, fields in a.redis.added if stream == fusion.ACTIONS_STREAM)
+    assert action["incident_id"] == records[0]["incident_id"]

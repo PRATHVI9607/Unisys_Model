@@ -26,6 +26,7 @@ import numpy as np
 import redis.asyncio as aioredis
 
 from agents.common.killswitch import ModeWatcher
+from agents.common.ledger import Ledger
 from agents.fusion_agent.decision_policy import (
     make_decision, DecisionInput, Decision,
 )
@@ -59,13 +60,16 @@ class FusionAgentV4:
     # (else they are independent events that happen to share a workload name).
     CORRELATION_WINDOW_S = 30.0
 
-    def __init__(self):
+    def __init__(self, ledger: Optional[Ledger] = None):
         self.redis_url = os.environ.get("REDIS_URL", "redis://redis-master:6379")
         self.dcm_url = os.environ.get("DCM_URL", "http://kubeheal-dcm:8003")
         self.burn_in = os.environ.get("BURN_IN_MODE", "false").lower() == "true"
         self.redis: Optional[aioredis.Redis] = None
         self.consumer = os.environ.get("HOSTNAME") or f"fusion-{uuid.uuid4().hex[:6]}"
         self.mode = ModeWatcher()
+        # The deployment can inject a MinIO-backed Ledger; the in-memory
+        # default keeps local/unit-test use explicit until P4-L2 wiring.
+        self.ledger = ledger or Ledger()
         self.running = False
         # short-term correlation buffer: "<ns>:<workload>" -> (event_fields, recv_monotonic)
         self.pending_health: Dict[str, tuple] = {}
@@ -201,23 +205,60 @@ class FusionAgentV4:
         )
         out = make_decision(inp)
 
+        incident_id = f"inc-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        await self._append_ledger(incident_id, "detection", {
+            "namespace": namespace,
+            "deployment": workload,
+            "pod": pod,
+            "health_event_id": health.get("event_id"),
+            "security_event_id": sec.get("event_id"),
+            "signals": [name for name, event in (("health", health), ("security", sec)) if event],
+        })
+        await self._append_ledger(incident_id, "scores", {
+            "health": {name: health.get(name) for name in
+                       ("health_risk", "health_label", "health_ci_width", "top_field") if name in health},
+            "security": {name: sec.get(name) for name in
+                         ("sec_risk", "sec_label", "sec_ci_width", "top_syscall") if name in sec},
+            "correlation_score": correlation,
+            "compound": compound,
+        })
+        await self._append_ledger(incident_id, "decision", {
+            "decision": out.decision.value,
+            "adjusted_score": out.adjusted_score,
+            "rationale": out.rationale,
+            "dry_run": out.dry_run,
+            "namespace_tier": inp.namespace_tier,
+            "compound": compound,
+            "causal_chain": causal_chain,
+        })
+        if out.decision in {Decision.HUMAN_PATCH, Decision.HUMAN_CONTAIN}:
+            await self._append_ledger(incident_id, "approval_requested", {
+                "decision": out.decision.value,
+                "status": "pending",
+                "rationale": out.rationale,
+            })
+
         if out.requires_incident_lock:
             async with acquire_incident_lock(self.redis, namespace, workload) as got:
                 if not got:
                     logger.debug(f"lock held for {key}; skipping")
                     return
-                await self._execute(namespace, workload, pod, out, inp, causal_chain)
+                await self._execute(namespace, workload, pod, out, inp, causal_chain, incident_id)
         else:
-            await self._execute(namespace, workload, pod, out, inp, causal_chain)
+            await self._execute(namespace, workload, pod, out, inp, causal_chain, incident_id)
         # Pending entries are kept for the correlation window so a partner event arriving
         # within 30 s can still form a compound incident. _prune() expires them; the incident
         # lock and the circuit breakers prevent duplicate actions on the same workload.
 
-    async def _execute(self, namespace, workload, pod, out, inp, causal_chain):
+    async def _append_ledger(self, incident_id: str, step: str, payload: Dict):
+        # MinIO's client is synchronous; keep its network I/O off the event loop.
+        await asyncio.to_thread(self.ledger.append, incident_id, step, payload)
+
+    async def _execute(self, namespace, workload, pod, out, inp, causal_chain, incident_id=None):
         logger.info(f"DECISION {out.decision.value} {namespace}/{workload} "
                     f"score={out.adjusted_score:.2f} :: {out.rationale}")
         outcome = "logged"
-        incident_id = f"inc-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        incident_id = incident_id or f"inc-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
         # The Fusion Agent never calls the Kubernetes API. Automatic actions are queued for the
         # Executor, the only component with write permissions (S-EX-1).
         # Circuit breakers count real automatic actions only: increment after the request is queued
