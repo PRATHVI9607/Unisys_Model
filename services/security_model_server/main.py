@@ -28,7 +28,7 @@ from models.security_model.security_model import (
 from models.security_model.security_output_head import SECURITY_LABELS
 from models.security_model.security_conformal import ConformalRegressor
 from models.interpretation.shap_explainer import SecurityModelSHAPExplainer
-from services.ckpt import load_model_checkpoint, health_payload, require_ready
+from services.ckpt import load_model_checkpoint, health_payload, require_ready, pt_only_status
 from agents.common.metrics import KubeHealMetrics, add_metrics_route
 
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +45,11 @@ class ScoreRequest(BaseModel):
 
 
 def _load_model():
+    refused = pt_only_status("security model")
+    if refused is not None:
+        STATE["status"] = refused
+        STATE["model"] = None
+        return
     ckpt = os.environ.get("MODEL_PATH",
                           str(ROOT / "models/security_model/checkpoints/best_security_model.pt"))
     m = SecurityModel()

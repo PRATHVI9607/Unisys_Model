@@ -20,6 +20,67 @@ from fastapi.responses import JSONResponse
 logger = logging.getLogger(__name__)
 
 
+MODEL_FORMATS = ("pt", "onnx")
+
+
+def model_format(env=None) -> str:
+    """Serving format from MODEL_FORMAT. Default and empty value: `pt` (the current behaviour).
+
+    An unknown value raises ValueError so callers can fail closed instead of guessing.
+    """
+    env = os.environ if env is None else env
+    value = (env.get("MODEL_FORMAT") or "pt").strip().lower()
+    if value not in MODEL_FORMATS:
+        raise ValueError(f"MODEL_FORMAT must be one of {MODEL_FORMATS}, got {value!r}")
+    return value
+
+
+def not_ready_status(name: str, error: str) -> dict:
+    """Status dict for a server that must answer 503 (same shape as load_checkpoint)."""
+    logger.error(f"{name}: {error} - failing closed (503)")
+    return {"loaded": False, "random_weights": False, "checkpoint": None, "error": error, "source": None}
+
+
+def pt_only_status(name: str, env=None):
+    """For servers whose ONNX export is not a drop-in (it drops outputs the server returns).
+
+    Returns None when serving `.pt` is what is configured; otherwise a not-ready status.
+    """
+    try:
+        fmt = model_format(env)
+    except ValueError as exc:
+        return not_ready_status(name, str(exc))
+    if fmt == "pt":
+        return None
+    return not_ready_status(
+        name, f"MODEL_FORMAT={fmt} is not supported for {name}: its ONNX export drops outputs "
+              f"(embeddings or attributions) that this server returns; serve the .pt checkpoint")
+
+
+def load_onnx_session(path: str, name: str, ort_module=None):
+    """Load an ONNX file into an onnxruntime session (CPU). Fails closed: returns (status, None)
+    on a missing file, a missing onnxruntime, or a load error. Never falls back to random weights
+    and never silently falls back to `.pt`."""
+    status = {"loaded": False, "random_weights": False, "checkpoint": path, "error": None, "source": None}
+    if not os.path.exists(path):
+        status["error"] = f"onnx file not found: {path}"
+        logger.error(f"{name}: {status['error']} - failing closed (503)")
+        return status, None
+    try:
+        ort = ort_module
+        if ort is None:
+            import onnxruntime as ort
+        session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    except Exception as exc:
+        status["error"] = f"onnx load failed: {exc}"
+        logger.error(f"{name}: {status['error']} - failing closed (503)")
+        return status, None
+    status["loaded"] = True
+    status["source"] = "onnx"
+    logger.info(f"Loaded {name} from ONNX {path}")
+    return status, session
+
+
 def allow_random_weights() -> bool:
     return os.environ.get("ALLOW_RANDOM_WEIGHTS", "false").strip().lower() == "true"
 

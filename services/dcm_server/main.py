@@ -25,7 +25,8 @@ sys.path.insert(0, str(ROOT))
 from models.dcm.cross_modal_attention import CrossModalAttention
 from models.dcm.causal_chain_builder import CausalChainBuilder
 from models.dcm.correlation_head import COMPOUND_THRESHOLD, is_compound
-from services.ckpt import load_model_checkpoint, health_payload, require_ready
+from services.ckpt import (load_model_checkpoint, health_payload, require_ready, model_format,
+                           not_ready_status, load_onnx_session)
 from models.interpretation.nl_summary_generator import generate_incident_summary
 from agents.common.metrics import KubeHealMetrics, add_metrics_route
 
@@ -46,7 +47,43 @@ class CorrelateRequest(BaseModel):
     want_nl_summary: bool = False
 
 
+class OnnxCorrelator:
+    """Same `correlate` interface as CrossModalAttention, backed by the exported ONNX graph
+    (models/export_dcm.py: inputs health_embedding[1,128], security_embedding[1,64] -> score)."""
+
+    def __init__(self, session):
+        self.session = session
+
+    def correlate(self, health_embedding, security_embedding) -> float:
+        import numpy as _np
+        feeds = {"health_embedding": _np.asarray(health_embedding, dtype=_np.float32).reshape(1, -1),
+                 "security_embedding": _np.asarray(security_embedding, dtype=_np.float32).reshape(1, -1)}
+        return float(_np.asarray(self.session.run(None, feeds)[0]).reshape(-1)[0])
+
+    def eval(self):
+        return self
+
+
+def _load_onnx_model():
+    path = os.environ.get("MODEL_ONNX_PATH", str(ROOT / "models/dcm_v4.onnx"))
+    status, session = load_onnx_session(path, "DCM")
+    STATE["status"] = status
+    STATE["model"] = OnnxCorrelator(session) if session is not None else None
+    STATE["trained"] = bool(status["loaded"])
+
+
 def _load_model():
+    try:
+        fmt = model_format()
+    except ValueError as exc:
+        STATE["status"] = not_ready_status("DCM", str(exc))
+        STATE["model"], STATE["trained"] = None, False
+        return
+    if fmt == "onnx":
+        # DCM is the only server whose ONNX graph is a drop-in: one output, the correlation score
+        # (parity against torch is asserted in tests/test_platform_onnx_switch.py).
+        _load_onnx_model()
+        return
     ckpt = os.environ.get("MODEL_PATH", str(ROOT / "models/dcm/checkpoints/best_dcm.pt"))
     m = CrossModalAttention()
     status = load_model_checkpoint(m, ckpt, "DCM")
