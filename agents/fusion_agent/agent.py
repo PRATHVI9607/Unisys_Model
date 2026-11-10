@@ -27,6 +27,7 @@ import redis.asyncio as aioredis
 
 from agents.common.killswitch import ModeWatcher
 from agents.common.ledger import Ledger, ledger_from_env
+from agents.common.metrics import KubeHealMetrics
 from agents.fusion_agent.decision_policy import (
     make_decision, DecisionInput, Decision,
 )
@@ -34,6 +35,7 @@ from agents.fusion_agent.incident_lock import acquire_incident_lock
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+METRICS = KubeHealMetrics()
 
 GROUP = "fusion"
 HEALTH_STREAM = "kubeheal.health.events"
@@ -204,6 +206,7 @@ class FusionAgentV4:
             mode=self.mode.mode_for(namespace),
         )
         out = make_decision(inp)
+        METRICS.record_decision(getattr(out.decision, "value", str(out.decision)))
 
         incident_id = f"inc-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
         await self._append_ledger(incident_id, "detection", {
@@ -346,6 +349,7 @@ class FusionAgentV4:
 
 
 async def main():
+    METRICS.start_server(int(os.environ.get("METRICS_PORT", "8081")))
     agent = FusionAgentV4()
     try:
         await agent.start()

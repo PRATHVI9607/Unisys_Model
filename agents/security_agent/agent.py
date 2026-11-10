@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import struct
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
@@ -14,11 +15,13 @@ import aiohttp
 import redis.asyncio as aioredis
 import kubernetes_asyncio
 from kubernetes_asyncio import client, config
+from agents.common.metrics import KubeHealMetrics
 from agents.security_agent.proc_scanner import PodIndex, scan_pids
 from pydantic import BaseModel, ConfigDict, Field
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+METRICS = KubeHealMetrics()
 
 
 def emb_b64(vec) -> str:
@@ -518,6 +521,7 @@ class SecurityAgent:
             "entropy_series": entropy_series or [],
             "early_signals": early_signals or {},
         }
+        started = time.perf_counter()
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -530,11 +534,14 @@ class SecurityAgent:
                     logger.warning(f"Security Model returned {resp.status}")
         except Exception as e:
             logger.debug(f"Security Model call failed: {e}")
+        finally:
+            METRICS.observe_model_latency("security", time.perf_counter() - started)
         return None
 
 
 async def main():
     """Run Security Agent."""
+    METRICS.start_server(int(os.environ.get("METRICS_PORT", "9100")))
     agent = SecurityAgent()
 
     try:

@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from typing import Optional
 
-from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+    start_http_server,
+)
 
 
 class KubeHealMetrics:
@@ -58,3 +66,16 @@ class KubeHealMetrics:
     def render(self) -> bytes:
         """Return the Prometheus text exposition for a component's ``/metrics`` route."""
         return generate_latest(self.registry)
+
+    def start_server(self, port: int, addr: str = "0.0.0.0"):
+        """Start a standalone HTTP listener exposing this component's registry."""
+        return start_http_server(port, addr=addr, registry=self.registry)
+
+
+def add_metrics_route(app, metrics: KubeHealMetrics) -> None:
+    """Add the standard ``/metrics`` route to a FastAPI application."""
+    from fastapi import Response
+
+    @app.get("/metrics", include_in_schema=False)
+    def metrics_endpoint():
+        return Response(content=metrics.render(), media_type=CONTENT_TYPE_LATEST)

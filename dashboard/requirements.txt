@@ -13,3 +13,6 @@ redis[asyncio]>=5.0.0
 # API
 pydantic==2.6.0
 python-multipart==0.0.6
+
+# Prometheus /metrics endpoint
+prometheus-client>=0.20.0

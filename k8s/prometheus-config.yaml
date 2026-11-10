@@ -137,6 +137,56 @@ data:
           - source_labels: [__meta_kubernetes_pod_name]
             action: replace
             target_label: pod
+
+      - job_name: 'kubeheal-executor'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [kubeheal]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: executor
+
+      - job_name: 'kubeheal-health-model'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [kubeheal]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: kubeheal-health-model
+
+      - job_name: 'kubeheal-security-model'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [kubeheal]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: kubeheal-security-model
+
+      - job_name: 'kubeheal-dcm'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [kubeheal]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: kubeheal-dcm
+
+      - job_name: 'kubeheal-dashboard'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [kubeheal]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: kubeheal-dashboard
         
       - job_name: 'kubeheal-demo-namespaces'
         kubernetes_sd_configs:

@@ -8,7 +8,9 @@ spec:
   replicas: 1   # single-node minikube demo; raise for multi-node HA
   selector: {matchLabels: {app: kubeheal-security-model}}
   template:
-    metadata: {labels: {app: kubeheal-security-model}}
+    metadata:
+      labels: {app: kubeheal-security-model}
+      annotations: {prometheus.io/scrape: "true", prometheus.io/path: /metrics, prometheus.io/port: "8002"}
     spec:
       serviceAccountName: security-model
       containers:

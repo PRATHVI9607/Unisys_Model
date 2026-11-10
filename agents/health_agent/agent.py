@@ -5,6 +5,7 @@ import logging
 import hashlib
 import os
 import struct
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ import kubernetes_asyncio
 from kubernetes_asyncio import client, watch, config
 from kubernetes_asyncio.config import load_incluster_config
 from agents.health_agent import baseline
+from agents.common.metrics import KubeHealMetrics
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -35,6 +37,7 @@ def namespace_tier(namespace: str) -> str:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+METRICS = KubeHealMetrics()
 
 
 class SeverityLevel(str, Enum):
@@ -398,6 +401,7 @@ class HealthAgent:
             "metrics": metrics.tolist() if hasattr(metrics, "tolist") else metrics,
         }
         result = None
+        started = time.perf_counter()
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -411,6 +415,7 @@ class HealthAgent:
                         logger.warning(f"Health Model returned {resp.status}")
         except Exception as e:
             logger.debug(f"Health Model call failed: {e}")
+        METRICS.observe_model_latency("health", time.perf_counter() - started)
 
         event_id = f"health-{datetime.utcnow().strftime('%Y%m%d-%H%M%S-%f')}-{name}"
 
@@ -531,6 +536,7 @@ class HealthAgent:
 
 async def main():
     """Run Health Agent."""
+    METRICS.start_server(int(os.environ.get("METRICS_PORT", "8080")))
     agent = HealthAgent()
 
     try:

@@ -29,11 +29,13 @@ from models.security_model.security_output_head import SECURITY_LABELS
 from models.security_model.security_conformal import ConformalRegressor
 from models.interpretation.shap_explainer import SecurityModelSHAPExplainer
 from services.ckpt import load_checkpoint, health_payload, require_ready
+from agents.common.metrics import KubeHealMetrics, add_metrics_route
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 STATE: Dict = {"model": None, "conformal": None, "status": {"loaded": False, "error": "not started"}, "shap": SecurityModelSHAPExplainer()}
+METRICS = KubeHealMetrics()
 
 
 class ScoreRequest(BaseModel):
@@ -65,6 +67,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="KubeHeal Security Model", version="4.0.0", lifespan=lifespan)
+add_metrics_route(app, METRICS)
 
 
 @app.get("/health")
@@ -84,6 +87,7 @@ def score(req: ScoreRequest):
 
     with torch.no_grad():
         out = model(sid, pid, mask, ent)
+    METRICS.observe_model_latency("security", time.time() - t0)
     risk = float(out["risk_score"].reshape(-1)[0])
     probs = torch.softmax(out["label_logits"], dim=-1)[0]
     idx = int(torch.argmax(probs).item())

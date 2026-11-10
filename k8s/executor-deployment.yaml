@@ -11,12 +11,18 @@ spec:
   template:
     metadata:
       labels: {app: executor}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9100"
     spec:
       serviceAccountName: executor
       containers:
         - name: executor
           image: kubeheal/executor:v4
           imagePullPolicy: IfNotPresent
+          ports:
+            - {name: metrics, containerPort: 9100}
           env:
             - {name: REDIS_URL, value: "redis://redis-master:6379"}
             - {name: EXEC_NAMESPACES, value: "prod,staging,dev"}

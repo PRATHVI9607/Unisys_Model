@@ -4,7 +4,7 @@ ENV UV_NO_CACHE=1 UV_SYSTEM_PYTHON=1
 WORKDIR /app
 RUN uv pip install --system \
     kubernetes-asyncio==29.0.1 redis==5.0.0 pydantic==2.6.0 \
-    aiohttp==3.9.0 prometheus-api-client "numpy<2"
+    aiohttp==3.9.0 prometheus-api-client "numpy<2" "prometheus-client>=0.20.0"
 COPY agents/ /app/agents/
 # torch-free metric schema the health agent imports (NOT the torch encoder).
 # models/ is a PEP-420 namespace package (no __init__.py needed).
@@ -13,6 +13,7 @@ ENV REDIS_URL=redis://redis-master:6379
 ENV HEALTH_MODEL_URL=http://kubeheal-health-model:8001
 ENV PROMETHEUS_URL=http://prometheus-operated.monitoring.svc.cluster.local:9090
 ENV NAMESPACE=kubeheal
+ENV METRICS_PORT=8080
 ENV LOG_LEVEL=INFO
 EXPOSE 8080
 CMD ["python", "-m", "agents.health_agent.agent"]

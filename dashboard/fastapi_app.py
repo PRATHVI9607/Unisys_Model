@@ -11,6 +11,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
+from agents.common.metrics import KubeHealMetrics, add_metrics_route
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -574,6 +575,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="KubeHeal Dashboard", lifespan=lifespan)
+METRICS = KubeHealMetrics()
+add_metrics_route(app, METRICS)
 
 # Mount static files directory for CSS, JS, etc.
 import os.path

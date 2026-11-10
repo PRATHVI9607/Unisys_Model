@@ -11,6 +11,10 @@ spec:
     metadata:
       labels:
         app: security-agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9100"
     spec:
       serviceAccountName: security-agent
       hostPID: true          # read /proc/<pid> of every pod (the agent never kills or writes)
@@ -18,6 +22,9 @@ spec:
         - name: agent
           image: kubeheal/security-agent:v4
           imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 9100
           securityContext:
             privileged: false
             runAsUser: 0

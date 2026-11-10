@@ -31,12 +31,14 @@ from models.health_model.health_conformal import ConformalRegressor
 from models.interpretation.field_name_mapper import FieldNameMapper
 from models.interpretation.shap_explainer import HealthModelSHAPExplainer
 from services.ckpt import load_checkpoint, health_payload, require_ready
+from agents.common.metrics import KubeHealMetrics, add_metrics_route
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 STATE: Dict = {"model": None, "conformal": None, "status": {"loaded": False, "error": "not started"}, "mapper": FieldNameMapper(),
                "shap": HealthModelSHAPExplainer()}
+METRICS = KubeHealMetrics()
 
 
 class ScoreRequest(BaseModel):
@@ -69,6 +71,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="KubeHeal Health Model", version="4.0.0", lifespan=lifespan)
+add_metrics_route(app, METRICS)
 
 
 @app.get("/health")
@@ -88,6 +91,7 @@ def score(req: ScoreRequest):
 
     with torch.no_grad():
         out = model(graph, mt)
+    METRICS.observe_model_latency("health", time.time() - t0)
     risk = float(out["risk_score"].reshape(-1)[0])
     probs = torch.softmax(out["label_logits"], dim=-1)[0]
     idx = int(torch.argmax(probs).item())

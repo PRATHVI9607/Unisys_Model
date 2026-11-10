@@ -8,6 +8,7 @@ compound_flag, causal_chain, and (best-effort, non-blocking) nl_summary.
 import os
 import sys
 import logging
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -26,12 +27,14 @@ from models.dcm.causal_chain_builder import CausalChainBuilder
 from models.dcm.correlation_head import COMPOUND_THRESHOLD, is_compound
 from services.ckpt import load_checkpoint, health_payload, require_ready
 from models.interpretation.nl_summary_generator import generate_incident_summary
+from agents.common.metrics import KubeHealMetrics, add_metrics_route
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 STATE: Dict = {"model": None, "chain": CausalChainBuilder(), "trained": False,
          "status": {"loaded": False, "error": "not started"}}
+METRICS = KubeHealMetrics()
 
 
 class CorrelateRequest(BaseModel):
@@ -62,6 +65,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="KubeHeal DCM", version="4.0.0", lifespan=lifespan)
+add_metrics_route(app, METRICS)
 
 
 @app.get("/health")
@@ -72,6 +76,7 @@ def health():
 @app.post("/dcm/correlate")
 def correlate(req: CorrelateRequest):
     require_ready(STATE["status"])
+    started = time.perf_counter()
     model = STATE["model"]
     if STATE["trained"]:
         score = model.correlate(req.health_embedding, req.security_embedding)
@@ -94,6 +99,8 @@ def correlate(req: CorrelateRequest):
             "action_taken": "pending",
         }
         nl = generate_incident_summary(incident)
+
+    METRICS.observe_model_latency("dcm", time.perf_counter() - started)
 
     return {
         "correlation_score": score,

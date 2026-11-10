@@ -22,12 +22,14 @@ from kubernetes_asyncio import client, config
 
 from agents.common.killswitch import ModeWatcher
 from agents.common.ledger import Ledger, ledger_from_env
+from agents.common.metrics import KubeHealMetrics
 from agents.executor import actions
 from agents.executor.guard import check_target
 from agents.health_agent.baseline import load_baseline
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+METRICS = KubeHealMetrics()
 
 EXEC_STREAM = "kubeheal.exec"
 ACTIONS_STREAM = "kubeheal.actions"
@@ -124,8 +126,19 @@ class ExecutorService:
     async def handle_entry(self, stream: str, msg_id: str, fields: Dict) -> bool:
         try:
             outcome = await self.execute(fields)
+            action = fields.get("action", "unknown")
+            if outcome.startswith("DRY RUN:"):
+                METRICS.record_action(action, "dry_run")
+                METRICS.record_dry_run_action(action)
+            elif outcome.startswith(("stopped_mode_test", "no_baseline_escalated")):
+                METRICS.record_action(action, "escalated")
+            elif "failed" in outcome or outcome.startswith("unknown_action"):
+                METRICS.record_action(action, "failure")
+            else:
+                METRICS.record_action(action, "success")
             await self._record(fields, outcome)
             if outcome.startswith("stopped_mode_test"):
+                METRICS.record_escalation("mode_switched_to_test")
                 await self._escalate(fields, outcome)
         except Exception as e:
             logger.error(f"executing {msg_id} failed, left pending: {e}", exc_info=True)
@@ -207,6 +220,7 @@ class ExecutorService:
 
 
 async def main():
+    METRICS.start_server(int(os.environ.get("METRICS_PORT", "9100")))
     svc = ExecutorService()
     try:
         await svc.start()

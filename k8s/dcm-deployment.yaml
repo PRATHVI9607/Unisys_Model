@@ -8,7 +8,9 @@ spec:
   replicas: 1
   selector: {matchLabels: {app: kubeheal-dcm}}
   template:
-    metadata: {labels: {app: kubeheal-dcm}}
+    metadata:
+      labels: {app: kubeheal-dcm}
+      annotations: {prometheus.io/scrape: "true", prometheus.io/path: /metrics, prometheus.io/port: "8003"}
     spec:
       serviceAccountName: dcm
       containers:

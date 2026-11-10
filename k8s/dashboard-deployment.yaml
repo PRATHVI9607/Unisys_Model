@@ -27,6 +27,10 @@ spec:
     metadata:
       labels:
         app: kubeheal-dashboard
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "5000"
     spec:
       serviceAccountName: dashboard
       containers:
