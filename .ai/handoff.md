@@ -3,22 +3,32 @@
 - **Agent:** Codex
 - **Date:** 2026-11-11
 - **Branch:** `work`
-- **Latest commit:** `c8931ba fix(REV-3): make mode watcher failures explicit`
-- **State:** REV-3 review fixes committed. No push, cluster access, training, or P6 worktree changes.
+- **Goal:** P7-RR-9 is implemented and committed; continue P7-RR-10, the next checklist task whose declared dependency P6-R1 is complete.
+- **Latest code commit:** `178754e feat(P7): scan restored PVCs before lifting quarantine`.
 
-## REV-3 completed
+## What changed and why
 
-- `ModeWatcher` emits a one-time warning on namespace label/watch failure and keeps policy checks fail-closed.
-- Fusion watcher startup is isolated so a startup exception leaves the default mode at `test`; unit test added.
-- The golden baseline's first-seen behavior was already documented.
-- The graph contract is camelCase: training records use camelCase; live Health Agent objects pass through `ApiClient.sanitize_for_serialization`; `yaml_diff_to_graph` preserves those keys. Generic snake_case conversion is unsafe for custom labels and annotations.
-- Owner updated `.claude/settings.json` deny rules; left them unchanged. The inactive `.git/hooks/pre-push` is untouched; `.githooks/pre-push` is configured.
-- Focused verification: `python -m pytest tests/test_killswitch.py tests/test_fusion_decide.py -q`: 76 passed, 1 skipped. Existing `datetime.utcnow()` deprecation warnings only. `git diff --check` passed before commit.
+- Added an Executor-created read-only Job that scans every restored PVC before the restore path can lift quarantine. The existing Security Agent sampler only observes writes through live process file descriptors and cannot inspect restored data at rest.
+- Scanner returns clean only after reading at least one regular file completely with no unreadable or skipped paths. High entropy means keep quarantined; empty, unreadable, symlinked, failed, timed-out, unavailable-image, and malformed-result scans are unknown and keep quarantine.
+- Job mounts PVCs read-only, disables service-account token mounting, uses a read-only root filesystem, RuntimeDefault seccomp, no privilege escalation, and dropped capabilities. Create/delete are kill-switch-gated writes; read access is namespaced to prod/staging/dev.
+- P6-D2 Health Agent periodic rescoring remains deferred. OBSERVE TTL is a freshness limit, not a sampling interval; no 100-second cadence can be inferred from 300 seconds divided by factor 3.
 
-## Recommended next decisions and work
+## Files touched
 
-- **P6-D2 recommendation for owner:** implement bounded periodic Health scoring while the existing workload OBSERVE key is active. Preserve the 60x15 model input and use the existing expiry without extending the request from each sample. The Health Agent is currently event-driven, so OBSERVE has no effect on workload sampling. Do not implement until the owner confirms.
-- P6-D6: KernelExplainer is not wired into serving; no legitimate background-data source has been identified. Do not invent one.
-- Next eligible non-cluster checklist task: P7-RR-9, Executor restore entropy verdict; RR-11 depends on RR-9. Review RR-10 before editing.
-- Leave P7-RR-7 and P10/P11 cluster verification to Claude. P12-H training remains unapproved.
-- P6 merge is `391b8ac`; P8-D5 `b7436e3`; Security OBSERVE sampling `b9238b7`; Falco source T0 `3690c9f`. Detailed P6 review limitations are in `docs/kubeheal/PROGRESS.md`.
+- `agents/executor/entropy_probe.py`, `agents/executor/restore_entropy.py`, `agents/executor/main.py`, `agents/executor/restore.py`
+- `k8s/rbac/rbac.yaml`, `k8s/executor-deployment.yaml`
+- `deploy/helm/kubeheal/templates/rbac.yaml`, `deploy/helm/kubeheal/templates/agents.yaml`, `deploy/helm/kubeheal/values.yaml`
+- `tests/test_restore_entropy_probe.py`, `tests/test_remediation_static.py`, `tests/test_platform_chart.py`
+- `docs/kubeheal/PROGRESS.md`, `docs/kubeheal/NEXT_FOR_CODEX.md`, `.ai/handoff.md`
+
+## Verification and open issues
+
+- Python compile succeeded for all four changed Executor modules.
+- Focused scanner/remediation/static/no-writes tests: 73 passed, 4 existing datetime deprecation warnings.
+- Helm chart test collection is blocked because Windows denied access to the installed `helm.exe` under WinGet. No Kubernetes command or cluster check was run; image availability/pull-secret setup and live RBAC remain for Claude.
+- REV-3 graph contract test remains open because `torch_geometric` is unavailable in this environment. P7-RR-7 and P10/P11 are cluster tasks for Claude. No training, push, or P6 worktree change.
+
+## Current task
+
+- P7-RR-10 is claimed as `[~] Codex` in `docs/kubeheal/PROGRESS.md`. Inspect each listed redelivery/cleanup issue and implement the safe pieces with tests. Do not run cluster work or model training. Record and leave any behavior needing an owner decision.
+- P7-RR-11 follows RR-9; it remains a candidate local task after RR-10 unless its dependencies add a constraint.

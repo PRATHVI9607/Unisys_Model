@@ -1,31 +1,34 @@
 # KubeHeal continuation notes (2026-11-11)
 
-Read `AGENTS.md`, `docs/kubeheal/PROJECT_SPEC.md`, `docs/kubeheal/IMPLEMENTATION_PLAN.md`, the Task checklist in `docs/kubeheal/PROGRESS.md`, and `.ai/handoff.md` before continuing. This is navigation; `PROGRESS.md` is the detailed task record.
+Read `AGENTS.md`, `docs/kubeheal/PROJECT_SPEC.md`, `docs/kubeheal/IMPLEMENTATION_PLAN.md`, the Task checklist in `docs/kubeheal/PROGRESS.md`, and `.ai/handoff.md` before continuing. The checklist is the detailed task record; this file is navigation.
 
 ## Current state
 
 - Repository: `C:\My_projects_1\cLOUD\Unisys_Model`, branch `work`.
-- Latest commit: `c8931ba fix(REV-3): make mode watcher failures explicit`.
-- REV-3 fixes are committed; no P6 worktree is modified.
-- P6 was reviewed and merged from `wave/P6` to `work` as `391b8ac`. No push occurred.
-- Do not use Kubernetes or touch `hybrid-demo`; cluster tasks remain with Claude. Do not train models; P12-H is not approved.
+- P7-RR-9 is implemented locally in the current session. The code and verification are described in its checklist entry in `PROGRESS.md`; review that entry and the diff/commits before taking the next task.
+- P6 was reviewed and merged from `wave/P6` into `work` as `391b8ac`. Do not modify `wave/P6` or its worktree.
+- P10-V1 app work is in `68018bc`; P10-V2 and other cluster verification remain with Claude. Do not access Kubernetes or `hybrid-demo`.
+- No model training is approved; P12-H remains out of scope. Never push or set `ALLOW_PUSH`.
 
-## Work completed in this continuation
+## Relevant completed work
 
-- P10-V1 (`68018bc`): demo victim app emits `http_requests_total` and `http_request_duration_seconds`; manifests, ServiceMonitor and unit tests. No cluster or image build.
-- P5-Q1, P9-G1 and P10-U5 (`3c80df4`): Health Agent HTTP metric contract docs, Grafana model-inflight panel, demo README/run order.
-- P8-D5 (`b7436e3`): approval claim startup reconciliation, 600-second chosen/tunable TTL, admin claim release with ledger audit. Focused tests passed; no Redis integration check.
-- P6 review/merge (`391b8ac`): 24 files, no conflicts. Focused P6 suite: 273 passed, 1 skipped, 1 failed due to missing `shap==0.44.0` in global Python 3.13. Broad non-cluster suite excluding inaccessible Helm test: 610 passed, 3 skipped, 17 failed due to missing dependencies/Python 3.11 environment. Full suite is not green in this shell.
-- P6-D2 partial (`b9238b7`): Security Agent consumes OBSERVE sampling requests; Health Agent remains event-driven.
-- P6-D7 (`3690c9f`): Security Agent derives `t0_ms` from earliest valid Falco source timestamp, never publish time. Focused tests: 110 passed, 2 Windows skips. No live Falco or cluster check.
-- REV-3: ModeWatcher warns once when namespace labels/watch fail and remains fail-closed; Fusion watcher-start fallback has a test; first-sight baseline behavior is documented. The graph contract is camelCase: training records use camelCase, and the live Health Agent uses `ApiClient.sanitize_for_serialization`; no generic key rewriting is appropriate. Focused tests: 76 passed, 1 skipped.
+- P10-V1 (`68018bc`): `demo/victim-app/` exports the Health Agent's HTTP metric names and includes its deployment/service/ServiceMonitor and tests. No image build or cluster verification.
+- P5-Q1, P9-G1, P10-U5 (`3c80df4`): Health Agent HTTP metric contract documentation, Grafana model-inflight panel, and demo instructions.
+- P8-D5 (`b7436e3`): approval-claim startup reconciliation and admin claim release. TTL 600 seconds is a chosen default, not a measurement; real Redis behavior was not checked.
+- P6-D2 Security sampling (`b9238b7`) and P6-D7 Falco source timestamp (`3690c9f`) are committed; no live Falco/cluster check.
+- REV-3 fixes (`c8931ba`) are committed; the graph contract test remains open due missing `torch_geometric` in the current Python environment.
 
-## Open decisions and next work
+## Decisions and limitations
 
-- The inactive `.git/hooks/pre-push` remains untouched; `.githooks/pre-push` is configured. The owner updated `.claude/settings.json`; do not revise those rules.
-- P6-D2 recommendation: add bounded periodic Health scoring while the existing workload OBSERVE key is active, using the same 60x15 metric pipeline and expiring request. Do not alter input shape or extend the TTL on each sample. Await owner direction before implementing.
-- P6-D6 SHAP helper exists, but serving is not wired to a real KernelExplainer. A valid background-data source is not identified; do not invent one.
-- Continue eligible non-cluster work in checklist order, starting with P7-RR-9 (Executor restore entropy verdict). Keep P7-RR-7 and P10/P11 cluster verification with Claude. P7-RR-10/11 need review before editing.
-- Exact P6 review/test findings and task status are recorded under the P6 section in `docs/kubeheal/PROGRESS.md`.
+- Keep Health Agent OBSERVE event-driven for now. The OBSERVE TTL is a freshness limit and does not define sampling cadence. Do not claim a 100-second interval from a 300-second TTL and factor 3. Design sampling cadence, incident correlation, and cooldown together before implementing periodic scoring.
+- P7-RR-9 now uses an Executor-created Job to scan restored PVCs read-only. Any incomplete or unreadable scan stays unknown and isolated. The Job uses the Executor image by default; verify it can be pulled from prod/staging/dev and provision pull secrets there if needed. The scanner deadline and resource settings are chosen defaults, not measured performance.
+- Local scanner/remediation/static/no-writes test run passed 73 tests with 4 datetime deprecation warnings; `py_compile` passed. The chart test could not collect because Windows denied access to the installed Helm executable under the user WinGet directory. Do not claim chart parity or cluster verification.
+- Full-suite status is not green in the current shell; see the older environment/test details in `PROGRESS.md`.
 
-Never push, never set `ALLOW_PUSH`, never run destructive Git commands, and never claim the full suite is green based on the current environment.
+## Next work
+
+- P7-RR-10 is eligible because its declared dependency P6-R1 is marked complete. Review the list in `PROGRESS.md`; make small, tested changes and do not run Kubernetes tests.
+- P7-RR-11 follows P7-RR-9. P7-RR-7 and P10/P11 require cluster verification and stay with Claude.
+- P6-D6 still lacks a legitimate KernelExplainer background-data source; do not invent one.
+
+Never push, never set `ALLOW_PUSH`, never run destructive Git commands, and never report unverified metrics as measured.
