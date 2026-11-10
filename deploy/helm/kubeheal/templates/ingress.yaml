@@ -1,0 +1,31 @@
+{{- /* Dashboard Ingress. className nginx in values.yaml (generic), traefik in values-k3d-demo.yaml. */ -}}
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kubeheal-dashboard
+  namespace: {{ include "kubeheal.namespace" . }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+{{ toYaml . | indent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ required "ingress.className is required when ingress.enabled" .Values.ingress.className }}
+  {{- with .Values.ingress.tls }}
+  tls:
+{{ toYaml . | indent 4 }}
+  {{- end }}
+  rules:
+    - {{- with .Values.ingress.host }}
+      host: {{ . | quote }}
+      {{- end }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: kubeheal-dashboard
+                port:
+                  number: {{ .Values.dashboard.port }}
+{{- end }}

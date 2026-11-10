@@ -1,0 +1,45 @@
+{{- /* S-CL-4 and P9-H2: namespaces, ResourceQuota, LimitRange. Numbers come only from values. */ -}}
+{{- if .Values.namespaces.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "kubeheal.namespace" . }}
+  labels:
+    kubeheal.io/enabled: "true"
+{{- range $tier := splitList " " (include "kubeheal.tiers" .) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $tier }}
+  labels:
+    kubeheal/tier: {{ $tier }}
+{{- end }}
+{{- end }}
+{{- range $tier := splitList " " (include "kubeheal.tiers" .) }}
+{{- $q := index $.Values.namespaces.quotas $tier | default dict }}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: kubeheal-quota
+  namespace: {{ $tier }}
+  labels:
+    kubeheal/tier: {{ $tier }}
+spec:
+  hard:
+{{- if not $q.hard }}{{ fail (printf "namespaces.quotas.%s.hard is required (owner decision, nothing is defaulted)" $tier) }}{{ end }}
+{{ toYaml $q.hard | indent 4 }}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: kubeheal-limits
+  namespace: {{ $tier }}
+  labels:
+    kubeheal/tier: {{ $tier }}
+spec:
+  limits:
+{{- if not $q.limits }}{{ fail (printf "namespaces.quotas.%s.limits is required (owner decision, nothing is defaulted)" $tier) }}{{ end }}
+{{ toYaml $q.limits | indent 4 }}
+{{- end }}

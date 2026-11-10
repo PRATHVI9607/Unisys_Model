@@ -1,0 +1,64 @@
+# k3d demo values (cluster `kubeheal`, context k3d-kubeheal). Use with the chart defaults:
+#   helm template kubeheal deploy/helm/kubeheal -f deploy/helm/kubeheal/values-k3d-demo.yaml
+#
+# Every number below is a DEMO CHOICE, NOT MEASURED, owner to confirm. They exist only so the chart
+# renders on the local demo cluster. Replace them with measured or decided values for any real use.
+# Requests and limits are still unset: run eval/resource_profile.py on the cluster and merge its snippet.
+
+killSwitch:
+  mode: test                  # fresh install is a dry run; the demo flips it to enforce on purpose
+
+ingress:
+  enabled: true
+  className: traefik          # k3s ships Traefik, not NGINX
+  host: ""
+
+networkPolicy:
+  enabled: true
+  prometheusNamespace: monitoring
+  ingressControllerNamespace: kube-system   # Traefik runs in kube-system on k3s
+
+# k3d has one or three schedulable nodes depending on the cluster config: do not block scheduling.
+modelServers:
+  topologySpread:
+    whenUnsatisfiable: ScheduleAnyway
+
+# --- demo placeholders (demo choice, not measured, owner to confirm) ---
+namespaces:
+  quotas:
+    prod:
+      hard: {requests.cpu: "4", requests.memory: 8Gi, pods: "40"}                  # demo choice, not measured, owner to confirm
+      limits:
+        - type: Container
+          defaultRequest: {cpu: 50m, memory: 64Mi}                                  # demo choice, not measured, owner to confirm
+          default: {cpu: 500m, memory: 512Mi}                                       # demo choice, not measured, owner to confirm
+    staging:
+      hard: {requests.cpu: "2", requests.memory: 4Gi, pods: "20"}                  # demo choice, not measured, owner to confirm
+      limits:
+        - type: Container
+          defaultRequest: {cpu: 50m, memory: 64Mi}                                  # demo choice, not measured, owner to confirm
+          default: {cpu: 500m, memory: 512Mi}                                       # demo choice, not measured, owner to confirm
+    dev:
+      hard: {requests.cpu: "2", requests.memory: 4Gi, pods: "20"}                  # demo choice, not measured, owner to confirm
+      limits:
+        - type: Container
+          defaultRequest: {cpu: 50m, memory: 64Mi}                                  # demo choice, not measured, owner to confirm
+          default: {cpu: 500m, memory: 512Mi}                                       # demo choice, not measured, owner to confirm
+
+redis:
+  persistence:
+    size: 1Gi                 # demo choice, not measured, owner to confirm
+
+hpa:
+  mode: queue
+  queue:
+    targetAverageValue: "2"   # demo choice, not measured, owner to confirm (mean concurrent requests per pod)
+
+# Executor env: same chosen defaults as values.yaml (chosen defaults, not measurements).
+executor:
+  env:
+    PROMETHEUS_URL: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+    SNAPSHOT_CLASS: "csi-hostpath-snapclass"   # P10 creates a VolumeSnapshotClass with exactly this name
+    CANARY_WINDOW_S: "30"
+    ROLLOUT_TIMEOUT_S: "180"
+    ROLLOUT_POLL_S: "5"

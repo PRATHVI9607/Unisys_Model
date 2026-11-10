@@ -1,0 +1,131 @@
+{{- /*
+S-CL-5 and P9-H5: NetworkPolicy around the kubeheal namespace. Default-deny ingress for every pod, then
+explicit allows. Only ingress is restricted (no egress policy is created, so DNS egress keeps working).
+  model servers : agents (health, security, fusion), dashboard, Prometheus
+  redis         : the five KubeHeal components that use it (see the note on the Executor in values.yaml)
+  dashboard     : the ingress controller namespace, Prometheus
+  other metrics : Prometheus
+*/ -}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $ns := include "kubeheal.namespace" . }}
+{{- $np := .Values.networkPolicy }}
+{{- $ms := .Values.modelServers }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: {{ $ns }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-model-servers-from-agents-dashboard-prometheus
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [{{ $ms.health.name }}, {{ $ms.security.name }}, {{ $ms.dcm.name }}]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [health-agent, security-agent, fusion-agent, kubeheal-dashboard]
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.prometheusNamespace }}
+      ports:
+        - {protocol: TCP, port: {{ $ms.health.port }}}
+        - {protocol: TCP, port: {{ $ms.security.port }}}
+        - {protocol: TCP, port: {{ $ms.dcm.port }}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis-from-kubeheal-components
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchLabels: {app: redis}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [health-agent, security-agent, fusion-agent, executor, kubeheal-dashboard]
+      ports:
+        - {protocol: TCP, port: 6379}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dashboard-from-ingress-and-prometheus
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchLabels: {app: kubeheal-dashboard}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.ingressControllerNamespace }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.prometheusNamespace }}
+      ports:
+        - {protocol: TCP, port: {{ .Values.dashboard.port }}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-metrics-from-prometheus
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [health-agent, security-agent, fusion-agent, executor]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.prometheusNamespace }}
+      ports:
+        - {protocol: TCP, port: {{ .Values.healthAgent.port }}}
+        - {protocol: TCP, port: {{ .Values.fusionAgent.port }}}
+        - {protocol: TCP, port: {{ .Values.securityAgent.metricsPort }}}
+        - {protocol: TCP, port: {{ .Values.executor.metricsPort }}}
+{{- if .Values.minio.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-minio-from-ledger-writers
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchLabels: {app: minio}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [fusion-agent, executor, minio-bootstrap, {{ $ms.health.name }}, {{ $ms.security.name }}, {{ $ms.dcm.name }}, kubeheal-dashboard]
+      ports:
+        - {protocol: TCP, port: 9000}
+{{- end }}
+{{- end }}

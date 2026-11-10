@@ -1,0 +1,18 @@
+KubeHeal {{ .Chart.AppVersion }} installed in namespace {{ include "kubeheal.namespace" . }}.
+
+Kill switch mode: {{ .Values.killSwitch.mode }} (test = dry run, nothing writes to the cluster).
+  kubectl -n {{ include "kubeheal.namespace" . }} patch configmap kubeheal-mode --type merge -p '{"data":{"mode":"enforce"}}'
+
+Before it works end to end:
+  * Secrets created outside the chart: {{ .Values.redis.auth.existingSecret }} (key {{ .Values.redis.auth.key }}, unless redis.auth.password was passed), {{ .Values.minio.rootSecret }} and {{ .Values.minio.clientSecret }} (scripts/minio_secret.ps1).
+  * Images {{ .Values.global.imageRegistry }}kubeheal/*:{{ .Values.global.imageTag }} must exist on the nodes (k3d: k3d image import).
+  * The Executor escalates every patch and restore until its five env values are non-empty (executor.env).
+{{- if eq .Values.hpa.mode "queue" }}
+  * The HPA needs prometheus-adapter with the rule in ConfigMap kubeheal-prometheus-adapter-rule and the scrape job in kubeheal-prometheus-scrape-snippet.
+{{- end }}
+  * Requests and limits are unset: run eval/resource_profile.py on the cluster and merge its values snippet.
+{{- if .Values.rbac.create }}
+  * RBAC is created by this chart (same rules as k8s/rbac/rbac.yaml). Do not also apply that file.
+{{- else }}
+  * rbac.create=false: apply k8s/rbac/rbac.yaml (and k8s/kill-switch.yaml roles) yourself.
+{{- end }}
