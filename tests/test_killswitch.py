@@ -18,6 +18,7 @@ from agents.common import killswitch as ks
 from agents.executor import actions
 from agents.executor.main import ExecutorService, ESCALATIONS_STREAM, ACTIONS_STREAM
 from agents.fusion_agent import decision_policy as dp
+from agents.common.ledger import InMemoryLedgerStore, Ledger
 
 
 def run(c):
@@ -263,6 +264,52 @@ def test_executor_reads_the_mode_itself():
     ex = ExecutorService(redis=r, core_api=core, networking_api=net)      # real, unread ModeWatcher
     run(ex.handle_entry("kubeheal.exec", "3-0", {"action": "contain", "namespace": "prod", "pod": "p"}))
     assert core.deleted == [] and net.created == []
+
+
+def test_executor_records_dry_run_step_and_result():
+    store = InMemoryLedgerStore()
+    ex = ExecutorService(redis=Redis(), core_api=Core(), networking_api=Net(),
+                         mode=FlippingMode(99), ledger=Ledger(store))
+    run(ex.handle_entry("kubeheal.exec", "4-0", {
+        "action": "contain", "namespace": "prod", "pod": "p",
+        "dry_run": "true", "incident_id": "inc-dry",
+    }))
+
+    records = [json.loads(store.objects[key]) for key in sorted(store.objects)]
+    assert [record["step"] for record in records] == [
+        "executor_create_quarantine_policy", "executor_result"
+    ]
+    assert records[0]["payload"]["outcome"] == "blocked_by_kill_switch"
+    assert records[1]["payload"]["outcome"].startswith("DRY RUN: would have CONTAIN")
+
+
+def test_executor_records_mid_action_steps_and_escalation():
+    store = InMemoryLedgerStore()
+    ex = ExecutorService(redis=Redis(), core_api=Core(), networking_api=Net(),
+                         mode=FlippingMode(1), ledger=Ledger(store))
+    run(ex.handle_entry("kubeheal.exec", "5-0", {
+        "action": "contain", "namespace": "prod", "pod": "p", "incident_id": "inc-stop",
+    }))
+
+    records = [json.loads(store.objects[key]) for key in sorted(store.objects)]
+    assert [record["step"] for record in records] == [
+        "executor_create_quarantine_policy", "executor_delete_pod",
+        "executor_result", "executor_escalation",
+    ]
+    assert records[0]["payload"]["outcome"] == "succeeded"
+    assert records[1]["payload"]["outcome"] == "blocked_by_kill_switch"
+    assert records[3]["payload"]["required"] == "human"
+
+
+def test_executor_mode_watcher_change_is_written_to_ledger():
+    store = InMemoryLedgerStore()
+    ex = ExecutorService(redis=Redis(), ledger=Ledger(store))
+    ex.mode.apply_configmap(NS(data={"mode": "enforce"}))
+
+    records = [json.loads(value) for value in store.objects.values()]
+    assert len(records) == 1
+    assert records[0]["step"] == "mode_change"
+    assert records[0]["payload"] == {"from": None, "to": "enforce", "source": "configmap"}
 
 
 # ---- static: every write method inside the executor only goes through _write -----------------------

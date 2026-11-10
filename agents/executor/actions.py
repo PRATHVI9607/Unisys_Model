@@ -45,8 +45,18 @@ async def _write(gate, namespace: str, step: str, fn: Callable[..., Awaitable], 
     right before the call, so a mode switch between two steps stops the second one. A missing
     gate blocks (fail safe)."""
     if gate is None or not gate.allow_write(namespace):
+        if gate is not None and hasattr(gate, "record_step"):
+            await gate.record_step(namespace, step, "blocked_by_kill_switch")
         raise ModeBlocked(step)
-    return await fn(*args, **kwargs)
+    try:
+        result = await fn(*args, **kwargs)
+    except Exception as exc:
+        if hasattr(gate, "record_step"):
+            await gate.record_step(namespace, step, f"failed: {exc}")
+        raise
+    if hasattr(gate, "record_step"):
+        await gate.record_step(namespace, step, "succeeded")
+    return result
 
 
 def _blocked_outcome(what: str, planned: List[str], done: List[str], blocked: ModeBlocked) -> str:
