@@ -16,12 +16,6 @@ from agents.common.killswitch import ENFORCE, MODE_CONFIGMAP, MODE_KEY, MODE_NAM
 
 VALID_MODES = (TEST, ENFORCE)
 
-# The patch verb is looked up by name on purpose: tests/test_no_writes_outside_executor.py bans a literal
-# `patch_namespaced_*` call anywhere outside agents/executor/. This constant and `write_mode` below are
-# the single sanctioned exception for the kill switch toggle; tests/test_dashboard_killswitch.py pins
-# that no other dashboard file references it. See the P8 report: the guard test should allow-list this file.
-_PATCH_CONFIGMAP_CALL = "patch_namespaced_" + "config_map"
-
 
 class ModeStore(Protocol):
     async def read_mode(self) -> Optional[str]: ...
@@ -57,6 +51,6 @@ class KubernetesModeStore:
         client = await self._client_module()
         async with client.ApiClient() as api:
             core = client.CoreV1Api(api)
-            await getattr(core, _PATCH_CONFIGMAP_CALL)(
+            await core.patch_namespaced_config_map(
                 self.name, self.namespace, {"data": {MODE_KEY: mode}}
             )
