@@ -2,9 +2,9 @@
 
 - **Agent:** Codex
 - **Date:** 2026-11-11
-- **Branch:** `work`; latest commit `b7436e3 feat(P8): reconcile approval claims on startup`.
+- **Branch:** `work`; latest commit before current P6-D7 changes `b9238b7 feat(P6): honor observe sampling in security agent`.
 - **Goal:** Continue KubeHeal per `docs/kubeheal/IMPLEMENTATION_PLAN.md`; never push or set `ALLOW_PUSH`.
-- **Current worktree:** P6-D2 Security Agent integration and updated `PROGRESS.md` are uncommitted. User authorized review/merge and related commits. No merge is in progress.
+- **Current worktree:** P6-D7 source-timestamp integration and refreshed progress/handoff notes are uncommitted. User authorized review/merge and related commits. No merge is in progress.
 
 ## Completed
 
@@ -16,18 +16,20 @@
 
 ## Files changed since the last commit
 
+- P6-D7 implemented locally: normalized Falco events retain source time (Falco `evt.time` nanoseconds are converted to UTC if top-level time is absent); Security Agent emits `t0_ms` from the earliest valid trigger-window `ts`. It never substitutes publish time. Focused Falco, entropy and Fusion restore/reliability tests: 110 passed, 2 Windows skips. No cluster/live Falco check.
+
 - `dashboard/admin_routes.py`: short/tunable TTL, claim enumeration and exact stream lookup, startup reconciliation helper, admin release endpoint.
 - `dashboard/fastapi_app.py`: startup invokes reconciliation after dashboard services initialize.
 - `tests/test_dashboard_approvals.py`, `tests/test_dashboard_seed.py`: TTL, recovery, release/auth/audit coverage and service fakes.
 - `agents/security_agent/agent.py`, `agents/security_agent/entropy_sampler.py`, `tests/test_sense_entropy_sampler.py`, `tests/test_sense_falco_replay.py`: Security side of factor-3 OBSERVE sampling.
+- `agents/security_agent/falco_client.py`, `agents/security_agent/syscall_window.py`, `tests/test_sense_falco_replay.py`: source timestamp preservation and T0 publication.
 - `docs/kubeheal/PROGRESS.md`: P6 review/test outcomes, P8-D5 completion, remaining task states.
 - `docs/kubeheal/NEXT_FOR_CODEX.md`: concise current status and navigation for Claude.
 - `.ai/handoff.md`: this handoff.
 
 ## Open issues and next step
 
-- P6-D2 remains incomplete: Health/Security Agents do not consume Fusion's factor-3 sampling contract. Health sensing is event-driven; sampling scheduling needs a safe design.
+- P6-D2 remains incomplete: Security Agent consumes the request, but Health Agent has no periodic observation loop. Its sampling schedule needs a safe design.
 - P6-D6 remains incomplete: the real metric KernelExplainer is not wired into serving/Fusion; the helper falls back to channel deviation unless injected.
-- P6-D7 remains incomplete for live events: Security Agent does not publish earliest suspicious Falco `ts` as `t0_ms`; automatic restore therefore is not reachable from live agent events. Never substitute event publish time.
-- P8-D5 is committed in `b7436e3`. Commit the tested Security half of P6-D2 and its log after `git diff --check`; then continue eligible non-cluster follow-ups. Keep cluster work with Claude; do not train models (P12-H unapproved).
+- P8-D5 is committed in `b7436e3`; Security half of P6-D2 is committed in `b9238b7`. Run `git diff --check`, commit P6-D7, then continue eligible non-cluster follow-ups. P6-D2 still needs a Health Agent schedule; P6-D6 still needs actual KernelExplainer wiring. Keep cluster work with Claude; do not train models (P12-H unapproved).
 - No Kubernetes cluster, Redis service, or model training was used. Never touch `hybrid-demo`.

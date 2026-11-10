@@ -5,7 +5,7 @@ import logging
 import os
 import struct
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
@@ -44,6 +44,28 @@ def namespace_tier(namespace: str) -> str:
     if "stag" in n:
         return "staging"
     return "dev"
+
+
+def falco_t0_ms(events: List[Dict]) -> Optional[int]:
+    """Return the earliest timezone-aware Falco event time, or None when the source time is unknown.
+
+    This only reads the normalized `ts` field. It never substitutes the Security Agent's publish time.
+    """
+    stamps = []
+    for event in events or []:
+        raw = event.get("ts")
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                continue
+            stamp_ms = int(parsed.timestamp() * 1000)
+            if stamp_ms > 0:
+                stamps.append(stamp_ms)
+        except (TypeError, ValueError, OverflowError, OSError):
+            continue
+    return min(stamps) if stamps else None
 
 
 class ThreatLevel(str, Enum):
@@ -409,15 +431,19 @@ class SecurityAgent:
         # The Security Agent only senses and reports (S-SA-5). Containment is decided by the
         # Fusion Agent and executed by the Executor.
         if risk_score >= 0.40:
+            t0_ms = falco_t0_ms(events)
+            extra = {
+                "entropy_phase": phase,
+                "entropy_valid_samples": str(result.valid_samples),
+                "entropy_files_json": json.dumps(result.files),
+                "syscall_source": source if events else "none",
+                "model_scored": "true" if sec else "false",
+            }
+            if t0_ms is not None:
+                extra["t0_ms"] = str(t0_ms)
             await self._publish_security_event(
                 pid_info, risk_score, early_signals, entropy_avg, sec,
-                extra={
-                    "entropy_phase": phase,
-                    "entropy_valid_samples": str(result.valid_samples),
-                    "entropy_files_json": json.dumps(result.files),
-                    "syscall_source": source if events else "none",
-                    "model_scored": "true" if sec else "false",
-                },
+                extra=extra,
             )
 
     async def _publish_security_event(

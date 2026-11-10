@@ -54,7 +54,9 @@ class FalcoWindowTracker:
         if not pid or sysc not in RANSOMWARE_SYSCALLS:
             return None
         w = self._windows.setdefault(pid, [])
-        w.append({"syscall": sysc, "fd_path": evt.get("fd_path", "")})
+        # Keep the Falco source timestamp for Fusion's T0/restore decision. `build_model_input` deliberately
+        # strips it from the Security Model's fixed event schema.
+        w.append({"syscall": sysc, "fd_path": evt.get("fd_path", ""), "ts": evt.get("ts", "")})
         if len(w) > self.max_events:
             del w[: len(w) - self.max_events]
         renames = sum(1 for e in w if e["syscall"].startswith("rename"))

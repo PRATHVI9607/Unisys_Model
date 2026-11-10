@@ -41,6 +41,7 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, Dict, Iterator, Optional, Tuple
 
@@ -122,6 +123,18 @@ def _normalise(evt: Dict) -> Optional[Dict]:
                 break
     if not syscall:
         return None
+    event_time = evt.get("time")
+    if not event_time:
+        # Falco's `evt.time` is epoch nanoseconds. Convert that source field to an explicit UTC string;
+        # downstream code never has to guess the unit of an integer timestamp.
+        raw_ns = of.get("evt.time")
+        try:
+            ns = int(raw_ns)
+            if ns > 0:
+                event_time = datetime.fromtimestamp(ns / 1_000_000_000, tz=timezone.utc).isoformat().replace(
+                    "+00:00", "Z")
+        except (TypeError, ValueError, OSError, OverflowError):
+            pass
     return {
         "syscall_inferred": inferred,
         "syscall": syscall,
@@ -131,7 +144,7 @@ def _normalise(evt: Dict) -> Optional[Dict]:
         "fd_path": of.get("fd.name") or of.get("fd.path") or "",
         "rule": evt.get("rule", ""),
         "priority": priority_name(evt.get("priority") or ""),
-        "ts": evt.get("time") or of.get("evt.time") or "",
+        "ts": event_time or "",
     }
 
 

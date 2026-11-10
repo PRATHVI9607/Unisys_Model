@@ -40,6 +40,14 @@ def test_events_of_current_rules_have_inferred_syscall_family():
     assert evs[-1]["syscall"] == "open"
 
 
+def test_earliest_falco_event_time_is_normalized_to_epoch_ms_without_publish_time_fallback():
+    from agents.security_agent.agent import falco_t0_ms
+    first = events(RANSOM)[0]
+    assert first["ts"].endswith("Z")
+    assert falco_t0_ms([{"ts": "2026-11-10T09:30:02Z"}, first]) == 1794303000000
+    assert falco_t0_ms([{"timestamp_ms": "1794303000000"}, {"ts": "not-a-time"}]) is None
+
+
 def test_directory_replay_reads_all_files_in_name_order():
     evs = events(FIX)
     assert len(evs) == 3 + 21 + 25
@@ -78,7 +86,8 @@ def test_tracker_triggers_on_burst_with_the_real_window():
     tr = triggers[0]
     assert tr.pid == 4242 and tr.reason == "burst"
     assert len(tr.events) == 15                            # default burst threshold
-    assert tr.events[0] == {"syscall": "write", "fd_path": "/data/file_0000.txt"}
+    assert tr.events[0]["syscall"] == "write" and tr.events[0]["fd_path"] == "/data/file_0000.txt"
+    assert tr.events[0]["ts"].startswith("2026-11-10T09:30:00")
     assert all(e["fd_path"].startswith("/data/") for e in tr.events)
 
 
@@ -216,7 +225,8 @@ def test_agent_replay_publishes_event_scored_by_the_model_input_from_the_trace(m
     assert ag.falco_mode == "replay"
     assert len(calls) == 1                                          # one trigger, sampling ended at once
     evts, series, signals = calls[0]
-    assert len(evts) == 15 and evts[0] == {"syscall": "write", "fd_path": "/data/file_0000.txt"}
+    assert len(evts) == 15 and evts[0]["syscall"] == "write"
+    assert evts[0]["fd_path"] == "/data/file_0000.txt" and evts[0]["ts"].endswith("Z")
     assert series == []                                             # entropy unavailable, not zeros
     # the 15-event window holds 7 renames, not above InotifyWatcher's threshold of 10
     assert signals["rename_burst"] is False and signals["high_entropy"] is False
@@ -226,6 +236,7 @@ def test_agent_replay_publishes_event_scored_by_the_model_input_from_the_trace(m
     assert stream == "kubeheal.security.events"
     assert p["pod_name"] == "victim-app-7d9f8b6c5-x2k4q" and p["namespace"] == "demo"
     assert p["syscall_source"] == "replay" and p["model_scored"] == "true"
+    assert p["t0_ms"] == "1794303000000"
     assert p["entropy"] == "" and p["entropy_valid_samples"] == "0" and p["entropy_phase"] == "complete"
     assert float(p["sec_risk"]) == pytest.approx(0.91)
 
