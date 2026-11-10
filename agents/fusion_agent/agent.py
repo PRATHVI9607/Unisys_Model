@@ -391,7 +391,7 @@ class FusionAgentV4:
         state = prior_state
         if out.decision == Decision.OBSERVE:
             written = await sampling.request_observe(self.redis, namespace, workload, pod or None, incident_id,
-                                                     self.cfg.observe_period_s)
+                                                     self.cfg.observe_period_s, now_ms=int(self.clock() * 1000))
             await self._append_ledger(incident_id, "observe_requested", {
                 "factor": sampling.OBSERVE_FACTOR, "period_s": self.cfg.observe_period_s,
                 "keys": written, "already_active": not written})
