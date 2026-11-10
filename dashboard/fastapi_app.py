@@ -12,6 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
 from agents.common.metrics import KubeHealMetrics, add_metrics_route
+from dashboard.admin_routes import redis_services, router as admin_router
+from dashboard.mode_admin import KubernetesModeStore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -566,6 +568,21 @@ async def lifespan(app: FastAPI):
     await dashboard.connect_redis()
     await dashboard.start_listeners()
 
+    # P8: approvals, incident page and kill switch need the ledger, Redis and the kubeheal-mode ConfigMap.
+    # If the ledger is misconfigured the dashboard still serves the event views; these endpoints answer 503.
+    try:
+        from agents.common.ledger import ledger_from_env
+        if os.getenv("LEDGER_BACKEND", "memory").strip().lower() == "memory":
+            logger.warning(
+                "LEDGER_BACKEND is not minio: the dashboard uses its own empty in-memory ledger, so it "
+                "will not see incidents written by other components and approvals are lost on restart")
+        app.state.services = redis_services(
+            ledger_from_env(), KubernetesModeStore(),
+            lambda: dashboard.redis if dashboard else None)
+    except Exception as e:
+        logger.error(f"approvals and kill switch endpoints disabled, ledger not available: {type(e).__name__}")
+        app.state.services = None
+
     logger.info("Dashboard started")
     yield
 
@@ -577,6 +594,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="KubeHeal Dashboard", lifespan=lifespan)
 METRICS = KubeHealMetrics()
 add_metrics_route(app, METRICS)
+app.include_router(admin_router)
 
 # Mount static files directory for CSS, JS, etc.
 import os.path
