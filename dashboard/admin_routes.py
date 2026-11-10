@@ -7,8 +7,12 @@ token). Collaborators (ledger, Redis queue, kill switch ConfigMap) come from `Da
 
 Approval flow (HUMAN_PATCH / HUMAN_CONTAIN decisions written by Fusion with an `approval_requested` entry):
   pending = approval_requested present, no `approved` and no `rejected` entry
-  approve : claim the incident, queue a request on kubeheal.exec (approved_by = admin identity,
-            dry_run from the current kill switch mode), then ledger `approved`
+  approve : mode enforce: claim the incident, queue a request on kubeheal.exec (approved_by = admin
+            identity, dry_run=false), store the stream id in the claim, then ledger `approved`. If the
+            ledger write fails after queueing, a repeated approve finishes the record from the claim and
+            never queues again.
+            mode test or unreadable: queue the request with dry_run=true and write `dry_run_approved`;
+            the incident stays pending and can be approved again once the mode is enforce.
   reject  : claim the incident, ledger `rejected`, nothing queued
 The claim is a Redis SET NX in deployments, so two replicas cannot decide the same incident twice.
 """
@@ -16,6 +20,7 @@ The claim is a Redis SET NX in deployments, so two replicas cannot decide the sa
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -24,7 +29,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from agents.common.killswitch import ENFORCE, TEST, is_dry_run, normalize
 from agents.common.ledger import Ledger
@@ -34,6 +39,7 @@ from dashboard.incident_view import build_incident, num
 from dashboard.ledger_view import (
     HUMAN_DECISIONS,
     STEP_APPROVED,
+    STEP_DRY_RUN_APPROVED,
     STEP_REJECTED,
     approval_status,
     index_steps,
@@ -49,6 +55,7 @@ logger = logging.getLogger(__name__)
 EXEC_STREAM = "kubeheal.exec"
 CLAIM_KEY = "kubeheal:approval:{incident_id}"
 CLAIM_TTL_S = 30 * 86400
+LEDGER_APPEND_ATTEMPTS = 3      # tries to write `approved` after the request was queued
 PAGE_HEADERS = {
     "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
     "X-Content-Type-Options": "nosniff",
@@ -63,6 +70,8 @@ class DashboardServices:
     enqueue_exec: Callable[[Dict[str, str]], Awaitable[str]]
     claim: Callable[[str], Awaitable[bool]]
     release: Callable[[str], Awaitable[None]]
+    claim_set: Callable[[str, str], Awaitable[None]]            # store a value in an existing claim
+    claim_get: Callable[[str], Awaitable[Optional[str]]]
     fetch_event: Callable[[str, str], Awaitable[Optional[Dict[str, Any]]]]
 
 
@@ -80,10 +89,17 @@ def redis_services(ledger: Ledger, mode_store: ModeStore, get_redis: Callable[[]
         return msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
 
     async def claim(incident_id: str) -> bool:
-        return bool(await _redis().set(CLAIM_KEY.format(incident_id=incident_id), "1", nx=True, ex=CLAIM_TTL_S))
+        return bool(await _redis().set(CLAIM_KEY.format(incident_id=incident_id), "claimed", nx=True, ex=CLAIM_TTL_S))
 
     async def release(incident_id: str) -> None:
         await _redis().delete(CLAIM_KEY.format(incident_id=incident_id))
+
+    async def claim_set(incident_id: str, value: str) -> None:
+        await _redis().set(CLAIM_KEY.format(incident_id=incident_id), value, xx=True, ex=CLAIM_TTL_S)
+
+    async def claim_get(incident_id: str) -> Optional[str]:
+        v = await _redis().get(CLAIM_KEY.format(incident_id=incident_id))
+        return v.decode() if isinstance(v, bytes) else v
 
     async def fetch_event(kind: str, event_id: str) -> Optional[Dict[str, Any]]:
         if not event_id or get_redis() is None:
@@ -98,7 +114,7 @@ def redis_services(ledger: Ledger, mode_store: ModeStore, get_redis: Callable[[]
         return {(k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
                 for k, v in raw.items()}
 
-    return DashboardServices(ledger, mode_store, enqueue_exec, claim, release, fetch_event)
+    return DashboardServices(ledger, mode_store, enqueue_exec, claim, release, claim_set, claim_get, fetch_event)
 
 
 def get_services(request: Request) -> DashboardServices:
@@ -147,6 +163,20 @@ class ModeRequest(BaseModel):
 
 
 # ---------------------------------------------------------------- helpers
+
+async def _body(request: Request, model, required: bool = False):
+    """Parse the JSON body AFTER authentication (the admin dependency has already run), so a malformed
+    body without credentials is 401 or 503, never 422."""
+    raw = await request.body()
+    if not raw.strip():
+        if required:
+            raise HTTPException(status_code=422, detail="request body required")
+        return model()
+    try:
+        return model.model_validate_json(raw)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=[{"loc": list(e["loc"]), "msg": e["msg"]} for e in exc.errors()])
+
 
 def _pending_summary(incident_id: str, records: List[Dict[str, Any]]) -> Dict[str, Any]:
     decision = step_payload(records, "decision")
@@ -234,46 +264,98 @@ async def list_pending_approvals(svc: DashboardServices = Depends(get_services))
     return {"pending": out, "count": len(out)}
 
 
+async def _append_with_retry(svc: DashboardServices, incident_id: str, step: str, payload: Dict[str, Any]) -> bool:
+    for _attempt in range(LEDGER_APPEND_ATTEMPTS):
+        try:
+            await _append(svc, incident_id, step, payload)
+            return True
+        except Exception as exc:
+            logger.error("ledger write %s/%s failed: %s", incident_id, step, type(exc).__name__)
+    return False
+
+
+def _queued_claim(value: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The claim of an approval whose request is queued: JSON with the stream id."""
+    if not value or not value.startswith("{"):
+        return None
+    try:
+        data = json.loads(value)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) and data.get("stream_id") else None
+
+
 @router.post("/api/approvals/{incident_id}/approve")
-async def approve(incident_id: str, body: Optional[DecisionNote] = None,
+async def approve(incident_id: str, request: Request,
                   admin: AdminIdentity = Depends(require_admin),
                   svc: DashboardServices = Depends(get_services)):
+    note = (await _body(request, DecisionNote)).note
     records, status = await _load_pending_or_raise(svc, incident_id)
     if status == "approved":
         return {"status": "already_approved", "incident_id": incident_id, "queued": False}
     if status == "rejected":
         raise HTTPException(status_code=409, detail="incident was already rejected")
+
+    # An earlier approval queued its request but could not write `approved`: finish the record, never queue again.
+    queued = _queued_claim(await svc.claim_get(incident_id))
+    if queued:
+        payload = {k: queued.get(k) for k in ("approved_by", "action", "dry_run", "mode", "mode_readable", "note")}
+        payload.update({"exec_stream_id": queued["stream_id"], "reconciled_by": admin.actor})
+        if not await _append_with_retry(svc, incident_id, STEP_APPROVED, payload):
+            raise HTTPException(status_code=500, detail="the request is already queued but the ledger write still fails; "
+                                                        "repeat the approve to finish the record, it will not queue again")
+        return {"status": "already_queued", "incident_id": incident_id, "queued": False, "recorded": True}
+
     mode = await current_mode(svc)
     fields = _exec_request(incident_id, records, admin.actor, mode["dry_run"])
     if not await svc.claim(incident_id):
         raise HTTPException(status_code=409, detail="another decision for this incident is in progress")
+
+    if mode["dry_run"]:
+        # Mode is test or unreadable: queue a dry run and keep the incident open (approvable again in enforce mode).
+        try:
+            try:
+                stream_id = await svc.enqueue_exec(fields)
+            except Exception as exc:
+                logger.error("approve %s: queueing failed: %s", incident_id, type(exc).__name__)
+                raise HTTPException(status_code=502, detail="could not queue the request for the Executor; nothing was approved")
+            ok = await _append_with_retry(svc, incident_id, STEP_DRY_RUN_APPROVED, {
+                "approved_by": admin.actor, "action": fields["action"], "dry_run": True,
+                "mode": mode["mode"], "mode_readable": mode["readable"],
+                "exec_stream_id": stream_id, "note": note,
+            })
+        finally:
+            await svc.release(incident_id)
+        if not ok:
+            raise HTTPException(status_code=500, detail="the dry run was queued but the ledger write failed; "
+                                                        "the incident is still pending")
+        return {"status": "dry_run_approved", "incident_id": incident_id, "action": fields["action"],
+                "dry_run": True, "queued": True, "approved_by": admin.actor, "incident_closed": False}
+
     try:
         stream_id = await svc.enqueue_exec(fields)
     except Exception as exc:
         await svc.release(incident_id)
         logger.error("approve %s: queueing failed: %s", incident_id, type(exc).__name__)
         raise HTTPException(status_code=502, detail="could not queue the request for the Executor; nothing was approved")
+    payload = {"approved_by": admin.actor, "action": fields["action"], "dry_run": False,
+               "mode": mode["mode"], "mode_readable": mode["readable"], "note": note}
     try:
-        await _append(svc, incident_id, STEP_APPROVED, {
-            "approved_by": admin.actor,
-            "action": fields["action"],
-            "dry_run": mode["dry_run"],
-            "mode": mode["mode"],
-            "mode_readable": mode["readable"],
-            "exec_stream_id": stream_id,
-            "note": (body.note if body else None),
-        })
+        await svc.claim_set(incident_id, json.dumps({**payload, "stream_id": stream_id}))
     except Exception as exc:
-        logger.error("approve %s: request queued but ledger write failed: %s", incident_id, type(exc).__name__)
-        raise HTTPException(status_code=500, detail="request queued but the ledger write failed; do not retry")
+        logger.error("approve %s: could not store the stream id in the claim: %s", incident_id, type(exc).__name__)
+    if not await _append_with_retry(svc, incident_id, STEP_APPROVED, {**payload, "exec_stream_id": stream_id}):
+        raise HTTPException(status_code=500, detail="the request is queued but the ledger write failed; "
+                                                    "repeat the approve to finish the record, it will not queue again")
     return {"status": "approved", "incident_id": incident_id, "action": fields["action"],
-            "dry_run": mode["dry_run"], "queued": True, "approved_by": admin.actor}
+            "dry_run": False, "queued": True, "approved_by": admin.actor, "incident_closed": True}
 
 
 @router.post("/api/approvals/{incident_id}/reject")
-async def reject(incident_id: str, body: Optional[DecisionNote] = None,
+async def reject(incident_id: str, request: Request,
                  admin: AdminIdentity = Depends(require_admin),
                  svc: DashboardServices = Depends(get_services)):
+    note = (await _body(request, DecisionNote)).note
     _records_, status = await _load_pending_or_raise(svc, incident_id)
     if status == "rejected":
         return {"status": "already_rejected", "incident_id": incident_id, "queued": False}
@@ -282,7 +364,7 @@ async def reject(incident_id: str, body: Optional[DecisionNote] = None,
     if not await svc.claim(incident_id):
         raise HTTPException(status_code=409, detail="another decision for this incident is in progress")
     try:
-        await _append(svc, incident_id, STEP_REJECTED, {"rejected_by": admin.actor, "note": (body.note if body else None)})
+        await _append(svc, incident_id, STEP_REJECTED, {"rejected_by": admin.actor, "note": note})
     except Exception as exc:
         await svc.release(incident_id)
         logger.error("reject %s: ledger write failed: %s", incident_id, type(exc).__name__)
@@ -331,8 +413,9 @@ async def kill_switch_status(svc: DashboardServices = Depends(get_services)):
 
 
 @router.post("/api/kill-switch")
-async def kill_switch_toggle(body: ModeRequest, admin: AdminIdentity = Depends(require_admin),
+async def kill_switch_toggle(request: Request, admin: AdminIdentity = Depends(require_admin),
                              svc: DashboardServices = Depends(get_services)):
+    body = await _body(request, ModeRequest, required=True)
     before = await current_mode(svc)
     if before["readable"] and before["raw"] == body.mode:
         return {"status": "unchanged", "mode": body.mode, "changed": False}
@@ -356,7 +439,11 @@ async def kill_switch_toggle(body: ModeRequest, admin: AdminIdentity = Depends(r
                 await svc.mode_store.write_mode(TEST)
             except Exception as exc2:
                 logger.error("kill switch revert to test failed: %s", type(exc2).__name__)
-        raise HTTPException(status_code=500, detail="the ledger write failed; the mode change was not kept")
+                raise HTTPException(status_code=500, detail="the ledger write failed and the revert to test also failed; "
+                                                            "the ConfigMap may still say enforce, check it now")
+            raise HTTPException(status_code=500, detail="the ledger write failed; the mode was reverted to test")
+        raise HTTPException(status_code=500, detail="the mode was changed to test but the audit entry is missing "
+                                                    "from the ledger")
     return {"status": "changed", "mode": body.mode, "changed": True, "actor": admin.actor, "ledger_id": ledger_id}
 
 

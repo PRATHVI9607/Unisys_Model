@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 STEP_REQUESTED = "approval_requested"
 STEP_APPROVED = "approved"
 STEP_REJECTED = "rejected"
+STEP_DRY_RUN_APPROVED = "dry_run_approved"   # a dry run request was queued; does not close the incident
 STEP_MODE_CHANGE = "mode_change"
 HUMAN_DECISIONS = frozenset({"human_patch", "human_contain"})
 

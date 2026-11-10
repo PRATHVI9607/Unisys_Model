@@ -133,6 +133,17 @@ def build_incident(
                            ("ledger scores", scores), ("security event", security_event),
                            ("health event", health_event)),
         },
+        "dry_run_approvals": [
+            {
+                "sequence": r.get("sequence"),
+                "timestamp": r.get("timestamp"),
+                "approved_by": (r.get("payload") or {}).get("approved_by"),
+                "action": (r.get("payload") or {}).get("action"),
+                "mode": (r.get("payload") or {}).get("mode"),
+                "exec_stream_id": (r.get("payload") or {}).get("exec_stream_id"),
+            }
+            for r in records if r.get("step") == "dry_run_approved"
+        ],
         "timeline": [
             {
                 "sequence": r.get("sequence"),

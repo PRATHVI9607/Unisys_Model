@@ -139,10 +139,24 @@ def _t0(t0: Dict[str, Any]) -> str:
     return f"<p>Attack onset T0: {esc(ms)} ms since the epoch ({esc(iso)}), from the {esc(t0['source'])}</p>"
 
 
-def _actions(incident_id: str, status: str) -> str:
+def _dry_runs(rows: List[Dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    items = "".join(
+        f"<li>{_ts(r.get('timestamp'))}: dry-run approved by {_na(r.get('approved_by'))} "
+        f"({_na(r.get('action'))}, mode {_na(r.get('mode'))}, stream {_na(r.get('exec_stream_id'))})</li>"
+        for r in rows
+    )
+    return (f'<h3>Dry-run approvals</h3><ul>{items}</ul>'
+            '<p class="hint">A dry-run approval queued a request that changes nothing in the cluster. '
+            'The incident stays pending until it is approved while the mode is enforce, or rejected.</p>')
+
+
+def _actions(incident_id: str, status: str, dry_runs: Optional[List[Dict[str, Any]]] = None) -> str:
+    history = _dry_runs(dry_runs or [])
     if status != "pending":
-        return f'<p>Approval status: <strong>{esc(status)}</strong></p>'
-    return ('<p>Approval status: <strong>pending</strong></p>'
+        return f'<p>Approval status: <strong>{esc(status)}</strong></p>{history}'
+    return (f'<p>Approval status: <strong>pending</strong></p>{history}'
             f'<button type="button" data-action="approve" data-incident="{esc(incident_id)}">Approve</button> '
             f'<button type="button" class="danger" data-action="reject" data-incident="{esc(incident_id)}">Reject</button>')
 
@@ -166,7 +180,7 @@ def incident_page(inc: Dict[str, Any]) -> str:
         f'<p>Decision: <strong>{_na(d.get("decision"))}</strong>; adjusted score {_na(d.get("adjusted_score"), "{:.4f}")}; '
         f'tier {_na(d.get("namespace_tier"))}; dry run {_na(d.get("dry_run"))}</p>'
         f'<p>Rationale: {_na(d.get("rationale"))}</p>'
-        + _token_box() + _actions(inc["incident_id"], inc["status"]) + '</section>'
+        + _token_box() + _actions(inc["incident_id"], inc["status"], inc.get("dry_run_approvals")) + '</section>'
         '<section class="grid"><h2>Scores</h2>'
         + _score_block("Health model", sc.get("health")) + _score_block("Security model", sc.get("security")) +
         f'<div class="card"><h3>Correlation</h3>{_bar("correlation", sc.get("correlation_score"), 1.0)}'

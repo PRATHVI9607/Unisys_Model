@@ -41,10 +41,11 @@ class Harness:
         self.ledger = Ledger()
         self.mode_store = FakeModeStore(mode, **mode_kwargs)
         self.exec_requests = []
-        self.claims = set()
+        self.claims = {}            # incident_id -> claim value
         self.events = {}            # (kind, event_id) -> hash-like dict of strings
         self.enqueue_error = None
         self.claim_denied = False
+        self.claim_set_error = None
 
     def services(self) -> DashboardServices:
         async def enqueue(fields):
@@ -56,16 +57,25 @@ class Harness:
         async def claim(incident_id):
             if self.claim_denied or incident_id in self.claims:
                 return False
-            self.claims.add(incident_id)
+            self.claims[incident_id] = "claimed"
             return True
 
         async def release(incident_id):
-            self.claims.discard(incident_id)
+            self.claims.pop(incident_id, None)
+
+        async def claim_set(incident_id, value):
+            if self.claim_set_error:
+                raise self.claim_set_error
+            if incident_id in self.claims:
+                self.claims[incident_id] = value
+
+        async def claim_get(incident_id):
+            return self.claims.get(incident_id)
 
         async def fetch(kind, event_id):
             return self.events.get((kind, event_id))
 
-        return DashboardServices(self.ledger, self.mode_store, enqueue, claim, release, fetch)
+        return DashboardServices(self.ledger, self.mode_store, enqueue, claim, release, claim_set, claim_get, fetch)
 
     def steps(self, incident_id=INC):
         prefix = f"incidents/{incident_id}/"

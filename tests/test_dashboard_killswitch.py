@@ -98,14 +98,16 @@ def test_ledger_failure_reverts_enforce_to_test(client, harness, monkeypatch):
         raise OSError("minio down")
     monkeypatch.setattr(harness.ledger, "append", broken)
     r = toggle(client, "enforce", AUTH)
-    assert r.status_code == 500
+    assert r.status_code == 500 and "reverted to test" in r.text
     assert harness.mode_store.writes == ["enforce", "test"] and harness.mode_store.mode == "test"
 
 
 def test_ledger_failure_when_switching_to_test_keeps_test(client, harness, monkeypatch):
     harness.mode_store.mode = "enforce"
     monkeypatch.setattr(harness.ledger, "append", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
-    assert toggle(client, "test", AUTH).status_code == 500
+    r = toggle(client, "test", AUTH)
+    assert r.status_code == 500
+    assert "changed to test" in r.text and "audit entry is missing" in r.text      # the change was kept, say so
     assert harness.mode_store.mode == "test"
 
 
