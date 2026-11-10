@@ -234,3 +234,55 @@ def test_health_model_unavailable_still_fails_closed(monkeypatch):
     win, _ = fetch(_load("window_full"))
     agent = ha.HealthAgent(redis_url="redis://unused")
     assert run(agent._assess_health("shop", "web", {}, {}, win, "Low")) is None
+
+
+def _assess_and_publish(monkeypatch, window):
+    from agents.health_agent import agent as ha
+    import aiohttp
+
+    class Resp:
+        status = 200
+        async def json(self): return {"risk_score": 0.7, "label": "drift", "ci_width": 0.08,
+                                      "top_field": "limits.cpu"}
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+    class Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        def post(self, url, json=None, timeout=None): return Resp()
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda *a, **k: Session())
+    agent = ha.HealthAgent(redis_url="redis://unused")
+    out = run(agent._assess_health("shop", "web", {"a": 1}, {"a": 2}, window, "Low"))
+    published = {}
+
+    class R:
+        async def xadd(self, stream, payload): published.update(payload)
+        async def hset(self, *a, **k): pass
+        async def expire(self, *a, **k): pass
+
+    agent.redis = R()
+    run(agent._publish_assessment(out))
+    return out, published
+
+
+def test_missing_metrics_publish_max_ci_width_but_keep_the_assessment(monkeypatch):
+    from agents.fusion_agent.decision_policy import make_decision, DecisionInput, Decision
+    win, _ = fetch(_load("window_missing"))
+    out, pub = _assess_and_publish(monkeypatch, win)
+    assert out is not None                                      # the assessment is not dropped
+    assert float(pub["health_ci_width"]) == 1.0
+    assert json.loads(pub["metrics_missing_json"]) == win.missing
+    assert float(pub["health_risk"]) == pytest.approx(0.7)
+    # the policy cannot auto-patch on it
+    d = make_decision(DecisionInput(health_risk=0.99, health_ci_width=float(pub["health_ci_width"]),
+                                    namespace_tier="prod", mode="enforce"))
+    assert d.decision == Decision.HUMAN_PATCH
+
+
+def test_complete_window_keeps_the_models_ci_width(monkeypatch):
+    win, _ = fetch(_load("window_full"))
+    _, pub = _assess_and_publish(monkeypatch, win)
+    assert float(pub["health_ci_width"]) == pytest.approx(0.08)
+    assert json.loads(pub["metrics_missing_json"]) == []

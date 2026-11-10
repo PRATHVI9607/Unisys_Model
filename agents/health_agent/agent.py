@@ -441,7 +441,12 @@ class HealthAgent:
             "namespace_tier": namespace_tier(namespace),
             "health_risk": float(result.get("risk_score", 0.0)),
             "health_label": result.get("label", "benign"),
-            "health_ci_width": float(result.get("ci_width", 0.0)),
+            # The Health Model server drops the missing-metric mask and scores the zero-filled columns, so
+            # with any missing metric its interval is not trustworthy: publish the maximum width (the policy
+            # then treats the assessment as uncertain) and keep the flags in metrics_missing_json. The
+            # assessment itself is not dropped. The real fix is a mask-aware server (tracked for P6 or
+            # later). The http_* columns will be missing for every workload that does not export them.
+            "health_ci_width": 1.0 if missing else float(result.get("ci_width", 0.0)),
             "top_field": result.get("top_field", ""),
             "top_metric": result.get("top_metric", ""),
             "field_attribution": result.get("field_attention_weights", {}),
