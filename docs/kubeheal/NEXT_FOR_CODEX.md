@@ -5,8 +5,8 @@ Read `AGENTS.md`, `docs/kubeheal/PROJECT_SPEC.md`, `docs/kubeheal/IMPLEMENTATION
 ## Current state
 
 - Repository: `C:\My_projects_1\cLOUD\Unisys_Model`, branch `work`.
-- Last committed code: `3690c9f feat(P6): publish Falco attack onset timestamp`.
-- REV-3 fixes are ready locally; no P6 worktree is modified.
+- Latest commit: `c8931ba fix(REV-3): make mode watcher failures explicit`.
+- REV-3 fixes are committed; no P6 worktree is modified.
 - P6 was reviewed and merged from `wave/P6` to `work` as `391b8ac`. No push occurred.
 - Do not use Kubernetes or touch `hybrid-demo`; cluster tasks remain with Claude. Do not train models; P12-H is not approved.
 
