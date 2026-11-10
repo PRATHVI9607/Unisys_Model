@@ -76,7 +76,8 @@ spec:
           startupProbe:
             exec: {command: ["redis-cli", "ping"]}
             periodSeconds: 5
-            failureThreshold: 60       # AOF replay can be slow after a crash; startup probe gates liveness
+            failureThreshold: 60       # chosen, not measured: AOF replay can be slow after a crash; the startup probe gates liveness
+          # Probe timings are chosen, not measured (no Redis manifest exists under k8s/).
           readinessProbe:
             exec: {command: ["redis-cli", "ping"]}
             periodSeconds: 5

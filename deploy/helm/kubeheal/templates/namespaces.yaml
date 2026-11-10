@@ -1,11 +1,14 @@
 {{- /* S-CL-4 and P9-H2: namespaces, ResourceQuota, LimitRange. Numbers come only from values. */ -}}
-{{- if .Values.namespaces.create }}
+{{- if .Values.namespaces.createReleaseNamespace }}
 apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ include "kubeheal.namespace" . }}
   labels:
     kubeheal.io/enabled: "true"
+---
+{{- end }}
+{{- if .Values.namespaces.create }}
 {{- range $tier := splitList " " (include "kubeheal.tiers" .) }}
 ---
 apiVersion: v1

@@ -3,8 +3,10 @@ KubeHeal {{ .Chart.AppVersion }} installed in namespace {{ include "kubeheal.nam
 Kill switch mode: {{ .Values.killSwitch.mode }} (test = dry run, nothing writes to the cluster).
   kubectl -n {{ include "kubeheal.namespace" . }} patch configmap kubeheal-mode --type merge -p '{"data":{"mode":"enforce"}}'
 
+Install with: helm install kubeheal deploy/helm/kubeheal -n {{ include "kubeheal.namespace" . }} --create-namespace -f <values>
+
 Before it works end to end:
-  * Secrets created outside the chart: {{ .Values.redis.auth.existingSecret }} (key {{ .Values.redis.auth.key }}, unless redis.auth.password was passed), {{ .Values.minio.rootSecret }} and {{ .Values.minio.clientSecret }} (scripts/minio_secret.ps1).
+  * Secrets created outside the chart: {{ .Values.redis.auth.existingSecret }} (key {{ .Values.redis.auth.key }}, unless redis.auth.password was passed), {{ .Values.minio.rootSecret }} and {{ .Values.minio.clientSecret }} (scripts/minio_secret.ps1), and {{ .Values.dashboard.adminTokenSecret.name }} (key {{ .Values.dashboard.adminTokenSecret.key }}, the dashboard admin token; the dashboard pod does not start without it).
   * Images {{ .Values.global.imageRegistry }}kubeheal/*:{{ .Values.global.imageTag }} must exist on the nodes (k3d: k3d image import).
   * The Executor escalates every patch and restore until its five env values are non-empty (executor.env).
 {{- if eq .Values.hpa.mode "queue" }}

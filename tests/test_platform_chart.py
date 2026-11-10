@@ -162,7 +162,7 @@ def test_k3d_placeholders_are_labelled():
 def test_tier_namespaces_quota_limitrange(env, fixture_file):
     docs = render(env, fixture_file)
     ns = {d["metadata"]["name"]: d for d in by_kind(docs, "Namespace")}
-    assert set(ns) == {"kubeheal", *TIERS}
+    assert set(ns) == set(TIERS)    # the release namespace is created by `helm install --create-namespace`
     for t in TIERS:
         assert ns[t]["metadata"]["labels"]["kubeheal/tier"] == t
         q = get(docs, "ResourceQuota", "kubeheal-quota", t)
@@ -175,6 +175,11 @@ def test_tier_namespaces_quota_limitrange(env, fixture_file):
 def test_namespaces_create_false_keeps_policy(fixture_file):
     docs = render("prod", fixture_file, "namespaces.create=false")
     assert not by_kind(docs, "Namespace") and len(by_kind(docs, "ResourceQuota")) == 3
+
+
+def test_release_namespace_is_opt_in(fixture_file):
+    docs = render("k3d-demo", fixture_file, "namespaces.createReleaseNamespace=true")
+    assert {d["metadata"]["name"] for d in by_kind(docs, "Namespace")} == {"kubeheal", *TIERS}
 
 
 # ---- model servers ------------------------------------------------------------------------------
@@ -340,6 +345,40 @@ def test_redis_secret_created_only_when_password_given(fixture_file):
     assert get(docs, "Secret", "kubeheal-redis")["stringData"] == {"password": "testonly"}
 
 
+# ---- Dashboard -----------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("env", ENVS)
+def test_dashboard_env(env, fixture_file):
+    dep = get(render(env, fixture_file), "Deployment", "kubeheal-dashboard")
+    assert dep["spec"]["template"]["spec"]["serviceAccountName"] == "dashboard"
+    envs = {e["name"]: e for e in dep["spec"]["template"]["spec"]["containers"][0]["env"]}
+    tok = envs["KUBEHEAL_ADMIN_TOKEN"]
+    assert "value" not in tok                                  # never a literal token
+    assert tok["valueFrom"]["secretKeyRef"] == {"name": "kubeheal-dashboard-admin", "key": "token"}
+    assert "optional" not in tok["valueFrom"]["secretKeyRef"]  # the Secret is required
+    assert "KUBEHEAL_ADMIN_IDENTITY" not in envs               # optional, only when set
+    assert envs["LEDGER_BACKEND"]["value"] == "minio"
+    assert envs["MINIO_ENDPOINT"]["value"] == "minio:9000"
+    assert envs["MINIO_BUCKET"]["value"] == "kubeheal-ledger"
+    for k, key in (("MINIO_ACCESS_KEY", "access-key"), ("MINIO_SECRET_KEY", "secret-key")):
+        assert envs[k]["valueFrom"]["secretKeyRef"] == {"name": "kubeheal-minio-client", "key": key}
+    assert envs["REDIS_URL"]["value"] == "redis://:$(REDIS_PASSWORD)@redis-master:6379"
+
+
+def test_dashboard_admin_identity_and_secret_override(fixture_file):
+    docs = render("k3d-demo", fixture_file, "dashboard.adminIdentity=ops-team",
+                  "dashboard.adminTokenSecret.name=other", "dashboard.adminTokenSecret.key=k")
+    c = get(docs, "Deployment", "kubeheal-dashboard")["spec"]["template"]["spec"]["containers"][0]
+    envs = {e["name"]: e for e in c["env"]}
+    assert envs["KUBEHEAL_ADMIN_IDENTITY"]["value"] == "ops-team"
+    assert envs["KUBEHEAL_ADMIN_TOKEN"]["valueFrom"]["secretKeyRef"] == {"name": "other", "key": "k"}
+
+
+def test_chart_never_creates_the_admin_token_secret(fixture_file):
+    for d in by_kind(render("k3d-demo", fixture_file, "redis.auth.password=x"), "Secret"):
+        assert d["metadata"]["name"] == "kubeheal-redis"
+
+
 # ---- NetworkPolicy -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("env", ENVS)
@@ -425,7 +464,9 @@ def test_rbac_rendered_by_chart_matches_k8s_rbac_yaml(fixture_file):
         assert g == r, f"{_key(g)} diverges from the k8s reference"
     # Namespaces in the reference: same names and tier labels as the chart.
     ref_ns = {d["metadata"]["name"]: d["metadata"].get("labels", {}) for d in ref_docs if d["kind"] == "Namespace"}
-    got_ns = {d["metadata"]["name"]: d["metadata"].get("labels", {}) for d in by_kind(got_docs, "Namespace")}
+    got_ns = {d["metadata"]["name"]: d["metadata"].get("labels", {})
+              for d in render("k3d-demo", fixture_file, "namespaces.createReleaseNamespace=true")
+              if d["kind"] == "Namespace"}
     assert ref_ns == got_ns
     assert get(got_docs, "ConfigMap", "kubeheal-mode")["data"] == \
         next(d for d in ref_docs if d["kind"] == "ConfigMap")["data"]

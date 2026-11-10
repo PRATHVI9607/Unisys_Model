@@ -31,9 +31,15 @@ namespace: kubeheal
 
 # ---- protected namespaces and platform policy (S-CL-4) -------------------------
 namespaces:
-  # Create the Namespace objects kubeheal, prod, staging and dev. Set false if k8s/rbac/rbac.yaml
-  # was applied first (it creates the same four namespaces; do not manage them twice).
+  # Create the tier Namespace objects prod, staging and dev (label kubeheal/tier). Set false if
+  # k8s/rbac/rbac.yaml was applied first (it creates the same namespaces; do not manage them twice).
   create: true
+  # The release namespace (`kubeheal`) is NOT templated: install with
+  #   helm install kubeheal deploy/helm/kubeheal -n kubeheal --create-namespace -f <values>
+  # Helm would otherwise fail on ownership of a Namespace it did not create. Set true only for
+  # `helm template | kubectl apply` flows. Nothing in agents/ or dashboard/ reads the label
+  # kubeheal.io/enabled that k8s/rbac/rbac.yaml puts on it.
+  createReleaseNamespace: false
   # Owner decision, REQUIRED for every tier. `hard` is a ResourceQuota spec.hard map and `limits` a
   # LimitRange spec.limits list. Nothing is defaulted because no number here has been measured.
   # Shape only (not values):
@@ -142,7 +148,7 @@ executor:
   # Non-root uid and read-only root filesystem; /tmp is an emptyDir.
   securityContext:
     runAsNonRoot: true
-    runAsUser: 65532
+    runAsUser: 65532          # chosen uid, not measured: any non-zero uid works with a read-only root filesystem
     readOnlyRootFilesystem: true
   resources: {}
   extraEnv: {}
@@ -151,6 +157,13 @@ dashboard:
   image: {repository: kubeheal/dashboard}
   port: 5000
   logLevel: INFO
+  # REQUIRED Secret, created outside the chart (no token value in any values file):
+  #   kubectl -n kubeheal create secret generic kubeheal-dashboard-admin --from-literal=token=<token>
+  # Rendered as KUBEHEAL_ADMIN_TOKEN. The pod does not start without the Secret. When the token is
+  # blank the dashboard answers 503 on every mutating endpoint (toggle, approve, reject).
+  adminTokenSecret: {name: kubeheal-dashboard-admin, key: token}
+  # Optional KUBEHEAL_ADMIN_IDENTITY (who the ledger records for admin actions); rendered only when set.
+  adminIdentity: ""
   resources: {}
   extraEnv: {}
 
@@ -223,7 +236,7 @@ hpa:
     # the handler, not requests waiting for a worker. When a real gauge exists, set seriesName to it
     # and metricsQuery to a gauge expression.
     seriesName: kubeheal_model_latency_seconds_sum
-    rateWindow: 1m
+    rateWindow: 1m             # chosen, not measured
     # Optional full override of the adapter metricsQuery (adapter template syntax).
     metricsQuery: ""
     targetAverageValue: ""     # REQUIRED when mode=queue

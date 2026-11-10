@@ -212,7 +212,9 @@ spec:
             {{- include "kubeheal.extraEnv" $ex.extraEnv | nindent 12 }}
           securityContext:
 {{ toYaml (merge (deepCopy $ex.securityContext) (deepCopy $g.containerSecurityContext)) | indent 12 }}
-          # The Executor has no HTTP health route; the metrics listener starts before the stream loop.
+          # The Executor has no HTTP health route; main() starts the metrics listener before anything
+          # that touches Redis, so a TCP probe on it is not killed by a Redis outage. Probe timings are
+          # chosen, not measured (no Executor probe exists in k8s/executor-deployment.yaml).
           readinessProbe:
             tcpSocket: {port: metrics}
             periodSeconds: 10
@@ -266,11 +268,27 @@ spec:
             - {containerPort: {{ $d.port }}, name: http}
           env:
             {{- include "kubeheal.redisEnv" . | nindent 12 }}
+            - name: KUBEHEAL_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $d.adminTokenSecret.name }}
+                  key: {{ $d.adminTokenSecret.key }}
+            {{- with $d.adminIdentity }}
+            - {name: KUBEHEAL_ADMIN_IDENTITY, value: {{ . | quote }}}
+            {{- end }}
+            # Always minio: without it the dashboard logs a warning and uses its own empty in-memory ledger.
+            # It uses the same MinIO user as fusion and executor (minio.clientSecret, policy
+            # kubeheal-ledger-writer: list, get and put on the ledger bucket), which is what it needs.
+            - {name: LEDGER_BACKEND, value: minio}
+            - {name: MINIO_ENDPOINT, value: {{ .Values.minio.endpoint | quote }}}
+            - {name: MINIO_BUCKET, value: {{ .Values.minio.bucket | quote }}}
+            {{- include "kubeheal.minioClientEnv" (dict "root" .) | nindent 12 }}
             - {name: LOG_LEVEL, value: {{ $d.logLevel | quote }}}
             {{- include "kubeheal.extraEnv" $d.extraEnv | nindent 12 }}
           securityContext:
 {{ toYaml $g.containerSecurityContext | indent 12 }}
 {{- include "kubeheal.resources" $d.resources | nindent 10 }}
+          # Probe timings below: same as k8s/dashboard-deployment.yaml.
           livenessProbe:
             httpGet: {path: /health, port: {{ $d.port }}}
             initialDelaySeconds: 10
