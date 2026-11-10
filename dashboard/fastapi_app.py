@@ -572,6 +572,10 @@ async def lifespan(app: FastAPI):
     # If the ledger is misconfigured the dashboard still serves the event views; these endpoints answer 503.
     try:
         from agents.common.ledger import ledger_from_env
+        if os.getenv("LEDGER_BACKEND", "memory").strip().lower() == "memory":
+            logger.warning(
+                "LEDGER_BACKEND is not minio: the dashboard uses its own empty in-memory ledger, so it "
+                "will not see incidents written by other components and approvals are lost on restart")
         app.state.services = redis_services(
             ledger_from_env(), KubernetesModeStore(),
             lambda: dashboard.redis if dashboard else None)
