@@ -1,0 +1,21 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kubeheal-victim-app
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: victim-app
+      kubeheal.io/scrape: "true"
+  namespaceSelector:
+    matchNames:
+      - prod
+      - dev
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 5s
+      scheme: http
