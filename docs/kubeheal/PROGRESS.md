@@ -68,12 +68,12 @@ Each line: ID, goal, files, verify. "needs" lists tasks that must be done first.
 - [ ] P4-I1 size: M. Integration script/test: create an incident, ledger objects appear, deletion refused when lock is available. Verify: script on k3d. Needs: P4-L2, P4-L3, P4-L4.
 
 ### P5 Sense: real signals (touches `agents/health_agent/`, `agents/security_agent/`, `tests/fixtures/`)
-- [ ] P5-H1 size: M. Health Agent real Prometheus `query_range`, 60 steps of 5 s per pod, 15 metrics, missing metrics flagged (not 0). Files: `agents/health_agent/`. Verify: unit tests with a fake Prometheus response. Needs: none.
-- [ ] P5-H2 size: S. Fixtures and tests for P5-H1 (full window, missing metric, short window). Verify: pytest. Needs: P5-H1.
-- [ ] P5-S1 size: M. Security Agent entropy sampler: 30 samples, 2 s apart, of data written by the suspect process via `/proc/<pid>/fd` targets on the pod volume, bounded read size. Files: `agents/security_agent/`. Verify: unit test on a temp directory. Needs: none.
-- [ ] P5-S2 size: M. Falco consumer (enabled when available) and replay mode streaming recorded Falco JSON traces from files. Files: `agents/security_agent/`. Verify: test replays a fixture into the event pipeline. Needs: none.
-- [ ] P5-S3 size: S. Recorded Falco fixtures under `tests/fixtures/falco/` and a test that replay feeds the Security Model input. Verify: pytest. Needs: P5-S2.
-- [ ] P5-S4 size: S. Remove synthetic syscall fabrication from live paths (keep in tests or replay tooling). Verify: grep test that live code has no fabrication. Needs: P5-S2.
+- [~] builder-B (wave/P5) P5-H1 size: M. Health Agent real Prometheus `query_range`, 60 steps of 5 s per pod, 15 metrics, missing metrics flagged (not 0). Files: `agents/health_agent/`. Verify: unit tests with a fake Prometheus response. Needs: none.
+- [~] builder-B (wave/P5) P5-H2 size: S. Fixtures and tests for P5-H1 (full window, missing metric, short window). Verify: pytest. Needs: P5-H1.
+- [~] builder-B (wave/P5) P5-S1 size: M. Security Agent entropy sampler: 30 samples, 2 s apart, of data written by the suspect process via `/proc/<pid>/fd` targets on the pod volume, bounded read size. Files: `agents/security_agent/`. Verify: unit test on a temp directory. Needs: none.
+- [~] builder-B (wave/P5) P5-S2 size: M. Falco consumer (enabled when available) and replay mode streaming recorded Falco JSON traces from files. Files: `agents/security_agent/`. Verify: test replays a fixture into the event pipeline. Needs: none.
+- [~] builder-B (wave/P5) P5-S3 size: S. Recorded Falco fixtures under `tests/fixtures/falco/` and a test that replay feeds the Security Model input. Verify: pytest. Needs: P5-S2.
+- [~] builder-B (wave/P5) P5-S4 size: S. Remove synthetic syscall fabrication from live paths (keep in tests or replay tooling). Verify: grep test that live code has no fabrication. Needs: P5-S2.
 
 ### P6 Decide: complete policy and fusion (touches `agents/fusion_agent/`, `agents/common/`, `tests/`)
 - [ ] P6-D1 size: L. `models_ok` input to the pure policy: missing or late model response means HUMAN; per-call deadlines in Fusion. Files: `decision_policy.py` (stronger agent only), `agents/fusion_agent/`. Verify: policy tests plus timeout test.
@@ -86,14 +86,14 @@ Each line: ID, goal, files, verify. "needs" lists tasks that must be done first.
 
 ### P7 Remediation paths (touches `agents/executor/` only; write paths: stronger agent)
 Drift (canary):
-- [ ] P7-RR-1 size: L. Save rollback point; patch only drifted fields; maxUnavailable 0. Verify: unit test with a fake API.
-- [ ] P7-RR-2 size: L. Canary watch: p99 latency and CPU throttling for 3 windows; keep or roll back; escalate on rollback; each step to ledger. Needs: P7-RR-1, P4-L1.
+- [~] builder-A (wave/P7) P7-RR-1 size: L. Save rollback point; patch only drifted fields; maxUnavailable 0. Verify: unit test with a fake API.
+- [~] builder-A (wave/P7) P7-RR-2 size: L. Canary watch: p99 latency and CPU throttling for 3 windows; keep or roll back; escalate on rollback; each step to ledger. Needs: P7-RR-1, P4-L1.
 Ransomware:
-- [ ] P7-RR-3 size: L. Rolling VolumeSnapshots every 5 min, keep 12, for PVCs in protected namespaces (Executor-owned scheduler or CronJob with scoped SA). Verify: unit test of retention.
-- [ ] P7-RR-4 size: L. Quarantine: pod label plus deny-all NetworkPolicy selecting the label; forensic on-demand snapshot. Verify: unit test.
-- [ ] P7-RR-5 size: L. Scale owner to 0 and remember replicas; choose newest rolling snapshot before T0; restore a new PVC; repoint workload; redeploy with image pinned by digest; scale back. Verify: unit tests; end-to-end in P10.
-- [ ] P7-RR-6 size: L. Entropy re-check on the restored volume; lift quarantine if clean, else keep isolated and escalate. Verify: unit test. Needs: P7-RR-4, P7-RR-5.
-- [ ] P7-RR-8 size: L. From P2 review: Executor validates stream fields (action enum, pod belongs to the deployment, namespace), uses `patch_field` instead of overwriting the whole pod template, quarantine NetworkPolicy selects only the labelled pod (the interim policy uses `podSelector: {}` and quarantines the whole namespace), and trim `kubeheal-executor-write` in `k8s/rbac/rbac.yaml` to verbs actually used. Verify: unit tests plus `scripts/rbac_check.py`.
+- [~] builder-A (wave/P7) P7-RR-3 size: L. Rolling VolumeSnapshots every 5 min, keep 12, for PVCs in protected namespaces (Executor-owned scheduler or CronJob with scoped SA). Verify: unit test of retention.
+- [~] builder-A (wave/P7) P7-RR-4 size: L. Quarantine: pod label plus deny-all NetworkPolicy selecting the label; forensic on-demand snapshot. Verify: unit test.
+- [~] builder-A (wave/P7) P7-RR-5 size: L. Scale owner to 0 and remember replicas; choose newest rolling snapshot before T0; restore a new PVC; repoint workload; redeploy with image pinned by digest; scale back. Verify: unit tests; end-to-end in P10.
+- [~] builder-A (wave/P7) P7-RR-6 size: L. Entropy re-check on the restored volume; lift quarantine if clean, else keep isolated and escalate. Verify: unit test. Needs: P7-RR-4, P7-RR-5.
+- [~] builder-A (wave/P7) P7-RR-8 size: L. From P2 review: Executor validates stream fields (action enum, pod belongs to the deployment, namespace), uses `patch_field` instead of overwriting the whole pod template, quarantine NetworkPolicy selects only the labelled pod (the interim policy uses `podSelector: {}` and quarantines the whole namespace), and trim `kubeheal-executor-write` in `k8s/rbac/rbac.yaml` to verbs actually used. Verify: unit tests plus `scripts/rbac_check.py`.
 - [ ] P7-RR-7 size: M. Measure RPO and RTO on k3d and write `docs/kubeheal/results/`. Verify: results file generated by a script. Needs: P10 cluster.
 
 ### P8 Dashboard (touches `dashboard/`)
