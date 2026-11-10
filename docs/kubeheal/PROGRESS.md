@@ -147,10 +147,11 @@ Ransomware:
 
 - [ ] P10-V1 size: M. `demo/victim-app/`: small FastAPI app with prometheus_client exporting `http_requests_total` (method, path, status) and `http_request_duration_seconds` (histogram), Dockerfile, Deployment and Service for prod and dev, ServiceMonitor. Verify: unit test of the exporter; scrape on k3d in P10-V2. Needs: P9 (chart or manifests), Prometheus operator in P10-U1.
 - [ ] P10-V2 size: M. On k3d verify that each of the 15 Health Agent queries returns data for the victim Deployment and record the result per query in this file (query, series returned yes/no, sample value, date). Needs: P10-V1, P10-U1.
+- [ ] P10-U7 size: M. On k3d verify the queue-depth autoscaling chain (owner decision 2026-11-11, S-CL-1): the per-pod gauge `kubeheal_model_inflight_requests` is scraped, prometheus-adapter exposes it (`kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1/namespaces/kubeheal/pods/*/kubeheal_model_inflight_requests` returns values) and `kubectl describe hpa` shows the HPA reading it (not `<unknown>`); record the outputs here with date. Needs: P9 merge with the gauge, P10-U1 (Prometheus and adapter).
 - [ ] P10-V3 size: S. Create the VolumeSnapshotClass `csi-hostpath-snapclass` (exact name, owner decision) in `up.ps1`; check `scripts/rbac_check.py` snapshot checks once the CRD exists.
 
 ### P11 Evaluation harness (touches `eval/`, `docs/kubeheal/results/`; cluster owner runs)
-- [ ] P11-E1 size: M. k6 load test 10 to 200 simulated pods, p50 and p95 vs replicas.
+- [ ] P11-E1 size: M. k6 load test 10 to 200 simulated pods, p50 and p95 vs replicas. Also tune the queue-depth HPA target (a CHOSEN DEFAULT in the chart values, not a measurement) from the measured replicas-versus-load data.
 - [ ] P11-E2 size: M. Chaos runs (Chaos Mesh or kubectl): detection continuity, fail-closed rate.
 - [ ] P11-E3 size: M. RPO and RTO runs against a database volume. Needs: P7.
 - [ ] P11-E4 size: M. End-to-end time-to-action per stage.
