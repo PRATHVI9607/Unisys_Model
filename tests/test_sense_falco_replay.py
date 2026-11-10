@@ -153,7 +153,8 @@ def test_builder_keeps_most_recent_events_and_caps_entropy():
     ({"FALCO_MODE": "replay"}, set(), "off"),                                   # no path: say off
     ({}, {"/var/run/falco/events.jsonl"}, "live"),                              # auto, file present
     ({"FALCO_GRPC_ADDR": "unix:///run/falco/falco.sock"}, {"/run/falco/falco.sock"}, "live"),
-    ({"FALCO_REPLAY_PATH": "/t"}, {"/t"}, "replay"),                            # auto, no Falco
+    ({"FALCO_REPLAY_PATH": "/t"}, {"/t"}, "off"),                               # auto never picks replay
+    ({"FALCO_MODE": "auto", "FALCO_REPLAY_PATH": "/t"}, {"/t"}, "off"),
     ({"FALCO_REPLAY_PATH": "/t"}, set(), "off"),
     ({}, set(), "off"),
     ({"FALCO_ENABLED": "true"}, set(), "live"),                                 # legacy flag forces live
@@ -275,3 +276,119 @@ def test_agent_entropy_checks_do_not_block_and_are_deduplicated_per_pid(monkeypa
         await asyncio.sleep(0)
         assert ag._checks == {}
     asyncio.run(go())
+
+
+def test_replay_is_only_reachable_with_explicit_mode():
+    env = {"FALCO_REPLAY_PATH": str(RANSOM)}
+    for mode_env in ({}, {"FALCO_MODE": "auto"}, {"FALCO_ENABLED": "false"}, {"FALCO_ENABLED": "true"}):
+        mode, _ = fc.resolve_falco_mode({**env, **mode_env}, exists=lambda p: p == str(RANSOM))
+        assert mode != "replay", mode_env
+    assert fc.resolve_falco_mode({**env, "FALCO_MODE": "replay"})[0] == "replay"
+
+
+# ---- gRPC priority mapping ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value,expected", [
+    ("Critical", "critical"), ("CRITICAL", "critical"), ("Warning", "warning"), ("", ""),
+    (2, "critical"), ("2", "critical"), (4, "warning"), (0, "emergency"), (7, "debug"),
+    (99, ""), (None, ""),
+])
+def test_priority_name_accepts_name_or_number(value, expected):
+    assert fc.priority_name(value) == expected
+
+
+def test_priority_name_prefers_the_protobuf_enum_descriptor():
+    class V:                      # stands in for an EnumValueDescriptor
+        def __init__(self, name): self.name = name
+
+    class Enum:
+        values_by_number = {3: V("CRITICAL")}     # deliberately differs from the fallback table
+
+    assert fc.priority_name(3, Enum) == "critical"
+    assert fc.priority_name(2, Enum) == "critical"        # not in the descriptor: falls back to the table
+
+
+def _grpc_resp(priority, with_descriptor=False):
+    class Resp:
+        rule = "KubeHeal Ransom Note Dropped"
+        time = "2026-11-10T09:30:00Z"
+        output_fields = {"evt.type": "openat", "proc.pid": "4242", "fd.name": "/data/DECRYPT_FILES.txt",
+                         "k8s.pod.name": "p", "k8s.ns.name": "demo"}
+    r = Resp()
+    r.priority = priority
+    if with_descriptor:
+        class V:
+            def __init__(self, name): self.name = name
+
+        class Enum:
+            values_by_number = {5: V("CRITICAL")}
+
+        class Field:
+            enum_type = Enum
+
+        class Desc:
+            fields_by_name = {"priority": Field}
+        r.DESCRIPTOR = Desc
+    return r
+
+
+@pytest.mark.parametrize("priority", [2, "CRITICAL", "Critical", "2"])
+def test_grpc_response_priority_is_the_enum_name_and_triggers_the_note_rule(priority):
+    evt = fc._event_from_grpc_response(_grpc_resp(priority))
+    assert evt["priority"] == "critical" and evt["pid"] == 4242
+    assert FalcoWindowTracker(clock=lambda: 0.0).add(evt) is not None   # critical rule fires on its own
+
+
+def test_grpc_response_uses_its_own_descriptor_when_present():
+    assert fc._event_from_grpc_response(_grpc_resp(5, with_descriptor=True))["priority"] == "critical"
+
+
+def test_grpc_numeric_priority_is_not_compared_as_str_of_a_number():
+    evt = fc._event_from_grpc_response(_grpc_resp(4))      # 4 = warning, must not trigger alone
+    assert evt["priority"] == "warning"
+    assert FalcoWindowTracker(clock=lambda: 0.0).add(evt) is None
+
+
+# ---- uncertainty of events without a model score -----------------------------------------------------
+
+def _publish_heuristic_only(monkeypatch, tmp_path, events_present, model_up):
+    from agents.security_agent.entropy_sampler import EntropySampler, ProcFdReader
+    ag, calls = _agent(monkeypatch, tmp_path, BENIGN, EntropySampler(ProcFdReader(str(tmp_path))))
+    ag.redis.kv["kubeheal:pid:99"] = json.dumps({"pid": 99, "pod": "p", "namespace": "prod"})
+    ag.inotify_watcher.check_rename_burst = lambda events=None: 0.5      # heuristic floor 0.60 >= observe
+
+    async def down(evts, series, signals):
+        return None
+    if not model_up:
+        monkeypatch.setattr(ag, "_call_security_model", down)
+
+    async def go():
+        evs = events(RANSOM)[:15] if events_present else None
+        await ag._trigger_entropy_check(99, evs, "replay" if events_present else "none")
+        await asyncio.gather(*list(ag._checks.values()))
+    asyncio.run(go())
+    return ag.redis.streams[0][1]
+
+
+def test_heuristic_only_event_has_max_ci_width_and_cannot_auto_contain(monkeypatch, tmp_path):
+    from agents.fusion_agent.decision_policy import make_decision, DecisionInput, Decision
+    p = _publish_heuristic_only(monkeypatch, tmp_path, events_present=False, model_up=True)
+    assert p["model_scored"] == "false" and p["syscall_source"] == "none"
+    assert float(p["sec_ci_width"]) >= 1.0
+    # even at the highest risk the policy sees an uncertain event: human, never AUTO_CONTAIN
+    out = make_decision(DecisionInput(sec_risk=0.99, sec_label=p["sec_label"],
+                                      sec_ci_width=float(p["sec_ci_width"]),
+                                      namespace_tier="prod", mode="enforce"))
+    assert out.decision != Decision.AUTO_CONTAIN and out.decision == Decision.HUMAN_CONTAIN
+    assert out.dry_run is False
+
+
+def test_event_with_unreachable_model_has_max_ci_width(monkeypatch, tmp_path):
+    p = _publish_heuristic_only(monkeypatch, tmp_path, events_present=True, model_up=False)
+    assert p["model_scored"] == "false" and p["syscall_source"] == "replay"
+    assert float(p["sec_ci_width"]) >= 1.0
+
+
+def test_model_scored_event_keeps_the_models_ci_width(monkeypatch, tmp_path):
+    p = _publish_heuristic_only(monkeypatch, tmp_path, events_present=True, model_up=True)
+    assert p["model_scored"] == "true" and float(p["sec_ci_width"]) == pytest.approx(0.1)

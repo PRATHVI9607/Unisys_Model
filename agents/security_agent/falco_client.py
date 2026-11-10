@@ -25,8 +25,9 @@ check, publish) is identical to live mode. Use it on machines where Falco cannot
 Docker Desktop) and in tests. Mode selection (`resolve_falco_mode`), env:
 
   FALCO_MODE         auto (default) | live | replay | off
-                     auto: live if the JSON events file or the gRPC unix socket exists, else replay if
-                     FALCO_REPLAY_PATH exists, else off.
+                     auto: live if the JSON events file or the gRPC unix socket exists, else off.
+                     auto NEVER selects replay: recorded events must be asked for explicitly with
+                     FALCO_MODE=replay, so a missing Falco cannot silently turn into canned data.
   FALCO_ENABLED      legacy flag. Used only when FALCO_MODE is unset: "true" forces live. "false" (the value
                      the current manifest sets) is treated as auto so Falco is used when it is there; set
                      FALCO_MODE=off to switch Falco input off explicitly.
@@ -65,6 +66,47 @@ RULE_SYSCALL_FALLBACK = (
 )
 
 
+# Falco gRPC Outputs API: `priority` is a protobuf enum, so resp.priority is an int. The names below mirror
+# Falco's schema.proto (EMERGENCY=0 ... DEBUG=7, the same order as falco_common's priority_type). The repo
+# has no generated stubs to check them against, so when the response object carries its own enum
+# descriptor that is used first (see `priority_name`); this table is only the fallback.
+FALCO_PRIORITY_BY_NUMBER = {
+    0: "emergency", 1: "alert", 2: "critical", 3: "error",
+    4: "warning", 5: "notice", 6: "informational", 7: "debug",
+}
+
+
+def priority_name(value, enum_type=None) -> str:
+    """Lower-case priority NAME for a Falco priority given as a name ("Critical", "CRITICAL") or as an enum
+    number (int or digit string). `enum_type` is an optional protobuf EnumDescriptor whose
+    `values_by_number` wins over the fallback table. Unknown numbers give "" (never a guess)."""
+    if isinstance(value, str) and not value.strip().lstrip("-").isdigit():
+        return value.strip().lower()
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if enum_type is not None:
+        try:
+            return enum_type.values_by_number[n].name.lower()
+        except (KeyError, AttributeError):
+            pass
+    return FALCO_PRIORITY_BY_NUMBER.get(n, "")
+
+
+def _event_from_grpc_response(resp) -> Optional[Dict]:
+    """Falco gRPC response -> normalised event. The enum name, not str(number), goes into `priority`."""
+    enum_type = None
+    try:
+        enum_type = resp.DESCRIPTOR.fields_by_name["priority"].enum_type
+    except (AttributeError, KeyError):
+        pass
+    return _normalise({"rule": resp.rule,
+                       "priority": priority_name(resp.priority, enum_type),
+                       "time": str(resp.time),
+                       "output_fields": dict(resp.output_fields)})
+
+
 def _normalise(evt: Dict) -> Optional[Dict]:
     """Map a Falco JSON event → KubeHeal's normalised event."""
     of = evt.get("output_fields", evt)
@@ -86,7 +128,7 @@ def _normalise(evt: Dict) -> Optional[Dict]:
         "namespace": of.get("k8s.ns.name") or "default",
         "fd_path": of.get("fd.name") or of.get("fd.path") or "",
         "rule": evt.get("rule", ""),
-        "priority": (evt.get("priority") or "").lower(),
+        "priority": priority_name(evt.get("priority") or ""),
         "ts": evt.get("time") or of.get("evt.time") or "",
     }
 
@@ -134,9 +176,7 @@ async def _stream_grpc(addr: str) -> AsyncIterator[Dict]:
         logger.info(f"Falco gRPC stream connected: {target}")
         async for resp in stub.sub(OutputsRequest()):
             try:
-                fields = dict(resp.output_fields)
-                yield _normalise({"rule": resp.rule, "priority": str(resp.priority),
-                                  "time": str(resp.time), "output_fields": fields}) or {}
+                yield _event_from_grpc_response(resp) or {}
             except Exception:
                 continue
 
@@ -204,7 +244,8 @@ async def replay_stream(path: str, delay_s: float = 0.0,
 
 
 def resolve_falco_mode(env=None, exists: Callable[[str], bool] = os.path.exists) -> Tuple[str, str]:
-    """(mode, reason) with mode one of live, replay, off. Pure apart from `exists`, for tests."""
+    """(mode, reason) with mode one of live, replay, off. Pure apart from `exists`, for tests.
+    Replay is reachable only with FALCO_MODE=replay, never through auto."""
     env = os.environ if env is None else env
     mode = (env.get("FALCO_MODE") or "").strip().lower()
     if not mode:
@@ -215,14 +256,20 @@ def resolve_falco_mode(env=None, exists: Callable[[str], bool] = os.path.exists)
     if mode in ("off", "live"):
         return mode, f"FALCO_MODE/FALCO_ENABLED = {mode}"
     if mode == "replay":
-        return ("replay", "FALCO_MODE=replay") if replay_path else             ("off", "FALCO_MODE=replay but FALCO_REPLAY_PATH is not set")
+        if replay_path:
+            return "replay", "FALCO_MODE=replay"
+        return "off", "FALCO_MODE=replay but FALCO_REPLAY_PATH is not set"
     if mode != "auto":
         return "off", f"unknown FALCO_MODE {mode!r}"
-    sock = grpc_addr[len("unix://"):] if grpc_addr.startswith("unix://") else         grpc_addr if grpc_addr.startswith("/") else ""
+    if grpc_addr.startswith("unix://"):
+        sock = grpc_addr[len("unix://"):]
+    elif grpc_addr.startswith("/"):
+        sock = grpc_addr
+    else:
+        sock = ""
     if exists(events_path):
         return "live", f"auto: Falco JSON output {events_path} exists"
     if sock and exists(sock):
         return "live", f"auto: Falco gRPC socket {sock} exists"
-    if replay_path and exists(replay_path):
-        return "replay", f"auto: Falco not found, replaying {replay_path}"
-    return "off", "auto: no Falco output and no FALCO_REPLAY_PATH; using the /proc write tracker only"
+    return "off", ("auto: no Falco output found; using the /proc write tracker only "
+                   "(set FALCO_MODE=replay and FALCO_REPLAY_PATH to replay a recorded trace)")

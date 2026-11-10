@@ -426,6 +426,7 @@ class SecurityAgent:
         pod = pid_info.get("pod") or "unknown"
         namespace = pid_info.get("namespace", "default")
         event_id = f"sec-{datetime.utcnow().strftime('%Y%m%d-%H%M%S-%f')}-{pod}"
+        model_scored = bool(sec)
         sec = sec or {}
 
         sec_label = label or sec.get("label") or (
@@ -441,7 +442,10 @@ class SecurityAgent:
             "namespace_tier": namespace_tier(namespace),
             "sec_risk": f"{risk_score:.4f}",
             "sec_label": sec_label,
-            "sec_ci_width": f"{float(sec.get('ci_width', 0.0)):.4f}",
+            # No model score (heuristic-only, or the Security Model was unreachable) must never look
+            # certain: publish the maximum width so the decision policy treats the event as uncertain and
+            # cannot reach AUTO_CONTAIN from it. The model's own width is used only when it scored.
+            "sec_ci_width": f"{float(sec.get('ci_width', 1.0)) if model_scored else 1.0:.4f}",
             "top_syscall": sec.get("top_syscall", ""),
             "syscall_attribution_json": json.dumps(sec.get("syscall_attention_weights", {})),
             "entropy_spike_json": json.dumps(sec.get("entropy_spike", {})),
