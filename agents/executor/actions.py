@@ -74,9 +74,10 @@ async def contain(gate, core_api, networking_api, namespace: str, pod: str) -> s
             raise
         except Exception as e:
             if "already exists" not in str(e).lower() and "conflict" not in str(e).lower():
-                logger.warning(f"quarantine policy: {e}")
-            else:
-                done.append(planned[0])
+                # Containment without isolation is not containment: stop before deleting the pod.
+                logger.error(f"quarantine policy failed for {namespace}/{pod}: {e}")
+                return f"contain_failed:quarantine_policy:{e}"
+            done.append(planned[0])
         await _write(gate, namespace, planned[1], core_api.delete_namespaced_pod,
                      pod, namespace, grace_period_seconds=0)
         done.append(planned[1])

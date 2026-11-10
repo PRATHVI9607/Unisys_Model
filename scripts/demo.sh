@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # KubeHeal v4 — guided demo driver.
-# Two scenarios: (A) config drift -> AUTO-PATCH, (B) ransomware -> AUTO-KILL.
+# Two scenarios: (A) config drift -> AUTO-PATCH, (B) ransomware -> AUTO-CONTAIN.
 # The visible action happens on the DASHBOARD, so this script also brings up the
 # port-forward and (optionally) seeds baseline events so the screen is never blank.
 #
@@ -103,7 +103,7 @@ if [ -f "$ROOT/chaos/chaos-pods.yaml" ]; then
   ok "applied. Watch the dashboard:"
   echo "   - rename burst -> entropy climbs to ~7.7 bits -> sec_risk high"
   echo "   - DCM correlation high (CPU thrash looks like drift) = compound incident"
-  echo "   - compound  ->  AUTO-KILL in <8s, see the causal chain in the event detail"
+  echo "   - compound  ->  AUTO-CONTAIN in <8s, see the causal chain in the event detail"
 fi
 
 echo ""

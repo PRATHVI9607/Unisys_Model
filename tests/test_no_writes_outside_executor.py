@@ -17,10 +17,12 @@ ALLOWED = ROOT / "agents" / "executor"
 EXTRA_ALLOWED = {ROOT / "chaos" / "ransomware-simulator.py"}
 
 WRITE_CALL = re.compile(
-    r"^(create|patch|delete|replace|deletecollection)_"
+    r"^(create|patch|delete|replace|deletecollection|delete_collection)_"
     r"(namespaced_\w+|namespace|node|persistent_volume\w*|cluster_\w+|custom_object\w*|"
-    r"\w+_for_all_namespaces)$"
+    r"\w+_for_all_namespaces|collection_\w+)$"
 )
+# Generic client entry points can issue any verb, so they are treated as writes too.
+RAW_CALLS = {"call_api"}
 KILL_CALLS = {("os", "kill"), ("os", "killpg")}
 
 
@@ -40,7 +42,7 @@ def _violations(path: Path):
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             name = node.func.attr
-            if WRITE_CALL.match(name):
+            if WRITE_CALL.match(name) or name in RAW_CALLS:
                 yield node.lineno, name
             base = node.func.value
             if isinstance(base, ast.Name) and (base.id, name) in KILL_CALLS:
@@ -60,9 +62,9 @@ def test_no_kubernetes_writes_or_kills_outside_executor():
 def test_detector_catches_a_violation(tmp_path):
     f = tmp_path / "x.py"
     f.write_text("async def a(api):\n    await api.patch_namespaced_deployment('d','n',{})\n"
-                 "import os\nos.kill(1, 9)\n")
+                 "import os\nos.kill(1, 9)\napi.call_api('/x', 'DELETE')\n")
     names = [n for _, n in _violations(f)]
-    assert "patch_namespaced_deployment" in names and "os.kill" in names
+    assert {"patch_namespaced_deployment", "os.kill", "call_api"} <= set(names)
 
 
 def test_executor_package_exists():

@@ -23,6 +23,15 @@ end
 """
 
 
+_EXTEND_IF_OWNER = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("expire", KEYS[1], ARGV[2])
+else
+    return 0
+end
+"""
+
+
 @asynccontextmanager
 async def acquire_incident_lock(redis, namespace: str, pod_name: str, token: str = None):
     """
@@ -40,7 +49,7 @@ async def acquire_incident_lock(redis, namespace: str, pod_name: str, token: str
         yield False
         return
 
-    hb = asyncio.create_task(_heartbeat(redis, lock_key))
+    hb = asyncio.create_task(_heartbeat(redis, lock_key, token))
     try:
         yield True
     finally:
@@ -55,10 +64,12 @@ async def acquire_incident_lock(redis, namespace: str, pod_name: str, token: str
             pass
 
 
-async def _heartbeat(redis, lock_key: str):
+async def _heartbeat(redis, lock_key: str, token: str):
     while True:
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
         try:
-            await redis.expire(lock_key, LOCK_TTL_SECONDS)
+            # Extend only our own lock: after a TTL expiry another replica may own the key.
+            if not await redis.eval(_EXTEND_IF_OWNER, 1, lock_key, token, LOCK_TTL_SECONDS):
+                return
         except Exception:
             return

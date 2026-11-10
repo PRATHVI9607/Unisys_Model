@@ -388,8 +388,8 @@ class HealthAgent:
         blast_radius: str,
     ) -> Optional[Dict]:
         """Score the drift with the v4 Health Model server. Returns a v4 dict
-        (the schema the Fusion Agent + dashboard consume), or a heuristic
-        fallback if the server is unreachable."""
+        (the schema the Fusion Agent + dashboard consume), or None when the
+        server is unreachable or not ready (fail closed, no heuristic score)."""
         import aiohttp
 
         payload = {
@@ -415,19 +415,12 @@ class HealthAgent:
         event_id = f"health-{datetime.utcnow().strftime('%Y%m%d-%H%M%S-%f')}-{name}"
 
         if result is None:
-            # local heuristic fallback → still emit the v4 schema
-            local = self._local_assessment(new_spec, {})
-            return {
-                "event_id": event_id, "namespace": namespace, "pod_name": name,
-                "deployment": name,
-                "namespace_tier": namespace_tier(namespace),
-                "health_risk": float(local["risk_score"]),
-                "health_label": local.get("model_used", "heuristic"),
-                "health_ci_width": 1.0,            # unknown → max uncertainty
-                "top_field": "", "field_attribution": {},
-                "health_embedding": [], "patch_proposal": local.get("patch_proposal"),
-                "blast_radius": blast_radius, "inference_method": "heuristic_fallback",
-            }
+            # Fail closed (P1 review): no model score means no assessment. The old local heuristic
+            # could emit risk 0.85 without a model, which can lead to an automatic action. The next
+            # drift event for this workload is assessed again because no cooldown is set.
+            logger.error(f"Health Model unavailable for {namespace}/{name}; "
+                         "no assessment published (fail closed)")
+            return None
 
         return {
             "event_id": event_id, "namespace": namespace, "pod_name": name,

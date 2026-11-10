@@ -10,6 +10,7 @@ ransomware remediation paths.
 """
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -140,7 +141,9 @@ class ExecutorService:
         await self.redis.xadd(ACTIONS_STREAM, {
             "incident_id": f.get("incident_id", ""),
             "action_type": f"executed_{f.get('action', 'unknown')}",
-            "target": f'{{"namespace": "{f.get("namespace", "")}", "deployment": "{f.get("deployment", "")}"}}',
+            "target": json.dumps({"namespace": f.get("namespace", ""),
+                                  "deployment": f.get("deployment", ""),
+                                  "pod": f.get("pod", "")}),
             "outcome": outcome,
             "approved_by": f.get("approved_by", ""),
             "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),

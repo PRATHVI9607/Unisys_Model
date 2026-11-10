@@ -143,7 +143,7 @@ fully-unit-tested decision function**:
 Executed under a **heartbeat incident lock** (10s TTL, 3s refresh) — a crash
 mid-incident frees the lock in ≤10s instead of v3's 30s gap.
 
-**Decisions:** `AUTO-KILL` · `AUTO-PATCH` · `HUMAN-KILL/PATCH` · `OBSERVE` · `BENIGN`.
+**Decisions:** `AUTO-CONTAIN` · `AUTO-PATCH` · `HUMAN-CONTAIN/PATCH` · `OBSERVE` · `BENIGN`.
 
 ---
 

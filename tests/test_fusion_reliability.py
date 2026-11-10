@@ -36,11 +36,13 @@ class FakeRedis:
         self.store[k] = v
         return True
 
-    async def eval(self, script, n, key, token):
-        if self.store.get(key) == token:
-            del self.store[key]
+    async def eval(self, script, n, key, token, *extra):
+        if self.store.get(key) != token:
+            return 0
+        if "expire" in script:
             return 1
-        return 0
+        del self.store[key]
+        return 1
 
 
 def run(c):
@@ -101,3 +103,39 @@ def test_contain_naming_everywhere():
     assert not hasattr(dp.Decision, "AUTO_KILL")
     assert not hasattr(dp.Thresholds, "RANSOMWARE_DIRECT_KILL")
     assert hasattr(dp, "CB_CONTAIN_LIMIT_PER_HOUR")
+
+
+# ---- P1 review fixes: circuit breaker accounting and pod target ----
+from types import SimpleNamespace
+
+
+def _out(decision, dry_run):
+    return SimpleNamespace(decision=decision, dry_run=dry_run, adjusted_score=0.9, rationale="t",
+                           action_params={})
+
+
+def _inp():
+    return SimpleNamespace(health_field_top="", namespace_tier="prod")
+
+
+def test_dry_run_does_not_use_circuit_breaker_budget():
+    a = agent_with_fake_redis()
+    run(a._execute("prod", "web", "web-abc-1", _out(dp.Decision.AUTO_CONTAIN, True), _inp(), []))
+    run(a._execute("prod", "web", "", _out(dp.Decision.AUTO_PATCH, True), _inp(), []))
+    assert a.redis.store.get("kubeheal:cb:contain:prod") is None
+    assert a.redis.store.get("kubeheal:cb:patch:prod:web") is None
+
+
+def test_enforced_actions_count_after_queueing():
+    a = agent_with_fake_redis()
+    run(a._execute("prod", "web", "web-abc-1", _out(dp.Decision.AUTO_CONTAIN, False), _inp(), []))
+    run(a._execute("prod", "web", "", _out(dp.Decision.AUTO_PATCH, False), _inp(), []))
+    assert int(a.redis.store["kubeheal:cb:contain:prod"]) == 1
+    assert int(a.redis.store["kubeheal:cb:patch:prod:web"]) == 1
+
+
+def test_contain_without_pod_is_not_queued():
+    a = agent_with_fake_redis()
+    run(a._execute("prod", "web", "", _out(dp.Decision.AUTO_CONTAIN, False), _inp(), []))
+    assert a.redis.store.get("kubeheal:cb:contain:prod") is None
+    assert not any(s == fusion.EXEC_STREAM for s, _ in getattr(a.redis, "added", []))

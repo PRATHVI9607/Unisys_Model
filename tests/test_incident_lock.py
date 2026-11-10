@@ -9,9 +9,10 @@ class FakeRedis:
         if nx and k in self.store: return None
         self.store[k]=v; return True
     async def expire(self,k,ttl): return k in self.store
-    async def eval(self,script,n,key,token):
-        if self.store.get(key)==token: del self.store[key]; return 1
-        return 0
+    async def eval(self,script,n,key,token,*extra):
+        if self.store.get(key)!=token: return 0
+        if "expire" in script: return 1      # extend-if-owner
+        del self.store[key]; return 1        # delete-if-owner
 
 def test_lock_acquire_release():
     async def run():
@@ -42,4 +43,24 @@ def test_lock_released_on_exception():
         except ValueError:
             pass
         assert "kubeheal:incident-lock:prod:podC" not in r.store
+    asyncio.run(run())
+
+
+def test_heartbeat_extends_only_own_lock(monkeypatch):
+    import agents.fusion_agent.incident_lock as il
+    monkeypatch.setattr(il, "HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    async def run():
+        r=FakeRedis()
+        calls=[]
+        orig=r.eval
+        async def spy(script,n,key,token,*extra):
+            calls.append(("expire" in script, token)); return await orig(script,n,key,token,*extra)
+        r.eval=spy
+        r.store["k"]="mine"
+        t=asyncio.create_task(il._heartbeat(r,"k","mine"))
+        await asyncio.sleep(0.05)
+        assert any(c[0] for c in calls)          # extended while we own it
+        r.store["k"]="other"                      # TTL expired, another replica took the lock
+        await asyncio.wait_for(t, timeout=1)      # heartbeat stops instead of extending theirs
+        assert r.store["k"]=="other"
     asyncio.run(run())

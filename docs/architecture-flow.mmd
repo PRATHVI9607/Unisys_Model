@@ -124,7 +124,7 @@ flowchart TB
 %% ─────────────── DECISIONS ───────────────
     subgraph DEC["🎬 &nbsp;ACTIONS"]
         direction LR
-        A1["🛑 <b>AUTO-KILL</b><br/>pod del + PV quarantine"]
+        A1["🛑 <b>AUTO-CONTAIN</b><br/>pod del + PV quarantine"]
         A2["🩹 <b>AUTO-PATCH</b><br/>canary kubectl patch"]
         A3["🙋 <b>HUMAN</b><br/>kill / patch approval"]
         A4["👁️ <b>OBSERVE</b><br/>monitor ×3"]

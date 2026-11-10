@@ -29,7 +29,7 @@ Falco syscalls + entropy ─► SECURITY MODEL (Transformer + Conv1D-SE) ─► 
                                        both embeddings ─► DCM ─► correlation_score ────────┤
                                        all signals ─► INTERPRETATION ─► SHAP + NL summary  │
                                        all signals ─► FUSION AGENT (3-signal policy) ◄──────┘
-                                                       └► AUTO-KILL / AUTO-PATCH / HUMAN / OBSERVE / BENIGN
+                                                       └► AUTO-CONTAIN / AUTO-PATCH / HUMAN / OBSERVE / BENIGN
 ```
 
 | Model | Inputs | Encoders | Output |
@@ -46,8 +46,8 @@ Falco syscalls + entropy ─► SECURITY MODEL (Transformer + Conv1D-SE) ─► 
 
 | Condition | Action |
 |-----------|--------|
-| compound + `sec_adj ≥ 0.85` | **AUTO-KILL** (compound) |
-| `sec_adj ≥ 0.85` (security only) | **AUTO-KILL** |
+| compound + `sec_adj ≥ 0.85` | **AUTO-CONTAIN** (compound) |
+| `sec_adj ≥ 0.85` (security only) | **AUTO-CONTAIN** |
 | `health_adj ≥ 0.85` and `sec_risk < 0.4` | **AUTO-PATCH** (canary) |
 | `max(adj) ≥ 0.65` | **HUMAN** approval |
 | `max(adj) ≥ 0.40` | **OBSERVE** |

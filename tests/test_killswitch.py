@@ -190,6 +190,27 @@ def test_enforce_runs_all_steps():
     assert net.created == ["prod"] and core.deleted == ["web-1"]
 
 
+def test_quarantine_failure_does_not_delete_the_pod():
+    class BadNet(Net):
+        async def create_namespaced_network_policy(self, ns, body):
+            raise RuntimeError("forbidden: cannot create networkpolicies")
+
+    core = Core()
+    out = run(actions.contain(Gate(99), core, BadNet(), "prod", "web-1"))
+    assert out.startswith("contain_failed:quarantine_policy")
+    assert core.deleted == []
+
+
+def test_quarantine_already_exists_still_proceeds():
+    class DupNet(Net):
+        async def create_namespaced_network_policy(self, ns, body):
+            raise RuntimeError("networkpolicies already exists")
+
+    core = Core()
+    assert run(actions.contain(Gate(99), core, DupNet(), "prod", "web-1")) == "contained"
+    assert core.deleted == ["web-1"]
+
+
 # ---- Executor integration ---------------------------------------------------------------
 class Redis:
     def __init__(self):
@@ -277,8 +298,15 @@ def _cluster_ok():
 
 
 def _patch_mode(value):
-    _kubectl("-n", "kubeheal", "patch", "cm", "kubeheal-mode", "--type", "merge", "-p",
-             json.dumps({"data": {"mode": value}}))
+    r = _kubectl("-n", "kubeheal", "patch", "cm", "kubeheal-mode", "--type", "merge", "-p",
+                 json.dumps({"data": {"mode": value}}))
+    assert r.returncode == 0, r.stderr
+
+
+def _ns_label(ns):
+    r = _kubectl("get", "ns", ns, "-o", "json")
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)["metadata"].get("labels", {}).get("kubeheal/mode")
 
 
 @pytest.mark.skipif(not _cluster_ok(), reason="k3d-kubeheal cluster not reachable")
@@ -301,6 +329,7 @@ def test_live_watch_follows_configmap_without_polling():
 
         original = json.loads(_kubectl("-n", "kubeheal", "get", "cm", "kubeheal-mode",
                                        "-o", "json").stdout)["data"]["mode"]
+        original_label = _ns_label("prod")      # restored exactly as found
         try:
             _patch_mode("test")
             assert await wait_for("test") is not None
@@ -308,12 +337,16 @@ def test_live_watch_follows_configmap_without_polling():
             assert await wait_for("enforce") is not None
             _patch_mode("test")
             assert await wait_for("test") is not None
-            _kubectl("label", "ns", "prod", "kubeheal/mode=test", "--overwrite")
+            r = _kubectl("label", "ns", "prod", "kubeheal/mode=test", "--overwrite")
+            assert r.returncode == 0, r.stderr
             _patch_mode("enforce")
             await asyncio.sleep(2)
             assert w.mode_for("prod") == "test" and w.mode_for("staging") == "enforce"
         finally:
-            _kubectl("label", "ns", "prod", "kubeheal/mode-")
+            if original_label is None:
+                _kubectl("label", "ns", "prod", "kubeheal/mode-")
+            else:
+                _kubectl("label", "ns", "prod", f"kubeheal/mode={original_label}", "--overwrite")
             _patch_mode(original)
             await w.stop()
             await api.close()

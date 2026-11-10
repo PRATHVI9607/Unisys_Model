@@ -163,7 +163,8 @@ class FusionAgentV4:
         namespace, workload = key.split(":", 1)
         health = health or {}
         sec = sec or {}
-        pod = sec.get("pod_name") or health.get("pod_name") or workload
+        # Only a security event names a real pod. Health events set pod_name to the Deployment name.
+        pod = sec.get("pod_name") or ""
 
         health_risk = float(health.get("health_risk", 0) or 0)
         sec_risk = float(sec.get("sec_risk", 0) or 0)
@@ -219,13 +220,22 @@ class FusionAgentV4:
         incident_id = f"inc-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
         # The Fusion Agent never calls the Kubernetes API. Automatic actions are queued for the
         # Executor, the only component with write permissions (S-EX-1).
-        if out.decision == Decision.AUTO_CONTAIN:
-            await self._cb_incr(f"kubeheal:cb:contain:{namespace}")
+        # Circuit breakers count real automatic actions only: increment after the request is queued
+        # (a failed enqueue or a retry does not double count) and never for dry runs, otherwise
+        # test mode would use up the budget before the switch to enforce.
+        if out.decision == Decision.AUTO_CONTAIN and not pod:
+            logger.error(f"AUTO_CONTAIN for {namespace}/{workload} without a pod from a security event; "
+                         "not queued")
+            outcome = "not_queued_no_pod"
+        elif out.decision == Decision.AUTO_CONTAIN:
             await self._enqueue_exec(incident_id, "contain", namespace, workload, pod, out, inp)
+            if not out.dry_run:
+                await self._cb_incr(f"kubeheal:cb:contain:{namespace}")
             outcome = "queued_for_executor"
         elif out.decision == Decision.AUTO_PATCH:
-            await self._cb_incr(f"kubeheal:cb:patch:{namespace}:{workload}")
             await self._enqueue_exec(incident_id, "patch", namespace, workload, pod, out, inp)
+            if not out.dry_run:
+                await self._cb_incr(f"kubeheal:cb:patch:{namespace}:{workload}")
             outcome = "queued_for_executor"
         await self.redis.xadd(ACTIONS_STREAM, {
             "incident_id": incident_id,
