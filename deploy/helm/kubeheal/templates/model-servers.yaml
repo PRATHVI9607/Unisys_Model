@@ -1,7 +1,8 @@
 {{- /*
 P9-H3 / S-CL-1, S-CL-2, S-CL-8: health model, security model and DCM servers.
 Each gets a Deployment (replicas from modelServers.replicas, topology spread), a Service, a
-PodDisruptionBudget (minAvailable 1) and, depending on hpa.mode, an HPA (min 2, max 8).
+PodDisruptionBudget (minAvailable 1) and, depending on hpa.mode, exactly one HPA (min 2, max 8):
+queue (default, per-pod in-flight gauge), latency (fallback) or cpu (weaker fallback).
 Requests and limits are rendered only when set in values (measure them with eval/resource_profile.py).
 */ -}}
 {{- $ms := .Values.modelServers }}
@@ -79,7 +80,8 @@ spec:
   minAvailable: {{ $ms.pdb.minAvailable }}
   selector:
     matchLabels: {app: {{ $s.name }}}
-{{- if eq $.Values.hpa.mode "queue" }}
+{{- if or (eq $.Values.hpa.mode "queue") (eq $.Values.hpa.mode "latency") }}
+{{- $mode := $.Values.hpa.mode }}
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -95,13 +97,13 @@ spec:
     - type: Pods
       pods:
         metric:
-          name: {{ $.Values.hpa.queue.metricName }}
+          name: {{ index $.Values.hpa $mode "metricName" }}
         target:
           type: AverageValue
-          averageValue: {{ required "hpa.queue.targetAverageValue is required when hpa.mode=queue (owner decision, nothing is defaulted)" $.Values.hpa.queue.targetAverageValue | quote }}
+          averageValue: {{ required (printf "hpa.%s.targetAverageValue is required when hpa.mode=%s" $mode $mode) (index $.Values.hpa $mode "targetAverageValue") | quote }}
 {{- else if eq $.Values.hpa.mode "cpu" }}
 ---
-# FALLBACK ONLY (hpa.mode=cpu): for clusters without prometheus-adapter. CPU utilisation is computed
+# WEAK FALLBACK (hpa.mode=cpu): for clusters without prometheus-adapter. CPU utilisation is computed
 # against the container CPU request, so the model server resources.requests.cpu must be set.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -120,6 +122,6 @@ spec:
           type: Utilization
           averageUtilization: {{ required "hpa.cpu.targetAverageUtilization is required when hpa.mode=cpu (owner decision)" $.Values.hpa.cpu.targetAverageUtilization }}
 {{- else if ne $.Values.hpa.mode "none" }}
-{{- fail "hpa.mode must be queue, cpu or none" }}
+{{- fail "hpa.mode must be queue, latency, cpu or none" }}
 {{- end }}
 {{- end }}

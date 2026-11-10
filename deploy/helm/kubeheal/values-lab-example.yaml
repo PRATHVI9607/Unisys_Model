@@ -1,0 +1,66 @@
+# EXAMPLE owner inputs for the private lab cluster in the project synopsis: 3 nodes, each with
+# 4 CPU cores and 8 GB RAM (12 cores and 24 GB in total).
+#
+# This file is an example of the shape of the required values, NOT a recommendation. Every number in it
+# is a chosen configuration for the lab cluster, not measured. A real owner supplies their own values.
+# It is meant to be layered after an environment file:
+#   helm template kubeheal deploy/helm/kubeheal -f deploy/helm/kubeheal/values-prod.yaml \
+#       -f deploy/helm/kubeheal/values-lab-example.yaml
+#
+# Requests and limits of the KubeHeal pods are still unset: they come from eval/resource_profile.py.
+# The quotas below only bound what each protected namespace may ask for in total.
+
+namespaces:
+  quotas:
+    prod:
+      hard:
+        requests.cpu: "4"            # chosen configuration for the lab cluster, not measured
+        requests.memory: 8Gi         # chosen configuration for the lab cluster, not measured
+        limits.cpu: "8"              # chosen configuration for the lab cluster, not measured
+        limits.memory: 16Gi          # chosen configuration for the lab cluster, not measured
+        pods: "30"                   # chosen configuration for the lab cluster, not measured
+        persistentvolumeclaims: "5"  # chosen configuration for the lab cluster, not measured
+      limits:
+        - type: Container
+          defaultRequest:
+            cpu: 50m                 # chosen configuration for the lab cluster, not measured
+            memory: 64Mi             # chosen configuration for the lab cluster, not measured
+          default:
+            cpu: 500m                # chosen configuration for the lab cluster, not measured
+            memory: 512Mi            # chosen configuration for the lab cluster, not measured
+    staging:
+      hard:
+        requests.cpu: "2"            # chosen configuration for the lab cluster, not measured
+        requests.memory: 4Gi         # chosen configuration for the lab cluster, not measured
+        limits.cpu: "4"              # chosen configuration for the lab cluster, not measured
+        limits.memory: 8Gi           # chosen configuration for the lab cluster, not measured
+        pods: "15"                   # chosen configuration for the lab cluster, not measured
+        persistentvolumeclaims: "3"  # chosen configuration for the lab cluster, not measured
+      limits:
+        - type: Container
+          defaultRequest:
+            cpu: 50m                 # chosen configuration for the lab cluster, not measured
+            memory: 64Mi             # chosen configuration for the lab cluster, not measured
+          default:
+            cpu: 500m                # chosen configuration for the lab cluster, not measured
+            memory: 512Mi            # chosen configuration for the lab cluster, not measured
+    dev:
+      hard:
+        requests.cpu: "2"            # chosen configuration for the lab cluster, not measured
+        requests.memory: 4Gi         # chosen configuration for the lab cluster, not measured
+        limits.cpu: "4"              # chosen configuration for the lab cluster, not measured
+        limits.memory: 8Gi           # chosen configuration for the lab cluster, not measured
+        pods: "15"                   # chosen configuration for the lab cluster, not measured
+        persistentvolumeclaims: "3"  # chosen configuration for the lab cluster, not measured
+      limits:
+        - type: Container
+          defaultRequest:
+            cpu: 50m                 # chosen configuration for the lab cluster, not measured
+            memory: 64Mi             # chosen configuration for the lab cluster, not measured
+          default:
+            cpu: 500m                # chosen configuration for the lab cluster, not measured
+            memory: 512Mi            # chosen configuration for the lab cluster, not measured
+
+redis:
+  persistence:
+    size: 1Gi                        # chosen configuration for the lab cluster, not measured

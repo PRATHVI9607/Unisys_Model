@@ -1,11 +1,11 @@
 # KubeHeal chart: generic defaults (NGINX ingress class, nothing sized).
 #
 # Rules for this file:
-#   * No resource requests or limits, no ResourceQuota or LimitRange numbers, no HPA target and no
-#     Redis volume size are set here. They are owner decisions or measurements. The templates use
+#   * No resource requests or limits, no ResourceQuota or LimitRange numbers and no Redis volume size
+#     are set here. They are owner decisions or measurements. The templates use
 #     `required` for them, so `helm template` with values-dev/staging/prod.yaml alone fails with a
-#     message naming the missing key until the owner supplies them. values-k3d-demo.yaml carries
-#     clearly labelled demo placeholders.
+#     message naming the missing key until the owner supplies them. values-k3d-demo.yaml and
+#     values-lab-example.yaml carry clearly labelled chosen numbers (examples, not measurements).
 #   * Requests and limits come from a measurement: run eval/resource_profile.py on the cluster, which
 #     writes a CSV and a values snippet to merge in (see the `resources:` keys below).
 
@@ -217,29 +217,32 @@ modelServers:
     extraEnv: {}
 
 # Autoscaling for the model servers: min 2, max 8 (spec S-CL-1).
-#   queue : request-concurrency metric through prometheus-adapter (the default, spec).
-#   cpu   : DOCUMENTED FALLBACK ONLY, for clusters without prometheus-adapter. Needs CPU requests set
-#           on the model server containers (measure them first) and a target you choose.
-#   none  : no HPA objects.
-# The target value is REQUIRED for the mode you pick: no number here has been measured.
+#   queue   : DEFAULT and required by the spec. Per-pod gauge kubeheal_model_inflight_requests, exported by
+#             each model server (scoring requests running plus waiting for a worker), served to the HPA by
+#             prometheus-adapter as a Pods metric (rule: ConfigMap kubeheal-prometheus-adapter-rule).
+#   latency : documented FALLBACK, off unless selected. rate() of the latency histogram sum is the mean number
+#             of requests being handled at once per pod. It does not count requests waiting for a worker.
+#   cpu     : an even weaker documented fallback for clusters without prometheus-adapter. Utilisation is
+#             computed against the CPU request, so resources.requests.cpu must be set on the model servers.
+#   none    : no HPA objects.
+# Exactly one HPA per model server is rendered, never two.
 hpa:
   mode: queue
   minReplicas: 2
   maxReplicas: 8
   queue:
-    # Name the HPA asks the custom metrics API for, and the adapter rule that produces it.
     metricName: kubeheal_model_inflight_requests
-    # The servers do NOT export a request-queue gauge today (kubeheal_queue_depth is declared in
-    # agents/common/metrics.py but nothing in services/ sets it). The only per-request series they
-    # export is the histogram kubeheal_model_latency_seconds. rate() of its _sum is the mean number
-    # of requests being handled at once per pod (busy seconds per second). That is concurrency inside
-    # the handler, not requests waiting for a worker. When a real gauge exists, set seriesName to it
-    # and metricsQuery to a gauge expression.
-    seriesName: kubeheal_model_latency_seconds_sum
-    rateWindow: 1m             # chosen, not measured
     # Optional full override of the adapter metricsQuery (adapter template syntax).
     metricsQuery: ""
-    targetAverageValue: ""     # REQUIRED when mode=queue
+    # CHOSEN DEFAULT, not a measurement: target average in-flight plus waiting requests per pod.
+    # Tunable; P11 (load tests) is where it gets tuned.
+    targetAverageValue: "4"
+  latency:
+    # Custom metric name the latency fallback HPA asks for (adapter rule is rendered only in this mode).
+    metricName: kubeheal_model_latency_concurrency
+    seriesName: kubeheal_model_latency_seconds_sum
+    rateWindow: 1m             # chosen, not measured
+    targetAverageValue: ""     # REQUIRED when mode=latency
   cpu:
     targetAverageUtilization: ""   # REQUIRED when mode=cpu
 

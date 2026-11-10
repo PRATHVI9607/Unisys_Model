@@ -1,6 +1,7 @@
 {{- $ns := include "kubeheal.namespace" . }}
-{{- if .Values.monitoring.adapterRule.enabled }}
-{{- $q := .Values.hpa.queue }}
+{{- if and .Values.monitoring.adapterRule.enabled (or (eq .Values.hpa.mode "queue") (eq .Values.hpa.mode "latency")) }}
+{{- $mode := .Values.hpa.mode }}
+{{- $q := index .Values.hpa $mode }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -10,16 +11,30 @@ metadata:
     app: kubeheal-prometheus-adapter-rule
 data:
   README: |
-    prometheus-adapter rule behind the model server HPA (hpa.mode=queue). prometheus-adapter does not
+    prometheus-adapter rule behind the model server HPA (hpa.mode={{ $mode }}). prometheus-adapter does not
     read this ConfigMap by itself: merge rule.yaml into its `rules.custom` (Helm values of the
     prometheus-adapter chart) or into its config ConfigMap, then restart the adapter. Check with:
       kubectl get --raw "/apis/custom.metrics.k8s.io/v1beta1/namespaces/{{ $ns }}/pods/*/{{ $q.metricName }}"
     The adapter needs `namespace` and `pod` labels on the series: see the ConfigMap
     kubeheal-prometheus-scrape-snippet.
-    The default series is the histogram sum kubeheal_model_latency_seconds_sum. Its rate is the mean number
-    of requests being handled at once per pod (concurrency inside the handler). It is NOT a count of
-    requests waiting for a worker: the servers do not export such a gauge yet.
+{{- if eq $mode "queue" }}
+    Series: the per-pod gauge kubeheal_model_inflight_requests exported by every model server. It counts
+    scoring requests running plus waiting for a worker (health and metrics routes are not counted).
+{{- else }}
+    FALLBACK rule. Series: the histogram sum {{ $q.seriesName }}. Its rate is the mean number of requests being
+    handled at once per pod. It does NOT count requests waiting for a worker.
+{{- end }}
   rule.yaml: |
+{{- if eq $mode "queue" }}
+    - seriesQuery: 'kubeheal_model_inflight_requests{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: namespace}
+          pod: {resource: pod}
+      name:
+        as: "{{ $q.metricName }}"
+      metricsQuery: {{ default "sum(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)" $q.metricsQuery | quote }}
+{{- else }}
     - seriesQuery: '{{ $q.seriesName }}{namespace!="",pod!=""}'
       resources:
         overrides:
@@ -27,7 +42,8 @@ data:
           pod: {resource: pod}
       name:
         as: "{{ $q.metricName }}"
-      metricsQuery: {{ default (printf "sum(rate(<<.Series>>{<<.LabelMatchers>>}[%s])) by (<<.GroupBy>>)" $q.rateWindow) $q.metricsQuery | quote }}
+      metricsQuery: {{ printf "sum(rate(<<.Series>>{<<.LabelMatchers>>}[%s])) by (<<.GroupBy>>)" $q.rateWindow | quote }}
+{{- end }}
 {{- end }}
 {{- if .Values.monitoring.scrapeSnippet.enabled }}
 ---

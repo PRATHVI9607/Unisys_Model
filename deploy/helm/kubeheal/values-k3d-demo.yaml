@@ -49,11 +49,6 @@ redis:
   persistence:
     size: 1Gi                 # demo choice, not measured, owner to confirm
 
-hpa:
-  mode: queue
-  queue:
-    targetAverageValue: "2"   # demo choice, not measured, owner to confirm (mean concurrent requests per pod)
-
 # Executor env: same chosen defaults as values.yaml (chosen defaults, not measurements).
 executor:
   env:

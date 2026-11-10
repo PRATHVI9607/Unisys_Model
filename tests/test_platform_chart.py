@@ -1,11 +1,10 @@
 """P9: the kubeheal Helm chart renders for all four values files and keeps its key properties.
 
 Needs the helm binary (PATH, or the winget install path); skipped with a reason when absent.
-dev, staging and prod deliberately leave the owner decisions (quota, limit range, Redis volume size, HPA
-target) unset, so those three render only together with the TEST FIXTURE below. The fixture numbers are
-arbitrary test inputs, not recommendations and never used outside this file.
+dev, staging and prod deliberately leave the owner decisions (quota, limit range, Redis volume size)
+unset, so those three render only together with values-lab-example.yaml (an example, not a
+recommendation; every number in it is labelled as chosen, not measured).
 """
-import copy
 import os
 import shutil
 import subprocess
@@ -24,14 +23,7 @@ _WINGET = Path(os.environ.get("LOCALAPPDATA", "")) / (
 HELM = shutil.which("helm") or (str(_WINGET) if _WINGET.exists() else None)
 pytestmark = pytest.mark.skipif(HELM is None, reason="helm binary not found on PATH or in the winget location")
 
-# TEST FIXTURE ONLY: arbitrary inputs so the REQUIRED owner values exist. Not recommendations.
-OWNER_FIXTURE = {
-    "namespaces": {"quotas": {t: {"hard": {"pods": "7"},
-                                  "limits": [{"type": "Container", "default": {"memory": "11Mi"}}]}
-                              for t in TIERS}},
-    "redis": {"persistence": {"size": "3Gi"}},
-    "hpa": {"queue": {"targetAverageValue": "5"}},
-}
+LAB_EXAMPLE = CHART / "values-lab-example.yaml"
 
 
 def values_path(env):
@@ -46,10 +38,9 @@ def helm(*args, check=True):
 
 
 @pytest.fixture(scope="module")
-def fixture_file(tmp_path_factory):
-    p = tmp_path_factory.mktemp("helm") / "owner_fixture.yaml"
-    p.write_text("# TEST FIXTURE, arbitrary numbers\n" + yaml.safe_dump(OWNER_FIXTURE), encoding="utf-8")
-    return p
+def fixture_file():
+    """The owner-values layer used for dev, staging and prod: the lab example file."""
+    return LAB_EXAMPLE
 
 
 def render(env, fixture, *sets, extra_values=()):
@@ -103,26 +94,32 @@ def test_owner_decisions_are_required_not_defaulted(env):
     assert "is required" in res.stderr and "owner decision" in res.stderr
 
 
-@pytest.mark.parametrize("missing,needle", [
-    ("quota", "namespaces.quotas.prod.hard is required"),
-    ("limits", "namespaces.quotas.prod.limits is required"),
-    ("redis", "redis.persistence.size is required"),
-    ("hpa", "hpa.queue.targetAverageValue is required"),
+@pytest.mark.parametrize("missing,override,needle", [
+    ("quota", {"namespaces": {"quotas": {"prod": {"hard": None}}}}, "namespaces.quotas.prod.hard is required"),
+    ("limits", {"namespaces": {"quotas": {"prod": {"limits": None}}}}, "namespaces.quotas.prod.limits is required"),
+    ("redis", {"redis": {"persistence": {"size": ""}}}, "redis.persistence.size is required"),
 ])
-def test_each_required_value_has_a_clear_error(missing, needle, tmp_path):
-    fx = copy.deepcopy(OWNER_FIXTURE)
-    if missing == "quota":
-        fx["namespaces"]["quotas"]["prod"]["hard"] = {}
-    if missing == "limits":
-        fx["namespaces"]["quotas"]["prod"]["limits"] = []
-    if missing == "redis":
-        fx["redis"]["persistence"]["size"] = ""
-    if missing == "hpa":
-        fx["hpa"]["queue"]["targetAverageValue"] = ""
+def test_each_required_value_has_a_clear_error(missing, override, needle, tmp_path):
     f = tmp_path / "f.yaml"
-    f.write_text(yaml.safe_dump(fx), encoding="utf-8")
-    res = helm("template", "kubeheal", str(CHART), "-f", str(values_path("prod")), "-f", str(f), check=False)
+    f.write_text(yaml.safe_dump(override), encoding="utf-8")      # null deletes the key from the layer below
+    res = helm("template", "kubeheal", str(CHART), "-f", str(values_path("prod")), "-f", str(LAB_EXAMPLE),
+               "-f", str(f), check=False)
     assert res.returncode != 0 and needle in res.stderr
+
+
+def test_lab_example_labels_every_number_and_sets_no_resources():
+    label = "chosen configuration for the lab cluster, not measured"
+    text = LAB_EXAMPLE.read_text(encoding="utf-8")
+    numbered = 0
+    for line in text.splitlines():
+        body = line.split("#")[0]
+        if ":" in body and any(ch.isdigit() for ch in body.split(":", 1)[1]):
+            numbered += 1
+            assert label in line, line
+    assert numbered >= 30
+    data = yaml.safe_load(text)
+    assert set(data) == {"namespaces", "redis"}
+    assert "resources" not in text.split("\n", 12)[-1].replace("Requests and limits", "")
 
 
 def test_no_invented_numbers_in_env_values_files():
@@ -143,7 +140,9 @@ def test_no_invented_numbers_in_env_values_files():
         data = yaml.safe_load(values_path(env).read_text(encoding="utf-8"))
         assert not (set(keys(data)) & forbidden), env
     defaults = yaml.safe_load((CHART / "values.yaml").read_text(encoding="utf-8"))
-    assert defaults["redis"]["persistence"]["size"] == "" and defaults["hpa"]["queue"]["targetAverageValue"] == ""
+    assert defaults["redis"]["persistence"]["size"] == ""
+    assert defaults["hpa"]["latency"]["targetAverageValue"] == "" and \
+        defaults["hpa"]["cpu"]["targetAverageUtilization"] == ""
     assert all(q == {"hard": {}, "limits": []} for q in defaults["namespaces"]["quotas"].values())
 
 
@@ -152,7 +151,7 @@ def test_k3d_placeholders_are_labelled():
     assert "demo choice, not measured, owner to confirm" in text
     for line in text.splitlines():
         stripped = line.split("#")[0]
-        if any(k in stripped for k in ("requests.cpu", "defaultRequest", "default:", "size:", "targetAverageValue")):
+        if any(k in stripped for k in ("requests.cpu", "defaultRequest", "default:", "size:")):
             assert "demo choice, not measured, owner to confirm" in line, line
 
 
@@ -168,8 +167,11 @@ def test_tier_namespaces_quota_limitrange(env, fixture_file):
         q = get(docs, "ResourceQuota", "kubeheal-quota", t)
         lr = get(docs, "LimitRange", "kubeheal-limits", t)
         assert q["spec"]["hard"] and lr["spec"]["limits"]
-    if env != "k3d-demo":   # numbers come from values only
-        assert get(docs, "ResourceQuota", "kubeheal-quota", "prod")["spec"]["hard"] == {"pods": "7"}
+    if env != "k3d-demo":   # numbers come from values only (the lab example layer)
+        lab = yaml.safe_load(LAB_EXAMPLE.read_text(encoding="utf-8"))["namespaces"]["quotas"]
+        for t in TIERS:
+            assert get(docs, "ResourceQuota", "kubeheal-quota", t)["spec"]["hard"] == lab[t]["hard"]
+            assert get(docs, "LimitRange", "kubeheal-limits", t)["spec"]["limits"] == lab[t]["limits"]
 
 
 def test_namespaces_create_false_keeps_policy(fixture_file):
@@ -207,13 +209,44 @@ def test_prod_topology_spread_is_hard(fixture_file):
     assert dep["spec"]["template"]["spec"]["topologySpreadConstraints"][0]["whenUnsatisfiable"] == "DoNotSchedule"
 
 
-def test_cpu_hpa_is_a_switch_and_needs_its_target(fixture_file):
+def hpas(docs):
+    return by_kind(docs, "HorizontalPodAutoscaler")
+
+
+def test_default_hpa_is_queue_depth_with_a_chosen_default_target(fixture_file):
+    docs = render("k3d-demo", fixture_file)
+    assert len(hpas(docs)) == 3                        # one per model server
+    for h in hpas(docs):
+        pods = h["spec"]["metrics"][0]["pods"]
+        assert pods["metric"]["name"] == "kubeheal_model_inflight_requests"
+        assert pods["target"] == {"type": "AverageValue", "averageValue": "4"}
+    text = (CHART / "values.yaml").read_text(encoding="utf-8")
+    assert "CHOSEN DEFAULT, not a measurement" in text and "P11" in text
+    # the env files no longer need the HPA target supplied: they render with only the lab example layered
+    assert len(hpas(render("prod", fixture_file))) == 3
+
+
+def test_latency_fallback_replaces_queue_and_never_both(fixture_file):
+    docs = render("k3d-demo", fixture_file, "hpa.mode=latency", "hpa.latency.targetAverageValue=3")
+    assert len(hpas(docs)) == 3                        # still exactly one per server
+    for h in hpas(docs):
+        assert h["spec"]["metrics"][0]["pods"]["metric"]["name"] == "kubeheal_model_latency_concurrency"
+    rule = yaml.safe_load(get(docs, "ConfigMap", "kubeheal-prometheus-adapter-rule")["data"]["rule.yaml"])
+    assert [r["name"]["as"] for r in rule] == ["kubeheal_model_latency_concurrency"]
+    assert "rate(<<.Series>>" in rule[0]["metricsQuery"]
+    res = helm("template", "k", str(CHART), "-f", str(values_path("k3d-demo")), "--set", "hpa.mode=latency",
+               check=False)
+    assert res.returncode != 0 and "hpa.latency.targetAverageValue is required" in res.stderr
+
+
+def test_cpu_hpa_is_the_weakest_fallback_and_needs_its_target(fixture_file):
     docs = render("k3d-demo", fixture_file, "hpa.mode=cpu", "hpa.cpu.targetAverageUtilization=50")
-    hpa = get(docs, "HorizontalPodAutoscaler", "kubeheal-dcm")
-    assert hpa["spec"]["metrics"][0]["type"] == "Resource"
+    assert len(hpas(docs)) == 3 and hpas(docs)[0]["spec"]["metrics"][0]["type"] == "Resource"
+    assert not by_kind(docs, "ConfigMap") or "kubeheal-prometheus-adapter-rule" not in \
+        {d["metadata"]["name"] for d in by_kind(docs, "ConfigMap")}
     res = helm("template", "k", str(CHART), "-f", str(values_path("k3d-demo")), "--set", "hpa.mode=cpu", check=False)
     assert res.returncode != 0 and "hpa.cpu.targetAverageUtilization is required" in res.stderr
-    assert not by_kind(render("k3d-demo", fixture_file, "hpa.mode=none"), "HorizontalPodAutoscaler")
+    assert not hpas(render("k3d-demo", fixture_file, "hpa.mode=none"))
     bad = helm("template", "k", str(CHART), "-f", str(values_path("k3d-demo")), "--set", "hpa.mode=bogus", check=False)
     assert bad.returncode != 0
 
@@ -221,10 +254,12 @@ def test_cpu_hpa_is_a_switch_and_needs_its_target(fixture_file):
 def test_adapter_rule_and_scrape_snippet(fixture_file):
     docs = render("k3d-demo", fixture_file)
     cm = get(docs, "ConfigMap", "kubeheal-prometheus-adapter-rule")
-    rule = yaml.safe_load(cm["data"]["rule.yaml"])[0]
-    assert rule["name"]["as"] == "kubeheal_model_inflight_requests"
-    assert rule["seriesQuery"].startswith("kubeheal_model_latency_seconds_sum")
-    assert "rate(<<.Series>>" in rule["metricsQuery"]
+    rule = yaml.safe_load(cm["data"]["rule.yaml"])
+    assert len(rule) == 1
+    assert rule[0]["name"]["as"] == "kubeheal_model_inflight_requests"
+    assert rule[0]["seriesQuery"].startswith("kubeheal_model_inflight_requests{")
+    assert rule[0]["resources"]["overrides"] == {"namespace": {"resource": "namespace"}, "pod": {"resource": "pod"}}
+    assert rule[0]["metricsQuery"].startswith("sum(<<.Series>>") and "rate(" not in rule[0]["metricsQuery"]
     scrape = yaml.safe_load(get(docs, "ConfigMap", "kubeheal-prometheus-scrape-snippet")["data"]["scrape-job.yaml"])
     assert scrape[0]["job_name"] == "kubeheal-pods"
     assert not by_kind(docs, "ServiceMonitor")

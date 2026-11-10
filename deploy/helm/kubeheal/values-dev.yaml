@@ -4,7 +4,6 @@
 # No numbers are set in this file on purpose. The owner must supply, with a second -f file or --set:
 #   namespaces.quotas.{prod,staging,dev}.hard and .limits   (ResourceQuota and LimitRange)
 #   redis.persistence.size
-#   hpa.queue.targetAverageValue  (or hpa.mode: cpu with hpa.cpu.targetAverageUtilization, or hpa.mode: none)
 # Until then `helm template` fails with a message naming the missing key. Requests and limits stay
 # unset until eval/resource_profile.py has produced a measured profile.
 
