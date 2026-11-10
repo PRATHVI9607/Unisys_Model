@@ -39,6 +39,22 @@ spec:
           env:
             - name: REDIS_URL
               value: redis://redis-master:6379
+            - name: LEDGER_BACKEND
+              value: minio
+            - name: MINIO_ENDPOINT
+              value: minio:9000
+            - name: MINIO_BUCKET
+              value: kubeheal-ledger
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kubeheal-minio-client
+                  key: access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kubeheal-minio-client
+                  key: secret-key
             - name: DCM_URL
               value: http://kubeheal-dcm:8003
             - name: BURN_IN_MODE

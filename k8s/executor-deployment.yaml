@@ -20,6 +20,19 @@ spec:
           env:
             - {name: REDIS_URL, value: "redis://redis-master:6379"}
             - {name: EXEC_NAMESPACES, value: "prod,staging,dev"}
+            - {name: LEDGER_BACKEND, value: "minio"}
+            - {name: MINIO_ENDPOINT, value: "minio:9000"}
+            - {name: MINIO_BUCKET, value: "kubeheal-ledger"}
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kubeheal-minio-client
+                  key: access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kubeheal-minio-client
+                  key: secret-key
           resources:
             requests: {cpu: 100m, memory: 128Mi}
             limits: {cpu: 500m, memory: 256Mi}

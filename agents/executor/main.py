@@ -21,7 +21,7 @@ import redis.asyncio as aioredis
 from kubernetes_asyncio import client, config
 
 from agents.common.killswitch import ModeWatcher
-from agents.common.ledger import Ledger
+from agents.common.ledger import Ledger, ledger_from_env
 from agents.executor import actions
 from agents.executor.guard import check_target
 from agents.health_agent.baseline import load_baseline
@@ -58,7 +58,7 @@ class ExecutorService:
         self.core_api = core_api
         self.apps_api = apps_api
         self.networking_api = networking_api
-        self.ledger = ledger or Ledger()
+        self.ledger = ledger if ledger is not None else ledger_from_env()
         self.consumer = os.environ.get("HOSTNAME") or f"executor-{uuid.uuid4().hex[:6]}"
         self.mode = mode or ModeWatcher(on_change=self._mode_changed)
         self.running = False

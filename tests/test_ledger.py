@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from agents.common.ledger import InMemoryLedgerStore, Ledger, MinioLedgerStore
+from agents.common.ledger import InMemoryLedgerStore, Ledger, MinioLedgerStore, ledger_from_env
 
 
 def test_ledger_sequences_are_per_incident_and_keys_are_stable():
@@ -56,15 +56,16 @@ class _FakeMinio:
     def __init__(self):
         self.objects = {}
 
-    def list_objects(self, bucket, prefix, recursive):
+    def list_objects(self, bucket_name, prefix, recursive):
         return [type("Object", (), {"object_name": key}) for key in self.objects if key.startswith(prefix)]
 
-    def stat_object(self, bucket, key):
+    def stat_object(self, bucket_name, object_name):
+        key = object_name
         if key not in self.objects:
             raise _MissingObject()
 
-    def put_object(self, bucket, key, data, length, content_type):
-        self.objects[key] = data.read(length)
+    def put_object(self, bucket_name, object_name, data, length, content_type):
+        self.objects[object_name] = data.read(length)
 
 
 def test_minio_store_writes_json_and_checks_existing_key():
@@ -76,4 +77,10 @@ def test_minio_store_writes_json_and_checks_existing_key():
 
     with pytest.raises(FileExistsError):
         MinioLedgerStore(client, "audit").put_if_absent(entry.key, b"overwrite")
+
+
+def test_ledger_factory_defaults_to_memory_and_rejects_missing_minio_credentials():
+    assert isinstance(ledger_from_env({}).store, InMemoryLedgerStore)
+    with pytest.raises(ValueError, match="MINIO_ACCESS_KEY"):
+        ledger_from_env({"LEDGER_BACKEND": "minio"})
 

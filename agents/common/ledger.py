@@ -8,11 +8,13 @@ Ledger instance when appending concurrently in one process.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any, Dict, Iterable, Optional, Protocol
+from urllib.parse import urlparse
 
 
 class LedgerStore(Protocol):
@@ -47,7 +49,7 @@ class MinioLedgerStore:
 
     def keys(self, prefix: str) -> Iterable[str]:
         return (obj.object_name for obj in self.client.list_objects(
-            self.bucket, prefix=prefix, recursive=True
+            bucket_name=self.bucket, prefix=prefix, recursive=True
         ))
 
     def put_if_absent(self, key: str, data: bytes) -> None:
@@ -55,7 +57,7 @@ class MinioLedgerStore:
         # Check first to avoid ordinary accidental overwrites; object lock on
         # the bucket provides the server-side retention guarantee.
         try:
-            self.client.stat_object(self.bucket, key)
+            self.client.stat_object(bucket_name=self.bucket, object_name=key)
         except Exception as exc:
             # Only a not-found response means the key is available. Preserve
             # connection/authentication errors instead of masking them.
@@ -66,7 +68,7 @@ class MinioLedgerStore:
             raise FileExistsError(key)
 
         self.client.put_object(
-            self.bucket, key, BytesIO(data), length=len(data),
+            bucket_name=self.bucket, object_name=key, data=BytesIO(data), length=len(data),
             content_type="application/json",
         )
 
@@ -114,3 +116,37 @@ class Ledger:
             data = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
             self.store.put_if_absent(key, data)
             return LedgerEntry(incident_id, sequence, step, key, payload)
+
+
+def ledger_from_env(env: Optional[Dict[str, str]] = None) -> Ledger:
+    """Build the configured backend, defaulting to in-memory for local tests.
+
+    Set ``LEDGER_BACKEND=minio`` in deployed components. Credentials are read
+    only from the environment, normally populated from a Kubernetes Secret.
+    """
+    env = os.environ if env is None else env
+    backend = env.get("LEDGER_BACKEND", "memory").strip().lower()
+    if backend == "memory":
+        return Ledger()
+    if backend != "minio":
+        raise ValueError(f"unsupported LEDGER_BACKEND: {backend}")
+
+    endpoint = env.get("MINIO_ENDPOINT", "minio.kubeheal.svc.cluster.local:9000")
+    parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
+    if not parsed.hostname:
+        raise ValueError("MINIO_ENDPOINT must contain a host")
+    host = parsed.netloc or parsed.path
+    access_key = env.get("MINIO_ACCESS_KEY")
+    secret_key = env.get("MINIO_SECRET_KEY")
+    if not access_key or not secret_key:
+        raise ValueError("MINIO_ACCESS_KEY and MINIO_SECRET_KEY are required for MinIO")
+
+    from minio import Minio
+
+    client = Minio(
+        host,
+        access_key=access_key,
+        secret_key=secret_key,
+        secure=(parsed.scheme == "https") if parsed.scheme else False,
+    )
+    return Ledger(MinioLedgerStore(client, env.get("MINIO_BUCKET", "kubeheal-ledger")))

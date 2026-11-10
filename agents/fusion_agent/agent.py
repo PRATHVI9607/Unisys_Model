@@ -26,7 +26,7 @@ import numpy as np
 import redis.asyncio as aioredis
 
 from agents.common.killswitch import ModeWatcher
-from agents.common.ledger import Ledger
+from agents.common.ledger import Ledger, ledger_from_env
 from agents.fusion_agent.decision_policy import (
     make_decision, DecisionInput, Decision,
 )
@@ -69,7 +69,7 @@ class FusionAgentV4:
         self.mode = ModeWatcher()
         # The deployment can inject a MinIO-backed Ledger; the in-memory
         # default keeps local/unit-test use explicit until P4-L2 wiring.
-        self.ledger = ledger or Ledger()
+        self.ledger = ledger if ledger is not None else ledger_from_env()
         self.running = False
         # short-term correlation buffer: "<ns>:<workload>" -> (event_fields, recv_monotonic)
         self.pending_health: Dict[str, tuple] = {}
