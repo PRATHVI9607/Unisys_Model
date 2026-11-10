@@ -14,3 +14,6 @@ data/*.jsonl
 
 # local Claude Code settings
 .claude/settings.local.json
+
+# pytest temp data (basetemp is set in pytest.ini)
+.pytest-tmp*/
