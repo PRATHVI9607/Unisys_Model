@@ -151,6 +151,7 @@ executor:
     CANARY_WINDOW_S: "30"
     ROLLOUT_TIMEOUT_S: "180"
     ROLLOUT_POLL_S: "5"
+    RESTORE_ENTROPY_IMAGE_PULL_SECRETS: "" # comma-separated secrets copied into target namespaces when needed
   # Non-root uid and read-only root filesystem; /tmp is an emptyDir.
   securityContext:
     runAsNonRoot: true

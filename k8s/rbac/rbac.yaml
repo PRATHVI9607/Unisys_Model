@@ -134,6 +134,38 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal
 subjects:
   - {kind: ServiceAccount, name: executor, namespace: kubeheal}
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: kubeheal-executor-entropy-read}
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kubeheal-executor-entropy-read, namespace: prod}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal-executor-entropy-read}
+subjects:
+  - {kind: ServiceAccount, name: executor, namespace: kubeheal}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kubeheal-executor-entropy-read, namespace: staging}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal-executor-entropy-read}
+subjects:
+  - {kind: ServiceAccount, name: executor, namespace: kubeheal}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kubeheal-executor-entropy-read, namespace: dev}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal-executor-entropy-read}
+subjects:
+  - {kind: ServiceAccount, name: executor, namespace: kubeheal}
+---
 # The write rules are a ClusterRole used ONLY through namespaced RoleBindings below, so the
 # permissions exist in prod, staging and dev and nowhere else.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -157,6 +189,9 @@ rules:
     verbs: [create, delete]
   - apiGroups: [snapshot.storage.k8s.io]
     resources: [volumesnapshots]
+    verbs: [create, delete]
+  - apiGroups: [batch]
+    resources: [jobs]
     verbs: [create, delete]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

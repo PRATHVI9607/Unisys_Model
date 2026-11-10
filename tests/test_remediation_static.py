@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EXEC = ROOT / "agents" / "executor"
 WRITE = re.compile(r"^(create|patch|delete|replace|deletecollection|delete_collection)_"
                    r"(namespaced_\w+|namespace|node|persistent_volume\w*|cluster_\w+|custom_object\w*)$")
-DISPATCHED = ["drift.py", "quarantine.py", "restore.py", "snapshots.py"]
+DISPATCHED = ["drift.py", "quarantine.py", "restore.py", "restore_entropy.py", "snapshots.py"]
 
 
 def _files():
@@ -95,6 +95,7 @@ def test_dispatched_paths_use_exactly_these_write_methods():
         "patch_namespaced_deployment_scale", "patch_namespaced_stateful_set_scale",
         "patch_namespaced_pod", "create_namespaced_network_policy", "delete_namespaced_network_policy",
         "create_namespaced_persistent_volume_claim",
+        "create_namespaced_job", "delete_namespaced_job",
         "create_namespaced_custom_object", "delete_namespaced_custom_object",
     }
 
@@ -151,7 +152,24 @@ def test_executor_write_rbac_matches_dispatched_write_verbs():
         ("networking.k8s.io", "networkpolicies", "delete"),
         ("snapshot.storage.k8s.io", "volumesnapshots", "create"),
         ("snapshot.storage.k8s.io", "volumesnapshots", "delete"),
+        ("batch", "jobs", "create"),
+        ("batch", "jobs", "delete"),
     }
+
+
+def test_entropy_scanner_read_permissions_are_namespaced():
+    import yaml
+    docs = [d for d in yaml.safe_load_all((ROOT / "k8s" / "rbac" / "rbac.yaml").read_text(encoding="utf-8")) if d]
+    role = next(d for d in docs if d.get("kind") == "ClusterRole" and
+                d["metadata"]["name"] == "kubeheal-executor-entropy-read")
+    permissions = {(group, resource, verb) for rule in role["rules"]
+                   for group in rule["apiGroups"] for resource in rule["resources"]
+                   for verb in rule["verbs"]}
+    assert permissions == {("batch", "jobs", "get"), ("batch", "jobs", "list"),
+                           ("", "pods/log", "get")}
+    bindings = [d for d in docs if d.get("kind") == "RoleBinding" and
+                d.get("roleRef", {}).get("name") == "kubeheal-executor-entropy-read"]
+    assert {d["metadata"]["namespace"] for d in bindings} == {"prod", "staging", "dev"}
 
 
 # ---- integration audit (P7 merge): code write calls <-> RBAC, and who may write at all ----------------
@@ -162,6 +180,8 @@ METHOD_PERMISSION = {
     "patch_namespaced_stateful_set_scale": ("apps", "statefulsets/scale", "patch"),
     "patch_namespaced_pod": ("", "pods", "patch"),
     "create_namespaced_persistent_volume_claim": ("", "persistentvolumeclaims", "create"),
+    "create_namespaced_job": ("batch", "jobs", "create"),
+    "delete_namespaced_job": ("batch", "jobs", "delete"),
     "create_namespaced_network_policy": ("networking.k8s.io", "networkpolicies", "create"),
     "delete_namespaced_network_policy": ("networking.k8s.io", "networkpolicies", "delete"),
     # VolumeSnapshots go through the custom objects API (group snapshot.storage.k8s.io)

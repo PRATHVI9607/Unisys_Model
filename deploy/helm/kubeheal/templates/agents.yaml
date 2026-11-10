@@ -204,13 +204,14 @@ spec:
             - {name: METRICS_PORT, value: {{ $ex.metricsPort | quote }}}
             {{- include "kubeheal.redisEnv" . | nindent 12 }}
             - {name: EXEC_NAMESPACES, value: {{ $ex.execNamespaces | quote }}}
+            - {name: RESTORE_ENTROPY_IMAGE, value: {{ include "kubeheal.image" (dict "root" . "image" $ex.image) | quote }}}
             - {name: LEDGER_BACKEND, value: minio}
             - {name: MINIO_ENDPOINT, value: {{ .Values.minio.endpoint | quote }}}
             - {name: MINIO_BUCKET, value: {{ .Values.minio.bucket | quote }}}
             {{- include "kubeheal.minioClientEnv" (dict "root" .) | nindent 12 }}
             # Always rendered, taken from executor.env (chosen defaults, not measurements). An empty
             # value is rendered as empty and the Executor then escalates config_missing (fail closed).
-            {{- range $name := list "PROMETHEUS_URL" "SNAPSHOT_CLASS" "CANARY_WINDOW_S" "ROLLOUT_TIMEOUT_S" "ROLLOUT_POLL_S" }}
+            {{- range $name := list "PROMETHEUS_URL" "SNAPSHOT_CLASS" "CANARY_WINDOW_S" "ROLLOUT_TIMEOUT_S" "ROLLOUT_POLL_S" "RESTORE_ENTROPY_IMAGE_PULL_SECRETS" }}
             - {name: {{ $name }}, value: {{ (index (default dict $ex.env) $name) | default "" | toString | quote }}}
             {{- end }}
             {{- include "kubeheal.extraEnv" $ex.extraEnv | nindent 12 }}

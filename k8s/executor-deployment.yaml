@@ -26,6 +26,8 @@ spec:
           env:
             - {name: REDIS_URL, value: "redis://redis-master:6379"}
             - {name: EXEC_NAMESPACES, value: "prod,staging,dev"}
+            - {name: RESTORE_ENTROPY_IMAGE, value: "kubeheal/executor:v4"}
+            - {name: RESTORE_ENTROPY_IMAGE_PULL_SECRETS, value: ""}
             - {name: LEDGER_BACKEND, value: "minio"}
             - {name: MINIO_ENDPOINT, value: "minio:9000"}
             - {name: MINIO_BUCKET, value: "kubeheal-ledger"}

@@ -315,7 +315,8 @@ def test_resources_unset_by_default_and_settable(env, fixture_file):
 
 # ---- Executor ----------------------------------------------------------------------------------
 
-EXEC_VARS = ["PROMETHEUS_URL", "SNAPSHOT_CLASS", "CANARY_WINDOW_S", "ROLLOUT_TIMEOUT_S", "ROLLOUT_POLL_S"]
+EXEC_VARS = ["PROMETHEUS_URL", "SNAPSHOT_CLASS", "CANARY_WINDOW_S", "ROLLOUT_TIMEOUT_S",
+             "ROLLOUT_POLL_S", "RESTORE_ENTROPY_IMAGE_PULL_SECRETS"]
 
 
 def exec_env(docs):
@@ -330,6 +331,7 @@ def test_executor_defaults_rendered(env, fixture_file):
     assert e["PROMETHEUS_URL"] == "http://prometheus-operated.monitoring.svc.cluster.local:9090"
     assert e["SNAPSHOT_CLASS"] == "csi-hostpath-snapclass"
     assert (e["CANARY_WINDOW_S"], e["ROLLOUT_TIMEOUT_S"], e["ROLLOUT_POLL_S"]) == ("30", "180", "5")
+    assert e["RESTORE_ENTROPY_IMAGE_PULL_SECRETS"] == ""
     assert dep["spec"]["template"]["spec"]["serviceAccountName"] == "executor"
     assert c["image"] == "kubeheal/executor:v4"
     assert c["readinessProbe"] and c["livenessProbe"]

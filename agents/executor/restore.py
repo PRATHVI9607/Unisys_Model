@@ -277,9 +277,11 @@ async def restore(gate, core_api, apps_api, networking_api, custom_api, req: Req
                 verdict = await entropy_check(ns, name, new_claims)
             except Exception as e:
                 await record("entropy_check_error", {"error": str(e)})
-        await record("entropy_checked", {"clean": verdict, "pvcs": new_claims})
-        if verdict is not True:
-            why = "entropy still high on the restored volume" if verdict is False else \
+        detail = verdict if isinstance(verdict, dict) else {}
+        clean = detail.get("clean") if detail else verdict
+        await record("entropy_checked", {**detail, "clean": clean, "pvcs": new_claims})
+        if clean is not True:
+            why = "entropy still high on the restored volume" if clean is False else \
                 "entropy result unknown (no check configured or the check failed)"
             return f"restored_kept_isolated:{why}; quarantine kept; escalated to HUMAN"
 

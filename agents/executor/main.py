@@ -28,7 +28,7 @@ from agents.common.killswitch import ModeWatcher
 from agents.common.ledger import Ledger, ledger_from_env
 from agents.common.metrics import KubeHealMetrics
 from agents.common.stream_reliability import ReliabilityConfig, StreamReliability
-from agents.executor import drift, quarantine, restore
+from agents.executor import drift, quarantine, restore, restore_entropy
 from agents.executor.config import ExecConfig
 from agents.executor.guard import check_target
 from agents.executor.metrics_source import PrometheusMetricSource
@@ -69,7 +69,7 @@ class RequestGate:
 
 class ExecutorService:
     def __init__(self, redis=None, core_api=None, apps_api=None, networking_api=None, mode=None,
-                 custom_api=None, record_step=None, metric_source=None, entropy_check=None,
+                 custom_api=None, batch_api=None, record_step=None, metric_source=None, entropy_check=None,
                  cfg=None, sleep=asyncio.sleep, clock=time.monotonic, ledger: Optional[Ledger] = None):
         self.redis_url = os.environ.get("REDIS_URL", "redis://redis-master:6379")
         self.redis = redis
@@ -78,6 +78,7 @@ class ExecutorService:
         self.networking_api = networking_api
         self.ledger = ledger if ledger is not None else ledger_from_env()
         self.custom_api = custom_api
+        self.batch_api = batch_api
         self.record_step = record_step or self._append_ledger_step
         self.metric_source = metric_source      # async (namespace, deployment, window_s) -> dict
         self.entropy_check = entropy_check      # async (namespace, workload, pvcs) -> True/False/None
@@ -125,6 +126,7 @@ class ExecutorService:
         self.apps_api = client.AppsV1Api()
         self.networking_api = client.NetworkingV1Api()
         self.custom_api = client.CustomObjectsApi()
+        self.batch_api = client.BatchV1Api()
         await self.mode.start(self.core_api)
         self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
         if self.metric_source is None and self.cfg.prometheus_url:
@@ -313,9 +315,18 @@ class ExecutorService:
                     drift.RollbackStore(self.redis), self.cfg, self.sleep, self.clock)
         else:
             async with self._lock(namespace, req.deployment):
+                entropy_check = self.entropy_check
+                if entropy_check is None:
+                    async def entropy_check(ns, workload, pvcs):
+                        return await restore_entropy.check_restored_pvcs(
+                            self.core_api, self.batch_api, gate, ns, req.incident_id, pvcs,
+                            os.environ.get("RESTORE_ENTROPY_IMAGE"), self.cfg.rollout_timeout_s,
+                            self.cfg.rollout_poll_s, self.sleep,
+                            [x.strip() for x in os.environ.get(
+                                "RESTORE_ENTROPY_IMAGE_PULL_SECRETS", "").split(",") if x.strip()])
                 outcome = await restore.restore(
                     gate, self.core_api, self.apps_api, self.networking_api, self.custom_api, req, rec,
-                    self.cfg, freeze, self.entropy_check, self.sleep, self.clock)
+                    self.cfg, freeze, entropy_check, self.sleep, self.clock)
         await rec("result", {"outcome": outcome})
         return outcome
 
