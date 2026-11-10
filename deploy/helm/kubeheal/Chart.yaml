@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kubeheal
+description: KubeHeal self-healing control plane (replaces scripts/install.sh). Agents, model servers, Executor, dashboard, Redis, MinIO ledger, kill switch, platform policy.
+type: application
+version: 0.1.0
+appVersion: "v4"

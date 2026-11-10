@@ -40,7 +40,7 @@ Real usage is measured later and recorded under `docs/kubeheal/results/`.
 | P6 Decide | in progress on builder wave/P6 |
 | P7 Remediation paths | code done and merged (5bd3558), proven with fakes only; open items P7-RR-9 to RR-11 and P6-D7, RR-7 needs P10 |
 | P8 Dashboard | done, merged (218029c) |
-| P9 Platform | built on wave/P9, reviewed, fixes in progress (queue-depth gauge and HPA, lab example values) |
+| P9 Platform | done, merged (see merge commit); helm lint and template pass with lab example overlay; nothing run on a cluster yet |
 | P10, P11, P13 | not started |
 | P12 Model hardening | NOT started; P12-H (retraining on live cluster data) is not approved |
 
@@ -127,19 +127,19 @@ Ransomware:
 - [x] P8-D1 size: M. Approve and reject flow for HUMAN decisions (writes `kubeheal.exec` and the ledger). Verify: API tests. Needs: P4-L1.
 - [x] P8-D2 size: M. Incident page: scores, CIs, SHAP view, causal chain with T0, ledger timeline. Verify: page renders against a seeded incident. Needs: P6-D6, P4-L1.
 - [x] P8-D3 size: M. Kill switch status and toggle with admin token, mode history. Verify: API test for toggle with and without token.
-- [~] builder-C (wave/P9, as Helm chart template) P8-D4 size: S. Ingress manifests (Traefik on k3d, NGINX in generic values). Verify: `kubectl apply --dry-run=client`.
+- [x] P8-D4 size: S. Ingress manifests (Traefik on k3d, NGINX in generic values). Verify: `kubectl apply --dry-run=client`.
 
 - [ ] P8-D5 size: M. Owner request 2026-11-11, do on `work` AFTER the P9 and P6 merges and BEFORE P10: the dashboard approval claim (`CLAIM_TTL_S`, now 30 days) gets a short chosen default TTL (about 10 minutes, documented as tunable, labelled chosen not measured); startup reconciliation in the dashboard that scans claims against the exec stream and the ledger and completes (writes the missing `approved`) or releases claims with no matching record; an admin-only 'release claim' action that writes a ledger entry (`claim_released`, actor). Files: `dashboard/`, tests `tests/test_dashboard_*.py`. Tests for each (short TTL, reconciliation complete and release, release action needs the token and writes the ledger entry).
 
 ### P9 Cloud platform (touches `deploy/helm/`, `k8s/`, `eval/`)
-- [~] builder-C (wave/P9) P9-H1 size: M. Helm chart `deploy/helm/kubeheal` replacing `scripts/install.sh`; values-dev, staging, prod, k3d-demo. Verify: `helm lint` and `helm template` for all four.
-- [~] builder-C (wave/P9) P9-H2 size: S. Namespaces prod, staging, dev with ResourceQuota, LimitRange, `kubeheal/tier` label. Verify: `helm template`.
-- [~] builder-C (wave/P9) P9-H3 size: M. Model servers: 2+ replicas, PDB minAvailable 1, topology spread, HPA 2 to 8 on request queue depth through prometheus-adapter (servers export the metric); CPU HPA only as documented fallback. Needs: P4-M1.
-- [~] builder-C (wave/P9) P9-H4 size: M. Resource profile script in `eval/` that measures usage; requests and limits come from the recorded measurement. Needs: cluster (cluster owner).
-- [~] builder-C (wave/P9) P9-H5 size: S. NetworkPolicy around `kubeheal` (only agents, dashboard, Prometheus reach model servers). Verify: `helm template`; enforcement check in P10.
-- [~] builder-C (wave/P9) P9-H6 size: S. Redis with AOF on a PVC, plus Redis auth (the Executor trusts every message on `kubeheal.exec`, so only Fusion and the dashboard may write to Redis). Verify: `helm template`. (From P2 review.)
-- [~] builder-C (wave/P9) P9-H8 size: S. Executor in the chart: image build and apply (legacy `scripts/install.sh` does not deploy it), readiness and liveness probes, securityContext. Verify: `helm template`. (From P2 review.)
-- [~] builder-C (wave/P9) P9-H7 size: M. ONNX or `.pt` serving by config where export parity holds (existing export scripts). Verify: tests with config switch.
+- [x] P9-H1 size: M. Helm chart `deploy/helm/kubeheal` replacing `scripts/install.sh`; values-dev, staging, prod, k3d-demo. Verify: `helm lint` and `helm template` for all four.
+- [x] P9-H2 size: S. Namespaces prod, staging, dev with ResourceQuota, LimitRange, `kubeheal/tier` label. Verify: `helm template`.
+- [x] P9-H3 size: M. Model servers: 2+ replicas, PDB minAvailable 1, topology spread, HPA 2 to 8 on request queue depth through prometheus-adapter (servers export the metric); CPU HPA only as documented fallback. Needs: P4-M1.
+- [x] P9-H4 size: M. (script written and unit-tested, NOT run on a cluster: needs the cluster owner in P10) Resource profile script in `eval/` that measures usage; requests and limits come from the recorded measurement. Needs: cluster (cluster owner).
+- [x] P9-H5 size: S. NetworkPolicy around `kubeheal` (only agents, dashboard, Prometheus reach model servers). Verify: `helm template`; enforcement check in P10.
+- [x] P9-H6 size: S. Redis with AOF on a PVC, plus Redis auth (the Executor trusts every message on `kubeheal.exec`, so only Fusion and the dashboard may write to Redis). Verify: `helm template`. (From P2 review.)
+- [x] P9-H8 size: S. Executor in the chart: image build and apply (legacy `scripts/install.sh` does not deploy it), readiness and liveness probes, securityContext. Verify: `helm template`. (From P2 review.)
+- [x] P9-H7 size: M. ONNX or `.pt` serving by config where export parity holds (existing export scripts). Verify: tests with config switch.
 
 ### P10 k3d environment and `demo` branch (cluster owner only)
 - [ ] P10-U1 size: L. Create `demo` from `work`; `demo/k3d/up.ps1` and `down.ps1` (cluster, kubeconfig fix, CSI hostpath, external-snapshotter, VolumeSnapshotClass, NetworkPolicy check, Prometheus, prometheus-adapter, Redis, MinIO, Helm install, image build and import). Needs: P9.

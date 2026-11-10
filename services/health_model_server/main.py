@@ -31,8 +31,9 @@ from models.health_model.yaml_gat_encoder import yaml_diff_to_graph
 from models.health_model.health_conformal import ConformalRegressor
 from models.interpretation.field_name_mapper import FieldNameMapper
 from models.interpretation.shap_explainer import HealthModelSHAPExplainer
-from services.ckpt import expected_preprocess_version, load_model_checkpoint, health_payload, require_ready
-from agents.common.metrics import KubeHealMetrics, add_metrics_route
+from services.ckpt import (expected_preprocess_version, load_model_checkpoint, health_payload,
+                           pt_only_status, require_ready)
+from agents.common.metrics import KubeHealMetrics, add_inflight_middleware, add_metrics_route
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -51,6 +52,11 @@ class ScoreRequest(BaseModel):
 
 
 def _load_model():
+    refused = pt_only_status("health model")
+    if refused is not None:
+        STATE["status"] = refused
+        STATE["model"] = None
+        return
     ckpt = os.environ.get("MODEL_PATH",
                           str(ROOT / "models/health_model/checkpoints/best_health_model.pt"))
     m = HealthModel()
@@ -78,6 +84,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="KubeHeal Health Model", version="4.0.0", lifespan=lifespan)
 add_metrics_route(app, METRICS)
+add_inflight_middleware(app, METRICS, ["/health/score"])
 
 
 @app.get("/health")

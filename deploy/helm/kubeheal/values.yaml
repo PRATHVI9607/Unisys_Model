@@ -1,0 +1,308 @@
+# KubeHeal chart: generic defaults (NGINX ingress class, nothing sized).
+#
+# Rules for this file:
+#   * No resource requests or limits, no ResourceQuota or LimitRange numbers and no Redis volume size
+#     are set here. They are owner decisions or measurements. The templates use
+#     `required` for them, so `helm template` with values-dev/staging/prod.yaml alone fails with a
+#     message naming the missing key until the owner supplies them. values-k3d-demo.yaml and
+#     values-lab-example.yaml carry clearly labelled chosen numbers (examples, not measurements).
+#   * Requests and limits come from a measurement: run eval/resource_profile.py on the cluster, which
+#     writes a CSV and a values snippet to merge in (see the `resources:` keys below).
+
+# ---- global -----------------------------------------------------------------
+global:
+  # Prefix for every KubeHeal and third-party image, e.g. "registry.example.com/". Empty = as named.
+  imageRegistry: ""
+  imageTag: v4              # tag used by scripts/install.sh and k8s/*.yaml
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets: []
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  # Applied to every KubeHeal container (the Security Agent and Executor extend it, see below).
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
+
+# Namespace the chart installs into. RBAC and the kill switch RoleBindings assume `kubeheal`.
+namespace: kubeheal
+
+# ---- protected namespaces and platform policy (S-CL-4) -------------------------
+namespaces:
+  # Create the tier Namespace objects prod, staging and dev (label kubeheal/tier). Set false if
+  # k8s/rbac/rbac.yaml was applied first (it creates the same namespaces; do not manage them twice).
+  create: true
+  # The release namespace (`kubeheal`) is NOT templated: install with
+  #   helm install kubeheal deploy/helm/kubeheal -n kubeheal --create-namespace -f <values>
+  # Helm would otherwise fail on ownership of a Namespace it did not create. Set true only for
+  # `helm template | kubectl apply` flows. Nothing in agents/ or dashboard/ reads the label
+  # kubeheal.io/enabled that k8s/rbac/rbac.yaml puts on it.
+  createReleaseNamespace: false
+  # Owner decision, REQUIRED for every tier. `hard` is a ResourceQuota spec.hard map and `limits` a
+  # LimitRange spec.limits list. Nothing is defaulted because no number here has been measured.
+  # Shape only (not values):
+  #   hard:   {requests.cpu: <quantity>, requests.memory: <quantity>, pods: <count>}
+  #   limits: [{type: Container, default: {...}, defaultRequest: {...}}]
+  quotas:
+    prod:    {hard: {}, limits: []}
+    staging: {hard: {}, limits: []}
+    dev:     {hard: {}, limits: []}
+
+# RBAC. Rendered from the same rules as k8s/rbac/rbac.yaml (tests/test_platform_chart.py fails if the
+# two diverge). Set false when k8s/rbac/rbac.yaml was applied with kubectl instead.
+rbac:
+  create: true
+
+# ---- kill switch (P3) ----------------------------------------------------------
+killSwitch:
+  mode: test        # fresh installs start in dry run; flip to enforce deliberately
+
+# ---- Redis: AOF on a PVC plus password auth (P9-H6) --------------------------------
+# NOTE: the Executor trusts every message on the `kubeheal.exec` stream, so only Fusion and the
+# dashboard should be able to write to Redis. What this chart enforces: one shared password
+# (requirepass) and a NetworkPolicy that lets only KubeHeal components reach Redis. Per-component
+# Redis ACL users (health and security agents limited to their own streams) need an audit of every
+# key the agents touch and are not done here.
+redis:
+  image:
+    repository: redis
+    tag: "7.2-alpine"          # deployer choice, pin and scan before production use
+  serviceName: redis-master    # kept so existing REDIS_URL defaults keep working
+  auth:
+    # Secret holding the password under `key`. Create it yourself, or pass `redis.auth.password` at
+    # install time (--set-file or --set, never commit it) and the chart creates the Secret.
+    # Use a URL-safe password: it is placed inside REDIS_URL.
+    existingSecret: kubeheal-redis
+    key: password
+    password: ""
+  persistence:
+    storageClass: ""           # empty = cluster default
+    size: ""                   # REQUIRED (volume budget is an owner decision)
+  resources: {}
+
+# ---- MinIO ledger (WORM bucket) --------------------------------------------------
+minio:
+  enabled: true
+  image:
+    repository: docker.io/pgsty/silo
+    tag: RELEASE.2026-11-09T00-00-00Z     # same as k8s/minio.yaml
+  mcImage:
+    repository: docker.io/pgsty/mc
+    tag: RELEASE.2026-11-09T00-00-00Z     # same as k8s/minio.yaml
+  rootSecret: kubeheal-minio-root       # keys root-user, root-password (scripts/minio_secret.ps1)
+  clientSecret: kubeheal-minio-client   # keys access-key, secret-key
+  endpoint: minio:9000
+  bucket: kubeheal-ledger
+  ledgerRetention: 1d                   # value from k8s/minio.yaml; owner to confirm for production
+  persistence:
+    storageClass: ""
+    size: 2Gi                           # same as k8s/minio.yaml
+  resources: {}
+
+# ---- agents, executor, dashboard ---------------------------------------------------
+# `resources` is left unset on purpose. Run `python eval/resource_profile.py` on the cluster and merge
+# the values snippet it writes. `extraEnv` is a name: value map appended to the container env.
+healthAgent:
+  image: {repository: kubeheal/health-agent}
+  port: 8080
+  prometheusUrl: http://prometheus-operated.monitoring.svc.cluster.local:9090
+  logLevel: INFO
+  # Optional hardening, OFF by default and not verified on a cluster yet: verify on k3d before enabling.
+  # runAsNonRoot needs a numeric runAsUser unless the image already sets a non-root USER.
+  hardening: {runAsNonRoot: false, readOnlyRootFilesystem: false, runAsUser: ""}
+  resources: {}
+  extraEnv: {}
+
+securityAgent:
+  image: {repository: kubeheal/security-agent}
+  metricsPort: 9100
+  falcoMode: auto             # auto | live | off | replay (see agents/security_agent/falco_client.py)
+  falcoEventsPath: /var/run/falco/events.jsonl
+  logLevel: INFO
+  resources: {}
+  extraEnv: {}
+
+fusionAgent:
+  image: {repository: kubeheal/fusion-agent}
+  replicas: 2
+  port: 8081
+  burnInMode: "false"
+  logLevel: INFO
+  # Optional hardening, OFF by default and not verified on a cluster yet: verify on k3d before enabling.
+  # runAsNonRoot needs a numeric runAsUser unless the image already sets a non-root USER.
+  hardening: {runAsNonRoot: false, readOnlyRootFilesystem: false, runAsUser: ""}
+  resources: {}
+  extraEnv: {}
+
+executor:
+  image: {repository: kubeheal/executor}
+  replicas: 1
+  metricsPort: 9100
+  # Namespaces the Executor may act in (must match the RoleBindings: prod, staging, dev).
+  execNamespaces: "prod,staging,dev"
+  # Chosen defaults, NOT measurements (owner decision). The Executor needs all five; an empty value
+  # still renders and the Executor then escalates (config_missing) instead of guessing. Override any
+  # of them with --set, including to "".
+  env:
+    PROMETHEUS_URL: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+    SNAPSHOT_CLASS: "csi-hostpath-snapclass"   # P10 creates a VolumeSnapshotClass with exactly this name
+    CANARY_WINDOW_S: "30"
+    ROLLOUT_TIMEOUT_S: "180"
+    ROLLOUT_POLL_S: "5"
+  # Non-root uid and read-only root filesystem; /tmp is an emptyDir.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532          # chosen uid, not measured: any non-zero uid works with a read-only root filesystem
+    readOnlyRootFilesystem: true
+  resources: {}
+  extraEnv: {}
+
+dashboard:
+  image: {repository: kubeheal/dashboard}
+  port: 5000
+  logLevel: INFO
+  # REQUIRED Secret, created outside the chart (no token value in any values file):
+  #   kubectl -n kubeheal create secret generic kubeheal-dashboard-admin --from-literal=token=<token>
+  # Rendered as KUBEHEAL_ADMIN_TOKEN. The pod does not start without the Secret. When the token is
+  # blank the dashboard answers 503 on every mutating endpoint (toggle, approve, reject).
+  adminTokenSecret: {name: kubeheal-dashboard-admin, key: token}
+  # Optional KUBEHEAL_ADMIN_IDENTITY (who the ledger records for admin actions); rendered only when set.
+  adminIdentity: ""
+  # Optional hardening, OFF by default and not verified on a cluster yet: verify on k3d before enabling.
+  # runAsNonRoot needs a numeric runAsUser unless the image already sets a non-root USER.
+  hardening: {runAsNonRoot: false, readOnlyRootFilesystem: false, runAsUser: ""}
+  resources: {}
+  extraEnv: {}
+
+# ---- model servers (S-CL-1, S-CL-2, S-CL-8) ----------------------------------------
+modelServers:
+  replicas: 2                  # 2+ so the PDB can keep one pod during a drain
+  pdb:
+    minAvailable: 1
+  topologySpread:
+    topologyKey: kubernetes.io/hostname
+    maxSkew: 1
+    whenUnsatisfiable: ScheduleAnyway   # DoNotSchedule would block 2 replicas on a single-node cluster
+  registryBucket: kubeheal-ledger
+  # modelFormat is MODEL_FORMAT: pt (default) or onnx. onnx is supported by the DCM only (one output,
+  # parity tested). The health and security servers fail closed (503) if asked for onnx because their
+  # ONNX export drops the embeddings and attributions they return. The ONNX file must exist at
+  # MODEL_ONNX_PATH inside the image or a mounted volume; nothing in this repo builds one into the image,
+  # and the MinIO registry download is ignored in ONNX mode. A missing file fails closed, there is no
+  # silent fall back to .pt.
+  health:
+    name: kubeheal-health-model
+    serviceAccount: health-model
+    image: {repository: kubeheal/health-model-server}
+    port: 8001
+    modelFormat: pt
+    modelPath: /app/models/health_model/checkpoints/best_health_model.pt
+    registryObject: models/health/best_health_model.pt
+    enableShap: "true"
+    # Optional hardening, OFF by default and not verified on a cluster yet: verify on k3d before enabling.
+    # runAsNonRoot needs a numeric runAsUser unless the image already sets a non-root USER.
+    hardening: {runAsNonRoot: false, readOnlyRootFilesystem: false, runAsUser: ""}
+    resources: {}
+    extraEnv: {}
+  security:
+    name: kubeheal-security-model
+    serviceAccount: security-model
+    image: {repository: kubeheal/security-model-server}
+    port: 8002
+    modelFormat: pt
+    modelPath: /app/models/security_model/checkpoints/best_security_model.pt
+    registryObject: models/security/best_security_model.pt
+    enableShap: "true"
+    # Optional hardening, OFF by default and not verified on a cluster yet: verify on k3d before enabling.
+    # runAsNonRoot needs a numeric runAsUser unless the image already sets a non-root USER.
+    hardening: {runAsNonRoot: false, readOnlyRootFilesystem: false, runAsUser: ""}
+    resources: {}
+    extraEnv: {}
+  dcm:
+    name: kubeheal-dcm
+    serviceAccount: dcm
+    image: {repository: kubeheal/dcm-server}
+    port: 8003
+    modelFormat: pt
+    modelPath: /app/models/dcm/checkpoints/best_dcm.pt
+    onnxPath: /app/models/dcm_v4.onnx
+    registryObject: models/dcm/best_dcm.pt
+    # Optional hardening, OFF by default and not verified on a cluster yet: verify on k3d before enabling.
+    # runAsNonRoot needs a numeric runAsUser unless the image already sets a non-root USER.
+    hardening: {runAsNonRoot: false, readOnlyRootFilesystem: false, runAsUser: ""}
+    resources: {}
+    extraEnv: {}
+
+# Autoscaling for the model servers: min 2, max 8 (spec S-CL-1).
+#   queue   : DEFAULT and required by the spec. Per-pod gauge kubeheal_model_inflight_requests, exported by
+#             each model server (scoring requests running plus waiting for a worker), served to the HPA by
+#             prometheus-adapter as a Pods metric (rule: ConfigMap kubeheal-prometheus-adapter-rule).
+#   latency : documented FALLBACK, off unless selected. rate() of the latency histogram sum is the mean number
+#             of requests being handled at once per pod. It does not count requests waiting for a worker.
+#   cpu     : an even weaker documented fallback for clusters without prometheus-adapter. Utilisation is
+#             computed against the CPU request, so resources.requests.cpu must be set on the model servers.
+#   none    : no HPA objects.
+# Exactly one HPA per model server is rendered, never two.
+hpa:
+  mode: queue
+  minReplicas: 2
+  maxReplicas: 8
+  queue:
+    metricName: kubeheal_model_inflight_requests
+    # Series the adapter rule reads. Exported by every model server on /metrics (tests check this).
+    seriesName: kubeheal_model_inflight_requests
+    # Optional full override of the adapter metricsQuery (adapter template syntax).
+    metricsQuery: ""          # default: avg(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>), one value per pod
+    # CHOSEN DEFAULT, not a measurement: target average in-flight plus waiting requests per pod.
+    # Tunable; P11 (load tests) is where it gets tuned.
+    targetAverageValue: "4"
+  latency:
+    # Custom metric name the latency fallback HPA asks for (adapter rule is rendered only in this mode).
+    metricName: kubeheal_model_latency_concurrency
+    seriesName: kubeheal_model_latency_seconds_sum
+    rateWindow: 1m             # chosen, not measured
+    targetAverageValue: ""     # REQUIRED when mode=latency
+  cpu:
+    targetAverageUtilization: ""   # REQUIRED when mode=cpu
+
+# Prometheus side.
+monitoring:
+  # ConfigMap with a Prometheus scrape job that discovers KubeHeal pods through the prometheus.io/*
+  # annotations every component carries, and sets the namespace and pod labels prometheus-adapter
+  # needs. Merge it into your Prometheus scrape_configs. No ServiceMonitor is created (no CRD).
+  scrapeSnippet:
+    enabled: true
+  # ConfigMap with the prometheus-adapter rule behind hpa.queue (merge into the adapter's rules.custom).
+  adapterRule:
+    enabled: true
+
+# ---- NetworkPolicy (S-CL-5) -------------------------------------------------------
+networkPolicy:
+  enabled: true
+  # Namespace (label kubernetes.io/metadata.name) where Prometheus runs.
+  prometheusNamespace: monitoring
+  # Namespace of the ingress controller that may reach the dashboard.
+  ingressControllerNamespace: ingress-nginx
+  # Ingress is restricted by default. The policies rely on the CNI letting the node reach pods for kubelet
+  # probes (probe traffic comes from the node, which most CNIs allow); to be checked on k3d in P10.
+  # Optional egress lockdown, OFF by default: default-deny egress plus allows for kube-dns, the API server,
+  # Redis, MinIO, the model servers and Prometheus. The Falco socket is a hostPath file, not network traffic,
+  # so no rule is needed for it.
+  egress:
+    enabled: false
+    dnsNamespace: kube-system
+    dnsPodLabel: {k8s-app: kube-dns}
+    apiServerCIDR: ""          # REQUIRED when egress.enabled: the API server address as a CIDR (cluster specific)
+    apiServerPorts: [443, 6443]   # standard API server ports (443 service, 6443 k3s and kubeadm)
+    prometheusPort: 9090       # port of the default PROMETHEUS_URL
+
+# ---- Ingress for the dashboard ----------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx           # values-k3d-demo.yaml uses traefik
+  host: ""                   # empty = no host match
+  path: /
+  annotations: {}
+  tls: []

@@ -1,0 +1,87 @@
+{{- $ns := include "kubeheal.namespace" . }}
+{{- if and .Values.monitoring.adapterRule.enabled (or (eq .Values.hpa.mode "queue") (eq .Values.hpa.mode "latency")) }}
+{{- $mode := .Values.hpa.mode }}
+{{- $q := index .Values.hpa $mode }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubeheal-prometheus-adapter-rule
+  namespace: {{ $ns }}
+  labels:
+    app: kubeheal-prometheus-adapter-rule
+data:
+  README: |
+    prometheus-adapter rule behind the model server HPA (hpa.mode={{ $mode }}). prometheus-adapter does not
+    read this ConfigMap by itself: merge rule.yaml into its `rules.custom` (Helm values of the
+    prometheus-adapter chart) or into its config ConfigMap, then restart the adapter. Check with:
+      kubectl get --raw "/apis/custom.metrics.k8s.io/v1beta1/namespaces/{{ $ns }}/pods/*/{{ $q.metricName }}"
+    The adapter needs `namespace` and `pod` labels on the series: see the ConfigMap
+    kubeheal-prometheus-scrape-snippet.
+{{- if eq $mode "queue" }}
+    Series: the per-pod gauge {{ $q.seriesName }} exported by every model server. It counts
+    scoring requests running plus waiting for a worker (health and metrics routes are not counted).
+{{- else }}
+    FALLBACK rule. Series: the histogram sum {{ $q.seriesName }}. Its rate is the mean number of requests being
+    handled at once per pod. It does NOT count requests waiting for a worker.
+{{- end }}
+  rule.yaml: |
+{{- if eq $mode "queue" }}
+    - seriesQuery: '{{ $q.seriesName }}{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: namespace}
+          pod: {resource: pod}
+      name:
+        as: "{{ $q.metricName }}"
+      metricsQuery: {{ default "avg(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)" $q.metricsQuery | quote }}
+{{- else }}
+    - seriesQuery: '{{ $q.seriesName }}{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: namespace}
+          pod: {resource: pod}
+      name:
+        as: "{{ $q.metricName }}"
+      metricsQuery: {{ printf "sum(rate(<<.Series>>{<<.LabelMatchers>>}[%s])) by (<<.GroupBy>>)" $q.rateWindow | quote }}
+{{- end }}
+{{- end }}
+{{- if .Values.monitoring.scrapeSnippet.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubeheal-prometheus-scrape-snippet
+  namespace: {{ $ns }}
+data:
+  README: |
+    One Prometheus scrape job covering every KubeHeal component. Each pod carries prometheus.io/scrape,
+    prometheus.io/path and prometheus.io/port annotations (health agent, fusion agent, security agent,
+    executor, dashboard and the three model servers), so new components and ports are picked up without
+    editing this job. Merge scrape-job.yaml into the scrape_configs of your Prometheus. No
+    ServiceMonitor is created (no CRD dependency).
+  scrape-job.yaml: |
+    - job_name: kubeheal-pods
+      kubernetes_sd_configs:
+        - role: pod
+          namespaces:
+            names: [{{ $ns }}]
+      relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          action: keep
+          regex: "true"
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+        - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+          action: replace
+          regex: ([^:]+)(?::\d+)?;(\d+)
+          replacement: $1:$2
+          target_label: __address__
+        - source_labels: [__meta_kubernetes_namespace]
+          target_label: namespace
+        - source_labels: [__meta_kubernetes_pod_name]
+          target_label: pod
+        - source_labels: [__meta_kubernetes_pod_label_app]
+          target_label: app
+{{- end }}

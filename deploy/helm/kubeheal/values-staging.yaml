@@ -1,0 +1,18 @@
+# staging values. Layer on top of values.yaml:
+#   helm install kubeheal deploy/helm/kubeheal -f deploy/helm/kubeheal/values-staging.yaml <owner inputs>
+#
+# No numbers are set in this file on purpose. The owner must supply, with a second -f file or --set:
+#   namespaces.quotas.{prod,staging,dev}.hard and .limits   (ResourceQuota and LimitRange)
+#   redis.persistence.size
+# Until then `helm template` fails with a message naming the missing key. Requests and limits stay
+# unset until eval/resource_profile.py has produced a measured profile.
+
+ingress:
+  className: nginx
+
+killSwitch:
+  mode: test        # flip to enforce only after a dry-run soak in this cluster
+
+modelServers:
+  topologySpread:
+    whenUnsatisfiable: ScheduleAnyway
