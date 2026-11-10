@@ -4,4 +4,5 @@ fastapi==0.110.0
 uvicorn[standard]==0.27.0
 pydantic==2.6.0
 prometheus-client>=0.20.0
+minio>=7.2.0
 numpy<2

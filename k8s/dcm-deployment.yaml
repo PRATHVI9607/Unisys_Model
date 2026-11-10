@@ -20,6 +20,21 @@ spec:
         ports: [{containerPort: 8003, name: http}]
         env:
         - {name: MODEL_PATH, value: /app/models/dcm/checkpoints/best_dcm.pt}
+        - {name: MODEL_REGISTRY_OBJECT, value: models/dcm/best_dcm.pt}
+        - {name: MODEL_REGISTRY_BUCKET, value: kubeheal-ledger}
+        - {name: MINIO_ENDPOINT, value: minio:9000}
+        - name: MINIO_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: kubeheal-minio-client
+              key: access-key
+              optional: true
+        - name: MINIO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: kubeheal-minio-client
+              key: secret-key
+              optional: true
         resources:
           requests: {cpu: "200m", memory: "256Mi"}
           limits: {cpu: "500m", memory: "512Mi"}

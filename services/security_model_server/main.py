@@ -28,7 +28,7 @@ from models.security_model.security_model import (
 from models.security_model.security_output_head import SECURITY_LABELS
 from models.security_model.security_conformal import ConformalRegressor
 from models.interpretation.shap_explainer import SecurityModelSHAPExplainer
-from services.ckpt import load_checkpoint, health_payload, require_ready
+from services.ckpt import load_model_checkpoint, health_payload, require_ready
 from agents.common.metrics import KubeHealMetrics, add_metrics_route
 
 logging.basicConfig(level=logging.INFO)
@@ -48,9 +48,9 @@ def _load_model():
     ckpt = os.environ.get("MODEL_PATH",
                           str(ROOT / "models/security_model/checkpoints/best_security_model.pt"))
     m = SecurityModel()
-    status = load_checkpoint(m, ckpt, "security model")
+    status = load_model_checkpoint(m, ckpt, "security model")
     if status["loaded"] and not status["random_weights"]:
-        logger.info(f"Loaded security model from {ckpt} ({m.param_count():,} params)")
+        logger.info(f"Loaded security model from {status['source']}:{status['checkpoint']} ({m.param_count():,} params)")
     STATE["status"] = status
     m.eval()
     STATE["model"] = m

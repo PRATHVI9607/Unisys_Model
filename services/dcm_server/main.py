@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT))
 from models.dcm.cross_modal_attention import CrossModalAttention
 from models.dcm.causal_chain_builder import CausalChainBuilder
 from models.dcm.correlation_head import COMPOUND_THRESHOLD, is_compound
-from services.ckpt import load_checkpoint, health_payload, require_ready
+from services.ckpt import load_model_checkpoint, health_payload, require_ready
 from models.interpretation.nl_summary_generator import generate_incident_summary
 from agents.common.metrics import KubeHealMetrics, add_metrics_route
 
@@ -49,13 +49,15 @@ class CorrelateRequest(BaseModel):
 def _load_model():
     ckpt = os.environ.get("MODEL_PATH", str(ROOT / "models/dcm/checkpoints/best_dcm.pt"))
     m = CrossModalAttention()
-    status = load_checkpoint(m, ckpt, "DCM")
+    status = load_model_checkpoint(m, ckpt, "DCM")
     STATE["trained"] = bool(status["loaded"] and not status["random_weights"])
     if STATE["trained"]:
         logger.info(f"Loaded DCM from {ckpt} ({m.param_count():,} params)")
     STATE["status"] = status
     m.eval()
     STATE["model"] = m
+    if status["loaded"] and not status["random_weights"]:
+        logger.info("Loaded DCM from %s:%s", status["source"], status["checkpoint"])
 
 
 @asynccontextmanager

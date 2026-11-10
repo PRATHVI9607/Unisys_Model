@@ -9,6 +9,9 @@ reports random_weights=true so it is never mistaken for a trained model.
 
 import logging
 import os
+import tempfile
+from pathlib import Path
+from urllib.parse import urlparse
 
 import torch
 from fastapi import HTTPException
@@ -44,12 +47,92 @@ def load_checkpoint(model, path: str, name: str) -> dict:
     return status
 
 
+def _download_registry_checkpoint(env, client_factory=None):
+    object_name = (env.get("MODEL_REGISTRY_OBJECT") or "").strip()
+    if not object_name:
+        return None
+    endpoint = env.get("MINIO_ENDPOINT", "minio.kubeheal.svc.cluster.local:9000")
+    access_key = env.get("MINIO_ACCESS_KEY")
+    secret_key = env.get("MINIO_SECRET_KEY")
+    if not access_key or not secret_key:
+        logger.warning("Model registry is configured but MinIO credentials are unavailable; using baked-in checkpoint")
+        return None
+
+    parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
+    host = parsed.netloc or parsed.path
+    if not parsed.hostname:
+        logger.warning("Model registry endpoint is invalid; using baked-in checkpoint")
+        return None
+
+    local_path = None
+    try:
+        if client_factory is None:
+            from minio import Minio
+            client_factory = Minio
+        client = client_factory(
+            host,
+            access_key=access_key,
+            secret_key=secret_key,
+            secure=(parsed.scheme == "https") if parsed.scheme else False,
+        )
+        bucket = env.get("MODEL_REGISTRY_BUCKET") or env.get("MINIO_BUCKET", "kubeheal-ledger")
+        response = client.get_object(bucket_name=bucket, object_name=object_name)
+        try:
+            with tempfile.NamedTemporaryFile(prefix="kubeheal-model-", suffix=Path(object_name).suffix or ".pt",
+                                             delete=False) as output:
+                local_path = output.name
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+        finally:
+            response.close()
+            release = getattr(response, "release_conn", None)
+            if release:
+                release()
+        return local_path
+    except Exception as exc:
+        if local_path:
+            try:
+                os.unlink(local_path)
+            except OSError:
+                pass
+        logger.warning("Could not download model registry object %s (%s); using baked-in checkpoint",
+                       object_name, type(exc).__name__)
+        return None
+
+
+def load_model_checkpoint(model, fallback_path: str, name: str, env=None, client_factory=None) -> dict:
+    """Try the configured MinIO model object, then fall back to the baked-in checkpoint."""
+    env = os.environ if env is None else env
+    downloaded_path = _download_registry_checkpoint(env, client_factory)
+    if downloaded_path:
+        initial_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+        try:
+            registry_status = load_checkpoint(model, downloaded_path, name)
+            if registry_status["loaded"] and not registry_status["random_weights"]:
+                registry_status.update({"source": "minio", "checkpoint": env["MODEL_REGISTRY_OBJECT"]})
+                return registry_status
+        finally:
+            try:
+                os.unlink(downloaded_path)
+            except OSError:
+                logger.warning("Could not remove temporary model checkpoint %s", downloaded_path)
+        model.load_state_dict(initial_state)
+        logger.warning("Model registry checkpoint was unusable; trying baked-in checkpoint")
+
+    status = load_checkpoint(model, fallback_path, name)
+    status["source"] = "baked_in" if status["loaded"] and not status["random_weights"] else None
+    return status
+
+
 def health_payload(status: dict, extra: dict = None):
     """Body and HTTP status for /health."""
     ok = bool(status.get("loaded"))
     body = {"status": "ok" if ok else "unavailable", "model_version": "v4.0.0",
             "model_loaded": ok, "random_weights": bool(status.get("random_weights")),
-            "error": status.get("error")}
+            "checkpoint_source": status.get("source"), "error": status.get("error")}
     body.update(extra or {})
     return JSONResponse(body, status_code=200 if ok else 503)
 

@@ -30,7 +30,7 @@ from models.health_model.yaml_gat_encoder import yaml_diff_to_graph
 from models.health_model.health_conformal import ConformalRegressor
 from models.interpretation.field_name_mapper import FieldNameMapper
 from models.interpretation.shap_explainer import HealthModelSHAPExplainer
-from services.ckpt import load_checkpoint, health_payload, require_ready
+from services.ckpt import load_model_checkpoint, health_payload, require_ready
 from agents.common.metrics import KubeHealMetrics, add_metrics_route
 
 logging.basicConfig(level=logging.INFO)
@@ -52,9 +52,9 @@ def _load_model():
     ckpt = os.environ.get("MODEL_PATH",
                           str(ROOT / "models/health_model/checkpoints/best_health_model.pt"))
     m = HealthModel()
-    status = load_checkpoint(m, ckpt, "health model")
+    status = load_model_checkpoint(m, ckpt, "health model")
     if status["loaded"] and not status["random_weights"]:
-        logger.info(f"Loaded health model from {ckpt} ({m.param_count():,} params)")
+        logger.info(f"Loaded health model from {status['source']}:{status['checkpoint']} ({m.param_count():,} params)")
     STATE["status"] = status
     m.eval()
     STATE["model"] = m
