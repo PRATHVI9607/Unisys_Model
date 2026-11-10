@@ -60,10 +60,19 @@ for sa in ("fusion-agent", "executor", "health-agent", "security-agent"):
 EXPECT.append(("dashboard", "patch configmaps/kubeheal-mode", "kubeheal", True))
 EXPECT.append(("dashboard", "patch configmaps/other", "kubeheal", False))
 
-# executor: write only in the protected namespaces, never in kube-system or kubeheal
+# executor: write only the verbs the dispatched paths use (kubeheal-executor-write), only in the
+# protected namespaces, never in kube-system or kubeheal. Every other tested write verb must be denied.
+EXECUTOR_GRANTED = {
+    "patch deployments.apps", "patch statefulsets.apps", "patch pods",
+    "create persistentvolumeclaims",
+    "create networkpolicies.networking.k8s.io", "delete networkpolicies.networking.k8s.io",
+    "create volumesnapshots.snapshot.storage.k8s.io", "delete volumesnapshots.snapshot.storage.k8s.io",
+    "patch deployments.apps/scale", "patch statefulsets.apps/scale",
+}
+assert EXECUTOR_GRANTED <= set(WRITERS_TO_TEST)
 for ns in ("prod", "staging", "dev"):
     for w in WRITERS_TO_TEST:
-        EXPECT.append(("executor", w, ns, True))
+        EXPECT.append(("executor", w, ns, w in EXECUTOR_GRANTED))
 for ns in ("kube-system", "kubeheal", "default"):
     for w in WRITERS_TO_TEST:
         EXPECT.append(("executor", w, ns, False))
