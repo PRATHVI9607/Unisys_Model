@@ -191,21 +191,41 @@ class ProcFdReader:
 
     def read_written(self, wf: WrittenFile) -> bytes:
         """The last `max_read_bytes` the process wrote through `wf` (or the file head if pos is unknown).
-        Never blocks on pipes (only regular files are opened) and never reads more than the bound."""
+
+        The path is opened once with O_RDONLY | O_NONBLOCK | O_NOFOLLOW and the OPEN descriptor is checked
+        with fstat: only a regular file is read. There is no stat-then-open gap, a FIFO cannot block the
+        open or the read, and a symlink swapped in for the target is refused (ELOOP). Never reads more than
+        the bound."""
         n = self.config.max_read_bytes
+        flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0))
         try:
-            if not stat.S_ISREG(os.stat(wf.host_path).st_mode):
-                return b""
-            with open(wf.host_path, "rb") as f:
-                if wf.pos is None:
-                    return f.read(n)
-                if wf.pos <= 0:
-                    return b""                     # nothing written through this descriptor yet
-                start = max(0, wf.pos - n)
-                f.seek(start)
-                return f.read(min(n, wf.pos - start))
+            fd = os.open(wf.host_path, flags)
         except OSError:
             return b""
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return b""
+            if wf.pos is None:
+                start, length = 0, n
+            elif wf.pos <= 0:
+                return b""                         # nothing written yet through this descriptor
+            else:
+                start = max(0, wf.pos - n)
+                length = min(n, wf.pos - start)
+            os.lseek(fd, start, os.SEEK_SET)
+            chunks, got = [], 0
+            while got < length:
+                chunk = os.read(fd, length - got)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                got += len(chunk)
+            return b"".join(chunks)
+        except OSError:
+            return b""
+        finally:
+            os.close(fd)
 
 
 class EntropySampler:
@@ -232,13 +252,15 @@ class EntropySampler:
                       on_sample: Optional[Callable[["EntropyResult", int], Awaitable[None]]] = None
                       ) -> EntropyResult:
         """`samples` samples, `interval_s` apart (the sleep is shortened by the time a sample took).
-        `on_sample(result, index)` is awaited after each sample (the agent uses it for an early report)."""
+        `on_sample(result, index)` is awaited after each sample (the agent uses it for an early report).
+        The blocking /proc and file reads of one sample run in a worker thread (asyncio.to_thread), so a
+        slow volume cannot stall the event loop that also runs the Falco consumer and the detectors."""
         cfg = self.config
         result = EntropyResult(pid=pid, series=[])
         for i in range(cfg.samples):
             t0 = self._clock()
             try:
-                result.series.append(self.sample_once(pid, result.files))
+                result.series.append(await asyncio.to_thread(self.sample_once, pid, result.files))
             except (FileNotFoundError, ProcessLookupError, PermissionError) as e:
                 logger.info("entropy sampling for pid %s stopped at sample %d: %s", pid, i, e)
                 result.ended_early = True

@@ -212,3 +212,76 @@ def test_max_files_per_sample_is_respected(proc):
     seen = []
     EntropySampler(proc.reader(cfg), config=cfg).sample_once(PID, seen)
     assert seen == ["/data/f3.bin", "/data/f4.bin"]
+
+
+def _symlink_or_skip(link, target):
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError, AttributeError):
+        pytest.skip("this OS/user cannot create symlinks")
+
+
+def test_symlink_target_is_not_followed(proc, tmp_path):
+    secret = tmp_path / "secret.bin"
+    secret.write_bytes(RANDOM_BLOCK)
+    root_data = proc.root / str(PID) / "root" / "data"
+    root_data.mkdir(parents=True)
+    _symlink_or_skip(root_data / "link.bin", secret)
+    if not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("O_NOFOLLOW not available")
+    proc.add_fd(3, "/data/link.bin", O_WRONLY_LARGEFILE, 4096)
+    r = proc.reader()
+    assert r.read_written(r.written_files(PID)[0]) == b""
+
+
+def test_fifo_target_is_skipped_without_blocking(proc):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("this OS cannot create FIFOs")
+    root_data = proc.root / str(PID) / "root" / "data"
+    root_data.mkdir(parents=True)
+    os.mkfifo(root_data / "pipe")
+    proc.add_fd(3, "/data/pipe", O_WRONLY_LARGEFILE, 4096)
+    r = proc.reader()
+    assert r.read_written(r.written_files(PID)[0]) == b""       # returns, does not hang
+
+
+def test_only_regular_files_are_read_even_if_open_succeeds(proc, monkeypatch):
+    """Platform independent check of the fstat gate: the open descriptor, not a separate stat, decides."""
+    import stat as st
+    from agents.security_agent import entropy_sampler as es
+    proc.file("/data/f.bin", RANDOM_BLOCK)
+    proc.add_fd(3, "/data/f.bin", O_WRONLY_LARGEFILE, 4096)
+    r = proc.reader()
+    wf = r.written_files(PID)[0]
+    assert len(r.read_written(wf)) == 4096
+
+    class FifoStat:
+        st_mode = st.S_IFIFO | 0o600
+    monkeypatch.setattr(es.os, "fstat", lambda fd: FifoStat)
+    try:
+        assert r.read_written(wf) == b""
+    finally:
+        monkeypatch.undo()            # os.fstat is global: restore before pytest cleans up tmp_path
+
+
+def test_collect_runs_the_blocking_sample_off_the_event_loop(proc):
+    import threading
+    proc.file("/data/enc.bin", RANDOM_BLOCK)
+    proc.add_fd(3, "/data/enc.bin", O_WRONLY_LARGEFILE, 4096)
+    threads = []
+
+    async def sleep(s):
+        await asyncio.sleep(0)
+
+    sampler = EntropySampler(proc.reader(), config=SamplerConfig(samples=2), sleep=sleep)
+    orig = sampler.sample_once
+
+    def spy(pid, seen=None):
+        threads.append(threading.get_ident())
+        return orig(pid, seen)
+    sampler.sample_once = spy
+
+    async def go():
+        return threading.get_ident(), await sampler.collect(PID)
+    main, res = asyncio.run(go())
+    assert res.valid_samples == 2 and threads and all(t != main for t in threads)
