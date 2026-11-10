@@ -230,6 +230,41 @@ def test_agent_replay_publishes_event_scored_by_the_model_input_from_the_trace(m
     assert float(p["sec_risk"]) == pytest.approx(0.91)
 
 
+def test_security_agent_reads_observe_request_before_its_next_entropy_sample(monkeypatch):
+    import json
+    import time
+    from types import SimpleNamespace
+    from agents.security_agent import agent as sa
+
+    agent = sa.SecurityAgent(redis_url="redis://unused")
+    agent.redis = FakeRedis()
+    agent.redis.kv["kubeheal:sampling:prod:pod:victim-abc"] = json.dumps({
+        "factor": 3, "until_ms": int(time.time() * 1000) + 30_000,
+    })
+    intervals = []
+
+    class Sampler:
+        config = SimpleNamespace(samples=2, interval_s=2.0)
+
+        async def collect(self, pid, on_sample=None, interval_provider=None):
+            intervals.append(await interval_provider())
+            return SimpleNamespace(pid=pid, series=[0.5], valid_samples=1, files=[], ended_early=False)
+
+    agent.sampler = Sampler()
+    async def pid_info(_pid):
+        return {"namespace": "prod", "pod": "victim-abc"}
+    async def no_mmap(_pid):
+        return False
+    async def no_assess(*_args, **_kwargs):
+        return None
+    monkeypatch.setattr(agent, "_get_pid_info", pid_info)
+    monkeypatch.setattr(agent, "_check_mmap_entropy", no_mmap)
+    monkeypatch.setattr(agent, "_assess_and_publish", no_assess)
+
+    asyncio.run(agent._run_entropy_check(4242, [], "falco"))
+    assert intervals == pytest.approx([2.0 / 3.0])
+
+
 def test_agent_replay_of_benign_trace_publishes_nothing_and_never_calls_the_model(monkeypatch, tmp_path):
     ag, calls = _agent(monkeypatch, tmp_path, BENIGN)
     _run_replay(ag)

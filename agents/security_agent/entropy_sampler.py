@@ -249,10 +249,13 @@ class EntropySampler:
         return sum(entropies) / len(entropies) if entropies else None
 
     async def collect(self, pid: int,
-                      on_sample: Optional[Callable[["EntropyResult", int], Awaitable[None]]] = None
+                      on_sample: Optional[Callable[["EntropyResult", int], Awaitable[None]]] = None,
+                      interval_provider: Optional[Callable[[], Awaitable[float]]] = None,
                       ) -> EntropyResult:
         """`samples` samples, `interval_s` apart (the sleep is shortened by the time a sample took).
         `on_sample(result, index)` is awaited after each sample (the agent uses it for an early report).
+        `interval_provider`, when supplied, is called before every sleep so a bounded OBSERVE request can
+        adjust the next interval without changing the sampler's configured base interval.
         The blocking /proc and file reads of one sample run in a worker thread (asyncio.to_thread), so a
         slow volume cannot stall the event loop that also runs the Falco consumer and the detectors."""
         cfg = self.config
@@ -268,5 +271,11 @@ class EntropySampler:
             if on_sample is not None:
                 await on_sample(result, i)
             if i < cfg.samples - 1:
-                await self._sleep(max(0.0, cfg.interval_s - (self._clock() - t0)))
+                interval = cfg.interval_s
+                if interval_provider is not None:
+                    try:
+                        interval = max(0.001, float(await interval_provider()))
+                    except Exception as exc:
+                        logger.debug("sampling interval lookup failed; using base interval: %s", exc)
+                await self._sleep(max(0.0, interval - (self._clock() - t0)))
         return result

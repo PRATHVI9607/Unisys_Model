@@ -147,6 +147,32 @@ def test_collect_takes_30_samples_2s_apart_with_injected_time(proc):
     assert len(res.model_series()) == 30
 
 
+def test_collect_uses_bounded_observe_factor_for_each_next_interval(proc):
+    proc.file("/data/enc.bin", RANDOM_BLOCK)
+    proc.add_fd(3, "/data/enc.bin", O_WRONLY_LARGEFILE, 4096)
+    state = {"t": 1000.0, "sleeps": [], "factor": 1}
+
+    async def sleep(s):
+        state["sleeps"].append(s)
+        state["t"] += s
+
+    async def next_interval():
+        return 2.0 / state["factor"]
+
+    cfg = SamplerConfig(samples=4, interval_s=2.0)
+    sampler = EntropySampler(proc.reader(cfg), config=cfg, clock=lambda: state["t"], sleep=sleep)
+
+    async def go():
+        async def on_sample(_result, index):
+            if index == 1:
+                state["factor"] = 3
+        return await sampler.collect(PID, on_sample=on_sample, interval_provider=next_interval)
+
+    result = asyncio.run(go())
+    assert result.valid_samples == 4
+    assert state["sleeps"] == pytest.approx([2.0, 2.0 / 3.0, 2.0 / 3.0])
+
+
 def test_series_follows_what_the_process_writes_over_time(proc):
     proc.file("/data/enc.bin", RANDOM_BLOCK)
     proc.add_fd(3, "/data/enc.bin", O_WRONLY_LARGEFILE, 4096)

@@ -15,6 +15,7 @@ import redis.asyncio as aioredis
 import kubernetes_asyncio
 from kubernetes_asyncio import client, config
 from agents.common.metrics import KubeHealMetrics
+from agents.common.sampling import sampling_factor, scaled_interval
 from agents.security_agent.proc_scanner import PodIndex, scan_pids
 from agents.security_agent.entropy_sampler import EntropySampler, EntropyResult, shannon_entropy
 from agents.security_agent.falco_client import (
@@ -359,7 +360,13 @@ class SecurityAgent:
                 await self._assess_and_publish(pid, pid_info, result, events, source,
                                                mmap_detected, "initial")
 
-        result = await self.sampler.collect(pid, on_sample=first_sample)
+        async def next_sample_interval() -> float:
+            factor = await sampling_factor(self.redis, pid_info.get("namespace", ""),
+                                           pod=pid_info.get("pod"))
+            return scaled_interval(self.sampler.config.interval_s, factor)
+
+        result = await self.sampler.collect(pid, on_sample=first_sample,
+                                            interval_provider=next_sample_interval)
         await self._assess_and_publish(pid, pid_info, result, events, source, mmap_detected, "complete")
 
     async def _assess_and_publish(self, pid: int, pid_info: Dict, result: EntropyResult,
