@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agents.executor import guard
@@ -132,6 +134,49 @@ def test_executor_acks_only_after_success_and_records_outcome():
     r2 = FakeRedis()
     ex.redis = r2
     assert run(ex.handle_entry(EXEC_STREAM, "10-0", {})) is False and r2.acked == []
+
+
+def test_executor_emits_action_metric_only_after_durable_result_record(monkeypatch):
+    r = FakeRedis()
+    ex = ExecutorService(redis=r, mode=Mode())
+    order = []
+
+    async def record(fields, outcome):
+        order.append("record")
+
+    ex._record = record
+    monkeypatch.setattr("agents.executor.main.METRICS.record_action",
+                        lambda action, outcome: order.append("metric"))
+    run(ex._finish({"action": "patch", "incident_id": "inc-1"}, "patched_kept", None))
+    assert order == ["record", "metric"]
+
+    async def record_fails(fields, outcome):
+        raise RuntimeError("ledger unavailable")
+    ex._record = record_fails
+    order.clear()
+    with pytest.raises(RuntimeError, match="ledger unavailable"):
+        run(ex._finish({"action": "patch", "incident_id": "inc-1"}, "patched_kept", None))
+    assert order == []
+
+
+def test_executor_skips_a_second_completed_request_for_the_same_incident_and_action():
+    r = FakeRedis()
+    ex = ExecutorService(redis=r, mode=Mode(), record_step=lambda *args: None)
+    calls = []
+
+    async def execute(fields):
+        calls.append(fields["incident_id"])
+        return "patched_kept"
+
+    async def finish(fields, outcome, marker_key):
+        await ex._write_marker(marker_key, outcome, recorded=True)
+
+    ex.execute, ex._finish = execute, finish
+    fields = {"action": "patch", "incident_id": "inc-1"}
+    assert run(ex.handle_entry(EXEC_STREAM, "1-0", fields))
+    assert run(ex.handle_entry(EXEC_STREAM, "2-0", fields))
+    assert calls == ["inc-1"]
+    assert r.acked == ["1-0", "2-0"]
 
 
 def test_fusion_enqueues_for_executor_and_has_no_kubernetes_client():

@@ -18,6 +18,7 @@ Safety rules:
 import asyncio
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -127,6 +128,7 @@ class SnapshotScheduler:
         self.namespaces = namespaces
         self.cfg, self.clock, self.sleep = cfg or ExecConfig(), clock, sleep
         self.is_frozen = is_frozen
+        self.record_step = record_step
         self.record = Recorder(record_step, "snapshot-scheduler")
         self.interval_s, self.keep = interval_s, keep
         self.running = False
@@ -135,6 +137,9 @@ class SnapshotScheduler:
         return sorted(self.namespaces if self.namespaces is not None else allowed_namespaces())
 
     async def run_once(self) -> Dict[str, List[str]]:
+        # Each scheduler cycle is a distinct operation in the append-only ledger.
+        self.run_id = f"snapshot-{uuid.uuid4().hex}"
+        self.record = Recorder(self.record_step, self.run_id)
         out: Dict[str, List[str]] = {"created": [], "deleted": [], "skipped": []}
         try:
             klass = self.cfg.snapshot_class

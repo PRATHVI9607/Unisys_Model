@@ -196,6 +196,13 @@ class RollbackStore:
         raw = await self.redis.get(self.key(namespace, deployment)) if self.redis else None
         return json.loads(raw) if raw else None
 
+    async def set_state(self, namespace: str, deployment: str, incident_id: str, state: str) -> None:
+        saved = await self.load(namespace, deployment)
+        if saved and saved.get("incident_id") == incident_id:
+            saved["state"] = state
+            saved["state_updated_at"] = time.time()
+            await self.save(namespace, deployment, saved)
+
 
 # ---- the path ---------------------------------------------------------------------------------------
 async def _rollout_done(apps_api, namespace: str, name: str) -> bool:
@@ -231,6 +238,36 @@ async def canary_patch(gate, apps_api, req: Request, golden: Optional[Dict], rec
     done: List[str] = []
     planned = ["patch_deployment"]
     try:
+        try:
+            previous = await store.load(ns, name)
+        except Exception as e:
+            await record("rollback_point_read_failed", {"error": str(e)})
+            return f"escalated:rollback_point_unreadable:{e}"
+        if previous and previous.get("state", "pending") == "pending":
+            previous_incident = previous.get("incident_id")
+            if previous_incident != req.incident_id:
+                await record("rollback_recovery_blocked", {"pending_incident_id": previous_incident})
+                return (f"escalated:rollback_recovery_required: pending canary from incident "
+                        f"{previous_incident}; human review required")
+            rollback_patch = previous.get("rollback")
+            if not isinstance(rollback_patch, list) or not rollback_patch:
+                await record("rollback_recovery_blocked", {"reason": "saved rollback patch missing"})
+                return "escalated:rollback_recovery_required: saved rollback patch is missing"
+            try:
+                await _write(gate, ns, "recover_rollback_after_restart",
+                             apps_api.patch_namespaced_deployment, name, ns, rollback_patch)
+            except ModeBlocked as b:
+                await record("rollback_recovery_blocked", {"reason": "kill switch", "step": b.step})
+                return (f"stopped_mode_test: recovery rollback blocked at {b.step}; "
+                        "workload requires human review")
+            ok = await poll_until(lambda: _rollout_done(apps_api, ns, name), timeout_s, poll_s, sleep, clock)
+            if not ok:
+                await record("rollback_recovery_timeout", {})
+                return "patch_failed: restart recovery rollback did not settle; escalated to HUMAN"
+            await store.set_state(ns, name, req.incident_id, "recovered")
+            await record("rollback_recovered_after_restart", {"incident_id": req.incident_id})
+            return "rolled_back:executor_restart_recovery"
+
         live = drift_view(to_dict(await apps_api.read_namespaced_deployment(name, ns)).get("spec") or {})
         try:
             plan = build_patch(golden.get("spec") or {}, live, req.patch_field)
@@ -247,7 +284,7 @@ async def canary_patch(gate, apps_api, req: Request, golden: Optional[Dict], rec
         try:
             await store.save(ns, name, {"incident_id": req.incident_id, "live_spec": live,
                                         "rollback": plan.rollback, "restore_strategy": plan.restore_strategy,
-                                        "saved_at": time.time()})
+                                        "saved_at": time.time(), "state": "pending"})
         except Exception as e:
             await record("rollback_point_failed", {"error": str(e)})
             return f"escalated:rollback_point_not_saved:{e}"
@@ -260,7 +297,8 @@ async def canary_patch(gate, apps_api, req: Request, golden: Optional[Dict], rec
         ok = await poll_until(lambda: _rollout_done(apps_api, ns, name), timeout_s, poll_s, sleep, clock)
         if not ok:
             await record("rollout_timeout", {})
-            return await _roll_back(gate, apps_api, req, plan, record, done, "rollout did not settle in time")
+            return await _roll_back(gate, apps_api, req, plan, record, done, "rollout did not settle in time",
+                                    timeout_s, poll_s, sleep, clock, store)
 
         for i in range(1, CANARY_WINDOWS + 1):
             if not gate_open(gate, ns):
@@ -277,7 +315,7 @@ async def canary_patch(gate, apps_api, req: Request, golden: Optional[Dict], rec
             await record("canary_window", {"window": i, "metrics": after, "improved": good, "why": why})
             if not good:
                 return await _roll_back(gate, apps_api, req, plan, record, done,
-                                        f"window {i}: {why}")
+                                        f"window {i}: {why}", timeout_s, poll_s, sleep, clock, store)
 
         if plan.restore_strategy:
             await _write(gate, ns, "restore_strategy", apps_api.patch_namespaced_deployment,
@@ -285,6 +323,7 @@ async def canary_patch(gate, apps_api, req: Request, golden: Optional[Dict], rec
             done.append("restore_strategy")
             await record("strategy_restored", {})
         await record("kept", {"windows": CANARY_WINDOWS})
+        await store.set_state(ns, name, req.incident_id, "kept")
         return "patched_kept"
     except ModeBlocked as b:
         await record("blocked", {"step": b.step})
@@ -298,7 +337,8 @@ async def canary_patch(gate, apps_api, req: Request, golden: Optional[Dict], rec
 
 
 async def _roll_back(gate, apps_api, req: Request, plan: PatchPlan, record: Recorder,
-                     done: List[str], reason: str) -> str:
+                     done: List[str], reason: str, timeout_s: float, poll_s: float,
+                     sleep: Callable, clock: Callable, store: RollbackStore) -> str:
     ns, name = req.namespace, req.deployment
     try:
         await _write(gate, ns, "rollback_deployment", apps_api.patch_namespaced_deployment,
@@ -311,5 +351,9 @@ async def _roll_back(gate, apps_api, req: Request, plan: PatchPlan, record: Reco
         await record("rollback_failed", {"error": str(e)})
         return f"patch_failed:rollback error {e} after canary failure ({reason}); escalated to HUMAN"
     done.append("rollback_deployment")
+    if not await poll_until(lambda: _rollout_done(apps_api, ns, name), timeout_s, poll_s, sleep, clock):
+        await record("rollback_rollout_timeout", {"reason": reason})
+        return f"patch_failed:rollback rollout did not settle after canary failure ({reason}); escalated to HUMAN"
+    await store.set_state(ns, name, req.incident_id, "rolled_back")
     await record("rolled_back", {"reason": reason})
     return f"rolled_back:{reason}"

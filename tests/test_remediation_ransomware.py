@@ -99,6 +99,18 @@ def test_scheduler_does_not_prune_below_twelve():
     assert out["deleted"] == [] and len(t.c.snapshots) == 6
 
 
+def test_snapshot_scheduler_uses_a_distinct_incident_id_for_each_run():
+    t = Sched()
+    ids = []
+    t.s.record_step = lambda incident_id, step, payload: ids.append(incident_id)
+    run(t.s.run_once())
+    first = t.s.run_id
+    t.clock.now += 1
+    run(t.s.run_once())
+    assert first.startswith("snapshot-") and t.s.run_id.startswith("snapshot-")
+    assert first != t.s.run_id and ids and set(ids) == {first, t.s.run_id}
+
+
 def test_scheduler_loop_uses_the_injected_clock_every_300_seconds():
     t = Sched()
     runs = []
@@ -195,7 +207,7 @@ def test_contain_refuses_a_pod_the_workload_does_not_own():
     out = do_contain(c, rec, redis, deployment="other", pod="db-abc-1")
     assert out.startswith("contain_failed:pod db-abc-1 is not owned")
     assert "kubeheal/quarantine" not in c.pods["db-abc-1"]["metadata"]["labels"]
-    assert "patch_pod" not in [e[1] for e in c.log]
+    assert c.log == []  # ownership is checked before any policy or pod write
 
 
 def test_contain_without_snapshot_class_still_isolates_and_reports_the_gap():
@@ -253,9 +265,13 @@ class R:
 @pytest.mark.parametrize("kind", ["Deployment", "StatefulSet"])
 def test_restore_full_path_in_order(kind):
     r = R(kind=kind)
+    r.wl()["spec"]["template"]["spec"]["initContainers"] = [
+        {"name": "init", "image": "reg:5000/init:1"}]
+    r.c.pods[r.pod]["status"]["initContainerStatuses"] = [
+        {"name": "init", "imageID": "docker.io/reg/init@" + fk.DIGEST}]
     assert r.go() == "restored"
     assert r.methods() == ["create_policy", f"patch_{kind}", f"scale_{kind}", "create_pvc", f"patch_{kind}",
-                           f"scale_{kind}", f"patch_{kind}", "delete_policy"]
+                           f"scale_{kind}", f"patch_{kind}", f"patch_{kind}", "delete_policy"]
     # remembered the replica count, then scaled to zero, then back to it
     assert r.c.log[1][3] == {"metadata": {"annotations": {"kubeheal/original-replicas": "1"}}}
     assert (r.c.log[2][3], r.c.log[5][3]) == (0, 1)
@@ -270,11 +286,13 @@ def test_restore_full_path_in_order(kind):
     pod_spec = r.wl()["spec"]["template"]["spec"]
     assert pod_spec["volumes"][0]["persistentVolumeClaim"]["claimName"] == f"db-data-restore-{INC}"
     assert pod_spec["containers"][0]["image"] == "reg:5000/db@" + fk.DIGEST
+    assert pod_spec["initContainers"][0]["image"] == "reg:5000/init@" + fk.DIGEST
     repoint = r.c.log[4][3]["spec"]["template"]["metadata"]["labels"]
     assert repoint == {"kubeheal/quarantine": "true", "kubeheal/incident": INC}
     # clean entropy: quarantine lifted, policy removed, replicas restored, evidence untouched
     assert "kubeheal/quarantine" not in r.wl()["spec"]["template"]["metadata"]["labels"]
     assert r.c.policies == {} and r.wl()["spec"]["replicas"] == 1
+    assert "kubeheal/original-replicas" not in r.wl()["metadata"].get("annotations", {})
     assert r.entropy_calls == [("prod", "db", [f"db-data-restore-{INC}"])]
     assert "db-data" in r.c.pvcs and r.redis.store.get("kubeheal:snapfreeze:prod:db-data") == INC
     assert f"kubeheal:snapfreeze:prod:db-data-restore-{INC}" not in r.redis.store

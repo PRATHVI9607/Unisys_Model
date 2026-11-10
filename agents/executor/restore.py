@@ -138,13 +138,16 @@ async def _preflight(core_api, apps_api, custom_api, req: Request) -> Dict:
             raise Escalate(f"restore_unsupported_volume_claim_template: volume {vol} ({claim}) is not a "
                            "plain PVC volume of the pod template, a patch cannot repoint it")
 
-    statuses = {s.get("name"): s for s in ((pod.get("status") or {}).get("containerStatuses") or [])}
-    images = {}
-    for c in tmpl.get("containers") or []:
-        digest = image_digest((statuses.get(c["name"]) or {}).get("imageID", ""))
-        if not digest:
-            raise Escalate(f"image_digest_unavailable: no sha256 imageID for container {c['name']}")
-        images[c["name"]] = pin_image(c["image"], digest)
+    pod_status = pod.get("status") or {}
+    images = {"containers": {}, "initContainers": {}}
+    for field, status_field in (("containers", "containerStatuses"),
+                                ("initContainers", "initContainerStatuses")):
+        statuses = {s.get("name"): s for s in (pod_status.get(status_field) or [])}
+        for c in tmpl.get(field) or []:
+            digest = image_digest((statuses.get(c["name"]) or {}).get("imageID", ""))
+            if not digest:
+                raise Escalate(f"image_digest_unavailable: no sha256 imageID for {field} {c['name']}")
+            images[field][c["name"]] = pin_image(c["image"], digest)
 
     t0_s = req.t0_ms / 1000.0
     plan = {}
@@ -188,7 +191,8 @@ async def restore(gate, core_api, apps_api, networking_api, custom_api, req: Req
     ns, name, kind = req.namespace, req.deployment, req.kind
     what = f"RESTORE {ns}/{name}"
     planned = ["ensure_quarantine_policy", "remember_replicas", "scale_to_zero", "create_restored_pvc",
-               "repoint_and_pin", "scale_back", "lift_quarantine", "delete_quarantine_policy"]
+               "repoint_and_pin", "scale_back", "remove_original_replicas_annotation",
+               "lift_quarantine", "delete_quarantine_policy"]
     if not (core_api and apps_api and networking_api and custom_api):
         return "no_kube_client"
     cfg = cfg or ExecConfig()
@@ -253,11 +257,16 @@ async def restore(gate, core_api, apps_api, networking_api, custom_api, req: Req
             await record("restored_pvc_created", {"pvc": p["new_claim"], "snapshot": p["snapshot"]})
         done.append(planned[3])
 
+        template_spec = {"volumes": [{"name": v, "persistentVolumeClaim": {"claimName": p["new_claim"]}}
+                                      for v, p in plan.items()],
+                         "containers": [{"name": c, "image": img}
+                                        for c, img in images["containers"].items()]}
+        if images["initContainers"]:
+            template_spec["initContainers"] = [{"name": c, "image": img}
+                                               for c, img in images["initContainers"].items()]
         await _patch_workload(gate, apps_api, kind, ns, name, planned[4], {"spec": {"template": {
             "metadata": {"labels": quarantine_labels(req.incident_id)},
-            "spec": {"volumes": [{"name": v, "persistentVolumeClaim": {"claimName": p["new_claim"]}}
-                                 for v, p in plan.items()],
-                     "containers": [{"name": c, "image": img} for c, img in images.items()]}}}})
+            "spec": template_spec}}})
         done.append(planned[4])
         await record("repointed_and_pinned", {"volumes": {v: p["new_claim"] for v, p in plan.items()},
                                               "images": images})
@@ -285,16 +294,23 @@ async def restore(gate, core_api, apps_api, networking_api, custom_api, req: Req
                 "entropy result unknown (no check configured or the check failed)"
             return f"restored_kept_isolated:{why}; quarantine kept; escalated to HUMAN"
 
-        await _patch_workload(gate, apps_api, kind, ns, name, planned[6], {"spec": {"template": {
-            "metadata": {"labels": {QUARANTINE_LABEL: None, INCIDENT_LABEL: None}}}}})
+        # The restore marker is only needed to recover a workload that was already scaled to zero.
+        # Remove it while quarantine is still in place, so a blocked write cannot expose the pod.
+        await _patch_workload(gate, apps_api, kind, ns, name, planned[6],
+                              {"metadata": {"annotations": {REPLICAS_ANNOTATION: None}}})
         done.append(planned[6])
+        await record("original_replicas_annotation_removed", {})
+
+        await _patch_workload(gate, apps_api, kind, ns, name, planned[7], {"spec": {"template": {
+            "metadata": {"labels": {QUARANTINE_LABEL: None, INCIDENT_LABEL: None}}}}})
+        done.append(planned[7])
         await record("quarantine_labels_removed", {})
         if not await poll_until(lambda: _ready(apps_api, kind, ns, name, replicas), timeout_s, poll_s, sleep, clock):
             return (f"restored_kept_isolated:rollout after lifting labels not ready in time; policy kept; "
                     f"completed {done}; escalated to HUMAN")
-        await _write(gate, ns, planned[7], networking_api.delete_namespaced_network_policy,
+        await _write(gate, ns, planned[8], networking_api.delete_namespaced_network_policy,
                      policy_name(req.incident_id), ns)
-        done.append(planned[7])
+        done.append(planned[8])
         if freeze is not None:
             for p in plan.values():
                 await freeze.unfreeze(ns, p["new_claim"])

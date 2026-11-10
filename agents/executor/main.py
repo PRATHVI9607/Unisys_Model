@@ -256,22 +256,27 @@ class ExecutorService:
 
     async def _finish(self, fields: Dict, outcome: str, marker_key: Optional[str]) -> None:
         action = fields.get("action", "unknown")
+        metric_outcome = "success"
+        dry_run = False
         if outcome.startswith("DRY RUN:"):
-            METRICS.record_action(action, "dry_run")
-            METRICS.record_dry_run_action(action)
+            metric_outcome, dry_run = "dry_run", True
         elif needs_escalation(outcome):
-            METRICS.record_action(action, "escalated")
+            metric_outcome = "escalated"
         elif outcome.startswith("refused:"):
-            METRICS.record_action(action, "refused")
+            metric_outcome = "refused"
         elif ("failed" in outcome or outcome.startswith("unknown_action")
               or outcome == "no_kube_client"):
-            METRICS.record_action(action, "failure")
-        else:
-            METRICS.record_action(action, "success")
+            metric_outcome = "failure"
         if needs_escalation(outcome):
-            METRICS.record_escalation(outcome.split(":", 1)[0])
             await self._escalate(fields, outcome)
         await self._record(fields, outcome)
+        # A request may be retried if durable recording fails. Count only after the ledger and
+        # actions-stream record succeed, so a failed record does not increment before retry.
+        METRICS.record_action(action, metric_outcome)
+        if dry_run:
+            METRICS.record_dry_run_action(action)
+        if needs_escalation(outcome):
+            METRICS.record_escalation(outcome.split(":", 1)[0])
         if marker_key:
             await self._write_marker(marker_key, outcome, recorded=True)
 

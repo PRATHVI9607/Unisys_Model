@@ -152,6 +152,36 @@ def test_canary_keeps_when_improved_in_three_windows():
     assert saved["live_spec"] == s.live_before and saved["rollback"]
 
 
+def test_pending_canary_after_restart_applies_saved_rollback_and_waits():
+    s = Scenario()
+    plan = drift.build_patch(s.golden["spec"], s.live_before, CPU)
+    obj = s.c.workloads[("Deployment", "web")]
+    patched = fk.json_patch(obj, plan.forward)
+    obj.clear()
+    obj.update(patched)
+    obj["metadata"]["generation"] += 1
+    obj["status"].update({"observedGeneration": obj["metadata"]["generation"]})
+    run(drift.RollbackStore(s.redis).save("prod", "web", {
+        "incident_id": "inc-1", "live_spec": s.live_before,
+        "rollback": plan.rollback, "restore_strategy": plan.restore_strategy,
+        "saved_at": s.clock(), "state": "pending"}))
+
+    assert s.go() == "rolled_back:executor_restart_recovery"
+    assert s.live_spec() == s.live_before
+    assert s.calls == []
+    assert s.steps()[-1] == "rollback_recovered_after_restart"
+    assert run(drift.RollbackStore(s.redis).load("prod", "web"))["state"] == "recovered"
+
+
+def test_pending_rollback_from_another_incident_blocks_new_canary():
+    s = Scenario()
+    run(drift.RollbackStore(s.redis).save("prod", "web", {
+        "incident_id": "inc-old", "rollback": [{"op": "replace", "path": "/spec/x", "value": 1}],
+        "state": "pending"}))
+    assert s.go().startswith("escalated:rollback_recovery_required")
+    assert s.c.writes() == [] and s.calls == []
+
+
 def test_canary_rolls_back_on_a_worse_window_and_restores_the_exact_spec():
     worse = {"http_p99_latency_ms": 300.0, "cpu_throttle_percent": 0.0}
     good = {"http_p99_latency_ms": 90.0, "cpu_throttle_percent": 0.0}
@@ -172,7 +202,7 @@ def test_canary_rolls_back_when_the_rollout_never_settles():
     s = Scenario()
     s.c.stuck_rollout = True
     out = s.go()
-    assert out.startswith("rolled_back:rollout did not settle")
+    assert out.startswith("patch_failed:rollback rollout did not settle")
     assert s.live_spec() == s.live_before
     assert len(s.calls) == 1                                         # no canary windows were observed
 
