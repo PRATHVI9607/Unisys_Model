@@ -91,6 +91,19 @@
       ],
       "title": "Dry-run actions and escalations",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Scoring requests running or waiting in each model-server pod.",
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "id": 7,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "kubeheal_model_inflight_requests", "legendFormat": "{{namespace}} / {{pod}}", "refId": "A" }
+      ],
+      "title": "Model requests in flight",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

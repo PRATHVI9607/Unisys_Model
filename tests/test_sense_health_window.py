@@ -54,9 +54,24 @@ def fetch(metrics, **kw):
 
 def test_mapping_table_covers_the_model_columns_in_order():
     assert [s.column for s in METRIC_SPECS] == METRIC_COLUMNS
-    assert all(s.basis in ("standard", "app-guess") for s in METRIC_SPECS)
+    assert all(s.basis in ("standard", "demo-victim-app contract") for s in METRIC_SPECS)
     # every query is a distinct PromQL string for this workload
     assert len(set(build_queries("shop", "web").values())) == 15
+
+
+def test_http_queries_match_the_demo_victim_app_exporter_contract():
+    queries = build_queries("prod", "victim-app-abc")
+    app_specs = {s.column: s for s in METRIC_SPECS if s.column.startswith("http_")}
+    assert set(app_specs) == {
+        "http_request_rate", "http_error_rate", "http_p50_latency_ms",
+        "http_p99_latency_ms", "http_p999_latency_ms",
+    }
+    assert all(s.basis == "demo-victim-app contract" for s in app_specs.values())
+    assert all('namespace="prod",pod=~"victim-app-abc.*"' in queries[name]
+               for name in app_specs)
+    assert "http_requests_total" in queries["http_request_rate"]
+    assert 'status=~"5.."' in queries["http_error_rate"]
+    assert "http_request_duration_seconds_bucket" in queries["http_p99_latency_ms"]
 
 
 def test_full_window_uses_range_queries_5s_step_60_points():

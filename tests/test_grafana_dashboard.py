@@ -25,4 +25,5 @@ def test_dashboard_is_valid_and_queries_defined_metrics():
     assert dashboard["title"] == "KubeHeal Overview"
     assert used <= metric_names
     assert {"kubeheal_decisions_total", "kubeheal_actions_total", "kubeheal_model_latency_seconds_bucket",
-            "kubeheal_queue_depth", "kube_deployment_status_replicas_available"} <= used
+            "kubeheal_queue_depth", "kubeheal_model_inflight_requests",
+            "kube_deployment_status_replicas_available"} <= used

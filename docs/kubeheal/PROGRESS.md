@@ -37,11 +37,12 @@ Real usage is measured later and recorded under `docs/kubeheal/results/`.
 | P3 Kill switch | done, see log |
 | P4 Record | done, see P4 checklist |
 | P5 Sense | done, merged (a6ef46a), see P5 log |
-| P6 Decide | in progress on wave/P6 (worktree scratchpad/wt/P6, last commit 36d436d, may have uncommitted work); NOT merged, NOT reviewed; see docs/kubeheal/NEXT_FOR_CODEX.md |
+| P6 Decide | builder complete on `wave/P6` at `7f95f6c`; Codex review/merge in progress under latest owner instruction |
 | P7 Remediation paths | code done and merged (5bd3558), proven with fakes only; open items P7-RR-9 to RR-11 and P6-D7, RR-7 needs P10 |
 | P8 Dashboard | done, merged (218029c) |
 | P9 Platform | done, merged (see merge commit); helm lint and template pass with lab example overlay; nothing run on a cluster yet |
-| P10, P11, P13 | not started |
+| P10 | in progress (P10-V1 and P10-U5 complete; cluster setup/verification remains with Claude) |
+| P11, P13 | not started |
 | P12 Model hardening | NOT started; P12-H (retraining on live cluster data) is not approved |
 
 ## Task checklist
@@ -94,12 +95,13 @@ What this does not do: it does not validate the model on live data, and the quir
 - [x] P5-S3 size: S. Recorded Falco fixtures under `tests/fixtures/falco/` and a test that replay feeds the Security Model input. Verify: pytest. Needs: P5-S2.
 - [x] P5-S4 size: S. Remove synthetic syscall fabrication from live paths (keep in tests or replay tooling). Verify: grep test that live code has no fabrication. Needs: P5-S2.
 
-- [ ] P5-Q1 size: M. Align the Health Agent PromQL to the real series (see Owner decisions): keep the 15 column names and meanings, change the `app-guess` rows in `agents/health_agent/metric_queries.py` to the victim-app contract (`http_requests_total{method,path,status}`, `http_request_duration_seconds` histogram, labels `namespace` and `pod` come from the ServiceMonitor), update the module docstring (no longer guesses), tests. Verify in P10-V2. Needs: P10-V1 for the contract.
+- [x] P5-Q1 size: M. Aligned the Health Agent HTTP PromQL basis/needs and module documentation to `demo/victim-app` while keeping the 15 columns, order and meanings. Added contract query test. `tests/test_sense_health_window.py`: 16 passed. `tests/test_health_preprocess_parity.py`: 6 passed, 2 blocked by missing `torch_geometric` in global Python 3.13. Live query verification remains P10-V2. Needs: P10-V1 for the contract.
 - [x] P5-Q2a size: L. Shared Health Model preprocessing for training and serving (`models/health_model/preprocess.py`), parity tests, agent sends replicas and logs the real CFS ratio. Done 2026-11-11 (option A, owner decision). No retraining.
 - [ ] P12-H size: L. NOT APPROVED, not started: retrain on live cluster windows through the shared preprocessing and recalibrate. Waits for the owner's go. P12-H fix list for the retrain (checkpoint then gets a NEW preprocessing version, for example `v2`, and a sidecar to match): (1) correct the dict-key overwrite in the CSV map so the `http_request_rate` channel holds the real request rate (today it holds replicas/100); (2) fill the six zeroed channels (`memory_rss_bytes`, `http_p50_latency_ms`, `http_p999_latency_ms`, `network_receive_bytes`, `network_transmit_bytes`, `disk_io_bytes`) from live windows; (3) use scaling constants that match the real units (latency in ms or s consistently, CPU in cores or millicores consistently, memory in bytes), and make `cpu_throttle_percent` the real CFS ratio if that is what is wanted; (4) bump `PREPROCESS_VERSION` in `models/health_model/preprocess.py` and keep `v1-legacy` readable only for the old checkpoint; (5) the trainer writes the sidecar (already wired in `train_health_model.py`), `upload_to_registry.py` ships it, and the server refuses a mismatch.
 
 ### P6 Decide: complete policy and fusion (touches `agents/fusion_agent/`, `agents/common/`, `tests/`)
-- [~] builder-E (wave/P6) P6-D1 size: L. `models_ok` input to the pure policy: missing or late model response means HUMAN; per-call deadlines in Fusion. Files: `decision_policy.py` (stronger agent only), `agents/fusion_agent/`. Verify: policy tests plus timeout test. STOPPED HERE (HANDOFF): policy inputs committed on wave/P6 (3ea4dd7); not reviewed or merged.
+- [~] Codex P6 review/merge size: L. Owner authorized review and merge on 2026-11-11. Branch `wave/P6` at `7f95f6c`, base `218029c`; review its 5 commits, resolve integration conflicts on `work`, run tests and record limitations before marking P6 items complete.
+- [ ] P6-D1 size: L. `models_ok` input to the pure policy: missing or late model response means HUMAN; per-call deadlines in Fusion. Files: `decision_policy.py` (stronger agent only), `agents/fusion_agent/`. Verify: policy tests plus timeout test. Builder commit: `3ea4dd7`.
 - [~] builder-E (wave/P6) P6-D2 size: M. OBSERVE triples sampling for that pod for a bounded period. Verify: test on sampling rate and expiry. Needs: P5-H1. STOPPED HERE: observe sampling committed on wave/P6 (36d436d), agent side of the contract still needs a change in agents/health_agent and agents/security_agent; not reviewed.
 - [~] builder-E (wave/P6) P6-D3 size: L. Protected-namespace label guard: `kubeheal/protected=true` means never automatic. Files: `decision_policy.py`, Fusion. Verify: policy test. STOPPED HERE: committed on wave/P6 (36d436d); not reviewed.
 - [~] builder-E (wave/P6) P6-D4 size: L. Circuit breakers as sliding windows: patches per Deployment 10/hour, containments per namespace 3/hour. Verify: window tests. STOPPED HERE: committed on wave/P6 (36d436d); not reviewed.
@@ -140,16 +142,17 @@ Ransomware:
 - [x] P9-H6 size: S. Redis with AOF on a PVC, plus Redis auth (the Executor trusts every message on `kubeheal.exec`, so only Fusion and the dashboard may write to Redis). Verify: `helm template`. (From P2 review.)
 - [x] P9-H8 size: S. Executor in the chart: image build and apply (legacy `scripts/install.sh` does not deploy it), readiness and liveness probes, securityContext. Verify: `helm template`. (From P2 review.)
 - [x] P9-H7 size: M. ONNX or `.pt` serving by config where export parity holds (existing export scripts). Verify: tests with config switch.
+- [x] P9-G1 size: S. Added a Grafana panel for `kubeheal_model_inflight_requests`, labelled by scraped namespace and pod. Kept the existing `kubeheal_queue_depth` panel. `tests/test_grafana_dashboard.py` passed.
 
 ### P10 k3d environment and `demo` branch (cluster owner only)
 - [ ] P10-U1 size: L. Create `demo` from `work`; `demo/k3d/up.ps1` and `down.ps1` (cluster, kubeconfig fix, CSI hostpath, external-snapshotter, VolumeSnapshotClass, NetworkPolicy check, Prometheus, prometheus-adapter, Redis, MinIO, Helm install, image build and import). Needs: P9.
 - [ ] P10-U2 size: M. Falco install attempt with automatic replay fallback and clear message. Needs: P5-S2.
 - [ ] P10-U3 size: M. Victim apps in prod (PVC with real files) and one in dev.
 - [ ] P10-U4 size: L. `demo/scripts/demo.ps1` numbered steps covering the full list in the plan. Needs: P6, P7, P8.
-- [ ] P10-U5 size: S. `demo/README.md` (run order, expected output, what to say, limitations). It must carry the status line: "Drift pipeline complete; inputs now match training preprocessing; live Health Model scores are not yet validated on real cluster windows. Retraining on live cluster data (P12-H) is a future step, not approved yet. Drift detection currently relies mainly on the configuration diff; metric-based evidence is limited in the current checkpoint and is addressed by P12-H."
+- [x] P10-U5 size: S. Added `demo/README.md` with the planned run order, expected behavior, presentation notes, required Health Model status line, and current limitations. Setup/demo scripts are not present and no end-to-end run or cluster verification is claimed.
 - [ ] P10-U6 size: L. Acceptance: `up.ps1`, all demo steps, reset, twice in a row without manual fixes.
 
-- [ ] P10-V1 size: M. `demo/victim-app/`: small FastAPI app with prometheus_client exporting `http_requests_total` (method, path, status) and `http_request_duration_seconds` (histogram), Dockerfile, Deployment and Service for prod and dev, ServiceMonitor. Verify: unit test of the exporter; scrape on k3d in P10-V2. Needs: P9 (chart or manifests), Prometheus operator in P10-U1.
+- [x] P10-V1 size: M. `demo/victim-app/`: small FastAPI app with prometheus_client exporting `http_requests_total` (method, path, status) and `http_request_duration_seconds` (histogram), Dockerfile, Deployment and Service for prod and dev, ServiceMonitor. Unit test: 3 passed (Python 3.13, 2026-11-11). YAML parsed locally. No image build or cluster verification; scrape verification remains P10-V2. Commit: `68018bc`.
 - [ ] P10-V2 size: M. On k3d verify that each of the 15 Health Agent queries returns data for the victim Deployment and record the result per query in this file (query, series returned yes/no, sample value, date). Needs: P10-V1, P10-U1.
 - [ ] P10-U7 size: M. On k3d verify the queue-depth autoscaling chain (owner decision 2026-11-11, S-CL-1): the per-pod gauge `kubeheal_model_inflight_requests` is scraped, prometheus-adapter exposes it (`kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1/namespaces/kubeheal/pods/*/kubeheal_model_inflight_requests` returns values) and `kubectl describe hpa` shows the HPA reading it (not `<unknown>`); record the outputs here with date. Needs: P9 merge with the gauge, P10-U1 (Prometheus and adapter).
 - [ ] P10-V3 size: S. Create the VolumeSnapshotClass `csi-hostpath-snapclass` (exact name, owner decision) in `up.ps1`; check `scripts/rbac_check.py` snapshot checks once the CRD exists.

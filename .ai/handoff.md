@@ -1,13 +1,37 @@
 # Handoff
 
-- **Agent:** Claude Code (orchestrator)
-- **Date:** 2026-11-11 (HANDOFF written: continue with `docs/kubeheal/NEXT_FOR_CODEX.md`)
-- **Branch:** `work` (clean tree, no merge in progress). HANDOFF: read `docs/kubeheal/NEXT_FOR_CODEX.md` for the state, the next tasks, and what Codex must leave for Claude. Builder branch `wave/P6` (worktree `scratchpad/wt/P6`, last commit 36d436d, may have uncommitted work) is NOT merged.
-- **Goal:** Autonomous build of full KubeHeal per `docs/kubeheal/IMPLEMENTATION_PLAN.md` (P0 to P11; P12 needs the owner's go). Never push, never set `ALLOW_PUSH`.
-- **What changed and why:** P0 to P5, P7 and P8 are done and merged; P5-Q2a (shared Health Model preprocessing, bit-parity tested) and the preprocessing version guard (`PREPROCESS_VERSION = v1-legacy`, sidecar next to the checkpoint, server refuses to start on mismatch) are on `work`; Executor defaults are the owner's chosen values (`agents/executor/config.py`); P8 merged as 218029c. Details: `docs/kubeheal/PROGRESS.md`. **Builders still running (GATE: let them finish, then review and merge):** P9 on worktree `scratchpad/wt/P9` branch `wave/P9` (last commit fac78d4, may have uncommitted work; applying owner decisions: real queue-depth gauge `kubeheal_model_inflight_requests` and HPA, `values-lab-example.yaml`, chart README, and review fixes), and P6 on `scratchpad/wt/P6` branch `wave/P6` (no commit yet, base 218029c; tasks P6-D1..D7 and R1). Worktree base path: `C:/Users/PV/AppData/Local/Temp/claude/b422cec1e7851a5a/17647aa4-3fa3-4021-8d2d-0fd5df60e364/scratchpad/wt/`. Merge plan: review P6 with the reviewer, fix findings, merge with a full suite (last full suite on work: 534 passed, 2 skipped). Then P8-D5 (queued: short approval claim TTL, startup reconciliation, admin release-claim), then P10.
-- **Open issues:** (1) Executor settings now have the owner's CHOSEN DEFAULTS (not measurements; see "Owner decisions (2026-11-11)" in PROGRESS.md); P10 must create VolumeSnapshotClass `csi-hostpath-snapclass`; P10-V1/V2 add the victim app and verify each of the 15 PromQL queries on k3d; P10-U7 verifies the queue-depth HPA chain. Health Model live scores are NOT validated (P12-H not approved). (2) P7-RR-9 (no production entropy check for restore), RR-10, RR-11, and P6-D7 (Fusion must send `restore` with `t0_ms` and `workload_kind`). (3) Health Model server drops the metric mask (events with missing metrics carry ci width 1.0 meanwhile). (4) VolumeSnapshot CRD is not installed until P10. (5) P4 caveats from Codex: model pods reuse a MinIO credential that also has `PutObject`; registry objects not published; Fusion and Executor pods on `k3d-kubeheal` were seen in `ImagePullBackOff` (images are built and imported in P9/P10). (6) The venv's interpreter is the Microsoft Store Python 3.11: it runs from Claude Code's shell, a sandboxed Codex session could not execute it. (7) Inactive `.git/hooks/pre-push` still exists (harmless, owner may delete). (8) Named subagents are not loaded in a running session; general-purpose agents follow `.claude/agents/*.md`.
-- **Next step:** see `docs/kubeheal/NEXT_FOR_CODEX.md`: P8-D5, P10-V1, P5-Q1, Grafana panel (Codex-safe); Claude later reviews and merges wave/P6, then P10 (cluster) and P11. USER RULE: never push.
+- **Agent:** Codex
+- **Date:** 2026-11-11
+- **Branch:** `work`; current HEAD is `68018bc feat(P10): add Prometheus victim app`.
+- **Goal:** Continue KubeHeal per `docs/kubeheal/IMPLEMENTATION_PLAN.md` and the safe-task order in `docs/kubeheal/NEXT_FOR_CODEX.md`. Never push or set `ALLOW_PUSH`.
+- **Current tree:** P10-V1 is committed. P5-Q1, P9-G1 (Grafana), P10-U5, `PROGRESS.md`, `NEXT_FOR_CODEX.md`, and this handoff are reviewed and staged; the user has now authorized review/merge and the related Git operations. No merge is in progress on `work`.
 
-## Update: P6 builder finished (appended after the handoff)
+## Completed this continuation
 
-P6 is finished on branch `wave/P6` (worktree `scratchpad/wt/P6`, last commit `7f95f6c`, everything committed, tree clean, base `218029c`). It is NOT reviewed and NOT merged; `work` is untouched by it (owner instruction: do not review or merge it now). The builder reports 595 passed, 2 skipped in the worktree (not verified by the orchestrator). Done: policy inputs and fail-closed rules (D1, D3, D5), sliding-window breakers (D4), OBSERVE sampling contract (D2), interpretation client and T0 (D6), shared incident and restore trigger (D7), stream reclaim and dead letter for Fusion and Executor (R1). Missing: Security Agent must publish `t0_ms` (until then no restore is ever requested), agents must read the sampling contract, Fusion env vars in the Dockerfile and chart, dashboard display of the new ledger steps. Full detail, edits outside the builder's folders and demo impact: the "Update: P6 builder finished" section at the end of `docs/kubeheal/NEXT_FOR_CODEX.md`.
+- **P10-V1**, commit `68018bc`: FastAPI victim app, Prometheus counter/histogram, Dockerfile, prod/dev Deployment and Service, ServiceMonitor, and local exporter tests in `demo/victim-app/`. Test: 3 passed. YAML parsed locally. No image build or cluster use.
+- **P5-Q1:** changed Health Agent HTTP metric documentation/basis to the victim-app contract; PromQL column names/order/meaning remain unchanged. Added query contract assertions. `tests/test_sense_health_window.py`: 16 passed. `tests/test_health_preprocess_parity.py`: 6 passed, 2 fail at import because global Python 3.13 lacks `torch_geometric`; no preprocessing files were changed. P10-V2 live query verification remains with Claude.
+- **P9-G1:** added Grafana panel for `kubeheal_model_inflight_requests`; existing `kubeheal_queue_depth` panel remains. Combined sense/Grafana tests: 17 passed.
+- **P10-U5:** created `demo/README.md` with the planned run order, expected behavior, presentation notes, exact Health Model status line, and explicit limitations. It says setup/demo scripts are absent and no cluster demo is verified.
+- Updated checklist statuses and refreshed this note for Claude. See `docs/kubeheal/PROGRESS.md` and `docs/kubeheal/NEXT_FOR_CODEX.md`.
+
+## P6 review in progress
+
+- `wave/P6` is at `7f95f6c`, based on `218029c`, with five commits. Codex is reviewing and integrating it on `work` under the owner's latest authorization. Git ownership protection prevents direct `git -C <P6 worktree>` status/log calls; branch diff is readable from the main repository.
+- The P6 diff has 24 files, including policy, Fusion, Executor stream reliability, sampling contract and interpretation client. `git diff --check 218029c..wave/P6` passed. Review has identified integration gaps to confirm and either fix or document: Health/Security sampling contract consumers; Security Agent attack-onset `t0_ms`; Dockerfile/chart optional environment variables; dashboard display of newer ledger steps. These need verification after merge.
+- Focused current-work regression command `python -m pytest tests/test_sense_health_window.py tests/test_grafana_dashboard.py demo/victim-app/test_app.py -q --basetemp=.pytest-tmp-codex-20261111`: 20 passed, 9 existing `datetime.utcnow()` warnings.
+- P8-D5 is next after P6 is merged, subject to its listed file boundaries and tests.
+- Cluster tasks P10-U1..U4 and U6..U7, P10-V2/V3, and P11 remain with Claude. P10-U5 is the local README task completed above. No Kubernetes cluster was used in this continuation.
+- P12-H retraining is not approved. Do not train.
+- P6 builder reported missing integration work: Security Agent `t0_ms`, sampling-contract readers, Dockerfile/chart env vars, dashboard rendering for new ledger steps. These are builder-reported items, not independently reviewed by Codex.
+
+## Verification details
+
+- Passed: `python -m pytest demo/victim-app/test_app.py -q --basetemp=demo/victim-app/.pytest-tmp-codex-20261111` (3 passed).
+- Passed: `python -m pytest tests/test_sense_health_window.py tests/test_grafana_dashboard.py -q` (17 passed, 9 existing `datetime.utcnow()` warnings).
+- Partial: `python -m pytest tests/test_health_preprocess_parity.py -q` (6 passed, 2 failed because `torch_geometric` is missing from system Python 3.13; required `.venv` launcher points at an unavailable Python 3.11 executable in this shell).
+- All YAML in `demo/victim-app/deployment.yaml`, `service.yaml`, and `servicemonitor.yaml` parsed successfully. No cluster validation was performed.
+- Do not claim all tests pass. Do not add unmeasured values to docs.
+
+## Next step
+
+Finish integrating and testing P6 on `work`, update P6 checklist items and this handoff with verified outcomes, then take P8-D5. Cluster tasks stay with Claude; do not train models. Never push.
