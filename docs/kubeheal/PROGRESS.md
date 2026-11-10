@@ -37,6 +37,91 @@ Real usage is measured later and recorded under `docs/kubeheal/results/`.
 | P3 Kill switch | done, see log |
 | P4 to P13 | not started |
 
+## Task checklist
+
+Legend: `[x]` done, `[~] <agent>` in progress, `[ ]` open. `size: S` can be taken by a small local model
+(it must not touch `decision_policy.py`, `agents/executor/`, `k8s/rbac/`); M and L need a stronger agent.
+Each line: ID, goal, files, verify. "needs" lists tasks that must be done first. Tests run with
+`PYTHONPATH=. .venv\Scripts\python.exe -m pytest tests/ -q`.
+
+### P0 to P3 (done)
+- [x] P0 environment, venv, guardrails, branch `work`, PROGRESS.md
+- [x] P1 core correctness F1 to F9 (see P1 log)
+- [x] P2 Executor service and least-privilege RBAC (see P2 log)
+- [x] P3 kill switch (see P3 log)
+- [x] AGENTS-1 agent-neutral instructions, `.githooks/pre-push`, subagents, this checklist (Claude Code, 2026-11-10)
+
+### P4 Record: ledger and metrics (touches `agents/common/`, `k8s/`, `deploy/grafana/`, `services/`)
+- [ ] P4-L1 size: M. Ledger writer `agents/common/ledger.py`: `Ledger.append(incident_id, step, payload)` writing key `incidents/<incident_id>/<seq>-<step>.json`; backends: in-memory (tests) and MinIO (boto3 or minio client). Add `tests/test_ledger.py` (sequence numbers, key format, no overwrite). Verify: pytest. Needs: none.
+- [ ] P4-L2 size: M. MinIO manifest `k8s/minio.yaml` (Deployment, PVC, Service, Secret ref), bucket created with versioning and object lock where supported; script `scripts/ledger_check.py` tries to delete an object and reports whether it was refused. Verify: script on k3d (cluster owner only). Needs: P4-L1.
+- [ ] P4-L3 size: M. Fusion Agent writes ledger entries: detection, scores, decision with reasons, approval. Files: `agents/fusion_agent/` (not `decision_policy.py`). Verify: test with in-memory ledger. Needs: P4-L1.
+- [ ] P4-L4 size: L. Executor writes a ledger entry per step and result; connect `ModeWatcher.on_change` to the ledger. Files: `agents/executor/` (write paths: stronger agent). Verify: tests, entry present for dry run and for mid-action stop. Needs: P4-L1.
+- [ ] P4-M1 size: S. Metrics helper `agents/common/metrics.py` (prometheus_client): decisions by type, actions by type and outcome, escalations, dry-run actions, model latency, queue depth, stream lag. Verify: `tests/test_metrics.py`. Needs: none.
+- [ ] P4-M2 size: M. Expose `/metrics` in every component (health agent, security agent, fusion, executor, servers, dashboard) using P4-M1. Verify: tests hit `/metrics` or the helper per component. Needs: P4-M1.
+- [ ] P4-G1 size: S. Grafana dashboard JSON `deploy/grafana/kubeheal-overview.json` (decisions, actions, latency, queue depth, replicas) using the P4-M1 metric names. Verify: valid JSON, every query names an existing metric. Needs: P4-M1.
+- [ ] P4-R1 size: M. Model registry: servers can pull a model version from MinIO at start and fall back to the baked-in checkpoint. Files: `services/ckpt.py`, tests. Verify: test with a fake store. Needs: P4-L1 (client code reuse).
+- [ ] P4-I1 size: M. Integration script/test: create an incident, ledger objects appear, deletion refused when lock is available. Verify: script on k3d. Needs: P4-L2, P4-L3, P4-L4.
+
+### P5 Sense: real signals (touches `agents/health_agent/`, `agents/security_agent/`, `tests/fixtures/`)
+- [ ] P5-H1 size: M. Health Agent real Prometheus `query_range`, 60 steps of 5 s per pod, 15 metrics, missing metrics flagged (not 0). Files: `agents/health_agent/`. Verify: unit tests with a fake Prometheus response. Needs: none.
+- [ ] P5-H2 size: S. Fixtures and tests for P5-H1 (full window, missing metric, short window). Verify: pytest. Needs: P5-H1.
+- [ ] P5-S1 size: M. Security Agent entropy sampler: 30 samples, 2 s apart, of data written by the suspect process via `/proc/<pid>/fd` targets on the pod volume, bounded read size. Files: `agents/security_agent/`. Verify: unit test on a temp directory. Needs: none.
+- [ ] P5-S2 size: M. Falco consumer (enabled when available) and replay mode streaming recorded Falco JSON traces from files. Files: `agents/security_agent/`. Verify: test replays a fixture into the event pipeline. Needs: none.
+- [ ] P5-S3 size: S. Recorded Falco fixtures under `tests/fixtures/falco/` and a test that replay feeds the Security Model input. Verify: pytest. Needs: P5-S2.
+- [ ] P5-S4 size: S. Remove synthetic syscall fabrication from live paths (keep in tests or replay tooling). Verify: grep test that live code has no fabrication. Needs: P5-S2.
+
+### P6 Decide: complete policy and fusion (touches `agents/fusion_agent/`, `agents/common/`, `tests/`)
+- [ ] P6-D1 size: L. `models_ok` input to the pure policy: missing or late model response means HUMAN; per-call deadlines in Fusion. Files: `decision_policy.py` (stronger agent only), `agents/fusion_agent/`. Verify: policy tests plus timeout test.
+- [ ] P6-D2 size: M. OBSERVE triples sampling for that pod for a bounded period. Verify: test on sampling rate and expiry. Needs: P5-H1.
+- [ ] P6-D3 size: L. Protected-namespace label guard: `kubeheal/protected=true` means never automatic. Files: `decision_policy.py`, Fusion. Verify: policy test.
+- [ ] P6-D4 size: L. Circuit breakers as sliding windows: patches per Deployment 10/hour, containments per namespace 3/hour. Verify: window tests.
+- [ ] P6-D5 size: M. Burn-in driven by a real counter of metric samples (2000), not only an env var. Verify: test with counter below and above.
+- [ ] P6-D6 size: M. Wire `interpretation_client.py`: field mapper, SHAP (KernelExplainer for metrics, attention fallback documented), causal chain with attack onset T0. Verify: tests with a stub model.
+- [ ] P6-R1 size: M. Redis stream reliability: `XAUTOCLAIM` of stale pending entries, dead-letter stream after N failures. Verify: pending-reclaim test with two consumers.
+
+### P7 Remediation paths (touches `agents/executor/` only; write paths: stronger agent)
+Drift (canary):
+- [ ] P7-RR-1 size: L. Save rollback point; patch only drifted fields; maxUnavailable 0. Verify: unit test with a fake API.
+- [ ] P7-RR-2 size: L. Canary watch: p99 latency and CPU throttling for 3 windows; keep or roll back; escalate on rollback; each step to ledger. Needs: P7-RR-1, P4-L1.
+Ransomware:
+- [ ] P7-RR-3 size: L. Rolling VolumeSnapshots every 5 min, keep 12, for PVCs in protected namespaces (Executor-owned scheduler or CronJob with scoped SA). Verify: unit test of retention.
+- [ ] P7-RR-4 size: L. Quarantine: pod label plus deny-all NetworkPolicy selecting the label; forensic on-demand snapshot. Verify: unit test.
+- [ ] P7-RR-5 size: L. Scale owner to 0 and remember replicas; choose newest rolling snapshot before T0; restore a new PVC; repoint workload; redeploy with image pinned by digest; scale back. Verify: unit tests; end-to-end in P10.
+- [ ] P7-RR-6 size: L. Entropy re-check on the restored volume; lift quarantine if clean, else keep isolated and escalate. Verify: unit test. Needs: P7-RR-4, P7-RR-5.
+- [ ] P7-RR-7 size: M. Measure RPO and RTO on k3d and write `docs/kubeheal/results/`. Verify: results file generated by a script. Needs: P10 cluster.
+
+### P8 Dashboard (touches `dashboard/`)
+- [ ] P8-D1 size: M. Approve and reject flow for HUMAN decisions (writes `kubeheal.exec` and the ledger). Verify: API tests. Needs: P4-L1.
+- [ ] P8-D2 size: M. Incident page: scores, CIs, SHAP view, causal chain with T0, ledger timeline. Verify: page renders against a seeded incident. Needs: P6-D6, P4-L1.
+- [ ] P8-D3 size: M. Kill switch status and toggle with admin token, mode history. Verify: API test for toggle with and without token.
+- [ ] P8-D4 size: S. Ingress manifests (Traefik on k3d, NGINX in generic values). Verify: `kubectl apply --dry-run=client`.
+
+### P9 Cloud platform (touches `deploy/helm/`, `k8s/`, `eval/`)
+- [ ] P9-H1 size: M. Helm chart `deploy/helm/kubeheal` replacing `scripts/install.sh`; values-dev, staging, prod, k3d-demo. Verify: `helm lint` and `helm template` for all four.
+- [ ] P9-H2 size: S. Namespaces prod, staging, dev with ResourceQuota, LimitRange, `kubeheal/tier` label. Verify: `helm template`.
+- [ ] P9-H3 size: M. Model servers: 2+ replicas, PDB minAvailable 1, topology spread, HPA 2 to 8 on request queue depth through prometheus-adapter (servers export the metric); CPU HPA only as documented fallback. Needs: P4-M1.
+- [ ] P9-H4 size: M. Resource profile script in `eval/` that measures usage; requests and limits come from the recorded measurement. Needs: cluster (cluster owner).
+- [ ] P9-H5 size: S. NetworkPolicy around `kubeheal` (only agents, dashboard, Prometheus reach model servers). Verify: `helm template`; enforcement check in P10.
+- [ ] P9-H6 size: S. Redis with AOF on a PVC. Verify: `helm template`.
+- [ ] P9-H7 size: M. ONNX or `.pt` serving by config where export parity holds (existing export scripts). Verify: tests with config switch.
+
+### P10 k3d environment and `demo` branch (cluster owner only)
+- [ ] P10-U1 size: L. Create `demo` from `work`; `demo/k3d/up.ps1` and `down.ps1` (cluster, kubeconfig fix, CSI hostpath, external-snapshotter, VolumeSnapshotClass, NetworkPolicy check, Prometheus, prometheus-adapter, Redis, MinIO, Helm install, image build and import). Needs: P9.
+- [ ] P10-U2 size: M. Falco install attempt with automatic replay fallback and clear message. Needs: P5-S2.
+- [ ] P10-U3 size: M. Victim apps in prod (PVC with real files) and one in dev.
+- [ ] P10-U4 size: L. `demo/scripts/demo.ps1` numbered steps covering the full list in the plan. Needs: P6, P7, P8.
+- [ ] P10-U5 size: S. `demo/README.md` (run order, expected output, what to say, limitations).
+- [ ] P10-U6 size: L. Acceptance: `up.ps1`, all demo steps, reset, twice in a row without manual fixes.
+
+### P11 Evaluation harness (touches `eval/`, `docs/kubeheal/results/`; cluster owner runs)
+- [ ] P11-E1 size: M. k6 load test 10 to 200 simulated pods, p50 and p95 vs replicas.
+- [ ] P11-E2 size: M. Chaos runs (Chaos Mesh or kubectl): detection continuity, fail-closed rate.
+- [ ] P11-E3 size: M. RPO and RTO runs against a database volume. Needs: P7.
+- [ ] P11-E4 size: M. End-to-end time-to-action per stage.
+- [ ] P11-E5 size: M. Baselines (Falco rules only, fixed entropy threshold, diff-only drift, single replica, pod delete only).
+- [ ] P11-E6 size: S. FP32 vs FP16 latency and memory.
+- [ ] P11-E7 size: S. Each results file states machine, cluster and date. Verify: scripts produce CSV plus markdown.
+
 ## P0 log
 
 Plan: switch to `work`; copy plan into repo; update CLAUDE.md; push-blocking guards and verify; untrack

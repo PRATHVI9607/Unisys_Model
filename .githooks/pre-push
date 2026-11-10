@@ -1,0 +1,9 @@
+#!/bin/sh
+# KubeHeal policy: pushes are done manually by the repo owner only.
+# Owner (PowerShell): $env:ALLOW_PUSH=1; git push ...; Remove-Item Env:ALLOW_PUSH
+# Agents must never set ALLOW_PUSH.
+if [ "$ALLOW_PUSH" = "1" ]; then
+  exit 0
+fi
+echo "pre-push: BLOCKED. Pushing is done by the repo owner only (set ALLOW_PUSH=1 to allow). See AGENTS.md, Push guard." >&2
+exit 1
