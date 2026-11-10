@@ -14,6 +14,7 @@ import aiohttp
 import redis.asyncio as aioredis
 import kubernetes_asyncio
 from kubernetes_asyncio import client, config
+from agents.security_agent.proc_scanner import PodIndex, scan_pids
 from pydantic import BaseModel, ConfigDict, Field
 
 logging.basicConfig(level=logging.INFO)
@@ -131,57 +132,6 @@ class EntropyCalculator:
         return sum(entropies) / len(entropies) if entropies else 0.0
 
 
-class ProcessScanner:
-    """Scan /proc for PID → pod mapping."""
-
-    async def scan_pids(self) -> Dict[int, Dict[str, str]]:
-        """Scan /proc for process information."""
-        pid_map = {}
-
-        try:
-            for pid_dir in os.listdir("/proc"):
-                if not pid_dir.isdigit():
-                    continue
-
-                pid = int(pid_dir)
-
-                try:
-                    with open(f"/proc/{pid}/cgroup", "r") as f:
-                        cgroup = f.read()
-
-                        if "kubepods" in cgroup:
-                            parts = cgroup.strip().split("/")
-
-                            pod_name = ""
-                            container_id = ""
-                            namespace = "default"
-
-                            for part in parts:
-                                if part.startswith("pod"):
-                                    pod_name = (
-                                        part.split("-", 1)[1] if "-" in part else part
-                                    )
-                                if part.startswith("containerd"):
-                                    container_id = part
-
-                            for part in parts:
-                                if part in ["default", "kube-system", "kubeheal"]:
-                                    namespace = part
-
-                            pid_map[pid] = {
-                                "pid": pid,
-                                "pod": pod_name,
-                                "container": container_id,
-                                "namespace": namespace,
-                            }
-                except (FileNotFoundError, PermissionError):
-                    continue
-        except Exception as e:
-            logger.debug(f"PID scan error: {e}")
-
-        return pid_map
-
-
 class InotifyWatcher:
     """Watch filesystem with inotify for ransomware patterns."""
 
@@ -245,11 +195,11 @@ class SecurityAgent:
 
         self.redis: Optional[aioredis.Redis] = None
         self.core_api: Optional[client.CoreV1Api] = None
-        self.networking_api: Optional[client.NetworkingV1Api] = None
 
         self.running = False
 
-        self.pid_scanner = ProcessScanner()
+        self.pod_index = PodIndex()
+        self.apps_api: Optional[client.AppsV1Api] = None
         self.inotify_watcher = InotifyWatcher()
 
         self.entropy_calculator = EntropyCalculator()
@@ -272,7 +222,7 @@ class SecurityAgent:
                 raise
 
         self.core_api = client.CoreV1Api()
-        self.networking_api = client.NetworkingV1Api()
+        self.apps_api = client.AppsV1Api()
 
         self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
 
@@ -297,7 +247,11 @@ class SecurityAgent:
         """Scan /proc for PID → pod mapping every 5s."""
         while self.running:
             try:
-                pid_map = await self.pid_scanner.scan_pids()
+                try:
+                    await self.pod_index.refresh(self.core_api, self.apps_api)
+                except Exception as e:
+                    logger.warning(f"pod index refresh failed, using stale index: {e}")
+                pid_map = scan_pids(self.pod_index)
 
                 for pid, info in pid_map.items():
                     key = f"kubeheal:pid:{pid}"
@@ -460,54 +414,10 @@ class SecurityAgent:
         risk_score = max(model_risk or 0.0, heuristic_risk)
         logger.info(f"PID {pid} entropy={entropy_avg:.2f} risk={risk_score:.3f}")
 
-        if risk_score >= 0.90:
-            await self._direct_kill(pid, pid_info, risk_score, early_signals, entropy_avg, sec)
-        elif risk_score >= 0.40:
+        # The Security Agent only senses and reports (S-SA-5). Containment is decided by the
+        # Fusion Agent and executed by the Executor.
+        if risk_score >= 0.40:
             await self._publish_security_event(pid_info, risk_score, early_signals, entropy_avg, sec)
-
-    async def _direct_kill(
-        self, pid: int, pid_info: Optional[Dict], risk_score: float,
-        early_signals: Dict, entropy_avg: float, sec: Optional[Dict],
-    ) -> None:
-        """Direct kill without Fusion (fastest path for critical ransomware)."""
-        logger.warning(f"DIRECT KILL: PID {pid}, risk={risk_score:.2f}")
-
-        namespace = pid_info.get("namespace", "default") if pid_info else "default"
-        await self._apply_network_isolation(namespace)
-        pid_info = pid_info or {"pid": pid, "namespace": namespace}
-        await self._publish_security_event(
-            pid_info, risk_score, early_signals, entropy_avg, sec,
-            label="ransomware_active", action="direct_kill",
-        )
-        try:
-            os.kill(pid, 9)
-            logger.info(f"Killed PID {pid}")
-        except Exception as e:
-            logger.error(f"Failed to kill PID {pid}: {e}")
-
-    async def _apply_network_isolation(self, namespace: str) -> None:
-        """Apply NetworkPolicy to block egress."""
-        logger.info(f"Applying network isolation to {namespace}")
-
-        np_manifest = {
-            "apiVersion": "networking.k8s.io/v1",
-            "kind": "NetworkPolicy",
-            "metadata": {"name": "kubeheal-quarantine", "namespace": namespace},
-            "spec": {
-                "podSelector": {},
-                "policyTypes": ["Egress"],
-                "egress": [{"to": [{"podSelector": {}}]}],
-            },
-        }
-
-        try:
-            if self.networking_api:
-                await self.networking_api.create_namespaced_network_policy(
-                    namespace, np_manifest
-                )
-                logger.info(f"NetworkPolicy applied to {namespace}")
-        except Exception as e:
-            logger.debug(f"NetworkPolicy error: {e}")
 
     async def _publish_security_event(
         self,
@@ -534,6 +444,8 @@ class SecurityAgent:
             "event_id": event_id,
             "namespace": namespace,
             "pod_name": pod,
+            "deployment": pid_info.get("workload") or pod,
+            "workload_kind": pid_info.get("workload_kind", "Pod"),
             "namespace_tier": namespace_tier(namespace),
             "sec_risk": f"{risk_score:.4f}",
             "sec_label": sec_label,

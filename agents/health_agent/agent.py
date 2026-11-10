@@ -14,6 +14,7 @@ import redis.asyncio as aioredis
 import kubernetes_asyncio
 from kubernetes_asyncio import client, watch, config
 from kubernetes_asyncio.config import load_incluster_config
+from agents.health_agent import baseline
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -223,21 +224,23 @@ class HealthAgent:
 
             blast_radius = await self._query_blast_radius(namespace, deployment)
 
-            old_spec = await self._get_previous_spec(namespace, name)
-            new_spec = deployment.spec.to_dict() if deployment.spec else {}
-            await self._save_spec(namespace, name, new_spec)
+            # camelCase JSON, the same shape the API server stores and that a patch needs.
+            new_spec = self._spec_json(deployment)
 
-            # Only assess when the spec ACTUALLY changed. The health model scores
-            # absolute state (spec tokens + metrics), so scoring a steady-state or
-            # status-only event makes it read normal config as high risk. First
-            # sight just establishes the baseline; an unchanged spec is not drift.
-            if old_spec is None:
-                logger.info(f"Baseline established for {namespace}/{name}; no drift to assess")
+            # Golden baseline: SET NX on first sight, never overwritten (S-HA-2). The diff is
+            # live versus golden (S-HA-3). The health model scores absolute state, so a spec
+            # equal to the golden baseline (steady state, status-only event) is not assessed.
+            golden, created = await baseline.get_or_set_baseline(
+                self.redis, namespace, name, new_spec)
+            if created:
+                logger.info(f"Golden baseline recorded for {namespace}/{name}; no drift to assess")
                 return
-            if old_spec == new_spec:
-                logger.info(f"No spec change for {namespace}/{name}; skipping assessment")
+            if not baseline.is_drifted(golden, new_spec):
+                logger.info(f"{namespace}/{name} matches its golden baseline; skipping assessment")
                 return
-            logger.info(f"Spec drift detected for {namespace}/{name}; assessing")
+            old_spec = golden["spec"]
+            new_spec = baseline.drift_view(new_spec)
+            logger.info(f"Spec drift vs golden baseline detected for {namespace}/{name}; assessing")
 
             # v4: poll for fresh 60×15 Prometheus window (shared cache, backoff)
             # — replaces the v3 hard-coded sleep(15) + single-metric fetch.
@@ -316,18 +319,12 @@ class HealthAgent:
             pass
         return None
 
-    async def _get_previous_spec(self, namespace: str, name: str) -> Optional[Dict]:
-        """Get previous spec from cache."""
-        key = f"kubeheal:spec:{namespace}:{name}"
-        spec = await self.redis.get(key)
-        if spec:
-            return json.loads(spec)
-        return None
-
-    async def _save_spec(self, namespace: str, name: str, spec: Dict) -> None:
-        """Save current spec to cache for next comparison."""
-        key = f"kubeheal:spec:{namespace}:{name}"
-        await self.redis.set(key, json.dumps(spec))
+    @staticmethod
+    def _spec_json(deployment) -> Dict:
+        """Deployment spec as camelCase JSON (what kubectl and the patch API use)."""
+        if not deployment.spec:
+            return {}
+        return client.ApiClient().sanitize_for_serialization(deployment.spec)
 
     async def _query_blast_radius(self, namespace: str, deployment) -> str:
         """Query blast radius: Services + Ingresses."""
@@ -422,6 +419,7 @@ class HealthAgent:
             local = self._local_assessment(new_spec, {})
             return {
                 "event_id": event_id, "namespace": namespace, "pod_name": name,
+                "deployment": name,
                 "namespace_tier": namespace_tier(namespace),
                 "health_risk": float(local["risk_score"]),
                 "health_label": local.get("model_used", "heuristic"),
@@ -433,6 +431,7 @@ class HealthAgent:
 
         return {
             "event_id": event_id, "namespace": namespace, "pod_name": name,
+                "deployment": name,
             "namespace_tier": namespace_tier(namespace),
             "health_risk": float(result.get("risk_score", 0.0)),
             "health_label": result.get("label", "benign"),
@@ -514,6 +513,7 @@ class HealthAgent:
             "event_id": a["event_id"],
             "namespace": a["namespace"],
             "pod_name": a["pod_name"],
+            "deployment": a.get("deployment", a["pod_name"]),
             "namespace_tier": a["namespace_tier"],
             "health_risk": f"{a['health_risk']:.4f}",
             "health_label": a["health_label"],

@@ -1,77 +1,29 @@
 """
-proc_scanner — PID → (namespace, pod, container) mapping (PRD Section 08.3)
-==========================================================================
-Supports cgroups v1 AND v2 (Minikube on Ubuntu 22.04 uses v2 — a demo-breaking
-gap in v3). kubectl lookup is LRU-cached (ransomware fires hundreds of eBPF
-events/sec for the same pod; uncached this would saturate the API server).
+proc_scanner - PID -> (namespace, pod, container, workload) mapping (S-SA-1)
+============================================================================
+Supports cgroups v1 AND v2 (cgroupfs and systemd layouts) and every namespace. The pod uid found in
+`/proc/<pid>/cgroup` is resolved through a read-only `PodIndex` that the Security Agent refreshes from
+the Kubernetes API (pods + replicasets, list verbs only). Lookups hit a dict, so a ransomware burst of
+hundreds of events per second for one pod costs no API calls.
+
+The PROC_ROOT environment variable (default /proc) lets tests point the scanner at a fixture tree.
 """
 
 import os
 import re
-import subprocess
-from functools import lru_cache
-from typing import Optional, Tuple
+from dataclasses import dataclass, asdict
+from typing import Dict, Optional, Tuple
 
 PROC_ROOT = os.environ.get("PROC_ROOT", "/proc")
 
+# cgroupfs, v1 and v2: .../kubepods[/<qos>]/pod<uid>/<container-id>
 _V1 = re.compile(r"/kubepods(?:/[^/]+)?/pod([a-f0-9-]+)/([a-f0-9]+)")
-# cgroups v2: ...pod<uid>.slice/<runtime-prefix-><container_hex>.scope
+# systemd driver: ...pod<uid>.slice/<runtime-prefix>-<container_hex>.scope (uid uses underscores)
 _V2 = re.compile(r"kubepods[^/]*/[^/]*pod([a-f0-9_-]+)\.slice/[^/]*?([a-f0-9]{12,})\.scope")
 
 
-def get_pod_for_pid(pid: int) -> Optional[Tuple[str, str, str]]:
-    """Return (namespace, pod_name, container_name) or None."""
-    cgroup_path = f"{PROC_ROOT}/{pid}/cgroup"
-    if not os.path.exists(cgroup_path):
-        return None
-    try:
-        with open(cgroup_path) as f:
-            lines = f.readlines()
-    except (PermissionError, FileNotFoundError, ProcessLookupError):
-        return None
-
-    pod_uid = container_id = None
-    for line in lines:
-        line = line.strip()
-        m = _V1.search(line)
-        if m:
-            pod_uid, container_id = m.group(1), m.group(2)[:12]
-            break
-        m = _V2.search(line)
-        if m:
-            # cgroups v2 encodes pod uid with underscores: pod<uid>.slice
-            pod_uid = m.group(1).replace("_", "-")
-            container_id = m.group(2)[:12]
-            break
-
-    if not pod_uid:
-        return None
-    return _kubectl_lookup_pod(pod_uid, container_id)
-
-
-@lru_cache(maxsize=1000)
-def _kubectl_lookup_pod(pod_uid: str, container_id: str) -> Optional[Tuple[str, str, str]]:
-    """Cached pod_uid → (namespace, pod, container). Runtime-agnostic via kubectl."""
-    try:
-        jsonpath = (
-            "{range .items[*]}{.metadata.namespace},{.metadata.name},"
-            "{.spec.containers[0].name},{.metadata.uid}{\"\\n\"}{end}"
-        )
-        result = subprocess.run(
-            ["kubectl", "get", "pod", "--all-namespaces", "-o", f"jsonpath={jsonpath}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        for line in result.stdout.strip().split("\n"):
-            parts = line.split(",")
-            if len(parts) == 4 and parts[3] == pod_uid:
-                return (parts[0], parts[1], parts[2])
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
-        pass
-    return None
-
-
 def parse_cgroup_line(line: str) -> Optional[Tuple[str, str]]:
-    """Exposed for unit tests: parse a single cgroup line → (pod_uid, container_id)."""
+    """Parse one cgroup line -> (pod_uid, container_id[:12]) or None."""
     line = line.strip()
     m = _V1.search(line)
     if m:
@@ -80,3 +32,92 @@ def parse_cgroup_line(line: str) -> Optional[Tuple[str, str]]:
     if m:
         return m.group(1).replace("_", "-"), m.group(2)[:12]
     return None
+
+
+def pod_uid_for_pid(pid: int, proc_root: Optional[str] = None) -> Optional[Tuple[str, str]]:
+    root = proc_root or PROC_ROOT
+    try:
+        with open(f"{root}/{pid}/cgroup") as f:
+            for line in f:
+                parsed = parse_cgroup_line(line)
+                if parsed:
+                    return parsed
+    except (PermissionError, FileNotFoundError, ProcessLookupError, OSError):
+        return None
+    return None
+
+
+@dataclass
+class PodInfo:
+    namespace: str
+    pod: str
+    container: str
+    workload_kind: str
+    workload: str
+    uid: str = ""
+
+    def as_dict(self) -> Dict[str, str]:
+        return asdict(self)
+
+
+class PodIndex:
+    """pod uid -> PodInfo, filled from the API (read-only)."""
+
+    def __init__(self):
+        self.by_uid: Dict[str, PodInfo] = {}
+
+    async def refresh(self, core_api, apps_api) -> int:
+        pods = await core_api.list_pod_for_all_namespaces()
+        rsets = await apps_api.list_replica_set_for_all_namespaces()
+        rs_owner: Dict[Tuple[str, str], str] = {}
+        for rs in rsets.items:
+            for o in (rs.metadata.owner_references or []):
+                if o.kind == "Deployment":
+                    rs_owner[(rs.metadata.namespace, rs.metadata.name)] = o.name
+        self.update_from(pods.items, rs_owner)
+        return len(self.by_uid)
+
+    def update_from(self, pods, rs_owner: Dict[Tuple[str, str], str]) -> None:
+        index: Dict[str, PodInfo] = {}
+        for p in pods:
+            md = p.metadata
+            kind, workload = "Pod", md.name
+            for o in (md.owner_references or []):
+                if o.kind == "ReplicaSet":
+                    owner = rs_owner.get((md.namespace, o.name))
+                    kind, workload = ("Deployment", owner) if owner else ("ReplicaSet", o.name)
+                else:
+                    kind, workload = o.kind, o.name
+                break
+            container = ""
+            if p.spec and p.spec.containers:
+                container = p.spec.containers[0].name
+            index[md.uid] = PodInfo(md.namespace, md.name, container, kind, workload, md.uid)
+        self.by_uid = index
+
+    def lookup(self, uid: str) -> Optional[PodInfo]:
+        return self.by_uid.get(uid)
+
+
+def scan_pids(index: PodIndex, proc_root: Optional[str] = None) -> Dict[int, Dict[str, str]]:
+    """Map every PID whose cgroup belongs to a known pod. Unknown pods are skipped."""
+    root = proc_root or PROC_ROOT
+    out: Dict[int, Dict[str, str]] = {}
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return out
+    for d in entries:
+        if not d.isdigit():
+            continue
+        parsed = pod_uid_for_pid(int(d), root)
+        if not parsed:
+            continue
+        info = index.lookup(parsed[0])
+        if info is None:
+            continue
+        rec = info.as_dict()
+        rec["pid"] = int(d)
+        rec["container_id"] = parsed[1]
+        out[int(d)] = rec
+    return out

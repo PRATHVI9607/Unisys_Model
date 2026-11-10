@@ -88,7 +88,7 @@ security = [
          syscall_attribution_json=json.dumps({"write": 0.61, "rename": 0.55, "ftruncate": 0.40}),
          entropy_spike_json=json.dumps({"timestep": 18, "value": 7.7}),
          early_signals_json=json.dumps({"rename_burst": True, "high_entropy": True, "mass_write": True}),
-         pid_target="20144", entropy="7.7000", action="quarantine_and_kill", off=-8),
+         pid_target="20144", entropy="7.7000", action="contain", off=-8),
 ]
 for s in security:
     off = s.pop("off"); s["timestamp_ms"] = now(off)

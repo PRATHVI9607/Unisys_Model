@@ -1,10 +1,14 @@
 """
-Fusion Agent v4 — Three-Signal Decision Engine (PRD Section 07 / 09).
+Fusion Agent v4 - Three-Signal Decision Engine (PRD Section 07 / 09).
 =====================================================================
 Consumes kubeheal.health.events + kubeheal.security.events via a Redis
 consumer group (each event handled by exactly one replica). Correlates the
 two signals through the DCM, runs the pure decision policy, executes under a
 heartbeat incident lock, and writes kubeheal.dcm.events + kubeheal.actions.
+
+P1 notes: events are keyed by the explicit workload (Deployment) name, a message is
+acknowledged only after it was handled successfully, and every Kubernetes write goes
+through agents.executor.actions (P2 moves that behind the Executor service).
 """
 
 import asyncio
@@ -12,7 +16,6 @@ import base64
 import json
 import logging
 import os
-import socket
 import time
 import uuid
 from datetime import datetime
@@ -21,9 +24,9 @@ from typing import Dict, Optional
 import aiohttp
 import numpy as np
 import redis.asyncio as aioredis
-import kubernetes_asyncio
 from kubernetes_asyncio import client, config
 
+from agents.executor import actions as kube_actions
 from agents.fusion_agent.decision_policy import (
     make_decision, DecisionInput, Decision,
 )
@@ -45,9 +48,15 @@ def _b64_to_vec(b64: str):
     return np.frombuffer(base64.b64decode(b64), dtype=np.float32).tolist()
 
 
+def workload_of(fields: Dict) -> str:
+    """Explicit workload (Deployment/StatefulSet) name carried in the event.
+    Falls back to pod_name only for events from older agents."""
+    return fields.get("deployment") or fields.get("pod_name") or "unknown"
+
+
 class FusionAgentV4:
     # Only correlate a health+security pair if both arrived within this window
-    # (else they are independent events that happen to share a pod name).
+    # (else they are independent events that happen to share a workload name).
     CORRELATION_WINDOW_S = 30.0
 
     def __init__(self):
@@ -60,12 +69,11 @@ class FusionAgentV4:
         self.networking_api: Optional[client.NetworkingV1Api] = None
         self.consumer = os.environ.get("HOSTNAME") or f"fusion-{uuid.uuid4().hex[:6]}"
         self.running = False
-        # short-term correlation buffer: pod → (event_fields, recv_monotonic)
+        # short-term correlation buffer: "<ns>:<workload>" -> (event_fields, recv_monotonic)
         self.pending_health: Dict[str, tuple] = {}
         self.pending_sec: Dict[str, tuple] = {}
 
     async def start(self):
-        # Kubernetes clients — required to actually execute kill/patch actions.
         try:
             config.load_incluster_config()
             logger.info("Loaded in-cluster config")
@@ -74,7 +82,7 @@ class FusionAgentV4:
                 await config.load_kube_config()
                 logger.info("Loaded kubeconfig")
             except Exception as e:
-                logger.warning(f"No kube config ({e}); actions will be dry-run only")
+                logger.warning(f"No kube config ({e}); actions will not be executed")
         try:
             self.core_api = client.CoreV1Api()
             self.apps_api = client.AppsV1Api()
@@ -107,26 +115,34 @@ class FusionAgentV4:
                 )
                 for stream, entries in msgs or []:
                     for msg_id, fields in entries:
-                        try:
-                            if stream == HEALTH_STREAM:
-                                await self._on_health(fields)
-                            else:
-                                await self._on_security(fields)
-                        finally:
-                            await self.redis.xack(stream, GROUP, msg_id)
+                        await self._handle_entry(stream, msg_id, fields)
                 await asyncio.sleep(0.05)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.debug(f"consume error: {e}")
+                logger.warning(f"consume error: {e}")
                 await asyncio.sleep(1)
 
+    async def _handle_entry(self, stream: str, msg_id: str, fields: Dict) -> bool:
+        """Handle one stream entry. XACK only after success; a failed entry stays in the
+        pending list so it can be reclaimed (P6 adds the reclaim and dead-letter logic)."""
+        try:
+            if stream == HEALTH_STREAM:
+                await self._on_health(fields)
+            else:
+                await self._on_security(fields)
+        except Exception as e:
+            logger.error(f"handling {stream}/{msg_id} failed, left pending: {e}", exc_info=True)
+            return False
+        await self.redis.xack(stream, GROUP, msg_id)
+        return True
+
     def _key(self, fields: Dict) -> str:
-        return f"{fields.get('namespace','default')}:{fields.get('pod_name','unknown')}"
+        return f"{fields.get('namespace', 'default')}:{workload_of(fields)}"
 
     def _fresh(self, entry) -> Optional[Dict]:
         """Return the paired event only if it arrived within the correlation
-        window — otherwise it's an independent event, not a compound one."""
+        window - otherwise it is an independent event, not a compound one."""
         if not entry:
             return None
         fields, ts = entry
@@ -153,15 +169,15 @@ class FusionAgentV4:
         self._prune()
 
     async def _decide(self, key: str, health: Optional[Dict], sec: Optional[Dict]):
-        namespace = key.split(":")[0]
-        pod = key.split(":", 1)[1]
+        namespace, workload = key.split(":", 1)
         health = health or {}
         sec = sec or {}
+        pod = sec.get("pod_name") or health.get("pod_name") or workload
 
         health_risk = float(health.get("health_risk", 0) or 0)
         sec_risk = float(sec.get("sec_risk", 0) or 0)
 
-        # ── DCM correlation (only when both signals present) ──
+        # DCM correlation (only when both signals are present)
         correlation, compound, causal_chain, nl = 0.0, False, [], None
         h_emb = _b64_to_vec(health.get("health_embedding_b64", ""))
         s_emb = _b64_to_vec(sec.get("security_embedding_b64", ""))
@@ -171,7 +187,7 @@ class FusionAgentV4:
             compound = corr.get("compound_flag", False)
             causal_chain = corr.get("causal_chain", [])
             nl = corr.get("nl_summary")
-            await self._publish_dcm(namespace, pod, corr, health, sec)
+            await self._publish_dcm(namespace, workload, corr, health, sec)
 
         inp = DecisionInput(
             health_risk=health_risk,
@@ -185,39 +201,41 @@ class FusionAgentV4:
             correlation_score=correlation,
             compound_flag=compound,
             namespace_tier=(health.get("namespace_tier") or sec.get("namespace_tier") or "staging"),
-            circuit_breaker_kills=await self._cb_count(f"kubeheal:cb:kill:{namespace}"),
-            circuit_breaker_patches=await self._cb_count(f"kubeheal:cb:patch:{namespace}:{pod}"),
+            circuit_breaker_containments=await self._cb_count(f"kubeheal:cb:contain:{namespace}"),
+            circuit_breaker_patches=await self._cb_count(f"kubeheal:cb:patch:{namespace}:{workload}"),
             burn_in_mode=self.burn_in,
             nl_summary=nl,
         )
         out = make_decision(inp)
 
         if out.requires_incident_lock:
-            async with acquire_incident_lock(self.redis, namespace, pod) as got:
+            async with acquire_incident_lock(self.redis, namespace, workload) as got:
                 if not got:
                     logger.debug(f"lock held for {key}; skipping")
                     return
-                await self._execute(namespace, pod, out, inp, causal_chain)
+                await self._execute(namespace, workload, pod, out, inp, causal_chain)
         else:
-            await self._execute(namespace, pod, out, inp, causal_chain)
-        # Note: pending entries are NOT popped here — they're kept for the
-        # correlation window so a partner event arriving within 30s can still
-        # form a compound incident. _prune() expires them; the incident lock +
-        # circuit breakers prevent duplicate actions on the same pod.
+            await self._execute(namespace, workload, pod, out, inp, causal_chain)
+        # Pending entries are kept for the correlation window so a partner event arriving
+        # within 30 s can still form a compound incident. _prune() expires them; the incident
+        # lock and the circuit breakers prevent duplicate actions on the same workload.
 
-    async def _execute(self, namespace, pod, out, inp, causal_chain):
-        logger.info(f"DECISION {out.decision.value} {namespace}/{pod} "
+    async def _execute(self, namespace, workload, pod, out, inp, causal_chain):
+        logger.info(f"DECISION {out.decision.value} {namespace}/{workload} "
                     f"score={out.adjusted_score:.2f} :: {out.rationale}")
         outcome = "logged"
-        if out.decision == Decision.AUTO_KILL:
-            await self._cb_incr(f"kubeheal:cb:kill:{namespace}")
-            outcome = await self._execute_kill(namespace, pod)
+        if out.decision == Decision.AUTO_CONTAIN:
+            await self._cb_incr(f"kubeheal:cb:contain:{namespace}")
+            outcome = await kube_actions.contain(self.core_api, self.networking_api, namespace, pod)
         elif out.decision == Decision.AUTO_PATCH:
-            await self._cb_incr(f"kubeheal:cb:patch:{namespace}:{pod}")
-            outcome = await self._execute_patch(namespace, pod, inp.health_field_top)
+            await self._cb_incr(f"kubeheal:cb:patch:{namespace}:{workload}")
+            baseline_raw = await self.redis.get(f"kubeheal:baseline:{namespace}:{workload}")
+            baseline = json.loads(baseline_raw) if baseline_raw else None
+            outcome = await kube_actions.patch_to_baseline(
+                self.apps_api, namespace, workload, baseline)
         await self.redis.xadd(ACTIONS_STREAM, {
             "action_type": out.decision.value,
-            "target": json.dumps({"namespace": namespace, "pod": pod}),
+            "target": json.dumps({"namespace": namespace, "deployment": workload, "pod": pod}),
             "confidence": f"{out.adjusted_score:.4f}",
             "rationale": out.rationale,
             "compound": str(out.action_params.get("compound", False)),
@@ -226,58 +244,6 @@ class FusionAgentV4:
             "outcome": outcome,
             "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
         })
-
-    async def _execute_kill(self, namespace: str, pod: str) -> str:
-        """AUTO-KILL: quarantine the namespace (egress NetworkPolicy) then
-        delete the offending pod immediately."""
-        if not self.core_api:
-            logger.warning("No kube client — kill is dry-run")
-            return "dry_run_no_kube"
-        # 1) egress quarantine so any C2 channel is cut before the kill
-        np = {
-            "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
-            "metadata": {"name": "kubeheal-quarantine"},
-            "spec": {"podSelector": {}, "policyTypes": ["Egress"],
-                     "egress": [{"to": [{"podSelector": {}}]}]},
-        }
-        try:
-            await self.networking_api.create_namespaced_network_policy(namespace, np)
-        except Exception as e:
-            if "already exists" not in str(e).lower() and "conflict" not in str(e).lower():
-                logger.debug(f"quarantine policy: {e}")
-        # 2) delete the pod (grace 0 = immediate)
-        try:
-            await self.core_api.delete_namespaced_pod(
-                pod, namespace, grace_period_seconds=0)
-            logger.warning(f"AUTO-KILL: deleted pod {namespace}/{pod}")
-            return "pod_killed+quarantined"
-        except Exception as e:
-            logger.error(f"AUTO-KILL failed for {namespace}/{pod}: {e}")
-            return f"kill_failed:{e}"
-
-    async def _execute_patch(self, namespace: str, pod: str, top_field: str) -> str:
-        """AUTO-PATCH: restore the highest-attribution field to its recorded
-        baseline. Baseline spec is stored by the Health Agent in Redis."""
-        if not self.apps_api:
-            logger.warning("No kube client — patch is dry-run")
-            return "dry_run_no_kube"
-        # owning Deployment name = pod_name minus the replicaset/pod hash suffixes
-        dep = "-".join(pod.split("-")[:-2]) if pod.count("-") >= 2 else pod
-        baseline_raw = await self.redis.get(f"kubeheal:baseline:{namespace}:{dep}")
-        if not baseline_raw:
-            logger.info(f"No baseline for {namespace}/{dep}; escalating patch to human")
-            return "no_baseline_escalated"
-        try:
-            baseline = json.loads(baseline_raw)
-            # restore full template spec to the recorded golden baseline (canary-safe:
-            # K8s rolls the Deployment; readiness probes gate the rollout)
-            body = {"spec": {"template": baseline.get("template", baseline)}}
-            await self.apps_api.patch_namespaced_deployment(dep, namespace, body)
-            logger.info(f"AUTO-PATCH: restored {namespace}/{dep} to baseline")
-            return "patched_to_baseline"
-        except Exception as e:
-            logger.error(f"AUTO-PATCH failed for {namespace}/{dep}: {e}")
-            return f"patch_failed:{e}"
 
     async def _call_dcm(self, h_emb, s_emb, health, sec) -> Dict:
         try:
@@ -293,13 +259,13 @@ class FusionAgentV4:
             logger.debug(f"DCM call failed: {e}")
         return {"correlation_score": 0.0, "compound_flag": False, "causal_chain": []}
 
-    async def _publish_dcm(self, namespace, pod, corr, health, sec):
+    async def _publish_dcm(self, namespace, workload, corr, health, sec):
         await self.redis.xadd(DCM_STREAM, {
-            "namespace": namespace, "pod_name": pod,
-            "correlation_score": f"{corr.get('correlation_score',0):.4f}",
+            "namespace": namespace, "pod_name": workload, "deployment": workload,
+            "correlation_score": f"{corr.get('correlation_score', 0):.4f}",
             "compound_flag": str(corr.get("compound_flag", False)),
             "causal_chain_json": json.dumps(corr.get("causal_chain", [])),
-            "correlation_confidence": f"{corr.get('correlation_confidence',0):.4f}",
+            "correlation_confidence": f"{corr.get('correlation_confidence', 0):.4f}",
             "nl_summary": corr.get("nl_summary") or "",
             "health_event_id": health.get("event_id", ""),
             "security_event_id": sec.get("event_id", ""),

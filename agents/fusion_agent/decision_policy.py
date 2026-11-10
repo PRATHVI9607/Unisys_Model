@@ -12,9 +12,9 @@ from typing import Optional
 
 
 class Decision(Enum):
-    AUTO_KILL = "auto_kill"
+    AUTO_CONTAIN = "auto_contain"
     AUTO_PATCH = "auto_patch"
-    HUMAN_KILL = "human_kill"
+    HUMAN_CONTAIN = "human_contain"
     HUMAN_PATCH = "human_patch"
     OBSERVE = "observe"
     BENIGN = "benign"
@@ -36,7 +36,7 @@ class DecisionInput:
     compound_flag: bool = False
 
     namespace_tier: str = "staging"
-    circuit_breaker_kills: int = 0
+    circuit_breaker_containments: int = 0
     circuit_breaker_patches: int = 0
 
     burn_in_mode: bool = False
@@ -54,17 +54,16 @@ class DecisionOutput:
 
 TIER_MULTIPLIERS = {"prod": 1.20, "staging": 1.00, "dev": 0.70}
 COMPOUND_ESCALATION = 1.15
-CB_KILL_LIMIT_PER_HOUR = 3
+CB_CONTAIN_LIMIT_PER_HOUR = 3
 CB_PATCH_LIMIT_PER_HOUR = 10
 
 
 class Thresholds:
-    RANSOMWARE_DIRECT_KILL = 0.98
-    AUTO_KILL = 0.85
+    AUTO_CONTAIN = 0.85
     AUTO_PATCH = 0.85
     HUMAN_APPROVAL = 0.65
     OBSERVE = 0.40
-    BURN_IN_AUTO_KILL = 0.95
+    BURN_IN_AUTO_CONTAIN = 0.95
     BURN_IN_AUTO_PATCH = 0.90
 
 
@@ -79,35 +78,35 @@ def make_decision(inp: DecisionInput) -> DecisionOutput:
         health_adjusted *= COMPOUND_ESCALATION
         sec_adjusted *= COMPOUND_ESCALATION
 
-    auto_kill_t = t.BURN_IN_AUTO_KILL if inp.burn_in_mode else t.AUTO_KILL
+    auto_contain_t = t.BURN_IN_AUTO_CONTAIN if inp.burn_in_mode else t.AUTO_CONTAIN
     auto_patch_t = t.BURN_IN_AUTO_PATCH if inp.burn_in_mode else t.AUTO_PATCH
 
     ci_uncertain = (inp.health_ci_width > 0.15 or inp.sec_ci_width > 0.15)
     params = {"nl_summary": inp.nl_summary}
 
     # ── COMPOUND INCIDENT ───────────────────────────────────
-    if inp.compound_flag and sec_adjusted >= auto_kill_t:
+    if inp.compound_flag and sec_adjusted >= auto_contain_t:
         if ci_uncertain:
-            return DecisionOutput(Decision.HUMAN_KILL, sec_adjusted,
+            return DecisionOutput(Decision.HUMAN_CONTAIN, sec_adjusted,
                 f"Compound incident but CI too wide (health_ci={inp.health_ci_width:.2f}, "
                 f"sec_ci={inp.sec_ci_width:.2f}). Human approval required.", True, params)
-        if inp.circuit_breaker_kills >= CB_KILL_LIMIT_PER_HOUR:
-            return DecisionOutput(Decision.HUMAN_KILL, sec_adjusted,
-                f"Compound incident. Circuit breaker: {inp.circuit_breaker_kills} kills this "
-                f"hour, limit {CB_KILL_LIMIT_PER_HOUR}. Human approval required.", True, params)
-        return DecisionOutput(Decision.AUTO_KILL, sec_adjusted,
+        if inp.circuit_breaker_containments >= CB_CONTAIN_LIMIT_PER_HOUR:
+            return DecisionOutput(Decision.HUMAN_CONTAIN, sec_adjusted,
+                f"Compound incident. Circuit breaker: {inp.circuit_breaker_containments} containments this "
+                f"hour, limit {CB_CONTAIN_LIMIT_PER_HOUR}. Human approval required.", True, params)
+        return DecisionOutput(Decision.AUTO_CONTAIN, sec_adjusted,
             f"Compound incident (DCM corr={inp.correlation_score:.2f}): "
             f"sec_risk={inp.sec_risk:.2f}, health_risk={inp.health_risk:.2f}. "
-            f"Tier={inp.namespace_tier}. AUTO-KILL.", True,
+            f"Tier={inp.namespace_tier}. AUTO-CONTAIN.", True,
             {"compound": True, "nl_summary": inp.nl_summary})
 
     # ── SECURITY-ONLY ───────────────────────────────────────
-    if sec_adjusted >= auto_kill_t and not inp.compound_flag:
-        if ci_uncertain or inp.circuit_breaker_kills >= CB_KILL_LIMIT_PER_HOUR:
-            return DecisionOutput(Decision.HUMAN_KILL, sec_adjusted,
+    if sec_adjusted >= auto_contain_t and not inp.compound_flag:
+        if ci_uncertain or inp.circuit_breaker_containments >= CB_CONTAIN_LIMIT_PER_HOUR:
+            return DecisionOutput(Decision.HUMAN_CONTAIN, sec_adjusted,
                 "Security incident. CI uncertainty or CB limit. Human approval.", True, params)
-        return DecisionOutput(Decision.AUTO_KILL, sec_adjusted,
-            f"Security incident. sec_risk={inp.sec_risk:.2f}, label={inp.sec_label}. AUTO-KILL.",
+        return DecisionOutput(Decision.AUTO_CONTAIN, sec_adjusted,
+            f"Security incident. sec_risk={inp.sec_risk:.2f}, label={inp.sec_label}. AUTO-CONTAIN.",
             True, {"compound": False, "nl_summary": inp.nl_summary})
 
     # ── HEALTH-ONLY (security calm) ─────────────────────────
@@ -122,7 +121,7 @@ def make_decision(inp: DecisionInput) -> DecisionOutput:
 
     # ── HUMAN APPROVAL ZONE ─────────────────────────────────
     if max(health_adjusted, sec_adjusted) >= t.HUMAN_APPROVAL:
-        dec = Decision.HUMAN_PATCH if health_adjusted > sec_adjusted else Decision.HUMAN_KILL
+        dec = Decision.HUMAN_PATCH if health_adjusted > sec_adjusted else Decision.HUMAN_CONTAIN
         return DecisionOutput(dec, max(health_adjusted, sec_adjusted),
             f"Medium confidence. health_adj={health_adjusted:.2f}, "
             f"sec_adj={sec_adjusted:.2f}. Human approval.", False, params)

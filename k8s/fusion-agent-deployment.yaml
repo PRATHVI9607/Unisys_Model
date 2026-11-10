@@ -45,7 +45,7 @@ spec:
               value: "false"
             - name: NAMESPACE
               value: kubeheal
-            - name: MAX_AUTO_KILL_PER_NS_PER_HOUR
+            - name: MAX_AUTO_CONTAIN_PER_NS_PER_HOUR
               value: "3"
             - name: MAX_AUTO_PATCH_PER_DEP_PER_HOUR
               value: "10"

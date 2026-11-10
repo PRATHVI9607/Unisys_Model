@@ -31,8 +31,9 @@ Real usage is measured later and recorded under `docs/kubeheal/results/`.
 
 | Phase | Status |
 |---|---|
-| P0 Environment and guardrails | in progress |
-| P1 to P13 | not started |
+| P0 Environment and guardrails | done (deny rules not proven enforced in-session; git-level push block verified) |
+| P1 Core correctness | done, see log |
+| P2 to P13 | not started |
 
 ## P0 log
 
@@ -52,3 +53,28 @@ Notes so far:
   - Test result: with those rules present, `git push --dry-run` via Bash, via PowerShell and via `git -C` were NOT blocked in this session (dry-run only, nothing was sent). So the rules are not proven enforced here; this session may not have reloaded settings, or the local `bypassPermissions` mode overrides them. The user should restart the session or check `/permissions`.
   - Because of that, push is blocked at the git level instead, and this was verified: `remote.origin.pushurl` is set to an invalid value, and `.git/hooks/pre-push` rejects unless `KUBEHEAL_ALLOW_PUSH=1`. `git push --dry-run origin work` now fails from Bash, PowerShell and with `-C`; a real push to a scratch bare repo was rejected by the hook. Fetch still works.
   - To push later, the user restores the URL (see final summary).
+
+- k3d cluster `kubeheal` created (1 server, 2 agents, `-p 8080:80@loadbalancer`, k3s v1.35.5+k3s1, kernel 6.18.33.2-microsoft-standard-WSL2). Kubeconfig points at `host.docker.internal`, which is refused on this machine, so the cluster entry was set to `https://127.0.0.1:48349` (TLS works). Scripts must repeat that fix after `k3d cluster create`. A pre-existing user cluster `hybrid-demo` exists and is never touched. Always use `--context k3d-kubeheal`.
+
+## P1 log (core correctness)
+
+Plan: F1 fail-closed model servers; F2 golden baseline (SET NX, live vs golden, reset tool); F3 explicit
+workload name in events; F4 ack only on success; F5 unique lock token; F6 Security Agent on
+`proc_scanner`; F7 Security Agent no longer acts; F8 AUTO_KILL to CONTAIN; F9 conformal file decision;
+static test that no Kubernetes write or `os.kill` exists outside `agents/executor/`.
+
+Done:
+- F1: `services/ckpt.py`. Missing/corrupt checkpoint: `/health` 503 `model_loaded:false`, score endpoints 503. `ALLOW_RANDOM_WEIGHTS=true` serves random weights and `/health` says `random_weights:true`. Applied to health, security and DCM servers (the DCM cold-start fallback is gone). Tests: `test_model_servers_fail_closed.py`.
+- F2: `agents/health_agent/baseline.py`; golden baseline written once with SET NX at `kubeheal:baseline:<ns>:<deployment>`; `replicas` excluded from drift; spec serialised as camelCase JSON via `ApiClient.sanitize_for_serialization` (the old `to_dict()` gave snake_case keys that cannot be patched back). Reset tool `scripts/baseline_tool.py`. Tests: `test_golden_baseline.py`. Note: the model input format changed from snake_case to camelCase keys for multi-word fields; the committed checkpoint was trained on whatever the training CSV used (not re-checked here).
+- F3: events carry `deployment`; Fusion keys correlation, locks and circuit breakers by `<ns>:<deployment>`; dash-stripping removed. Security events get the workload from the pod owner chain (Pod, ReplicaSet, Deployment) through the read-only `PodIndex`. This also fixes a pairing bug from the scan: health events were keyed by Deployment name and security events by pod name, so they never paired.
+- F4: `_handle_entry` acks only after success; failures stay pending (reclaim and dead-letter are P6).
+- F5: lock token is `uuid4().hex` per acquisition.
+- F6: Security Agent uses `proc_scanner.PodIndex` + `scan_pids` (cgroup v1 and v2, any namespace, no `kubectl` subprocess). Tests: `test_proc_scanner_index.py`.
+- F7: removed `_direct_kill`, `os.kill`, the agent's own NetworkPolicy. It only publishes events (risk >= 0.40).
+- F8: `AUTO_KILL/HUMAN_KILL` to `AUTO_CONTAIN/HUMAN_CONTAIN`, `circuit_breaker_kills` to `circuit_breaker_containments`, `RANSOMWARE_DIRECT_KILL` removed, env and seed script renamed.
+- F9: decision and facts in `docs/kubeheal/CONFORMAL.md`. The loaded quantile is not used in the interval; this stays open until P12.
+- All Kubernetes writes moved to `agents/executor/actions.py` (Fusion calls it in-process until P2 makes the Executor a service). `tests/test_no_writes_outside_executor.py` enforces this for every later phase.
+
+Acceptance: 72 tests pass (`PYTHONPATH=. .venv\Scripts\python.exe -m pytest tests/ -q`, 2026-11-10, this machine). No write call outside `agents/executor/`.
+Deferred: none.
+Next step: P2 Remediation Executor service and least-privilege RBAC (needs the k3d cluster, already running).

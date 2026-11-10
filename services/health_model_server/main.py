@@ -30,11 +30,12 @@ from models.health_model.yaml_gat_encoder import yaml_diff_to_graph
 from models.health_model.health_conformal import ConformalRegressor
 from models.interpretation.field_name_mapper import FieldNameMapper
 from models.interpretation.shap_explainer import HealthModelSHAPExplainer
+from services.ckpt import load_checkpoint, health_payload, require_ready
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-STATE: Dict = {"model": None, "conformal": None, "mapper": FieldNameMapper(),
+STATE: Dict = {"model": None, "conformal": None, "status": {"loaded": False, "error": "not started"}, "mapper": FieldNameMapper(),
                "shap": HealthModelSHAPExplainer()}
 
 
@@ -49,14 +50,10 @@ def _load_model():
     ckpt = os.environ.get("MODEL_PATH",
                           str(ROOT / "models/health_model/checkpoints/best_health_model.pt"))
     m = HealthModel()
-    if os.path.exists(ckpt):
-        try:
-            m.load_state_dict(torch.load(ckpt, map_location="cpu"))
-            logger.info(f"Loaded health model from {ckpt} ({m.param_count():,} params)")
-        except Exception as e:
-            logger.error(f"Checkpoint load failed: {e} — random weights")
-    else:
-        logger.warning(f"No checkpoint at {ckpt} — random weights")
+    status = load_checkpoint(m, ckpt, "health model")
+    if status["loaded"] and not status["random_weights"]:
+        logger.info(f"Loaded health model from {ckpt} ({m.param_count():,} params)")
+    STATE["status"] = status
     m.eval()
     STATE["model"] = m
     conf_path = str(Path(ckpt).parent / "health_conformal.json")
@@ -76,11 +73,12 @@ app = FastAPI(title="KubeHeal Health Model", version="4.0.0", lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_version": "v4.0.0", "model_loaded": STATE["model"] is not None}
+    return health_payload(STATE["status"])
 
 
 @app.post("/health/score")
 def score(req: ScoreRequest):
+    require_ready(STATE["status"])
     t0 = time.time()
     model = STATE["model"]
     graph = yaml_diff_to_graph(req.old_spec or {}, req.new_spec or {})
@@ -109,6 +107,7 @@ def score(req: ScoreRequest):
         "label": label,
         "label_probabilities": {l: float(probs[i]) for i, l in enumerate(HEALTH_LABELS)},
         "ci_lower": lo, "ci_upper": hi, "ci_width": width,
+        "conformal_q": STATE["conformal"].q,
         "field_attention_weights": field_attr,
         "top_field": top_field,
         "top_metric": top_metric,

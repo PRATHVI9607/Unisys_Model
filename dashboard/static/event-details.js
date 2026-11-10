@@ -638,7 +638,7 @@ class EventDetailsModal {
         // Security-specific remediation
         if (!isHealth) {
             // Get action from event (may be in event_data or from pid_target context)
-            const action = eventData.action || 'direct_kill';
+            const action = eventData.action || 'contain';
             const pid = eventData.pid_target || 'unknown';
             
             html += `

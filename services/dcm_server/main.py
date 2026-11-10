@@ -24,12 +24,14 @@ sys.path.insert(0, str(ROOT))
 from models.dcm.cross_modal_attention import CrossModalAttention
 from models.dcm.causal_chain_builder import CausalChainBuilder
 from models.dcm.correlation_head import COMPOUND_THRESHOLD, is_compound
+from services.ckpt import load_checkpoint, health_payload, require_ready
 from models.interpretation.nl_summary_generator import generate_incident_summary
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-STATE: Dict = {"model": None, "chain": CausalChainBuilder(), "trained": False}
+STATE: Dict = {"model": None, "chain": CausalChainBuilder(), "trained": False,
+         "status": {"loaded": False, "error": "not started"}}
 
 
 class CorrelateRequest(BaseModel):
@@ -44,15 +46,11 @@ class CorrelateRequest(BaseModel):
 def _load_model():
     ckpt = os.environ.get("MODEL_PATH", str(ROOT / "models/dcm/checkpoints/best_dcm.pt"))
     m = CrossModalAttention()
-    if os.path.exists(ckpt):
-        try:
-            m.load_state_dict(torch.load(ckpt, map_location="cpu"))
-            STATE["trained"] = True
-            logger.info(f"Loaded DCM from {ckpt} ({m.param_count():,} params)")
-        except Exception as e:
-            logger.error(f"DCM load failed: {e} — random weights (cold start)")
-    else:
-        logger.warning(f"No DCM checkpoint at {ckpt} — cold start (correlation ~0.5)")
+    status = load_checkpoint(m, ckpt, "DCM")
+    STATE["trained"] = bool(status["loaded"] and not status["random_weights"])
+    if STATE["trained"]:
+        logger.info(f"Loaded DCM from {ckpt} ({m.param_count():,} params)")
+    STATE["status"] = status
     m.eval()
     STATE["model"] = m
 
@@ -68,12 +66,12 @@ app = FastAPI(title="KubeHeal DCM", version="4.0.0", lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_version": "v4.0.0",
-            "model_loaded": STATE["model"] is not None, "trained": STATE["trained"]}
+    return health_payload(STATE["status"], {"trained": STATE["trained"]})
 
 
 @app.post("/dcm/correlate")
 def correlate(req: CorrelateRequest):
+    require_ready(STATE["status"])
     model = STATE["model"]
     if STATE["trained"]:
         score = model.correlate(req.health_embedding, req.security_embedding)

@@ -28,11 +28,12 @@ from models.security_model.security_model import (
 from models.security_model.security_output_head import SECURITY_LABELS
 from models.security_model.security_conformal import ConformalRegressor
 from models.interpretation.shap_explainer import SecurityModelSHAPExplainer
+from services.ckpt import load_checkpoint, health_payload, require_ready
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-STATE: Dict = {"model": None, "conformal": None, "shap": SecurityModelSHAPExplainer()}
+STATE: Dict = {"model": None, "conformal": None, "status": {"loaded": False, "error": "not started"}, "shap": SecurityModelSHAPExplainer()}
 
 
 class ScoreRequest(BaseModel):
@@ -45,14 +46,10 @@ def _load_model():
     ckpt = os.environ.get("MODEL_PATH",
                           str(ROOT / "models/security_model/checkpoints/best_security_model.pt"))
     m = SecurityModel()
-    if os.path.exists(ckpt):
-        try:
-            m.load_state_dict(torch.load(ckpt, map_location="cpu"))
-            logger.info(f"Loaded security model from {ckpt} ({m.param_count():,} params)")
-        except Exception as e:
-            logger.error(f"Checkpoint load failed: {e} — random weights")
-    else:
-        logger.warning(f"No checkpoint at {ckpt} — random weights")
+    status = load_checkpoint(m, ckpt, "security model")
+    if status["loaded"] and not status["random_weights"]:
+        logger.info(f"Loaded security model from {ckpt} ({m.param_count():,} params)")
+    STATE["status"] = status
     m.eval()
     STATE["model"] = m
     conf_path = str(Path(ckpt).parent / "security_conformal.json")
@@ -72,11 +69,12 @@ app = FastAPI(title="KubeHeal Security Model", version="4.0.0", lifespan=lifespa
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_version": "v4.0.0", "model_loaded": STATE["model"] is not None}
+    return health_payload(STATE["status"])
 
 
 @app.post("/security/score")
 def score(req: ScoreRequest):
+    require_ready(STATE["status"])
     t0 = time.time()
     model = STATE["model"]
     events = req.events or []
@@ -104,6 +102,7 @@ def score(req: ScoreRequest):
         "label": label,
         "label_probabilities": {l: float(probs[i]) for i, l in enumerate(SECURITY_LABELS)},
         "ci_lower": lo, "ci_upper": hi, "ci_width": width,
+        "conformal_q": STATE["conformal"].q,
         "syscall_attention_weights": syscall_attr,
         "top_syscall": top_syscall,
         "entropy_spike": spike,

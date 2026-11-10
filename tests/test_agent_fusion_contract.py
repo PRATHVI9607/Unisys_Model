@@ -16,13 +16,13 @@ def published_keys(src, stream):
 def test_health_publishes_fusion_fields():
     pub = published_keys(HEALTH_SRC, "health")
     for need in ["health_risk","health_label","health_ci_width","top_field",
-                 "namespace_tier","health_embedding_b64","event_id"]:
+                 "namespace_tier","health_embedding_b64","event_id","deployment"]:
         assert need in pub, f"health agent must publish {need}"
 
 def test_security_publishes_fusion_fields():
     pub = published_keys(SEC_SRC, "security")
     for need in ["sec_risk","sec_label","sec_ci_width","top_syscall",
-                 "namespace_tier","security_embedding_b64","event_id"]:
+                 "namespace_tier","security_embedding_b64","event_id","deployment"]:
         assert need in pub, f"security agent must publish {need}"
 
 def test_no_stale_v3_endpoints():

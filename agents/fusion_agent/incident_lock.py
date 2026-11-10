@@ -7,6 +7,7 @@ an atomic Lua check-and-delete. Max gap after a crash = 10s.
 """
 
 import asyncio
+import uuid
 from contextlib import asynccontextmanager
 
 LOCK_PREFIX = "kubeheal:incident-lock"
@@ -23,7 +24,7 @@ end
 
 
 @asynccontextmanager
-async def acquire_incident_lock(redis, namespace: str, pod_name: str, token: str = "1"):
+async def acquire_incident_lock(redis, namespace: str, pod_name: str, token: str = None):
     """
     async with acquire_incident_lock(redis, ns, pod) as acquired:
         if not acquired:
@@ -31,6 +32,8 @@ async def acquire_incident_lock(redis, namespace: str, pod_name: str, token: str
         ...  # decision + action
     Lock is released even on exception.
     """
+    # Unique token per replica and incident: the Lua check-and-delete only releases our own lock.
+    token = token or uuid.uuid4().hex
     lock_key = f"{LOCK_PREFIX}:{namespace}:{pod_name}"
     acquired = await redis.set(lock_key, token, nx=True, ex=LOCK_TTL_SECONDS)
     if not acquired:
