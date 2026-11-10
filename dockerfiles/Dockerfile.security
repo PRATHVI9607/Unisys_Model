@@ -7,7 +7,7 @@ RUN uv pip install --system \
 COPY agents/ /app/agents/
 ENV REDIS_URL=redis://redis-master:6379
 ENV SECURITY_MODEL_URL=http://kubeheal-security-model:8002
-ENV FALCO_ENABLED=false
+ENV FALCO_MODE=auto
 ENV FALCO_EVENTS_PATH=/var/run/falco/events.jsonl
 ENV PROC_ROOT=/proc
 ENV METRICS_PORT=9100

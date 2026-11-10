@@ -245,13 +245,21 @@ class HealthAgent:
             new_spec = baseline.drift_view(new_spec)
             logger.info(f"Spec drift vs golden baseline detected for {namespace}/{name}; assessing")
 
-            # v4: poll for fresh 60×15 Prometheus window (shared cache, backoff)
-            # — replaces the v3 hard-coded sleep(15) + single-metric fetch.
-            from agents.health_agent.prometheus_client import wait_for_fresh_metrics
-            metrics = await wait_for_fresh_metrics(namespace, name, self.prometheus_url)
+            # P5: a real 60-step query_range window (5 s step) per metric, with missing metrics
+            # flagged. No window at all (Prometheus down, every metric empty) means no assessment:
+            # the model must never be fed an invented all-zero window (fail closed).
+            from agents.health_agent.prometheus_client import (
+                wait_for_fresh_metric_window, PrometheusUnavailable,
+            )
+            try:
+                window = await wait_for_fresh_metric_window(namespace, name, self.prometheus_url)
+            except PrometheusUnavailable as e:
+                logger.error(f"No Prometheus window for {namespace}/{name}: {e}; "
+                             "no assessment published (fail closed)")
+                return
 
             assessment = await self._assess_health(
-                namespace, name, old_spec, new_spec, metrics, blast_radius
+                namespace, name, old_spec, new_spec, window, blast_radius
             )
 
             if assessment:
@@ -387,7 +395,7 @@ class HealthAgent:
         name: str,
         old_spec: Optional[Dict],
         new_spec: Dict,
-        metrics,                 # np.ndarray [60,15] from wait_for_fresh_metrics
+        metrics,                 # MetricWindow (or a bare np.ndarray [60,15], treated as no missing info)
         blast_radius: str,
     ) -> Optional[Dict]:
         """Score the drift with the v4 Health Model server. Returns a v4 dict
@@ -395,10 +403,15 @@ class HealthAgent:
         server is unreachable or not ready (fail closed, no heuristic score)."""
         import aiohttp
 
+        values = getattr(metrics, "values", metrics)
+        missing = list(getattr(metrics, "missing", []) or [])
         payload = {
             "old_spec": old_spec or {},
             "new_spec": new_spec or {},
-            "metrics": metrics.tolist() if hasattr(metrics, "tolist") else metrics,
+            "metrics": values.tolist() if hasattr(values, "tolist") else values,
+            # Extra keys: the Health Model server ignores them today (ScoreRequest has no such field);
+            # they are sent so the server can use the flags once it supports them (see P5 report).
+            "metrics_missing": missing,
         }
         result = None
         started = time.perf_counter()
@@ -433,7 +446,12 @@ class HealthAgent:
             "namespace_tier": namespace_tier(namespace),
             "health_risk": float(result.get("risk_score", 0.0)),
             "health_label": result.get("label", "benign"),
-            "health_ci_width": float(result.get("ci_width", 0.0)),
+            # The Health Model server drops the missing-metric mask and scores the zero-filled columns, so
+            # with any missing metric its interval is not trustworthy: publish the maximum width (the policy
+            # then treats the assessment as uncertain) and keep the flags in metrics_missing_json. The
+            # assessment itself is not dropped. The real fix is a mask-aware server (tracked for P6 or
+            # later). The http_* columns will be missing for every workload that does not export them.
+            "health_ci_width": 1.0 if missing else float(result.get("ci_width", 0.0)),
             "top_field": result.get("top_field", ""),
             "top_metric": result.get("top_metric", ""),
             "field_attribution": result.get("field_attention_weights", {}),
@@ -441,6 +459,9 @@ class HealthAgent:
             "patch_proposal": self._patch_from_field(result.get("top_field", ""), old_spec, new_spec),
             "blast_radius": blast_radius,
             "inference_method": "health_model_v4",
+            # P5: which of the 15 metrics had no real data (their window columns were 0.0 placeholders).
+            "metrics_missing": missing,
+            "metrics_observed": dict(getattr(metrics, "observed", {}) or {}),
         }
 
     def _patch_from_field(self, top_field: str, old_spec, new_spec) -> Optional[Dict]:
@@ -523,6 +544,8 @@ class HealthAgent:
             "patch_proposal_json": json.dumps(a.get("patch_proposal") or {}),
             "blast_radius": a.get("blast_radius", "unknown"),
             "inference_method": a.get("inference_method", ""),
+            "metrics_missing_json": json.dumps(a.get("metrics_missing", [])),
+            "metrics_observed_json": json.dumps(a.get("metrics_observed", {})),
             "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
         }
         await self.redis.xadd("kubeheal.health.events", payload)

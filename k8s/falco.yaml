@@ -8,7 +8,7 @@
 #
 # Falco writes one JSON event per line to /var/run/falco/events.jsonl on each
 # node (hostPath). The KubeHeal Security Agent DaemonSet mounts the same path
-# read-only and tails it (FALCO_ENABLED=true, FALCO_EVENTS_PATH).
+# read-only and tails it (FALCO_MODE=auto, FALCO_EVENTS_PATH).
 ---
 apiVersion: v1
 kind: ConfigMap

@@ -2,7 +2,6 @@ import asyncio
 import base64
 import json
 import logging
-import math
 import os
 import struct
 import time
@@ -17,6 +16,13 @@ import kubernetes_asyncio
 from kubernetes_asyncio import client, config
 from agents.common.metrics import KubeHealMetrics
 from agents.security_agent.proc_scanner import PodIndex, scan_pids
+from agents.security_agent.entropy_sampler import EntropySampler, EntropyResult, shannon_entropy
+from agents.security_agent.falco_client import (
+    falco_event_stream, replay_stream, resolve_falco_mode,
+)
+from agents.security_agent.syscall_window import (
+    FalcoWindowTracker, build_model_input, DEFAULT_BURST_THRESHOLD, DEFAULT_COOLDOWN_S,
+)
 from pydantic import BaseModel, ConfigDict, Field
 
 logging.basicConfig(level=logging.INFO)
@@ -37,22 +43,6 @@ def namespace_tier(namespace: str) -> str:
     if "stag" in n:
         return "staging"
     return "dev"
-
-
-def synth_events(early_signals: Dict, n: int = 60) -> List[Dict]:
-    """Synthesize a syscall event window from early signals for the Security
-    Model (the Falco gRPC stream is optional; entropy + these signals drive
-    detection). Ransomware-consistent ops when signals fire, else benign I/O."""
-    if early_signals.get("rename_burst") or early_signals.get("high_entropy"):
-        pool = (["write", "rename", "ftruncate", "open", "read"]
-                + (["mmap", "msync"] if early_signals.get("mmap_detected") else []))
-        paths = [f"/data/file_{i}.locked" for i in range(20)]
-    else:
-        pool = ["read", "stat", "open", "close"]
-        paths = [f"/var/log/app_{i}.log" for i in range(5)]
-    import random
-    return [{"syscall": random.choice(pool), "fd_path": random.choice(paths)}
-            for _ in range(n)]
 
 
 class ThreatLevel(str, Enum):
@@ -82,57 +72,12 @@ class SecurityEvent(BaseModel):
 
 
 class EntropyCalculator:
-    """Calculate Shannon entropy for file samples."""
+    """Shannon entropy of a byte string. File sampling lives in entropy_sampler.EntropySampler
+    (data actually written by the suspect process); this class no longer reads any fixed paths."""
 
     @staticmethod
     def calculate_entropy(data: bytes) -> float:
-        """Calculate Shannon entropy."""
-        if not data:
-            return 0.0
-
-        byte_freq = {}
-        for byte in data:
-            byte_freq[byte] = byte_freq.get(byte, 0) + 1
-
-        entropy = 0.0
-        data_len = len(data)
-
-        for count in byte_freq.values():
-            p = count / data_len
-            if p > 0:
-                entropy -= p * math.log2(p)
-
-        return entropy
-
-    @staticmethod
-    def calculate_file_entropy(file_path: str, sample_size: int = 4096) -> float:
-        """Calculate entropy from file sample."""
-        try:
-            fd = os.open(file_path, os.O_RDONLY)
-            data = os.read(fd, sample_size)
-            os.close(fd)
-            return EntropyCalculator.calculate_entropy(data)
-        except Exception:
-            return 0.0
-
-    @staticmethod
-    def calculate_file_entropy_random(
-        file_paths: List[str], max_samples: int = 20
-    ) -> float:
-        """Calculate average entropy from multiple files."""
-        import random
-
-        if not file_paths:
-            return 0.0
-
-        sample_paths = random.sample(file_paths, min(max_samples, len(file_paths)))
-
-        entropies = []
-        for path in sample_paths:
-            ent = EntropyCalculator.calculate_file_entropy(path)
-            entropies.append(ent)
-
-        return sum(entropies) / len(entropies) if entropies else 0.0
+        return shannon_entropy(data)
 
 
 class InotifyWatcher:
@@ -150,10 +95,11 @@ class InotifyWatcher:
         ]
         self.recent_events: List[Dict] = []
 
-    def check_rename_burst(self) -> float:
-        """Check for rename burst pattern."""
+    def check_rename_burst(self, events: Optional[List[Dict]] = None) -> float:
+        """Check for rename burst pattern in `events` (default: the last recorded window)."""
+        window = self.recent_events if events is None else events
         rename_count = sum(
-            1 for e in self.recent_events if e.get("syscall") == "rename"
+            1 for e in window if e.get("syscall", "").startswith("rename")
         )
 
         if rename_count > self.rename_burst_threshold:
@@ -184,6 +130,7 @@ class SecurityAgent:
         entropy_threshold: float = 7.2,
         mmap_entropy_threshold: float = 7.0,
         mmap_size_threshold: int = 50 * 1024 * 1024,
+        sampler: Optional[EntropySampler] = None,
     ):
         self.namespace       = namespace
         self.redis_url       = redis_url       or os.environ.get("REDIS_URL", "redis://redis-master:6379")
@@ -206,6 +153,10 @@ class SecurityAgent:
         self.inotify_watcher = InotifyWatcher()
 
         self.entropy_calculator = EntropyCalculator()
+        # Real write-entropy sampler (30 samples, 2 s apart, bounded reads); injectable for tests.
+        self.sampler = sampler or EntropySampler()
+        self.falco_mode = "off"
+        self._checks: Dict[int, "asyncio.Task"] = {}   # pid -> running entropy check
 
         self.write_counters: Dict[int, int] = {}
 
@@ -240,6 +191,8 @@ class SecurityAgent:
         """Stop the Security Agent."""
         logger.info("Stopping Security Agent...")
         self.running = False
+        for t in list(self._checks.values()):
+            t.cancel()
 
         if self.redis:
             await self.redis.aclose()
@@ -268,59 +221,59 @@ class SecurityAgent:
                 await asyncio.sleep(5)
 
     async def _handle_falco_events(self) -> None:
-        """Consume REAL Falco syscall events (gRPC Outputs API or JSON tail),
-        maintain a rolling syscall window per PID, and trigger an entropy check
-        when a window shows a ransomware-indicative burst (mass write+rename+
-        ftruncate) or a Falco ransomware rule fires. Disabled by default
-        (the /proc write tracker covers detection); enable with FALCO_ENABLED."""
-        if os.environ.get("FALCO_ENABLED", "false").lower() != "true":
-            logger.info("Falco disabled; using /proc write tracker")
+        """Consume Falco syscall events and keep a rolling syscall window per PID. The source is chosen
+        by falco_client.resolve_falco_mode: live Falco (gRPC Outputs API or JSON tail) when it is
+        available, REPLAY of recorded Falco JSON traces (FALCO_REPLAY_PATH) when it is not, or off (the
+        /proc write tracker alone). Live and replay events go through the same ingest path."""
+        mode, reason = resolve_falco_mode()
+        self.falco_mode = mode
+        logger.info("Falco input mode: %s (%s)", mode, reason)
+        if mode == "off":
             return
-        from agents.security_agent.falco_client import (
-            falco_event_stream, RANSOMWARE_SYSCALLS,
+        tracker = FalcoWindowTracker(
+            burst_threshold=int(os.environ.get("FALCO_BURST_THRESHOLD", str(DEFAULT_BURST_THRESHOLD))),
+            cooldown_s=float(os.environ.get("FALCO_TRIGGER_COOLDOWN_S", str(DEFAULT_COOLDOWN_S))),
         )
+        if mode == "replay":
+            path = os.environ["FALCO_REPLAY_PATH"]
+            delay = float(os.environ.get("FALCO_REPLAY_DELAY_S", "0"))
+            n = await self._consume_falco(replay_stream(path, delay), tracker, "replay")
+            logger.info("Falco replay of %s finished: %d event(s)", path, n)
+            return
         logger.info("Falco event consumer started")
-        BURST = int(os.environ.get("FALCO_BURST_THRESHOLD", "15"))  # ops/window
-        windows: Dict[int, list] = {}   # pid -> recent ransomware-syscall names
-        last_fire: Dict[int, float] = {}
-        import time as _t
         while self.running:
             try:
-                async for evt in falco_event_stream(self.falco_grpc_addr):
-                    if not self.running:
-                        break
-                    pid = evt.get("pid")
-                    sysc = evt.get("syscall", "")
-                    # Record PID→pod mapping from Falco's k8s fields
-                    if pid and evt.get("pod"):
-                        await self.redis.setex(
-                            f"kubeheal:pid:{pid}", 300,
-                            json.dumps({"pid": pid, "pod": evt["pod"],
-                                        "namespace": evt.get("namespace", "default")}),
-                        )
-                    if not pid:
-                        continue
-                    # rolling window of ransomware-relevant syscalls
-                    if sysc in RANSOMWARE_SYSCALLS:
-                        w = windows.setdefault(pid, [])
-                        w.append(sysc)
-                        if len(w) > 256:
-                            del w[: len(w) - 256]
-                        renames = sum(1 for s in w if s.startswith("rename"))
-                        writes = sum(1 for s in w if "write" in s or s == "ftruncate")
-                        ransom_rule = "ransom" in evt.get("rule", "").lower()
-                        if (renames + writes >= BURST or ransom_rule) and \
-                           (_t.monotonic() - last_fire.get(pid, 0) > 5):
-                            last_fire[pid] = _t.monotonic()
-                            self.inotify_watcher.recent_events = [
-                                {"syscall": s} for s in w
-                            ]
-                            await self._trigger_entropy_check(pid)
+                await self._consume_falco(falco_event_stream(self.falco_grpc_addr), tracker, "falco")
+                await asyncio.sleep(3)          # stream ended normally: do not spin
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.warning(f"Falco consumer error: {e}; retry in 3s")
                 await asyncio.sleep(3)
+
+    async def _consume_falco(self, stream, tracker: FalcoWindowTracker, source: str) -> int:
+        n = 0
+        async for evt in stream:
+            if not self.running:
+                break
+            n += 1
+            await self._ingest_falco_event(evt, tracker, source)
+        return n
+
+    async def _ingest_falco_event(self, evt: Dict, tracker: FalcoWindowTracker, source: str) -> None:
+        """One normalised Falco event (live or replayed): record PID to pod from Falco's k8s fields, update
+        the window, and start an entropy check on a burst or a Falco ransomware rule."""
+        pid = evt.get("pid")
+        if pid and evt.get("pod"):
+            await self.redis.setex(
+                f"kubeheal:pid:{pid}", 300,
+                json.dumps({"pid": pid, "pod": evt["pod"],
+                            "namespace": evt.get("namespace", "default")}),
+            )
+        trigger = tracker.add(evt)
+        if trigger:
+            self.inotify_watcher.recent_events = trigger.events
+            await self._trigger_entropy_check(trigger.pid, trigger.events, source)
 
     def _sample_write_bytes(self) -> Dict[int, int]:
         """Cumulative write_bytes per kubepods PID from /proc/<pid>/io."""
@@ -371,43 +324,70 @@ class SecurityAgent:
             except Exception as e:
                 logger.debug(f"Write event error: {e}")
 
-    async def _trigger_entropy_check(self, pid: int) -> None:
-        """Trigger entropy calculation and Security Model scoring for high-write PID."""
-        logger.info(f"Entropy check for PID {pid}")
+    async def _trigger_entropy_check(self, pid: int, syscall_events: Optional[List[Dict]] = None,
+                                     syscall_source: str = "none") -> None:
+        """Start an entropy check for `pid` in the background (one at a time per PID: a full run takes
+        samples x interval, 60 s with the defaults, and must not block the detectors that call this).
 
+        `syscall_events` is the real syscall window (from Falco live or replay) when there is one;
+        `syscall_source` says where it came from ("falco", "replay") or "none"."""
+        running = self._checks.get(pid)
+        if running is not None and not running.done():
+            return
+        task = asyncio.create_task(self._run_entropy_check(pid, list(syscall_events or []), syscall_source))
+
+        def _done(t, pid=pid):
+            if self._checks.get(pid) is t:
+                self._checks.pop(pid, None)
+            if not t.cancelled() and t.exception():
+                logger.error(f"Entropy check for PID {pid} failed: {t.exception()}")
+        task.add_done_callback(_done)
+        self._checks[pid] = task
+
+    async def _run_entropy_check(self, pid: int, events: List[Dict], source: str) -> None:
+        """Sample the entropy of what `pid` writes, assess, publish. An initial assessment is published after
+        the first sample (so detection does not wait for the whole window), a final one when the series is
+        complete. Both carry entropy_phase and entropy_valid_samples."""
+        logger.info(f"Entropy check for PID {pid} (syscalls from: {source})")
         pid_info = await self._get_pid_info(pid)
         if not pid_info:
             return
-
-        # Sample files from PV mount paths (real paths in production)
-        files_written = [f"/data/test_{i}.dat" for i in range(20)]
-        entropy_avg = self.entropy_calculator.calculate_file_entropy_random(files_written)
         mmap_detected = await self._check_mmap_entropy(pid)
 
-        rename_score = self.inotify_watcher.check_rename_burst()
+        async def first_sample(result: EntropyResult, i: int) -> None:
+            if i == 0 and self.sampler.config.samples > 1:
+                await self._assess_and_publish(pid, pid_info, result, events, source,
+                                               mmap_detected, "initial")
+
+        result = await self.sampler.collect(pid, on_sample=first_sample)
+        await self._assess_and_publish(pid, pid_info, result, events, source, mmap_detected, "complete")
+
+    async def _assess_and_publish(self, pid: int, pid_info: Dict, result: EntropyResult,
+                                  events: List[Dict], source: str, mmap_detected: bool,
+                                  phase: str) -> None:
+        entropy_avg = result.mean                      # None when no sample had readable data
+        entropy_known = entropy_avg is not None
+        rename_score = self.inotify_watcher.check_rename_burst(events)
         early_signals = {
             "rename_burst":      rename_score > 0,
             "ftruncate_pattern": False,
-            "high_entropy":      entropy_avg > self.entropy_threshold,
+            "high_entropy":      entropy_known and entropy_avg > self.entropy_threshold,
             "mmap_detected":     mmap_detected,
         }
 
-        # Build entropy series (30 steps). Prefer the REAL Falco syscall window
-        # when present (set by _handle_falco_events); else synthesize from signals.
-        entropy_series = [entropy_avg + (0.1 * (i % 3)) for i in range(30)]
-        real = getattr(self.inotify_watcher, "recent_events", None)
-        events = ([{"syscall": e.get("syscall", ""), "fd_path": ""} for e in real]
-                  if real else synth_events(early_signals))
-
-        # Call the v4 Security Model
-        sec = await self._call_security_model(events, entropy_series, early_signals)
+        # The Security Model needs a real syscall window. Without one (no Falco, no replay) the model is not
+        # called and nothing is fabricated: the event is scored from the entropy and /proc heuristics only
+        # and says so (model_scored=false, syscall_source=none).
+        sec = None
+        if events:
+            sec = await self._call_security_model(events, result.model_series(), early_signals)
         model_risk = float(sec["risk_score"]) if sec else None
 
-        # Heuristic baseline (floor — clear ransomware signatures)
+        # Heuristic baseline (floor, clear ransomware signatures)
         heuristic_risk = 0.0
         if mmap_detected:
             heuristic_risk = 0.85
-        elif entropy_avg > self.entropy_threshold:
+        elif entropy_known and entropy_avg > self.entropy_threshold:
             heuristic_risk = min(0.95, entropy_avg / 8.0)
         if early_signals["rename_burst"]:
             heuristic_risk = max(heuristic_risk, 0.60)
@@ -415,12 +395,23 @@ class SecurityAgent:
             heuristic_risk = max(heuristic_risk, 0.95)
 
         risk_score = max(model_risk or 0.0, heuristic_risk)
-        logger.info(f"PID {pid} entropy={entropy_avg:.2f} risk={risk_score:.3f}")
+        logger.info(f"PID {pid} [{phase}] entropy="
+                    f"{'n/a' if not entropy_known else format(entropy_avg, '.2f')} "
+                    f"valid_samples={result.valid_samples} risk={risk_score:.3f}")
 
         # The Security Agent only senses and reports (S-SA-5). Containment is decided by the
         # Fusion Agent and executed by the Executor.
         if risk_score >= 0.40:
-            await self._publish_security_event(pid_info, risk_score, early_signals, entropy_avg, sec)
+            await self._publish_security_event(
+                pid_info, risk_score, early_signals, entropy_avg, sec,
+                extra={
+                    "entropy_phase": phase,
+                    "entropy_valid_samples": str(result.valid_samples),
+                    "entropy_files_json": json.dumps(result.files),
+                    "syscall_source": source if events else "none",
+                    "model_scored": "true" if sec else "false",
+                },
+            )
 
     async def _publish_security_event(
         self,
@@ -431,12 +422,14 @@ class SecurityAgent:
         sec: Optional[Dict] = None,
         label: Optional[str] = None,
         action: str = "observe",
+        extra: Optional[Dict[str, str]] = None,
     ) -> None:
         """Publish the v4 SecurityEvent schema (Section 15.A.1) to
         kubeheal.security.events + a hash for dashboard detail lookup."""
         pod = pid_info.get("pod") or "unknown"
         namespace = pid_info.get("namespace", "default")
         event_id = f"sec-{datetime.utcnow().strftime('%Y%m%d-%H%M%S-%f')}-{pod}"
+        model_scored = bool(sec)
         sec = sec or {}
 
         sec_label = label or sec.get("label") or (
@@ -452,17 +445,22 @@ class SecurityAgent:
             "namespace_tier": namespace_tier(namespace),
             "sec_risk": f"{risk_score:.4f}",
             "sec_label": sec_label,
-            "sec_ci_width": f"{float(sec.get('ci_width', 0.0)):.4f}",
+            # No model score (heuristic-only, or the Security Model was unreachable) must never look
+            # certain: publish the maximum width so the decision policy treats the event as uncertain and
+            # cannot reach AUTO_CONTAIN from it. The model's own width is used only when it scored.
+            "sec_ci_width": f"{float(sec.get('ci_width', 1.0)) if model_scored else 1.0:.4f}",
             "top_syscall": sec.get("top_syscall", ""),
             "syscall_attribution_json": json.dumps(sec.get("syscall_attention_weights", {})),
             "entropy_spike_json": json.dumps(sec.get("entropy_spike", {})),
             "security_embedding_b64": emb_b64(sec.get("security_embedding", [])),
             "early_signals_json": json.dumps(early_signals),
             "pid_target": str(pid_info.get("pid", 0)),
-            "entropy": f"{float(entropy or 0.0):.4f}",
+            # empty (not 0.0) when no sample of written data could be read
+            "entropy": f"{float(entropy):.4f}" if entropy is not None else "",
             "action": action,
             "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
         }
+        payload.update(extra or {})
         await self.redis.xadd("kubeheal.security.events", payload)
         hkey = f"kubeheal:security:{event_id}"
         await self.redis.hset(hkey, mapping={k: v for k, v in payload.items()
@@ -516,11 +514,7 @@ class SecurityAgent:
         """Call the v4 Security Model /security/score. Returns the full v4
         result (sec_risk, label, ci_width, top_syscall, entropy_spike,
         security_embedding) or None if the server is unreachable."""
-        payload = {
-            "events": events or [],
-            "entropy_series": entropy_series or [],
-            "early_signals": early_signals or {},
-        }
+        payload = build_model_input(events or [], entropy_series or [], early_signals or {})
         started = time.perf_counter()
         try:
             async with aiohttp.ClientSession() as session:

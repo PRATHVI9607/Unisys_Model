@@ -49,10 +49,12 @@ spec:
               value: "7.0"
             - name: WRITE_BYTES_THRESHOLD
               value: "10485760"        # 10 MiB / 2s window
-            # Falco: set true once Falco is installed (see k8s/falco.yaml).
-            # When false, detection runs off the /proc write-byte tracker.
-            - name: FALCO_ENABLED
-              value: "false"
+            # Falco input mode: auto (use Falco when its socket or events file exists, otherwise the
+            # /proc write-byte tracker only), live, off, or replay (FALCO_REPLAY_PATH, explicit opt-in
+            # only: replay never starts from auto because it invents pids and pods).
+            # See agents/security_agent/falco_client.py. Falco itself is installed from k8s/falco.yaml.
+            - name: FALCO_MODE
+              value: auto
             - name: FALCO_EVENTS_PATH
               value: /var/run/falco/events.jsonl
             - name: NAMESPACE
