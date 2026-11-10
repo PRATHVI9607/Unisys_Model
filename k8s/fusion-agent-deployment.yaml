@@ -28,7 +28,7 @@ spec:
       labels:
         app: fusion-agent
     spec:
-      serviceAccountName: kubeheal
+      serviceAccountName: fusion-agent
       containers:
         - name: agent
           image: kubeheal/fusion-agent:v4

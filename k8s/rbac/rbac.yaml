@@ -1,49 +1,9 @@
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: kubeheal
-  namespace: kubeheal
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: kubeheal
-rules:
-  - apiGroups: [""]
-    resources: ["pods", "services", "configmaps", "namespaces"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets", "statefulsets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["networkpolicies"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["persistentvolumes"]
-    verbs: ["get", "list", "watch", "update", "patch"]
-  - apiGroups: ["policy"]
-    resources: ["poddisruptionbudgets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["apiextensions.k8s.io"]
-    resources: ["customresourcedefinitions"]
-    verbs: ["get", "list"]
-  - apiGroups: ["admissionregistration.k8s.io"]
-    resources: ["validatingwebhookconfigurations"]
-    verbs: ["get", "list"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: kubeheal
-subjects:
-  - kind: ServiceAccount
-    name: kubeheal
-    namespace: kubeheal
-roleRef:
-  kind: ClusterRole
-  name: kubeheal
-  apiGroup: rbac.authorization.k8s.io
----
+# KubeHeal least-privilege RBAC (P2, S-EX-1 / S-HA-6 / S-SA-5).
+#
+# One ServiceAccount per component. Agents, servers and the dashboard are read-only (or have no
+# Kubernetes access at all). Only the Executor can write, and only through Roles bound in the
+# protected namespaces (prod, staging, dev). Nothing here grants write access in `kube-system`
+# or `kubeheal`. Verified by scripts/rbac_check.py (kubectl auth can-i).
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -54,7 +14,168 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: kubeheal-demo
-  labels:
-    kubeheal.io/namespace-tier: "dev"
-    kubeheal.io/watch: "true"
+  name: prod
+  labels: {kubeheal/tier: prod}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+  labels: {kubeheal/tier: staging}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev
+  labels: {kubeheal/tier: dev}
+---
+# ---- ServiceAccounts ------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: health-agent, namespace: kubeheal}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: security-agent, namespace: kubeheal}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: fusion-agent, namespace: kubeheal}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: executor, namespace: kubeheal}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: dashboard, namespace: kubeheal}
+---
+# Model servers never talk to the Kubernetes API: no token is mounted.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: health-model, namespace: kubeheal}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: security-model, namespace: kubeheal}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: dcm, namespace: kubeheal}
+automountServiceAccountToken: false
+---
+# ---- Read-only observer (agents, dashboard) ---------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: kubeheal-observer}
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, namespaces, persistentvolumeclaims, events]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies, ingresses]
+    verbs: [get, list, watch]
+  - apiGroups: [snapshot.storage.k8s.io]
+    resources: [volumesnapshots]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: kubeheal-observer}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal-observer}
+subjects:
+  - {kind: ServiceAccount, name: health-agent, namespace: kubeheal}
+  - {kind: ServiceAccount, name: security-agent, namespace: kubeheal}
+  - {kind: ServiceAccount, name: dashboard, namespace: kubeheal}
+---
+# Fusion only needs namespace labels (tier, protected, mode override).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: kubeheal-namespace-reader}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: kubeheal-namespace-reader}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal-namespace-reader}
+subjects:
+  - {kind: ServiceAccount, name: fusion-agent, namespace: kubeheal}
+---
+# ---- Executor: cluster-wide READ, write only inside protected namespaces ----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: kubeheal-executor-read}
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces, persistentvolumeclaims]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets]
+    verbs: [get, list, watch]
+  - apiGroups: [snapshot.storage.k8s.io]
+    resources: [volumesnapshots, volumesnapshotclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: kubeheal-executor-read}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal-executor-read}
+subjects:
+  - {kind: ServiceAccount, name: executor, namespace: kubeheal}
+---
+# The write rules are a ClusterRole used ONLY through namespaced RoleBindings below, so the
+# permissions exist in prod, staging and dev and nowhere else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: kubeheal-executor-write}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [patch, update]
+  - apiGroups: [apps]
+    resources: [deployments/scale, statefulsets/scale]
+    verbs: [get, patch, update]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [delete, patch]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [create, patch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [create, delete, patch]
+  - apiGroups: [snapshot.storage.k8s.io]
+    resources: [volumesnapshots]
+    verbs: [create, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kubeheal-executor-write, namespace: prod}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal-executor-write}
+subjects:
+  - {kind: ServiceAccount, name: executor, namespace: kubeheal}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kubeheal-executor-write, namespace: staging}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal-executor-write}
+subjects:
+  - {kind: ServiceAccount, name: executor, namespace: kubeheal}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kubeheal-executor-write, namespace: dev}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal-executor-write}
+subjects:
+  - {kind: ServiceAccount, name: executor, namespace: kubeheal}

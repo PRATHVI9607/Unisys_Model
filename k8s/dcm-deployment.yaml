@@ -10,7 +10,7 @@ spec:
   template:
     metadata: {labels: {app: kubeheal-dcm}}
     spec:
-      serviceAccountName: kubeheal
+      serviceAccountName: dcm
       containers:
       - name: dcm-server
         image: kubeheal/dcm-server:v4

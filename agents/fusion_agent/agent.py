@@ -8,7 +8,7 @@ heartbeat incident lock, and writes kubeheal.dcm.events + kubeheal.actions.
 
 P1 notes: events are keyed by the explicit workload (Deployment) name, a message is
 acknowledged only after it was handled successfully, and every Kubernetes write goes
-through agents.executor.actions (P2 moves that behind the Executor service).
+through the Executor: this agent only publishes requests to kubeheal.exec.
 """
 
 import asyncio
@@ -24,9 +24,7 @@ from typing import Dict, Optional
 import aiohttp
 import numpy as np
 import redis.asyncio as aioredis
-from kubernetes_asyncio import client, config
 
-from agents.executor import actions as kube_actions
 from agents.fusion_agent.decision_policy import (
     make_decision, DecisionInput, Decision,
 )
@@ -40,6 +38,7 @@ HEALTH_STREAM = "kubeheal.health.events"
 SEC_STREAM = "kubeheal.security.events"
 DCM_STREAM = "kubeheal.dcm.events"
 ACTIONS_STREAM = "kubeheal.actions"
+EXEC_STREAM = "kubeheal.exec"
 
 
 def _b64_to_vec(b64: str):
@@ -64,9 +63,6 @@ class FusionAgentV4:
         self.dcm_url = os.environ.get("DCM_URL", "http://kubeheal-dcm:8003")
         self.burn_in = os.environ.get("BURN_IN_MODE", "false").lower() == "true"
         self.redis: Optional[aioredis.Redis] = None
-        self.core_api: Optional[client.CoreV1Api] = None
-        self.apps_api: Optional[client.AppsV1Api] = None
-        self.networking_api: Optional[client.NetworkingV1Api] = None
         self.consumer = os.environ.get("HOSTNAME") or f"fusion-{uuid.uuid4().hex[:6]}"
         self.running = False
         # short-term correlation buffer: "<ns>:<workload>" -> (event_fields, recv_monotonic)
@@ -74,22 +70,6 @@ class FusionAgentV4:
         self.pending_sec: Dict[str, tuple] = {}
 
     async def start(self):
-        try:
-            config.load_incluster_config()
-            logger.info("Loaded in-cluster config")
-        except Exception:
-            try:
-                await config.load_kube_config()
-                logger.info("Loaded kubeconfig")
-            except Exception as e:
-                logger.warning(f"No kube config ({e}); actions will not be executed")
-        try:
-            self.core_api = client.CoreV1Api()
-            self.apps_api = client.AppsV1Api()
-            self.networking_api = client.NetworkingV1Api()
-        except Exception as e:
-            logger.warning(f"Kube client init failed: {e}")
-
         self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
         for stream in (HEALTH_STREAM, SEC_STREAM):
             try:
@@ -224,16 +204,19 @@ class FusionAgentV4:
         logger.info(f"DECISION {out.decision.value} {namespace}/{workload} "
                     f"score={out.adjusted_score:.2f} :: {out.rationale}")
         outcome = "logged"
+        incident_id = f"inc-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        # The Fusion Agent never calls the Kubernetes API. Automatic actions are queued for the
+        # Executor, the only component with write permissions (S-EX-1).
         if out.decision == Decision.AUTO_CONTAIN:
             await self._cb_incr(f"kubeheal:cb:contain:{namespace}")
-            outcome = await kube_actions.contain(self.core_api, self.networking_api, namespace, pod)
+            await self._enqueue_exec(incident_id, "contain", namespace, workload, pod, out, inp)
+            outcome = "queued_for_executor"
         elif out.decision == Decision.AUTO_PATCH:
             await self._cb_incr(f"kubeheal:cb:patch:{namespace}:{workload}")
-            baseline_raw = await self.redis.get(f"kubeheal:baseline:{namespace}:{workload}")
-            baseline = json.loads(baseline_raw) if baseline_raw else None
-            outcome = await kube_actions.patch_to_baseline(
-                self.apps_api, namespace, workload, baseline)
+            await self._enqueue_exec(incident_id, "patch", namespace, workload, pod, out, inp)
+            outcome = "queued_for_executor"
         await self.redis.xadd(ACTIONS_STREAM, {
+            "incident_id": incident_id,
             "action_type": out.decision.value,
             "target": json.dumps({"namespace": namespace, "deployment": workload, "pod": pod}),
             "confidence": f"{out.adjusted_score:.4f}",
@@ -242,6 +225,21 @@ class FusionAgentV4:
             "nl_summary": out.action_params.get("nl_summary") or "",
             "causal_chain": json.dumps(causal_chain),
             "outcome": outcome,
+            "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
+        })
+
+    async def _enqueue_exec(self, incident_id, action, namespace, workload, pod, out, inp):
+        await self.redis.xadd(EXEC_STREAM, {
+            "incident_id": incident_id,
+            "action": action,
+            "namespace": namespace,
+            "deployment": workload,
+            "pod": pod,
+            "patch_field": inp.health_field_top if action == "patch" else "",
+            "namespace_tier": inp.namespace_tier,
+            "approved_by": "auto",
+            "source": "fusion",
+            "rationale": out.rationale,
             "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
         })
 

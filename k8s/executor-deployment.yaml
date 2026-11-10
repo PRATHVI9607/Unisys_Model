@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: executor
+  namespace: kubeheal
+  labels: {app: executor}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: executor}
+  template:
+    metadata:
+      labels: {app: executor}
+    spec:
+      serviceAccountName: executor
+      containers:
+        - name: executor
+          image: kubeheal/executor:v4
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: REDIS_URL, value: "redis://redis-master:6379"}
+            - {name: EXEC_NAMESPACES, value: "prod,staging,dev"}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}

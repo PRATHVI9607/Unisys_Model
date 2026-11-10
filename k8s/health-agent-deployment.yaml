@@ -28,7 +28,7 @@ spec:
       labels:
         app: health-agent
     spec:
-      serviceAccountName: kubeheal
+      serviceAccountName: health-agent
       containers:
         - name: agent
           image: kubeheal/health-agent:v4

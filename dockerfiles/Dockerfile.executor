@@ -1,0 +1,11 @@
+FROM python:3.11-slim
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /bin/
+ENV UV_NO_CACHE=1 UV_SYSTEM_PYTHON=1
+WORKDIR /app
+RUN uv pip install --system \
+    kubernetes-asyncio==29.0.1 redis==5.0.0 "numpy<2"
+COPY agents/ /app/agents/
+ENV REDIS_URL=redis://redis-master:6379
+ENV EXEC_NAMESPACES=prod,staging,dev
+ENV LOG_LEVEL=INFO
+CMD ["python", "-m", "agents.executor.main"]

@@ -10,7 +10,7 @@ spec:
   template:
     metadata: {labels: {app: kubeheal-security-model}}
     spec:
-      serviceAccountName: kubeheal
+      serviceAccountName: security-model
       containers:
       - name: security-model-server
         image: kubeheal/security-model-server:v4

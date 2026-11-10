@@ -33,7 +33,8 @@ Real usage is measured later and recorded under `docs/kubeheal/results/`.
 |---|---|
 | P0 Environment and guardrails | done (deny rules not proven enforced in-session; git-level push block verified) |
 | P1 Core correctness | done, see log |
-| P2 to P13 | not started |
+| P2 Executor and least-privilege RBAC | done, see log |
+| P3 to P13 | not started |
 
 ## P0 log
 
@@ -78,3 +79,19 @@ Done:
 Acceptance: 72 tests pass (`PYTHONPATH=. .venv\Scripts\python.exe -m pytest tests/ -q`, 2026-11-10, this machine). No write call outside `agents/executor/`.
 Deferred: none.
 Next step: P2 Remediation Executor service and least-privilege RBAC (needs the k3d cluster, already running).
+
+## P2 log (Executor and least-privilege RBAC)
+
+Plan: Executor service on a new stream `kubeheal.exec`; Fusion only publishes requests; one
+ServiceAccount per component; read-only roles for agents and dashboard; write verbs for the Executor only
+through RoleBindings in prod, staging, dev; hard target guard; `kubectl auth can-i` proof.
+
+Done:
+- `agents/executor/main.py` (consumer group `executor`, ack only after handling, outcome written to `kubeheal.actions`), `guard.py` (never acts on `kubeheal`, `kube-system`, `kube-public`, `kube-node-lease`; only `EXEC_NAMESPACES`, default prod,staging,dev), `Dockerfile.executor`, `k8s/executor-deployment.yaml`.
+- Fusion Agent no longer has Kubernetes clients; `_execute` publishes `kubeheal.exec` requests with an `incident_id` and records `queued_for_executor`.
+- `k8s/rbac/rbac.yaml` rewritten: 8 ServiceAccounts (model servers and DCM mount no token), ClusterRoles `kubeheal-observer`, `kubeheal-namespace-reader`, `kubeheal-executor-read`, `kubeheal-executor-write` (bound only by RoleBindings in prod/staging/dev). Namespaces prod/staging/dev created with `kubeheal/tier` labels. All manifests point at their own ServiceAccount. The Security Agent DaemonSet lost the `KILL` capability.
+- Applied to the k3d cluster `kubeheal`. `scripts/rbac_check.py`: 224 checks, 0 failures (agents, servers and dashboard cannot patch, delete or create in prod/staging/dev/kube-system/kubeheal; executor can in prod/staging/dev and cannot in kube-system, kubeheal, default, cannot read secrets or create clusterrolebindings). The 5 VolumeSnapshot checks per case are skipped until the CRD is installed in P10 (script prints a note). Pytest wrapper `tests/test_rbac_k3d.py` skips when the cluster is unreachable.
+
+Acceptance: 79 tests pass (2026-11-10, this machine). RBAC matrix proven on k3d.
+Deferred: VolumeSnapshot verbs checked only after the CRD exists (P10). The Executor image is not built or deployed yet (P9/P10).
+Next step: P3 kill switch (ConfigMap `kubeheal-mode`, Watch API, policy input, Executor gate).

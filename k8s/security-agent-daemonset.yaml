@@ -12,8 +12,8 @@ spec:
       labels:
         app: security-agent
     spec:
-      serviceAccountName: kubeheal
-      hostPID: true          # see host PIDs so /proc/<pid> + os.kill target real procs
+      serviceAccountName: security-agent
+      hostPID: true          # read /proc/<pid> of every pod (the agent never kills or writes)
       containers:
         - name: agent
           image: kubeheal/security-agent:v4
@@ -26,8 +26,7 @@ spec:
               drop: ["ALL"]
               # SYS_PTRACE: read /proc/<pid>/mem for mmap entropy
               # DAC_READ_SEARCH: read files across container boundaries
-              # KILL: os.kill() ransomware processes owned by other UIDs
-              add: ["SYS_PTRACE", "DAC_READ_SEARCH", "KILL"]
+              add: ["SYS_PTRACE", "DAC_READ_SEARCH"]
           env:
             - name: PYTHONDONTWRITEBYTECODE
               value: "1"

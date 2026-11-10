@@ -28,7 +28,7 @@ spec:
       labels:
         app: kubeheal-dashboard
     spec:
-      serviceAccountName: kubeheal
+      serviceAccountName: dashboard
       containers:
         - name: dashboard
           image: kubeheal/dashboard:v4
