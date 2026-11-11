@@ -227,3 +227,60 @@ def test_weakens_posture_is_candidate_first_reference_second():
     assert weakens_posture(candidate, live) == [P + "privileged_added"]
     assert weakens_posture(live, candidate) == []          # tightening is not a weakening
     assert weakens_posture(candidate, live) == policy_violations(live, candidate)
+
+
+# -- review fixes: malformed input never crashes with a bare AttributeError and never looks like a verdict ----
+@pytest.mark.parametrize("base,spec", [
+    (None, deployment()), (deployment(), None), (None, None), ("x", deployment()), ([], deployment()),
+    (deployment(), {"template": "x"}),
+    (deployment(), {"spec": {"template": {"spec": {"containers": "x"}}}}),
+    (deployment(), {"spec": {"template": {"spec": {"containers": ["x"]}}}}),
+    (deployment(), {"spec": {"template": {"spec": {"containers": [{"name": "app", "resources": "big"}]}}}}),
+])
+def test_malformed_specs_raise_posture_error(base, spec):
+    with pytest.raises(posture.PostureError):
+        policy_violations(base, spec)
+    with pytest.raises(posture.PostureError):
+        weakens_posture(spec, base)
+    assert issubclass(posture.PostureError, ValueError)
+
+
+@pytest.mark.parametrize("was,now,fires", [
+    ("500m", "0", True),                       # zero is at or below the floor and a cut of at least 10x
+    ("500m", 0, True),
+    (0, "50m", False),                         # no baseline value: never fires
+    (0.5, "50m", True),                        # plain numbers are cores
+    (0.5, 0.05, True),
+    (1, 0.1, False),                           # 10x cut but above the floor
+    ("1", "100m", False),
+    ("500m", "60m", False),                    # above the floor
+])
+def test_cpu_numeric_forms_and_zero(was, now, fires):
+    got = policy_violations(deployment(cpu=was), deployment(cpu=now))
+    assert (f"{POLICY_REASON_PREFIX}cpu_cut_10x" in got) is fires
+
+
+@pytest.mark.parametrize("was,now,fires", [
+    ("320Mi", "32Mi", True), ("327680Ki", "32768Ki", True), (335544320, 33554432, True),
+    ("1Gi", "0", True), ("1Gi", "100Mi", False), ("320Mi", "33Mi", False),
+])
+def test_memory_numeric_forms_and_zero(was, now, fires):
+    got = policy_violations(deployment(memory=was), deployment(memory=now))
+    assert (f"{POLICY_REASON_PREFIX}memory_cut_10x" in got) is fires
+
+
+def test_cut_in_second_container_and_init_container_limit():
+    def two(cpu_a, cpu_b):
+        d = deployment()
+        d["spec"]["template"]["spec"]["containers"].append(
+            {"name": "side", "image": "x", "resources": {"limits": {"cpu": cpu_b}}})
+        d["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"]["cpu"] = cpu_a
+        return d
+    assert policy_violations(two("500m", "500m"), two("500m", "50m")) == [f"{POLICY_REASON_PREFIX}cpu_cut_10x"]
+    # deliberate limit: resource cuts are checked on `containers` only, not on init containers
+    base, new = deployment(), deployment()
+    base["spec"]["template"]["spec"]["initContainers"] = [
+        {"name": "i", "image": "x", "resources": {"limits": {"cpu": "500m"}}}]
+    new["spec"]["template"]["spec"]["initContainers"] = [
+        {"name": "i", "image": "x", "resources": {"limits": {"cpu": "5m"}}}]
+    assert policy_violations(base, new) == []

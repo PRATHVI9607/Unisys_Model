@@ -26,6 +26,11 @@ CUT_FLOORS = {"cpu": (0.05, parse_cpu), "memory": (32 * 2**20, parse_memory)}
 _EPS = 1e-9   # relative slack: parse("30m") * 10 != parse("300m") in binary floating point
 
 
+class PostureError(ValueError):
+    """A spec could not be read (None, wrong types). Callers must NOT treat this as "no violation" or as a
+    violation: no rule-based rollback may be triggered by it. Treat the assessment as failed and escalate."""
+
+
 def _spec(obj: Any) -> dict:
     """canonical_spec that also accepts a bare pod template ({metadata, spec: {containers}}) or pod spec."""
     if isinstance(obj, dict) and "template" not in obj:
@@ -58,11 +63,18 @@ def policy_violations(base: Any, spec: Any) -> list[str]:
     """Posture weakenings `spec` introduces relative to `base` (the restore target), as `policy:<name>`.
 
     A weakening already present in `base` is not reported. The order is fixed: POSTURE_FEATURES, then
-    cpu_cut_10x, then memory_cut_10x."""
-    base, spec = _spec(base), _spec(spec)
-    f = spec_diff_features(base, spec)
+    cpu_cut_10x, then memory_cut_10x. Raises PostureError on a malformed spec (never a partial answer).
+
+    Only `containers` are scanned for resource cuts; init containers are checked for posture flags only
+    (spec-diff features), a deliberate limit that follows v5."""
+    try:
+        base, spec = _spec(base), _spec(spec)
+        f = spec_diff_features(base, spec)
+        cuts = [r for r in CUT_FLOORS if _resource_cut(base, spec, r)]
+    except (AttributeError, TypeError, KeyError, ValueError) as exc:
+        raise PostureError(f"unreadable spec: {exc!r}") from exc
     return [POLICY_REASON_PREFIX + k for k in POSTURE_FEATURES if f[k]] + [
-        f"{POLICY_REASON_PREFIX}{r}_cut_{CUT_FACTOR}x" for r in CUT_FLOORS if _resource_cut(base, spec, r)]
+        f"{POLICY_REASON_PREFIX}{r}_cut_{CUT_FACTOR}x" for r in cuts]
 
 
 def posture_violations_present(base: Any, spec: Any) -> bool:
