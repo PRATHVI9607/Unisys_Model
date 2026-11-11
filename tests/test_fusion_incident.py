@@ -72,7 +72,7 @@ def test_the_incident_window_expires():
 
 def test_the_second_event_cannot_queue_an_action_when_an_approval_is_pending():
     a = make_agent()
-    handle_sec(a, sec_event(event_id="sec-1", model_scored="false", sec_ci_width="1.0"), "1-0")    # human
+    handle_sec(a, sec_event(event_id="sec-1", model_scored="false", sec_uncertain="true"), "1-0")    # human
     handle_sec(a, sec_event(event_id="sec-2", entropy_phase="complete"), "2-0")                  # would be auto
     steps = [r["step"] for r in ledger_steps(a)]
     assert steps.count("approval_requested") == 1 and "incident_update" in steps
@@ -170,7 +170,7 @@ def test_restore_is_requested_after_a_successful_automatic_contain():
 
 def test_restore_after_human_approval_of_a_containment():
     a = make_agent()
-    ev = sec_event(t0_ms=str(T0), model_scored="false", sec_ci_width="1.0")       # human decision
+    ev = sec_event(t0_ms=str(T0), model_scored="false", sec_uncertain="true")       # human decision
     handle_sec(a, ev)
     iid = incident_id_of(ev)
     assert stream(a.redis, fusion.EXEC_STREAM) == []
@@ -297,7 +297,8 @@ def test_incident_state_survives_a_held_incident_lock():
     a = make_agent()
     lock_key = "kubeheal:incident-lock:prod:payments"
     run(a.redis.set(lock_key, "someone-else", nx=True, ex=10))
-    handle_sec(a, sec_event(event_id="sec-1", sec_ci_width="0.30"), "1-0")       # wide CI: human, needs the lock
+    handle_sec(a, sec_event(event_id="sec-1", sec_prediction_set='["ransomware", "exfiltration"]'),
+                "1-0")                                                              # two labels: human, needs the lock
     iid = incident_id_of(sec_event())
     assert a.redis.hashes[fusion.INCIDENT_PREFIX + ":" + iid]["opened"] == "1"
     assert a.redis.hashes[fusion.INCIDENT_PREFIX + ":" + iid]["action_state"] == "human_pending"

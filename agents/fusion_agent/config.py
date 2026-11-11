@@ -39,6 +39,9 @@ class FusionConfig:
     #                                        trigger) is kept in Redis
     model_unavailable_dedup_ttl_s: int = 300  # MODEL_UNAVAILABLE_DEDUP_TTL_S: one escalation per workload for a
     #                                        Health Model outage inside this window (chosen default, not measured)
+    security_fresh_s: float = 30.0         # SECURITY_FRESH_S: a Security Model score (Redis hash written by the
+    #                                        Security Agent) older than this is not "fresh" for the rule-based
+    #                                        rollback (Q1). A configuration default, not a measurement.
     burn_in_forced: bool = False           # BURN_IN_MODE=true forces burn-in on. It can never force it off.
 
     @classmethod
@@ -51,5 +54,6 @@ class FusionConfig:
             incident_dedup_ttl_s=_num(env, "INCIDENT_DEDUP_TTL_S", 600, int),
             incident_context_ttl_s=_num(env, "INCIDENT_CONTEXT_TTL_S", 86400, int),
             model_unavailable_dedup_ttl_s=_num(env, "MODEL_UNAVAILABLE_DEDUP_TTL_S", 300, int),
+            security_fresh_s=_num(env, "SECURITY_FRESH_S", 30.0),
             burn_in_forced=str(env.get("BURN_IN_MODE", "false")).strip().lower() == "true",
         )

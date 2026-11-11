@@ -34,7 +34,8 @@ def emb(n=4, seed=0):
 def sec_event(**kw):
     ev = {"event_id": "sec-1", "namespace": "prod", "deployment": "payments", "pod_name": "payments-abc-1",
           "pid_target": "42", "workload_kind": "Deployment", "namespace_tier": "prod",
-          "sec_risk": "0.95", "sec_label": "ransomware_active", "sec_ci_width": "0.05",
+          "sec_risk": "0.95", "sec_label": "ransomware", "sec_prediction_set": '["ransomware"]',
+          "sec_uncertain": "false",
           "top_syscall": "write", "model_scored": "true", "syscall_source": "falco",
           "entropy_phase": "initial", "entropy_valid_samples": "1", "timestamp_ms": str(NOW_MS)}
     ev.update(kw)
@@ -43,8 +44,8 @@ def sec_event(**kw):
 
 def health_event(**kw):
     ev = {"event_id": "health-1", "namespace": "prod", "deployment": "payments", "pod_name": "payments",
-          "namespace_tier": "prod", "health_risk": "0.95", "health_label": "drift",
-          "health_ci_width": "0.05", "top_field": "spec.cpu", "model_scored": "true",
+          "namespace_tier": "prod", "health_risk": "0.95", "health_label": "degradation",
+          "health_prediction_set": '["degradation"]', "health_uncertain": "false", "top_field": "spec.cpu", "model_scored": "true",
           "timestamp_ms": str(NOW_MS + 1000)}
     ev.update(kw)
     return ev
@@ -64,11 +65,36 @@ class StubInterp(InterpretationClient):
         return self.result
 
 
+def rule_health_event(**kw):
+    """A health event that carries rule evidence (V5-D2 failure_reasons), a baseline and a changed spec. The
+    Health Model did not answer: the rule path does not need it (Q1)."""
+    ev = health_event(health_risk="0", health_label="benign", health_prediction_set="[]",
+                      model_scored="false", model_unavailable="true", spec_changed="true", has_baseline="true",
+                      failure_reasons_json=json.dumps(["ImagePullBackOff"]),
+                      changed_fields_json=json.dumps(["containers[0].image"]))
+    ev.update(kw)
+    return ev
+
+
+def security_score_key(namespace="prod", workload="payments"):
+    return f"{fusion.SECURITY_SCORE_PREFIX}:{namespace}:{workload}"
+
+
+def set_security_score(agent, namespace="prod", workload="payments", sec_risk="0.05", model_scored="true",
+                       ts_ms=None):
+    """What the Security Agent (V5-S2) will write: a hash per workload. The agent clock is 1_000_000.0 s."""
+    agent.redis.hashes[security_score_key(namespace, workload)] = {
+        "sec_risk": str(sec_risk), "model_scored": model_scored,
+        "ts_ms": str(int(agent.clock() * 1000) if ts_ms is None else ts_ms)}
+
+
 def make_agent(enforce=True, protected=False, burn_in_over=True, interp=None, cfg=None, redis=None, clock=None,
-               namespaces=("prod", "dev", "staging")):
+               namespaces=("prod", "dev", "staging"), legacy_dcm=False):
     store = InMemoryLedgerStore()
     a = fusion.FusionAgentV4(ledger=Ledger(store), cfg=cfg or FusionConfig(), interp=interp or StubInterp(),
                              clock=clock or (lambda: 1_000_000.0))
+    # V5-D3: no DCM by default (independent of the DCM_URL of the test machine); legacy_dcm=True is the old path
+    a.dcm_url = "http://dcm.invalid" if legacy_dcm else ""
     a.redis = redis or FakeRedis()
     a.mode.ns_readable = True
     a.mode.ns_protect = {n: ("true" if protected else None) for n in namespaces}

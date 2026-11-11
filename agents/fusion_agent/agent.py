@@ -3,16 +3,18 @@ Fusion Agent v4 - Three-Signal Decision Engine (PRD Section 07 / 09).
 =====================================================================
 Consumes kubeheal.health.events + kubeheal.security.events via a Redis
 consumer group (each event handled by exactly one replica). Correlates the
-two signals through the DCM, runs the pure decision policy, executes under a
-heartbeat incident lock, and writes kubeheal.dcm.events + kubeheal.actions.
+two signals with kubeheal.correlation.compound_score (V5-D3: no DCM call by default), runs the pure
+decision policy, executes under a heartbeat incident lock, and writes kubeheal.actions. The learned DCM is an
+OPTIONAL legacy path: it is used (and kubeheal.dcm.events written) only when DCM_URL is set to a non-empty value.
 
 P1 notes: events are keyed by the explicit workload (Deployment) name, a message is
 acknowledged only after it was handled successfully, and every Kubernetes write goes
 through the Executor: this agent only publishes requests to kubeheal.exec.
 
 P6 adds (all state in Redis so both replicas agree):
-  * models_ok: a missing or late DCM or interpretation answer, or an event the model did not score, means HUMAN
-    (S-POL-1). Per-call deadlines come from FusionConfig.
+  * models_ok: a missing or late legacy DCM or interpretation answer (only when DCM_URL is set), an event the
+    model did not score, or an event that cannot be mapped onto the contract, means HUMAN (S-POL-1).
+    Per-call deadlines come from FusionConfig.
   * protected namespaces (label kubeheal/protected, unknown means protected), sliding-window circuit breakers
     counted by incident id, burn-in from a real sample counter.
   * OBSERVE writes a sampling request (agents/common/sampling.py).
@@ -20,7 +22,9 @@ P6 adds (all state in Redis so both replicas agree):
     the second one updates it. Incident ids derive from the event ids, so a redelivered entry maps to the same
     incident and cannot count twice or queue a second request.
   * the restore request: after the Executor reports `contained` on kubeheal.actions (automatic or approved by a
-    human), Fusion requests `restore` with t0_ms and workload_kind, only when T0 is known; otherwise it escalates.
+    human), Fusion requests `restore` with t0_ms and workload_kind, only when T0 is known and the containment
+    was for a ransomware label (Q2: `restore_after`); otherwise it escalates. After an exfiltration containment
+    (`human_followup`) no restore is requested and a human is told once.
   * stream reliability (agents/common/stream_reliability.py): pending reclaim, dead letter after N deliveries.
 """
 
@@ -29,6 +33,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -45,11 +50,12 @@ from agents.common.metrics import KubeHealMetrics
 from agents.common.stream_reliability import ReliabilityConfig, StreamReliability
 from agents.fusion_agent.breakers import BurnInCounter, contain_breaker, patch_breaker
 from agents.fusion_agent.config import FusionConfig
+from agents.fusion_agent import event_mapping as em
 from agents.fusion_agent.decision_policy import (
-    make_decision, DecisionInput, Decision, TIER_MULTIPLIERS,
+    make_decision, DecisionInput, Decision, TIER_MULTIPLIERS, AUTO_CONTAIN_LABELS, RESTORE_LABEL,
 )
 from agents.fusion_agent.incident_lock import LockState, acquire_incident_lock
-from agents.fusion_agent.interpretation_client import InterpretationClient, earliest_t0
+from agents.fusion_agent.interpretation_client import InterpretationClient, build_causal_chain, earliest_t0
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -68,6 +74,9 @@ OPEN_PREFIX = "kubeheal:fusion:open"              # (namespace, pod, pid) -> inc
 RESTORE_PREFIX = "kubeheal:fusion:restore"        # marker: a restore request was queued for this incident
 EXEC_REQ_PREFIX = "kubeheal:fusion:execreq"       # SET NX marker: this incident and action was queued once
 MODEL_DOWN_PREFIX = "kubeheal:fusion:modelunavail"  # SET NX marker: a health model outage was escalated lately
+# Hash per workload, written by the Security Agent (task V5-S2, NOT built yet): fields sec_risk, ts_ms,
+# model_scored; the Security Agent sets its TTL. Read by `_security_score` for the rule-based rollback (Q1).
+SECURITY_SCORE_PREFIX = "kubeheal:security:score"
 AUTOMATIC = (Decision.AUTO_CONTAIN, Decision.AUTO_PATCH)
 RESTORE_KINDS = ("Deployment", "StatefulSet")     # what the Executor accepts (agents/executor/validation.py)
 
@@ -82,20 +91,6 @@ def workload_of(fields: Dict) -> str:
     """Explicit workload (Deployment/StatefulSet) name carried in the event.
     Falls back to pod_name only for events from older agents."""
     return fields.get("deployment") or fields.get("pod_name") or "unknown"
-
-
-def _ci_width(event: Dict, name: str) -> Optional[float]:
-    """CI width of a PRESENT event. 0.0 only when the whole event is absent (nothing to be uncertain about);
-    a present event without a usable width is None, which the policy treats as uncertain (fail closed)."""
-    if not event:
-        return 0.0
-    raw = event.get(name)
-    if raw in (None, ""):
-        return None
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return None
 
 
 def _truthy(v) -> bool:
@@ -141,7 +136,8 @@ class FusionAgentV4:
     def __init__(self, ledger: Optional[Ledger] = None, cfg: Optional[FusionConfig] = None,
                  interp: Optional[InterpretationClient] = None, clock=time.time):
         self.redis_url = os.environ.get("REDIS_URL", "redis://redis-master:6379")
-        self.dcm_url = os.environ.get("DCM_URL", "http://kubeheal-dcm:8003")
+        # V5-D3: the DCM is an optional legacy path. Empty (the default) means no DCM call and no explain call.
+        self.dcm_url = (os.environ.get("DCM_URL") or "").strip()
         self.cfg = cfg or FusionConfig.from_env()
         # BURN_IN_MODE can only force burn-in on; the real counter decides when it ends (S-POL-7).
         self.burn_in = self.cfg.burn_in_forced
@@ -311,7 +307,10 @@ class FusionAgentV4:
             raise
 
     async def _on_health(self, f: Dict):
-        if _truthy(f.get("model_unavailable")):
+        # Q1: an event with failure reasons (the Health Agent's rule evidence) is decided even when the Health
+        # Model did not answer, because the rule path does not need the model. Without failure reasons a
+        # model_unavailable event stays an escalation.
+        if _truthy(f.get("model_unavailable")) and not em.string_list(f.get("failure_reasons_json")):
             await self._on_model_unavailable(f)
             return
         key = self._key(f)
@@ -366,13 +365,37 @@ class FusionAgentV4:
             issues.append("security event not scored by the Security Model "
                           "(heuristic only, no syscall window, or model unreachable)")
         if health and not _truthy(health.get("model_scored")):
-            # a missing field counts as not scored: only an explicit "true" from the Health Agent is trusted
+            # a missing field counts as not scored: only an explicit "true" from the Health Agent is trusted.
+            # The policy ignores models_ok on the rule path (Q1); the issue still reaches the ledger.
             issues.append("health event not scored by the Health Model")
-        health_risk = float(health.get("health_risk", 0) or 0)
-        sec_risk = float(sec.get("sec_risk", 0) or 0)
+        health_risk = em.safe_float(health.get("health_risk"))
+
+        # An event that cannot be mapped onto the contract (a risk that is not a number in [0, 1], ...) is never
+        # trusted: models_ok is false, so a human decides. Mapping never raises.
+        health_ev = em.to_health_event(health, namespace, workload) if health else None
+        sec_ev = em.to_security_event(sec, namespace, workload) if sec else None
+        if health and health_ev is None:
+            issues.append("health event is malformed (it cannot be mapped onto the correlation contract)")
+        if sec and sec_ev is None:
+            issues.append("security event is malformed (it cannot be mapped onto the correlation contract)")
+
+        # Q1: raw security risk and its freshness for the rule-based rollback. A security event in this decision
+        # that the Security Model scored counts as fresh. Otherwise the per-workload hash written by the Security
+        # Agent (V5-S2) is read. Until V5-S2 writes that key nothing is fresh, so the rule path escalates to a
+        # human: the intended fail-closed behaviour, not a bug.
+        if sec:
+            sec_risk = em.safe_float(sec.get("sec_risk"))
+            security_fresh, security_source = _truthy(sec.get("model_scored")), "event"
+        else:
+            fresh_hash, hash_risk = await self._security_score(namespace, workload)
+            sec_risk = hash_risk if fresh_hash and hash_risk is not None else 0.0
+            security_fresh, security_source = fresh_hash, ("hash" if fresh_hash else "none")
 
         correlation, compound, dcm_chain, nl = 0.0, False, [], None
-        if health and sec:
+        corr_reasons: list = []
+        legacy = bool(self.dcm_url)
+        if health and sec and legacy:
+            # Legacy path (DCM_URL set): the learned DCM answers; a missing answer or embedding means HUMAN.
             h_emb = _b64_to_vec(health.get("health_embedding_b64", ""))
             s_emb = _b64_to_vec(sec.get("security_embedding_b64", ""))
             if not (h_emb and s_emb):
@@ -389,21 +412,36 @@ class FusionAgentV4:
                     await self._publish_dcm(namespace, workload, corr, health, sec)
                 else:
                     issues.append(res.error)
-        expl = await self.interp.explain(health or None, sec or None, dcm_chain, t0_ms,
-                                         self.cfg.interpretation_deadline_s)
-        if not expl.ok:
-            issues.append(expl.error)
-        causal_chain = expl.causal_chain
+        elif health and sec and health_ev is not None and sec_ev is not None:
+            correlation, compound, corr_reasons = em.correlate(health_ev, sec_ev)
+        if legacy:
+            expl = await self.interp.explain(health or None, sec or None, dcm_chain, t0_ms,
+                                             self.cfg.interpretation_deadline_s)
+            if not expl.ok:
+                issues.append(expl.error)
+            causal_chain, attributions = expl.causal_chain, expl.attributions
+        else:
+            # Local, no model call: the plain sentence and the chain come from the correlation reasons and the
+            # models' own top factors.
+            nl = em.local_summary(health_ev, sec_ev, correlation, compound, corr_reasons) or None
+            causal_chain = build_causal_chain(health or None, sec or None, [], t0_ms) + \
+                [f"Correlation: {r}" for r in corr_reasons]
+            attributions = {
+                "health_top_factors": [f.model_dump() for f in health_ev.top_factors] if health_ev else [],
+                "security_top_factors": [f.model_dump() for f in sec_ev.top_factors] if sec_ev else [],
+                "methods": {"top_factors": "top_factors_json as published by the model services"}}
         models_ok = not issues
 
+        health_set = em.prediction_set(health, "health_prediction_set")
+        sec_set = em.prediction_set(sec, "sec_prediction_set")
         inp = DecisionInput(
             health_risk=health_risk,
             health_label=health.get("health_label", "benign"),
-            health_ci_width=_ci_width(health, "health_ci_width"),
+            health_prediction_set=health_set,
             health_field_top=health.get("top_field", ""),
             sec_risk=sec_risk,
             sec_label=sec.get("sec_label", "benign"),
-            sec_ci_width=_ci_width(sec, "sec_ci_width"),
+            sec_prediction_set=sec_set,
             sec_syscall_top=sec.get("top_syscall", ""),
             correlation_score=correlation,
             compound_flag=compound,
@@ -415,6 +453,11 @@ class FusionAgentV4:
             metric_samples_seen=await BurnInCounter(self.redis).seen(),
             burn_in_mode=self.burn_in,
             nl_summary=nl,
+            rollback_reasons=em.string_list(health.get("failure_reasons_json")),
+            spec_changed=_truthy(health.get("spec_changed")),
+            has_baseline=_truthy(health.get("has_baseline")),
+            changed_fields=em.string_list(health.get("changed_fields_json")),
+            security_fresh=security_fresh,
             mode=self.mode.mode_for(namespace),
         )
         out = make_decision(inp)
@@ -422,11 +465,14 @@ class FusionAgentV4:
 
         scores = {
             "health": {name: health.get(name) for name in
-                       ("health_risk", "health_label", "health_ci_width", "top_field") if name in health},
+                       ("health_risk", "health_label", "health_prediction_set", "health_uncertain",
+                        "top_factors_json", "top_field", "model_scored", "model_version") if name in health},
             "security": {name: sec.get(name) for name in
-                         ("sec_risk", "sec_label", "sec_ci_width", "top_syscall", "model_scored",
-                          "syscall_source", "entropy_phase", "entropy_valid_samples") if name in sec},
+                         ("sec_risk", "sec_label", "sec_prediction_set", "sec_uncertain", "top_factors_json",
+                          "top_syscall", "model_scored", "model_version", "syscall_source", "entropy_phase",
+                          "entropy_valid_samples") if name in sec},
             "correlation_score": correlation,
+            "correlation_reasons": corr_reasons,
             "compound": compound,
         }
         decision_payload = {
@@ -437,10 +483,19 @@ class FusionAgentV4:
             "namespace_tier": inp.namespace_tier,
             "compound": compound,
             "causal_chain": causal_chain,
-            "attributions": expl.attributions,
+            "attributions": attributions,
             "models_ok": models_ok,
             "model_issues": issues,
             "namespace_protected": inp.namespace_protected,
+            "health_prediction_set": health_set,
+            "sec_prediction_set": sec_set,
+            "health_uncertain": health.get("health_uncertain"),
+            "sec_uncertain": sec.get("sec_uncertain"),
+            "top_factors_json": {"health": health.get("top_factors_json"), "security": sec.get("top_factors_json")},
+            "rule_path": bool(out.action_params.get("rule_path", False)),
+            "rule_reasons": out.action_params.get("rule_reasons", []),
+            "security_fresh": security_fresh,
+            "security_fresh_source": security_source,
         }
         if t0_ms:
             decision_payload["t0_ms"] = t0_ms        # absent means unknown, never a guess
@@ -474,9 +529,18 @@ class FusionAgentV4:
                    "workload_kind": workload_kind, "namespace_tier": inp.namespace_tier}
         if t0_ms:
             new_ctx["t0_ms"] = str(t0_ms)
+        action_blocked = bool(prior_state)           # an action or an approval already exists for this incident
+        if out.decision in (Decision.AUTO_CONTAIN, Decision.HUMAN_CONTAIN) and not action_blocked:
+            # Q2: what a later `contained` result needs to know. The policy decides it for an automatic
+            # containment; for a human-decided one (approved later on the dashboard) it comes from the label.
+            label = str(inp.sec_label).strip().lower()
+            params = out.action_params
+            new_ctx["containment_label"] = label
+            new_ctx["restore_after"] = "1" if params.get("restore_after", label == RESTORE_LABEL) else "0"
+            new_ctx["human_followup"] = "1" if params.get(
+                "human_followup", label in AUTO_CONTAIN_LABELS and label != RESTORE_LABEL) else "0"
         await self.redis.hset(self._ctx_key(incident_id), mapping={k: v for k, v in new_ctx.items() if v})
 
-        action_blocked = bool(prior_state)           # an action or an approval already exists for this incident
         state = prior_state
         if out.decision == Decision.OBSERVE:
             written = await sampling.request_observe(self.redis, namespace, workload, pod or None, incident_id,
@@ -612,13 +676,24 @@ class FusionAgentV4:
         return True
 
     async def _xadd_exec(self, incident_id, action, namespace, workload, pod, out, inp):
+        params = out.action_params
+        patch_fields = params.get("patch_fields") or []
+        # The Executor does not read the Q2 fields below yet (later work); they are carried so it can.
+        # patch_field falls back to the first changed field when the Health event names no top field.
+        patch_field = (inp.health_field_top or (patch_fields[0] if patch_fields else ""))             if action == "patch" else ""
         await self.redis.xadd(EXEC_STREAM, {
             "incident_id": incident_id,
             "action": action,
             "namespace": namespace,
             "deployment": workload,
             "pod": pod,
-            "patch_field": inp.health_field_top if action == "patch" else "",
+            "patch_field": patch_field,
+            "patch_fields": json.dumps(patch_fields),
+            "rule_path": str(bool(params.get("rule_path", False))).lower(),
+            "rule_reasons": json.dumps(params.get("rule_reasons") or []),
+            "containment_label": str(params.get("containment_label") or ""),
+            "restore_after": str(bool(params.get("restore_after", False))).lower(),
+            "human_followup": str(bool(params.get("human_followup", False))).lower(),
             "namespace_tier": inp.namespace_tier,
             "approved_by": "auto",
             "dry_run": str(out.dry_run).lower(),
@@ -657,6 +732,21 @@ class FusionAgentV4:
         if await self.redis.get(marker):
             return
         namespace, workload, pod = ctx.get("namespace", ""), ctx.get("deployment", ""), ctx.get("pod", "")
+        if ctx.get("restore_after") != "1":
+            # Q2: the restore step is for ransomware only. After an exfiltration containment a human follows up
+            # (once per incident); any other label, or a context without the flag, requests nothing.
+            if ctx.get("human_followup") == "1":
+                esc_key = f"{RESTORE_PREFIX}:escalated:{incident_id}:human_followup"
+                if await self.redis.set(esc_key, "1", nx=True, ex=self.cfg.incident_context_ttl_s):
+                    try:
+                        await self._escalate(
+                            incident_id, namespace, workload,
+                            f"human_followup_required: containment done for {ctx.get('containment_label') or 'exfiltration'}; "
+                            "no restore is requested for this label, human follow-up required")
+                    except Exception:
+                        await self.redis.delete(esc_key)
+                        raise
+            return
         t0 = ctx.get("t0_ms", "")
         kind = ctx.get("workload_kind", "")
         problem = None
@@ -727,6 +817,31 @@ class FusionAgentV4:
             "reason": reason, "required": "human", "source": "fusion",
             "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
         })
+
+    async def _security_score(self, namespace: str, workload: str) -> Tuple[bool, Optional[float]]:
+        """(fresh, risk) from the hash the Security Agent writes per workload (task V5-S2, not built yet):
+        `kubeheal:security:score:<namespace>:<workload>` with fields sec_risk, ts_ms, model_scored.
+        Fresh only when the hash exists, model_scored is "true", ts_ms parses and is within SECURITY_FRESH_S of
+        now (a configuration default, not a measurement), and sec_risk is a finite number. Anything else,
+        including a Redis error, is (False, None): the rule path then escalates to a human (Q1)."""
+        try:
+            h = await self.redis.hgetall(f"{SECURITY_SCORE_PREFIX}:{namespace}:{workload}")
+        except Exception as e:
+            logger.warning(f"security score hash unreadable ({e}); treated as not fresh")
+            return False, None
+        if not h or not _truthy(h.get("model_scored")):
+            return False, None
+        try:
+            ts_ms = float(h["ts_ms"])
+            risk = float(h["sec_risk"])
+        except (KeyError, TypeError, ValueError):
+            return False, None
+        if not (math.isfinite(ts_ms) and math.isfinite(risk)):
+            return False, None
+        # abs(): a timestamp slightly ahead of this clock (clock skew) is as fresh as one slightly behind it
+        if abs(self.clock() * 1000.0 - ts_ms) > self.cfg.security_fresh_s * 1000.0:
+            return False, None
+        return True, risk
 
     async def _publish_dcm(self, namespace, workload, corr, health, sec):
         await self.redis.xadd(DCM_STREAM, {
