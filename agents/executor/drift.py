@@ -30,6 +30,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agents.executor.actions import ModeBlocked, _blocked_outcome, _write
+from agents.executor.ledger_guard import LedgerUnavailable
 from agents.executor.config import ConfigMissing, ExecConfig
 from agents.executor.support import Recorder, gate_open, poll_until, to_dict
 from agents.executor.validation import Request
@@ -359,7 +360,10 @@ async def canary_patch(gate, apps_api, req: Request, golden: Optional[Dict], rec
 
 
 def _not_applied(exc: Exception) -> bool:
-    """True when the API server rejected the request outright (4xx), so the patch cannot have been applied."""
+    """True when the patch cannot have been applied: the API server rejected it outright (4xx), or the
+    "about to do" ledger write failed inside `_write` before the call was made (LedgerUnavailable)."""
+    if isinstance(exc, LedgerUnavailable):
+        return True
     status = getattr(exc, "status", None)
     return isinstance(status, int) and 400 <= status < 500 and status not in (408, 429)
 

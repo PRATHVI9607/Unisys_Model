@@ -123,6 +123,26 @@ def test_drift_patch_needs_a_successful_ledger_write_first():
     esc = s.redis.stream(ESCALATIONS_STREAM)
     assert len(esc) == 1 and esc[0]["required"] == "human" and "ledger_unavailable" in esc[0]["reason"]
     assert any('reason="corrective_needs_ledger"' in l for l in metric("kubeheal_ledger_unavailable_total"))
+    # The refused patch must not leave a pending rollback point: it would block every later patch of this
+    # Deployment ("rollback_recovery_required") or turn a retry of the same incident into a blind rollback.
+    saved = json.loads(s.redis.store["kubeheal:rollback:prod:web"]) if "kubeheal:rollback:prod:web" in s.redis.store else None
+    assert saved is None or saved.get("state") != "pending", saved
+
+
+def test_a_later_patch_runs_after_a_ledger_refused_one():
+    s = Scenario()
+    s.redis.store["kubeheal:baseline:prod:web"] = json.dumps(s.golden)
+    led = FlakyLedger()
+    led.down_steps = {"intent_patch_deployment"}
+    ex = ExecutorService(redis=s.redis, apps_api=s.c.apps, mode=fk.Mode(), metric_source=s.source,
+                         cfg=ExecConfig(DRIFT_ENV), sleep=s.clock.sleep, clock=s.clock, ledger=led)
+    req = {"action": "patch", "namespace": "prod", "deployment": "web", "pod": "", "patch_field": CPU}
+    run(ex.handle_entry("kubeheal.exec", "1-0", dict(req, incident_id="inc-a")))
+    assert s.c.writes() == []
+    led.down_steps = set()                                   # MinIO is back; another incident, same Deployment
+    run(ex.handle_entry("kubeheal.exec", "2-0", dict(req, incident_id="inc-b")))
+    assert s.c.writes() != []                                # it patched: not blocked by a stale pending record
+    assert "rollback_recovery_required" not in json.dumps(s.redis.stream(ESCALATIONS_STREAM))
 
 
 def test_drift_rollback_is_protective_and_goes_on_without_minio():
