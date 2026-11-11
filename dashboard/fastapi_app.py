@@ -216,6 +216,8 @@ class KubeHealDashboard:
                             # Parse v4 health event
                             def _g(k, d=b""):
                                 return fields.get(k, d).decode()
+                            if _g(b"model_unavailable").lower() == "true":
+                                continue      # an outage notice for Fusion, not a health assessment
                             event_id = _g(b"event_id")
                             namespace = _g(b"namespace", b"default")
                             pod_name = _g(b"pod_name", b"unknown")

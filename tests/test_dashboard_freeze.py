@@ -216,3 +216,35 @@ def test_claim_that_holds_a_stream_id_has_no_expiry_in_the_redis_wiring():
     start = src.index("async def claim_set")
     block = src[start:src.index("async def claim_get")]
     assert "xx=True" in block and "ex=" not in block
+
+
+# ---- health listener ignores the Health Agent's model_unavailable notice ----------------------------------
+
+def test_health_listener_skips_model_unavailable_events_and_keeps_real_ones():
+    from dashboard.fastapi_app import KubeHealDashboard
+
+    class R:
+        def __init__(self, dash):
+            self.dash, self.calls = dash, 0
+
+        async def xread(self, streams, count=None, block=None):
+            self.calls += 1
+            if self.calls > 1:
+                self.dash.running = False
+                return []
+            return [(b"kubeheal.health.events", [
+                (b"1-0", {b"event_id": b"e-down", b"namespace": b"prod", b"health_label": b"model_unavailable",
+                          b"model_unavailable": b"true"}),
+                (b"2-0", {b"event_id": b"e-ok", b"namespace": b"prod", b"pod_name": b"web-1",
+                          b"health_risk": b"0.2", b"health_label": b"benign", b"timestamp_ms": b"1"}),
+            ])]
+
+    async def go():
+        dash = KubeHealDashboard()
+        dash.running = True
+        dash.redis = R(dash)
+        await dash._listen_health_events()
+        return dash
+
+    dash = asyncio.run(go())
+    assert [e.event_id for e in dash.health_events] == ["e-ok"]
