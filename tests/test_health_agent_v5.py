@@ -112,6 +112,7 @@ async def test_a_posture_violation_is_assessed_without_waiting(env):
     await env.tick(0)                                  # the first poll is immediate
     [event] = env.events
     assert "policy:cpu_cut_10x" in json.loads(event["failure_reasons_json"])
+    assert event["health_uncertain"] == "true" and event["health_prediction_set"] == "[]"
     assert env.clock.t == 1000.0                       # no time passed: no waiting for the 60 s deadline
 
 
@@ -124,6 +125,7 @@ async def test_a_failed_rollout_is_assessed_early_once_confirmed_on_two_polls(en
     await env.tick(2)                                  # poll 2: seen again, assess now
     [event] = env.events
     assert json.loads(event["failure_reasons_json"]) == ["ImagePullBackOff"]
+    assert event["health_uncertain"] == "true" and event["health_prediction_set"] == "[]"
     assert env.clock.t == 1002.0
     assert env.core.pod_calls[0][0] == "prod"          # pods are listed per namespace
     assert env.core.pod_calls[0][1]["label_selector"] == "app=victim-app"
@@ -192,6 +194,9 @@ async def test_inference_down_with_failure_reasons_still_publishes_the_rule_evid
     assert json.loads(event["changed_fields_json"]) == ["template.spec.containers[0].resources.limits.cpu"]
     assert "health_risk" not in event
     assert KEY not in env.agent.pending                # rule evidence is a decision input, no retry loop
+    env.result = prediction()                          # recovery does not create a second incident for this spec
+    await env.tick(120)
+    assert len(env.events) == 1
 
 
 @scenario
@@ -247,6 +252,34 @@ async def test_an_unexpected_exception_in_an_assessment_tells_a_human_too(env):
 
 
 @scenario
+async def test_a_missing_golden_baseline_is_not_recreated_from_the_drifted_spec(env):
+    await env.baseline_then_change(image="img:2")
+    env.redis.store.pop(baseline.baseline_key(*KEY))
+    await env.tick(60)
+    [notice] = env.events
+    assert "golden baseline missing" in notice["assessment_error"]
+    assert baseline.baseline_key(*KEY) not in env.redis.store
+    assert env.predictions == []
+
+
+@scenario
+async def test_first_sight_retries_after_a_redis_error_on_the_same_event(env):
+    await env.send("ADDED", dep())
+    another = Env()
+    another.redis.store.update(env.redis.store)
+    another.redis.fail["get"] = ha.aioredis.RedisError("temporary Redis error")
+    try:
+        await another.send("ADDED", dep(image="img:2"))
+        assert KEY not in another.agent.pending
+        assert another.agent.seen_hash.get(KEY) is None
+        another.redis.fail.clear()
+        await another.send("ADDED", dep(image="img:2"))
+        assert KEY in another.agent.pending
+    finally:
+        await another.agent.stop()
+
+
+@scenario
 async def test_missing_metrics_are_null_features_never_zeros(env):
     win = full_window()
     win["latency_p99_s"] = None
@@ -270,6 +303,39 @@ async def test_no_metric_at_all_is_published_uncertain(env):
     [features] = env.predictions
     assert all(features[k] is None for k in METRIC_FEATURES)
     assert env.events[0]["health_uncertain"] == "true"
+    assert env.events[0]["health_prediction_set"] == "[]"  # Fusion certainty gate must fail closed too
+
+
+@scenario
+async def test_a_superseded_assessment_waiting_on_metrics_is_not_published(env):
+    await env.baseline_then_change(image="img:2")
+    env.gate = asyncio.Event()
+    env.clock.advance(60)
+    await env.agent.tick()
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert env.active == 1
+    await env.send("MODIFIED", dep(image="img:3"))
+    env.gate.set()
+    await env.agent.drain()
+    assert env.events == []
+    assert env.agent.pending[KEY].hash == env.agent.seen_hash[KEY]
+
+
+@scenario
+async def test_health_event_and_detail_hash_publish_atomically_and_idempotently(env):
+    payload = {"event_id": "stable-event", "namespace": "prod", "health_label": "degradation"}
+    env.redis.fail["hset"] = ha.aioredis.RedisError("detail write failed")
+    with pytest.raises(ha.aioredis.RedisError):
+        await env.agent._publish_event(payload)
+    assert env.events == []
+    assert "kubeheal:health:stable-event" not in env.redis.hashes
+
+    env.redis.fail.clear()
+    await env.agent._publish_event(payload)
+    await env.agent._publish_event(payload)
+    assert env.events == [payload]
+    assert env.redis.hashes["kubeheal:health:stable-event"] == payload
 
 
 @scenario

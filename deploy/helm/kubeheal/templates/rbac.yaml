@@ -67,7 +67,7 @@ subjects:
 # watches (waiting reasons, OOMKilled, readiness) and the HorizontalPodAutoscalers. This is a
 # separate read-only ClusterRole, used ONLY through namespaced RoleBindings, so kubeheal-observer
 # (shared with the Security Agent and the dashboard) is not widened and the autoscaling read
-# exists in prod, staging and dev only. No write verb.
+# exists only in explicitly selected watch namespaces. No write verb.
 # The `pods list` rule duplicates what kubeheal-observer already grants cluster-wide; it is kept so the
 # Health Agent's need stays explicit if the observer role is ever narrowed. Only the HPA read is new.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -85,6 +85,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata: {name: kubeheal-health-agent-read, namespace: {{ $tier }}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal-health-agent-read}
+subjects:
+  - {kind: ServiceAccount, name: health-agent, namespace: {{ include "kubeheal.namespace" $ }}}
+---
+{{- end }}
+{{- range $watchNamespace := .Values.healthAgent.additionalWatchNamespaces }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kubeheal-health-agent-read, namespace: {{ $watchNamespace }}}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal-health-agent-read}
 subjects:
   - {kind: ServiceAccount, name: health-agent, namespace: {{ include "kubeheal.namespace" $ }}}

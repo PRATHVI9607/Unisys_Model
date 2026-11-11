@@ -32,6 +32,9 @@ def render_template_docs():
     rng = re.compile(r'\{\{- range \$tier := splitList " " \(include "kubeheal.tiers" \.\) \}\}(.*?)\{\{- end \}\}',
                      re.S)
     text = rng.sub(lambda m: "".join(m.group(1).replace("{{ $tier }}", t) for t in ("prod", "staging", "dev")), text)
+    extra = re.compile(r'\{\{- range \$watchNamespace := \.Values\.healthAgent\.additionalWatchNamespaces \}\}.*?\{\{- end \}\}',
+                       re.S)
+    text = extra.sub("", text)
     text = text.replace("{{- if .Values.rbac.create }}", "")
     text = re.sub(r"\{\{- end \}\}\s*$", "", text)
     assert "{{" not in text, "template uses a construct this mini-renderer does not know"

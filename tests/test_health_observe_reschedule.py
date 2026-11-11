@@ -201,7 +201,11 @@ async def test_a_debounce_assessment_waits_for_a_sample_that_is_scoring(env):
     for _ in range(3):
         await env.tick(ha.POLL_S)                       # the waiting assessment is retried
     assert env.max_active == 1
-    assert len(env.events) >= 3
+    # The sample for image:2 became stale when image:3 arrived while scoring was in
+    # flight. Only the original image:2 assessment and the current image:3 assessment
+    # should be published.
+    assert len(env.events) == 2
+    assert env.redis.store[env.agent._assessed_key(KEY)] == env.agent.seen_hash[KEY]
 
 
 @scenario
@@ -213,6 +217,8 @@ async def test_a_failed_sample_does_not_publish_a_fabricated_score(env):
     await env.tick(20)
     new = env.events[base:]
     assert len(new) == 1 and new[0]["model_unavailable"] == "true" and "health_risk" not in new[0]
+    await env.agent.observe_sample(KEY)                 # another sample of the same spec is deduplicated
+    assert len(env.events) == base + 1
 
 
 # ---- lifecycle ----------------------------------------------------------------------------------------------

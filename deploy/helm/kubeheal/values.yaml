@@ -107,6 +107,8 @@ minio:
 healthAgent:
   image: {repository: kubeheal/health-agent}
   port: 8080
+  # Extra namespaces beyond prod/staging/dev. Each gets a namespaced read-only HPA RoleBinding.
+  additionalWatchNamespaces: []
   prometheusUrl: http://prometheus-operated.monitoring.svc.cluster.local:9090
   logLevel: INFO
   # Optional hardening, OFF by default and not verified on a cluster yet: verify on k3d before enabling.
