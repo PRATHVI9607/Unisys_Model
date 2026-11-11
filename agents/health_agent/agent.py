@@ -16,6 +16,7 @@ import kubernetes_asyncio
 from kubernetes_asyncio import client, watch, config
 from kubernetes_asyncio.config import load_incluster_config
 from agents.health_agent import baseline
+from agents.common.sampling import sampling_factor, scaled_interval
 from agents.common.metrics import KubeHealMetrics
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -44,6 +45,24 @@ def namespace_tier(namespace: str) -> str:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 METRICS = KubeHealMetrics()
+
+# Chosen default cadence, not a measured profile. During an active OBSERVE request,
+# the workload's next assessment is scheduled at base/factor. No periodic assessment
+# runs when no OBSERVE request is active.
+HEALTH_OBSERVE_BASE_S = 60.0
+
+
+def observe_base_s_from_env() -> float:
+    raw = os.environ.get("HEALTH_OBSERVE_BASE_S")
+    if raw is None:
+        return HEALTH_OBSERVE_BASE_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("HEALTH_OBSERVE_BASE_S must be a positive number") from exc
+    if value <= 0 or not value < float("inf"):
+        raise ValueError("HEALTH_OBSERVE_BASE_S must be a positive finite number")
+    return value
 
 
 class SeverityLevel(str, Enum):
@@ -87,6 +106,8 @@ class HealthAgent:
         health_model_url: str = None,
         cooldown_ttl: int = 300,
         prometheus_url: str = None,
+        observe_base_s: Optional[float] = None,
+        clock=time.monotonic,
     ):
         self.namespace = namespace
         self.redis_url = redis_url or os.environ.get("REDIS_URL", "redis://redis-master:6379")
@@ -108,6 +129,21 @@ class HealthAgent:
 
         self.running = False
         self.watcher = None
+
+        # P6-D2: periodic rescoring is limited to workloads with an active OBSERVE request.
+        self.observe_base_s = (observe_base_s if observe_base_s is not None
+                               else observe_base_s_from_env())
+        self.clock = clock
+        # (namespace, deployment) -> latest Deployment and clock() time of last assessment.
+        # Only workloads whose spec differs from the golden baseline are tracked.
+        self._drifted: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._observe_task: Optional[asyncio.Task] = None
+        # One shared serializer for _spec_json; closed in stop(). Created lazily because
+        # constructing an ApiClient opens an aiohttp session.
+        self._serializer: Optional[client.ApiClient] = None
+        # Per-workload guard so a watch event and an OBSERVE_SAMPLE never score the same
+        # workload at the same time.
+        self._workload_locks: Dict[Tuple[str, str], asyncio.Lock] = {}
 
         self.baseline_configmap = "kubeheal-baselines"
 
@@ -139,6 +175,12 @@ class HealthAgent:
 
         logger.info("Health Agent started successfully")
 
+        # Set before the task exists so observe_loop never depends on watch_deployments ordering.
+        self.running = True
+        self._observe_task = asyncio.create_task(self.observe_loop())
+        logger.info(f"OBSERVE rescheduling enabled: base interval {self.observe_base_s}s "
+                    "while an OBSERVE request is active")
+
         await self.watch_deployments()
 
     async def stop(self) -> None:
@@ -149,10 +191,58 @@ class HealthAgent:
         if self.watcher:
             self.watcher.stop()
 
+        if self._observe_task:
+            task = self._observe_task
+            self._observe_task = None
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                # Swallow only the task's own cancellation. If this coroutine itself is being
+                # cancelled, re-raise so the caller's cancellation is not lost.
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+            except Exception:
+                logger.exception("Health OBSERVE task ended with an error")
+
+        if self._serializer is not None:
+            serializer, self._serializer = self._serializer, None
+            await serializer.close()
+
         if self.redis:
             await self.redis.aclose()
 
         logger.info("Health Agent stopped")
+
+    async def observe_loop(self) -> None:
+        """Rescore known drift only while Fusion's bounded OBSERVE request is active."""
+        try:
+            while self.running:
+                await asyncio.sleep(1)
+                try:
+                    await self.observe_tick()
+                except Exception:
+                    logger.exception("Health OBSERVE rescheduler pass failed; will retry")
+        except asyncio.CancelledError:
+            raise
+
+    async def observe_tick(self) -> None:
+        """Perform one scheduler pass; split out for deterministic unit tests."""
+        if not self.redis or not self.observe_base_s:
+            return
+        now = self.clock()
+        due = []
+        for key, state in list(self._drifted.items()):
+            namespace, name = key
+            factor = await sampling_factor(self.redis, namespace, workload=name)
+            interval = scaled_interval(self.observe_base_s, factor)
+            if factor > 1 and now - state["last_assessed"] >= interval:
+                # Advance before awaiting the handler so the next tick cannot duplicate it.
+                state["last_assessed"] = now
+                due.append(state["deployment"])
+        for deployment in due:
+            await self.handle_deployment_event("OBSERVE_SAMPLE", deployment)
 
     async def watch_deployments(self) -> None:
         """Watch Deployment changes, reconnecting across watch timeouts.
@@ -163,7 +253,6 @@ class HealthAgent:
         normal timeout.
         """
         logger.info("Starting Deployment watch (reconnecting)...")
-        self.running = True
         resource_version = None
         while self.running:
             try:
@@ -201,9 +290,29 @@ class HealthAgent:
 
     async def handle_deployment_event(self, event_type: str, deployment) -> None:
         try:
-            logger.info(f"handle_deployment_event STARTED: {event_type}")
             name = deployment.metadata.name
             namespace = deployment.metadata.namespace
+            drift_key = (namespace, name)
+            if event_type == "DELETED":
+                self._drifted.pop(drift_key, None)
+                if not self._workload_locks.get(drift_key, asyncio.Lock()).locked():
+                    self._workload_locks.pop(drift_key, None)
+                return
+            lock = self._workload_locks.setdefault(drift_key, asyncio.Lock())
+            if event_type == "OBSERVE_SAMPLE":
+                # A periodic sample yields to any scoring already in flight for this workload.
+                if lock.locked():
+                    logger.info(f"Skipping OBSERVE sample for {namespace}/{name}: scoring in flight")
+                    return
+            async with lock:
+                await self._handle_locked(event_type, deployment, namespace, name, drift_key)
+        except Exception as e:
+            logger.error(f"Error handling deployment event: {e}", exc_info=True)
+
+    async def _handle_locked(self, event_type: str, deployment, namespace: str, name: str,
+                             drift_key: Tuple[str, str]) -> None:
+        try:
+            logger.info(f"handle_deployment_event STARTED: {event_type}")
             generation = deployment.metadata.generation or 0
             observed_gen = deployment.status.observed_generation or 0
 
@@ -219,9 +328,23 @@ class HealthAgent:
 
             logger.info(f"Processing event for {namespace}/{name}...")
 
-            in_cooldown = await self._check_cooldown(namespace, name)
+            # Scheduler-triggered samples are already bounded by the active OBSERVE key.
+            # Watch events retain the regular cooldown to avoid duplicate scoring.
+            in_cooldown = (event_type != "OBSERVE_SAMPLE" and
+                           await self._check_cooldown(namespace, name))
             logger.info(f"Cooldown check for {namespace}/{name}: {in_cooldown}")
             if in_cooldown:
+                # Keep a tracked workload pointed at its newest watch object. If it has
+                # returned to baseline, stop scheduling it even though scoring is cooling down.
+                state = self._drifted.get(drift_key)
+                if state:
+                    state["deployment"] = deployment
+                    try:
+                        golden = await baseline.load_baseline(self.redis, namespace, name)
+                        if golden and not baseline.is_drifted(golden, self._spec_json(deployment)):
+                            self._drifted.pop(drift_key, None)
+                    except Exception as e:
+                        logger.debug(f"Could not refresh tracked drift state for {namespace}/{name}: {e}")
                 logger.info(f"Skipping {namespace}/{name} - in cooldown")
                 return
 
@@ -245,8 +368,13 @@ class HealthAgent:
                 logger.info(f"Golden baseline recorded for {namespace}/{name}; no drift to assess")
                 return
             if not baseline.is_drifted(golden, new_spec):
+                self._drifted.pop(drift_key, None)
                 logger.info(f"{namespace}/{name} matches its golden baseline; skipping assessment")
                 return
+            self._drifted.setdefault(drift_key, {
+                "deployment": deployment,
+                "last_assessed": self.clock(),
+            })["deployment"] = deployment
             old_spec = golden["spec"]
             new_spec = baseline.drift_view(new_spec)
             logger.info(f"Spec drift vs golden baseline detected for {namespace}/{name}; assessing")
@@ -272,6 +400,8 @@ class HealthAgent:
             if assessment:
                 await self._publish_assessment(assessment)
                 await self._set_cooldown(namespace, name)
+                if drift_key in self._drifted:
+                    self._drifted[drift_key]["last_assessed"] = self.clock()
                 logger.info(f"Assessment {namespace}/{name}: "
                             f"health_risk={assessment['health_risk']:.2f} "
                             f"label={assessment['health_label']}")
@@ -341,12 +471,13 @@ class HealthAgent:
             pass
         return None
 
-    @staticmethod
-    def _spec_json(deployment) -> Dict:
+    def _spec_json(self, deployment) -> Dict:
         """Deployment spec as camelCase JSON (what kubectl and the patch API use)."""
         if not deployment.spec:
             return {}
-        return client.ApiClient().sanitize_for_serialization(deployment.spec)
+        if self._serializer is None:
+            self._serializer = client.ApiClient()
+        return self._serializer.sanitize_for_serialization(deployment.spec)
 
     async def _query_blast_radius(self, namespace: str, deployment) -> str:
         """Query blast radius: Services + Ingresses."""
