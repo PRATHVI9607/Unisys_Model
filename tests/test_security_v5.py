@@ -690,4 +690,4 @@ def test_the_agent_has_no_kubernetes_write_in_the_new_modules():
         for needle in ("create_namespaced", "patch_namespaced", "delete_namespaced", "replace_namespaced",
                        "os.kill", "kubectl", "subprocess"):
             assert needle not in src, (name, needle)
-    assert not [c for c in "—" if c in (root / "agent.py").read_text(encoding="utf-8")]
+    assert chr(0x2014) not in (root / "agent.py").read_text(encoding="utf-8")
