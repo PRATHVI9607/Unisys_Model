@@ -43,6 +43,7 @@ metadata:
   namespace: prod
   labels:
     app.kubernetes.io/name: victim-app
+    kubeheal.io/watch: "true"   # the Health Agent only watches labelled Deployments
 spec:
   replicas: 1
   selector:
@@ -121,6 +122,7 @@ metadata:
   namespace: dev
   labels:
     app.kubernetes.io/name: victim-app
+    kubeheal.io/watch: "true"   # the Health Agent only watches labelled Deployments
 spec:
   replicas: 1
   selector:
