@@ -442,8 +442,9 @@ class SecurityAgent:
         namespace, pod = info.get("namespace", "default"), info.get("pod")
         known = self.pod_index.lookup_pod(namespace, pod) if pod else None
         if known is not None:
-            info["workload"] = info.get("workload") or known.workload
-            info["workload_kind"] = info.get("workload_kind") or known.workload_kind
+            # the index is authoritative: a record written before the index knew the pod holds the pod-name fallback
+            info["workload"] = known.workload
+            info["workload_kind"] = known.workload_kind
             info["container"] = info.get("container") or known.container
         info["pod_uid"] = info.get("pod_uid") or info.get("uid") or (known.uid if known is not None else "")
         info["workload"] = info.get("workload") or pod or "unknown"
@@ -632,7 +633,8 @@ class SecurityAgent:
             # empty (not 0.0) when no sample of written data could be read
             "entropy": f"{float(entropy):.4f}" if entropy is not None else "",
             "action": action,
-            "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
+            # epoch ms; datetime.utcnow().timestamp() reads the naive UTC time as local time (wrong off UTC)
+            "timestamp_ms": str(int(self._wall() * 1000)),
         }
         payload.update(extra or {})
         await self.redis.xadd("kubeheal.security.events", payload)

@@ -691,3 +691,21 @@ def test_the_agent_has_no_kubernetes_write_in_the_new_modules():
                        "os.kill", "kubectl", "subprocess"):
             assert needle not in src, (name, needle)
     assert chr(0x2014) not in (root / "agent.py").read_text(encoding="utf-8")
+
+
+def test_the_pod_index_wins_over_a_pod_name_fallback_stored_before_it_knew_the_pod():
+    ag = make_agent_sec()
+    pod = "victim-app-7d9f8b6c5-x2k4q"
+    ag.redis.store["kubeheal:pid:4242"] = json.dumps({"pid": 4242, "pod": pod, "namespace": "demo",
+                                                      "workload": pod})          # the fallback, stored early
+    ag.pod_index.by_pod[("demo", pod)] = PodInfo("demo", pod, "app", "Deployment", "victim-app", "uid-9")
+    check(ag, burst_window())
+    assert score_hash(ag, "kubeheal:security:score:demo:victim-app")["model_scored"] == "true"
+    assert score_hash(ag) is None and published(ag)[0]["deployment"] == "victim-app"
+
+
+def test_the_event_timestamp_is_epoch_milliseconds_of_the_agent_clock():
+    ag = make_agent_sec()
+    ag._wall = lambda: 1_794_303_000.25
+    check(ag, burst_window())
+    assert published(ag)[0]["timestamp_ms"] == "1794303000250"
