@@ -30,6 +30,7 @@ def test_quantities():
 
 def test_component_mapping_longest_prefix():
     assert rp.component_for_pod("kubeheal-health-model-7d9f-abcde") == "health-model"
+    assert rp.component_for_pod("kubeheal-inference-5d8c7-qwert") == "inference"
     assert rp.component_for_pod("health-agent-6c8-xyz") == "health-agent"
     assert rp.component_for_pod("security-agent-zk2lm") == "security-agent"
     assert rp.component_for_pod("redis-0") == "redis"

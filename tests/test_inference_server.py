@@ -274,3 +274,17 @@ def test_model_dir_env_var(monkeypatch, tmp_path):
 def test_module_level_app_exists_for_uvicorn():
     assert isinstance(srv.app.state.metrics.inflight_requests._value.get(), float)
     assert json.dumps(srv.EXPLAIN_RISK) == json.dumps({"health": 0.0, "security": SECURITY_PUBLISH_RISK})
+
+
+def test_k6_load_script_body_matches_the_health_bundle(client, bundles):
+    """demo/scripts/k6_health_model.js lives on the demo branch only; the check runs wherever the file exists."""
+    import re
+    js = Path(__file__).resolve().parents[1] / "demo" / "scripts" / "k6_health_model.js"
+    if not js.exists():
+        pytest.skip("demo/scripts/k6_health_model.js is on the demo branch")
+    text = js.read_text(encoding="utf-8")
+    assert "/v1/health/predict" in text
+    block = text[text.index("const features = {"):text.index("};", text.index("const features = {"))]
+    features = {k: float(v) for k, v in re.findall(r"(\w+):\s*(-?[0-9.]+)", block)}
+    assert set(features) == set(bundles["health"].features)
+    assert client.post("/v1/health/predict", json={"features": features}).status_code == 200
