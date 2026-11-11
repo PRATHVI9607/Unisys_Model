@@ -236,7 +236,8 @@ class Redis:
 
 
 class FlippingMode:
-    """enforce for the first N checks, then test."""
+    """enforce for the first N checks, then test. A gated write asks twice (before and after its
+    "about to do" ledger entry), so FlippingMode(2) lets exactly one write through."""
 
     def __init__(self, n):
         self.n, self.calls = n, 0
@@ -258,7 +259,7 @@ def test_executor_dry_run_request_from_fusion_wins_even_in_enforce():
 
 def test_executor_mid_action_switch_escalates_to_human():
     r, core, net = Redis(), Core(), Net()
-    ex = ExecutorService(redis=r, core_api=core, networking_api=net, mode=FlippingMode(1))
+    ex = ExecutorService(redis=r, core_api=core, networking_api=net, mode=FlippingMode(2))
     run(ex.handle_entry("kubeheal.exec", "2-0", {"action": "contain", "namespace": "prod", "pod": "p",
                                                  "incident_id": "inc-10"}))
     assert core.deleted == [] and net.created == ["prod"]
@@ -295,18 +296,18 @@ def test_executor_records_mid_action_steps_and_escalation():
     store = InMemoryLedgerStore()
     core = Core()
     ex = ExecutorService(redis=Redis(), core_api=core, networking_api=Net(),
-                         mode=FlippingMode(1), ledger=Ledger(store))
+                         mode=FlippingMode(2), ledger=Ledger(store))
     run(ex.handle_entry("kubeheal.exec", "5-0", {
         "action": "contain", "namespace": "prod", "pod": "p", "incident_id": "inc-stop",
     }))
 
     records = [json.loads(store.objects[key]) for key in sorted(store.objects)]
     assert [record["step"] for record in records] == [
-        "request_accepted", "quarantine_policy_created", "blocked",
+        "request_accepted", "intent_create_quarantine_policy", "quarantine_policy_created", "blocked",
         "result", "executor_escalation", "executor_result",
     ]
-    assert records[2]["payload"]["step"] == "label_pod"
-    assert records[4]["payload"]["required"] == "human"
+    assert records[3]["payload"]["step"] == "label_pod"
+    assert records[5]["payload"]["required"] == "human"
     assert core.patched == [] and core.deleted == []
 
 

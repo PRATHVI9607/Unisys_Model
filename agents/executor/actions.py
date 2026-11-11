@@ -8,6 +8,10 @@ call (S-KS-3). A blocked write raises ModeBlocked; the action function turns tha
   * "stopped_mode_test: ..."   when the mode flipped to `test` mid-action: the next step is not run
     and the caller escalates to a human (S-KS-5).
 
+A gate that has `record_intent` also writes an "about to do" ledger entry before each write; if that
+write fails the rules in ledger_guard.py apply (protective steps go on through the fallback stream,
+corrective steps stop with LedgerUnavailable, and the Executor escalates).
+
 tests/test_no_writes_outside_executor.py proves that no write call exists outside this package and
 that inside it every write method is only ever passed to `_write`, never called directly.
 The write paths live next to this module and use the same `_write` choke point: drift.py (canary patch),
@@ -37,6 +41,14 @@ async def _write(gate, namespace: str, step: str, fn: Callable[..., Awaitable], 
         if gate is not None and hasattr(gate, "record_step"):
             await gate.record_step(namespace, step, "blocked_by_kill_switch")
         raise ModeBlocked(step)
+    if hasattr(gate, "record_intent"):
+        # "About to do" ledger entry (ledger_guard.py). It may raise LedgerUnavailable: then the step
+        # does not run. The write can take a while, so the gate is asked AGAIN right before the call.
+        await gate.record_intent(namespace, step)
+        if not gate.allow_write(namespace):
+            if hasattr(gate, "record_step"):
+                await gate.record_step(namespace, step, "blocked_by_kill_switch")
+            raise ModeBlocked(step)
     try:
         result = await fn(*args, **kwargs)
     except Exception as exc:

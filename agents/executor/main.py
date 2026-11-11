@@ -31,6 +31,7 @@ from agents.common.stream_reliability import ReliabilityConfig, StreamReliabilit
 from agents.executor import drift, quarantine, restore, restore_entropy
 from agents.executor.config import ExecConfig
 from agents.executor.guard import check_target
+from agents.executor.ledger_guard import LedgerGuard
 from agents.executor.metrics_source import PrometheusMetricSource
 from agents.executor.snapshots import SnapshotFreeze, SnapshotScheduler
 from agents.executor.support import Recorder, needs_escalation
@@ -46,6 +47,7 @@ ACTIONS_STREAM = "kubeheal.actions"
 ESCALATIONS_STREAM = "kubeheal.escalations"
 GROUP = "executor"
 DONE_PREFIX = "kubeheal:exec:done"       # result marker per incident, action and dry-run flag (P6-R1)
+FLUSH_INTERVAL_S = 30                    # chosen, not measured: how often the fallback stream is flushed to MinIO
 DONE_TTL_S = 7 * 24 * 3600               # chosen, not measured: how long a finished request is remembered
 # Outcomes that are not final: a later request for the same incident may legitimately run again.
 # Refused and escalated-before-running outcomes wrote nothing; a corrected request must be able to follow.
@@ -60,8 +62,10 @@ class RequestGate:
     """Kill-switch gate for one request. The Executor reads the mode itself (it does not trust the
     Fusion Agent), and a request that Fusion already marked as a dry run can only get stricter."""
 
-    def __init__(self, mode, force_dry: bool = False, on_step=None):
-        self.mode, self.force_dry, self.on_step = mode, force_dry, on_step
+    def __init__(self, mode, force_dry: bool = False, on_step=None, intent=None):
+        # `intent(namespace, step)` writes the "about to do" ledger entry (ledger_guard.LedgerGuard) and
+        # raises LedgerUnavailable when the step must not run. None: no intent entry (older callers, tests).
+        self.mode, self.force_dry, self.on_step, self.intent = mode, force_dry, on_step, intent
 
     def allow_write(self, namespace: str) -> bool:
         return (not self.force_dry) and (not self.mode.dry_run_for(namespace))
@@ -69,6 +73,10 @@ class RequestGate:
     async def record_step(self, namespace: str, step: str, outcome: str) -> None:
         if self.on_step:
             await self.on_step(namespace, step, outcome)
+
+    async def record_intent(self, namespace: str, step: str) -> None:
+        if self.intent:
+            await self.intent(namespace, step)
 
 
 class ExecutorService:
@@ -83,6 +91,9 @@ class ExecutorService:
         self.ledger = ledger if ledger is not None else ledger_from_env()
         self.custom_api = custom_api
         self.batch_api = batch_api
+        # Ledger failure policy (P7-RR-10): every record falls back to a durable Redis stream, and every
+        # write is preceded by an "about to do" entry (RequestGate.record_intent).
+        self.ledger_guard = LedgerGuard(self.ledger, lambda: self.redis, METRICS)
         self.record_step = record_step or self._append_ledger_step
         self.metric_source = metric_source      # async (namespace, deployment, window_s) -> dict
         self.entropy_check = entropy_check      # async (namespace, workload, pvcs) -> True/False/None
@@ -119,7 +130,12 @@ class ExecutorService:
             logger.error(f"mode change ledger write failed: {e}")
 
     async def _append_ledger_step(self, incident_id: str, step: str, payload: Dict):
-        await asyncio.to_thread(self.ledger.append, incident_id, step, payload)
+        await self.ledger_guard.record(incident_id, step, payload)
+
+    def _intent_for(self, incident_id_fn):
+        async def intent(namespace: str, step: str) -> None:
+            await self.ledger_guard.intent(incident_id_fn(), step, {"namespace": namespace})
+        return intent
 
     async def start(self):
         try:
@@ -136,9 +152,12 @@ class ExecutorService:
         if self.metric_source is None and self.cfg.prometheus_url:
             self.metric_source = PrometheusMetricSource(self.cfg.prometheus_url)
         self.scheduler = SnapshotScheduler(
-            self.core_api, self.custom_api, RequestGate(self.mode), cfg=self.cfg,
+            self.core_api, self.custom_api,
+            RequestGate(self.mode, intent=self._intent_for(lambda: self.scheduler.run_id)), cfg=self.cfg,
             is_frozen=SnapshotFreeze(self.redis).is_frozen, record_step=self.record_step)
         self._tasks.add(asyncio.create_task(self.scheduler.run_forever()))
+        self._tasks.add(asyncio.create_task(
+            self.ledger_guard.run_flusher(FLUSH_INTERVAL_S, self.sleep)))   # cancelled in stop()
         try:
             await self.redis.xgroup_create(EXEC_STREAM, GROUP, id="0", mkstream=True)
         except Exception as e:
@@ -313,7 +332,7 @@ class ExecutorService:
         await rec("request_accepted", {"action": req.action, "namespace": req.namespace,
                                        "deployment": req.deployment, "pod": req.pod,
                                        "dry_run_requested": req.dry_run})
-        gate = RequestGate(self.mode, force_dry=req.dry_run)
+        gate = RequestGate(self.mode, force_dry=req.dry_run, intent=self._intent_for(lambda: incident_id))
         freeze = SnapshotFreeze(self.redis)
         if req.action == "contain":
             outcome = await quarantine.contain(gate, self.core_api, self.networking_api, self.apps_api,
@@ -343,12 +362,7 @@ class ExecutorService:
 
     async def _escalate(self, f: Dict, outcome: str):
         incident_id = f.get("incident_id") or f.get("_ledger_incident_id") or f"inc-{uuid.uuid4().hex}"
-        await self._append_ledger(incident_id, "executor_escalation", {
-            "namespace": f.get("namespace", ""),
-            "deployment": f.get("deployment", ""),
-            "reason": outcome,
-            "required": "human",
-        })
+        # The human is told FIRST: a ledger outage (the reason for many escalations) must never delay the page.
         await self.redis.xadd(ESCALATIONS_STREAM, {
             "incident_id": incident_id,
             "namespace": f.get("namespace", ""),
@@ -356,6 +370,12 @@ class ExecutorService:
             "reason": outcome,
             "required": "human",
             "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
+        })
+        await self._append_ledger(incident_id, "executor_escalation", {
+            "namespace": f.get("namespace", ""),
+            "deployment": f.get("deployment", ""),
+            "reason": outcome,
+            "required": "human",
         })
 
     async def _record(self, f: Dict, outcome: str):
@@ -380,7 +400,7 @@ class ExecutorService:
         })
 
     async def _append_ledger(self, incident_id: str, step: str, payload: Dict):
-        await asyncio.to_thread(self.ledger.append, incident_id, step, payload)
+        await self.ledger_guard.record(incident_id, step, payload)
 
 
 async def main():

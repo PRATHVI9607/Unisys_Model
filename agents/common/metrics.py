@@ -50,6 +50,22 @@ class KubeHealMetrics:
         self.stream_lag = Gauge(
             "kubeheal_stream_lag", "Current consumer stream lag", ["stream"], registry=self.registry
         )
+        # Ledger failure policy (P7-RR-10). Alert on any increase of the fallback counter, on any
+        # increase of the unavailable counter, and on a pending gauge that stays above zero.
+        self.ledger_fallback_writes = Counter(
+            "kubeheal_ledger_fallback_writes_total",
+            "Ledger records written to the durable fallback stream because the ledger write failed",
+            ["kind"], registry=self.registry
+        )
+        self.ledger_unavailable = Counter(
+            "kubeheal_ledger_unavailable_total",
+            "Automatic steps refused because the required ledger write could not be made",
+            ["reason"], registry=self.registry
+        )
+        self.ledger_pending = Gauge(
+            "kubeheal_ledger_pending_entries",
+            "Entries waiting in the fallback stream to be flushed to the ledger", registry=self.registry
+        )
 
     def record_decision(self, decision: str) -> None:
         self.decisions.labels(decision=decision).inc()
@@ -71,6 +87,15 @@ class KubeHealMetrics:
 
     def set_stream_lag(self, stream: str, lag: float) -> None:
         self.stream_lag.labels(stream=stream).set(lag)
+
+    def record_ledger_fallback(self, kind: str) -> None:
+        self.ledger_fallback_writes.labels(kind=kind).inc()
+
+    def record_ledger_unavailable(self, reason: str) -> None:
+        self.ledger_unavailable.labels(reason=reason).inc()
+
+    def set_ledger_pending(self, depth: float) -> None:
+        self.ledger_pending.set(depth)
 
     def render(self) -> bytes:
         """Return the Prometheus text exposition for a component's ``/metrics`` route."""
