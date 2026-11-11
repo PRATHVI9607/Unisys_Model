@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import os
 import struct
 import time
@@ -43,7 +44,19 @@ def namespace_tier(namespace: str) -> str:
         return "prod"
     if "stag" in n:
         return "staging"
-    return "dev"
+    if "dev" in n:
+        return "dev"
+    # A namespace that matches none of the known names is "unknown", not "dev": the decision policy scores an
+    # unknown tier with the highest multiplier and never acts automatically on it. (The `kubeheal/tier`
+    # namespace label is set by the manifests but is not read by any agent yet; the name rule is all there is.)
+    return "unknown"
+
+
+def _finite_or(value, default: float) -> float:
+    """float(value) when it is a finite non-negative number, else `default` (a NaN width must not pass)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return float(value) if math.isfinite(value) and value >= 0 else default
 
 
 def falco_t0_ms(events: List[Dict]) -> Optional[int]:
@@ -182,6 +195,17 @@ class SecurityAgent:
         self._checks: Dict[int, "asyncio.Task"] = {}   # pid -> running entropy check
 
         self.write_counters: Dict[int, int] = {}
+        # earliest Falco timestamp seen per PID (kept outside the capped syscall window) for T0
+        self._falco_first_ts: Dict[int, str] = {}
+        # checks that did not produce an event, by reason (logged as well; no Prometheus counter here)
+        self.dropped_checks: Dict[str, int] = {}
+        # model answers that were not usable, by reason
+        self.rejected_model_results: Dict[str, int] = {}
+
+    def _drop(self, reason: str, pid: int, detail: str = "") -> None:
+        self.dropped_checks[reason] = self.dropped_checks.get(reason, 0) + 1
+        logger.warning(f"entropy check for PID {pid} dropped ({reason}) {detail}; "
+                       f"{self.dropped_checks[reason]} dropped for this reason so far")
 
     async def start(self) -> None:
         """Start the Security Agent."""
@@ -295,6 +319,8 @@ class SecurityAgent:
             )
         trigger = tracker.add(evt)
         if trigger:
+            if trigger.first_ts:
+                self._falco_first_ts[trigger.pid] = trigger.first_ts
             self.inotify_watcher.recent_events = trigger.events
             await self._trigger_entropy_check(trigger.pid, trigger.events, source)
 
@@ -363,7 +389,7 @@ class SecurityAgent:
             if self._checks.get(pid) is t:
                 self._checks.pop(pid, None)
             if not t.cancelled() and t.exception():
-                logger.error(f"Entropy check for PID {pid} failed: {t.exception()}")
+                self._drop("check_failed", pid, str(t.exception()))
         task.add_done_callback(_done)
         self._checks[pid] = task
 
@@ -374,6 +400,8 @@ class SecurityAgent:
         logger.info(f"Entropy check for PID {pid} (syscalls from: {source})")
         pid_info = await self._get_pid_info(pid)
         if not pid_info:
+            # the PID cache entry (300 s) expired or never existed: no pod to report against
+            self._drop("pid_cache_expired", pid, "no kubeheal:pid entry; no event published")
             return
         mmap_detected = await self._check_mmap_entropy(pid)
 
@@ -408,8 +436,10 @@ class SecurityAgent:
         # called and nothing is fabricated: the event is scored from the entropy and /proc heuristics only
         # and says so (model_scored=false, syscall_source=none).
         sec = None
+        model_rejected = False
         if events:
-            sec = await self._call_security_model(events, result.model_series(), early_signals)
+            sec, model_rejected = self._usable_model_result(
+                await self._call_security_model(events, result.model_series(), early_signals), pid)
         model_risk = float(sec["risk_score"]) if sec else None
 
         # Heuristic baseline (floor, clear ransomware signatures)
@@ -431,7 +461,10 @@ class SecurityAgent:
         # The Security Agent only senses and reports (S-SA-5). Containment is decided by the
         # Fusion Agent and executed by the Executor.
         if risk_score >= 0.40:
-            t0_ms = falco_t0_ms(events)
+            # T0 is the earliest Falco time seen for this PID: the capped window (256 events) can start later
+            # than the real onset in a long attack, so the first-seen timestamp is added to it.
+            first_ts = self._falco_first_ts.get(pid, "")
+            t0_ms = falco_t0_ms(list(events) + ([{"ts": first_ts}] if first_ts else []))
             extra = {
                 "entropy_phase": phase,
                 "entropy_valid_samples": str(result.valid_samples),
@@ -441,6 +474,8 @@ class SecurityAgent:
             }
             if t0_ms is not None:
                 extra["t0_ms"] = str(t0_ms)
+            if events and not sec:
+                extra["model_issue"] = "invalid_model_response" if model_rejected else "model_unreachable"
             await self._publish_security_event(
                 pid_info, risk_score, early_signals, entropy_avg, sec,
                 extra=extra,
@@ -481,7 +516,7 @@ class SecurityAgent:
             # No model score (heuristic-only, or the Security Model was unreachable) must never look
             # certain: publish the maximum width so the decision policy treats the event as uncertain and
             # cannot reach AUTO_CONTAIN from it. The model's own width is used only when it scored.
-            "sec_ci_width": f"{float(sec.get('ci_width', 1.0)) if model_scored else 1.0:.4f}",
+            "sec_ci_width": f"{_finite_or(sec.get('ci_width'), 1.0) if model_scored else 1.0:.4f}",
             "top_syscall": sec.get("top_syscall", ""),
             "syscall_attribution_json": json.dumps(sec.get("syscall_attention_weights", {})),
             "entropy_spike_json": json.dumps(sec.get("entropy_spike", {})),
@@ -500,6 +535,25 @@ class SecurityAgent:
                                              if k != "security_embedding_b64"})
         await self.redis.expire(hkey, 86400)
         logger.info(f"Security event {event_id}: risk={risk_score:.2f} label={sec_label}")
+
+    def _usable_model_result(self, raw: Optional[Dict[str, Any]], pid: int):
+        """The Security Model's answer, or None when it is unusable. A missing, non-numeric, NaN, infinite or
+        out-of-range risk_score would poison `max(model, heuristic)` (NaN makes every comparison False and
+        suppresses the event) or raise KeyError, so such an answer is logged, counted and ignored: the event is
+        scored by the heuristic alone, marked model_scored=false with the maximum CI width.
+        Returns (usable result or None, True when an answer arrived but was rejected)."""
+        if raw is None:
+            return None, False
+        score = raw.get("risk_score") if isinstance(raw, dict) else None
+        if (isinstance(score, bool) or not isinstance(score, (int, float))
+                or not math.isfinite(score) or not 0.0 <= score <= 1.0):
+            reason = "risk_score_missing" if score is None else "risk_score_invalid"
+            self.rejected_model_results[reason] = self.rejected_model_results.get(reason, 0) + 1
+            logger.warning(f"Security Model answer for PID {pid} ignored ({reason}: {score!r}); using the "
+                           f"heuristic score only, not model scored. {self.rejected_model_results[reason]} "
+                           "ignored for this reason so far")
+            return None, True
+        return raw, False
 
     async def _get_pid_info(self, pid: int) -> Optional[Dict]:
         """Get PID info from cache."""

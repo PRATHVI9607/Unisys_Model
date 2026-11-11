@@ -7,6 +7,8 @@ Run: PYTHONPATH=. pytest tests/test_decision_policy.py -q
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agents.fusion_agent.decision_policy import (
@@ -18,7 +20,8 @@ from agents.fusion_agent.decision_policy import (
 # P6: the policy fails closed on missing inputs, so the base case states them explicitly: all models
 # answered, namespace known to be unprotected, burn-in over. Tests for the new rules live in
 # tests/test_policy_rules.py.
-OK = dict(models_ok=True, namespace_protected=False, metric_samples_seen=BURN_IN_SAMPLES)
+OK = dict(models_ok=True, namespace_protected=False, metric_samples_seen=BURN_IN_SAMPLES,
+          namespace_tier="staging")
 
 
 def D(**kw):
@@ -119,9 +122,32 @@ def test_prod_tier_amplifies_to_autocontain():
     o = D(sec_risk=0.72, namespace_tier="prod")
     assert o.decision == Decision.AUTO_CONTAIN
 
-def test_unknown_tier_defaults_to_1x():
-    o = D(sec_risk=0.86, namespace_tier="weird")
-    assert o.decision == Decision.AUTO_CONTAIN
+def test_unknown_tier_is_scored_with_the_highest_multiplier_but_never_acts():
+    for tier in ("weird", "production", "unknown", "", None):
+        o = D(sec_risk=0.80, namespace_tier=tier)
+        assert o.adjusted_score == pytest.approx(0.80 * max(TIER_MULTIPLIERS.values()))
+        assert o.decision == Decision.HUMAN_CONTAIN and o.requires_incident_lock
+        assert "tier is unknown" in o.rationale
+    # the same score on a known tier acts automatically only when the tier is "prod" or "staging"
+    assert D(sec_risk=0.86, namespace_tier="staging").decision == Decision.AUTO_CONTAIN
+    # a health incident of an unknown tier is also at most a human patch
+    h = D(health_risk=0.80, namespace_tier="weird")
+    assert h.decision == Decision.HUMAN_PATCH and "tier is unknown" in h.rationale
+
+
+def test_a_missing_tier_defaults_to_unknown_not_to_staging():
+    assert DecisionInput().namespace_tier == "unknown"
+    o = make_decision(DecisionInput(sec_risk=0.99, models_ok=True, namespace_protected=False,
+                                    metric_samples_seen=BURN_IN_SAMPLES, mode="enforce"))
+    assert o.decision == Decision.HUMAN_CONTAIN
+
+
+def test_prod_and_production_no_longer_differ_silently():
+    prod = D(sec_risk=0.80, namespace_tier="prod")
+    production = D(sec_risk=0.80, namespace_tier="production")
+    assert prod.decision == Decision.AUTO_CONTAIN
+    assert production.decision == Decision.HUMAN_CONTAIN        # unknown: scored at 1.20 but never automatic
+    assert production.adjusted_score == pytest.approx(prod.adjusted_score)
 
 
 # ── BURN-IN MODE ────────────────────────────────────────────

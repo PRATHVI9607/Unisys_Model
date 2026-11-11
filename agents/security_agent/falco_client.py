@@ -41,7 +41,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, Dict, Iterator, Optional, Tuple
 
@@ -97,6 +97,28 @@ def priority_name(value, enum_type=None) -> str:
     return FALCO_PRIORITY_BY_NUMBER.get(n, "")
 
 
+def timestamp_to_iso(ts) -> str:
+    """Timezone-aware ISO string (UTC, 'Z') for a protobuf Timestamp (`seconds` and `nanos`). str(ts) of a
+    protobuf message is text format ('seconds: 1 nanos: 2'), which is not a time, so T0 stayed unknown and the
+    restore never became automatic. An ISO string that carries a timezone passes through; anything else (missing,
+    zero, unparsable) gives "" = unknown. Never a guess."""
+    if isinstance(ts, str):
+        try:
+            ok = datetime.fromisoformat(ts.strip().replace("Z", "+00:00")).tzinfo is not None
+        except ValueError:
+            ok = False
+        return ts.strip() if ok else ""
+    try:
+        seconds = int(getattr(ts, "seconds", 0) or 0)
+        nanos = int(getattr(ts, "nanos", 0) or 0)
+        if seconds <= 0 or not 0 <= nanos < 1_000_000_000:
+            return ""
+        moment = datetime.fromtimestamp(seconds, tz=timezone.utc) + timedelta(microseconds=nanos // 1000)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+    return moment.isoformat().replace("+00:00", "Z")
+
+
 def _event_from_grpc_response(resp) -> Optional[Dict]:
     """Falco gRPC response -> normalised event. The enum name, not str(number), goes into `priority`."""
     enum_type = None
@@ -106,7 +128,7 @@ def _event_from_grpc_response(resp) -> Optional[Dict]:
         pass
     return _normalise({"rule": resp.rule,
                        "priority": priority_name(resp.priority, enum_type),
-                       "time": str(resp.time),
+                       "time": timestamp_to_iso(resp.time),
                        "output_fields": dict(resp.output_fields)})
 
 

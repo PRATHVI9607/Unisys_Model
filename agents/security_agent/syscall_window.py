@@ -12,6 +12,7 @@ events. It does not import torch (the agent image has none); the constants below
 """
 
 import time
+from datetime import datetime
 from typing import Callable, Dict, List, Optional, Sequence
 
 from agents.security_agent.falco_client import RANSOMWARE_SYSCALLS
@@ -25,12 +26,28 @@ DEFAULT_BURST_THRESHOLD = 15          # pre-P5 FALCO_BURST_THRESHOLD default (op
 DEFAULT_COOLDOWN_S = 5.0              # pre-P5 minimum gap between triggers for one PID
 
 
-class Trigger:
-    """A window that should start an entropy check."""
-    __slots__ = ("pid", "events", "reason")
+MAX_TRACKED_PIDS = 4096               # chosen default, not measured: bound on the first-seen map
 
-    def __init__(self, pid: int, events: List[Dict], reason: str):
-        self.pid, self.events, self.reason = pid, events, reason
+# A first-seen time is kept per PID OUTSIDE the capped window, so a long attack (more events than the window
+# holds) still reports the real onset as T0 instead of the start of the retained window.
+
+
+def _ts_ms(ts: str) -> Optional[int]:
+    """Epoch ms of a timezone-aware ISO string, None when it is not one."""
+    try:
+        parsed = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        return int(parsed.timestamp() * 1000) if parsed.tzinfo is not None else None
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+class Trigger:
+    """A window that should start an entropy check. `first_ts` is the earliest Falco time seen for the PID,
+    which may be older than every event left in the capped window ("" when no event carried a usable time)."""
+    __slots__ = ("pid", "events", "reason", "first_ts")
+
+    def __init__(self, pid: int, events: List[Dict], reason: str, first_ts: str = ""):
+        self.pid, self.events, self.reason, self.first_ts = pid, events, reason, first_ts
 
 
 class FalcoWindowTracker:
@@ -43,6 +60,22 @@ class FalcoWindowTracker:
         self._clock = clock
         self._windows: Dict[int, List[Dict]] = {}
         self._last_fire: Dict[int, float] = {}
+        self._first_seen: Dict[int, tuple] = {}     # pid -> (epoch ms, original ts string)
+
+    def first_seen(self, pid: int) -> str:
+        return self._first_seen.get(pid, (0, ""))[1]
+
+    def _note_first_seen(self, pid: int, ts: str) -> None:
+        ms = _ts_ms(ts) if ts else None
+        if ms is None:
+            return
+        known = self._first_seen.get(pid)
+        if known is None:
+            if len(self._first_seen) >= MAX_TRACKED_PIDS:
+                self._first_seen.pop(next(iter(self._first_seen)))      # oldest tracked PID goes
+            self._first_seen[pid] = (ms, ts)
+        elif ms < known[0]:
+            self._first_seen[pid] = (ms, ts)
 
     def window(self, pid: int) -> List[Dict]:
         return list(self._windows.get(pid, []))
@@ -54,6 +87,7 @@ class FalcoWindowTracker:
         if not pid or sysc not in RANSOMWARE_SYSCALLS:
             return None
         w = self._windows.setdefault(pid, [])
+        self._note_first_seen(pid, evt.get("ts", ""))
         # Keep the Falco source timestamp for Fusion's T0/restore decision. `build_model_input` deliberately
         # strips it from the Security Model's fixed event schema.
         w.append({"syscall": sysc, "fd_path": evt.get("fd_path", ""), "ts": evt.get("ts", "")})
@@ -72,7 +106,7 @@ class FalcoWindowTracker:
         if now - self._last_fire.get(pid, float("-inf")) <= self.cooldown_s:
             return None
         self._last_fire[pid] = now
-        return Trigger(pid, list(w), "falco_rule" if ransom_rule else "burst")
+        return Trigger(pid, list(w), "falco_rule" if ransom_rule else "burst", self.first_seen(pid))
 
 
 def build_model_input(events: Sequence[Dict], entropy_series: Sequence[float],

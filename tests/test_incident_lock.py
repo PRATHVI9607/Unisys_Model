@@ -64,3 +64,69 @@ def test_heartbeat_extends_only_own_lock(monkeypatch):
         await asyncio.wait_for(t, timeout=1)      # heartbeat stops instead of extending theirs
         assert r.store["k"]=="other"
     asyncio.run(run())
+
+
+# ---- review fix E: a transient Redis error must not end the heartbeat -------------------------------------
+def test_one_transient_extend_error_does_not_stop_the_heartbeat(monkeypatch):
+    import agents.fusion_agent.incident_lock as il
+    monkeypatch.setattr(il, "HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    async def run():
+        r = FakeRedis()
+        r.store["k"] = "mine"
+        orig, state_calls = r.eval, {"n": 0}
+        async def flaky(script, n, key, token, *extra):
+            state_calls["n"] += 1
+            if state_calls["n"] == 1:
+                raise ConnectionError("one-off")
+            return await orig(script, n, key, token, *extra)
+        r.eval = flaky
+        state = il.LockState()
+        t = asyncio.create_task(il._heartbeat(r, "k", "mine", state))
+        await asyncio.sleep(0.1)
+        assert state_calls["n"] >= 3 and not t.done() and state.lost is False   # kept extending after the error
+        t.cancel()
+    asyncio.run(run())
+
+
+def test_persistent_errors_mark_the_lock_lost_once_the_ttl_has_passed(monkeypatch):
+    import agents.fusion_agent.incident_lock as il
+    monkeypatch.setattr(il, "HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(il, "LOCK_TTL_SECONDS", 0.05)
+    async def run():
+        r = FakeRedis()
+        async def broken(*a, **k):
+            raise ConnectionError("down")
+        r.eval = broken
+        state = il.LockState()
+        await asyncio.wait_for(il._heartbeat(r, "k", "mine", state), timeout=2)
+        assert state.lost is True and "no successful extend" in state.reason
+    asyncio.run(run())
+
+
+def test_a_changed_owner_marks_the_lock_lost():
+    import agents.fusion_agent.incident_lock as il
+    async def run():
+        r = FakeRedis()
+        r.store["k"] = "other"
+        state = il.LockState()
+        il.HEARTBEAT_INTERVAL_SECONDS, saved = 0.01, il.HEARTBEAT_INTERVAL_SECONDS
+        try:
+            await asyncio.wait_for(il._heartbeat(r, "k", "mine", state), timeout=1)
+        finally:
+            il.HEARTBEAT_INTERVAL_SECONDS = saved
+        assert state.lost is True
+    asyncio.run(run())
+
+
+def test_the_context_manager_fills_the_state_passed_in(monkeypatch):
+    import agents.fusion_agent.incident_lock as il
+    monkeypatch.setattr(il, "HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    async def run():
+        r = FakeRedis()
+        state = il.LockState()
+        async with acquire_incident_lock(r, "prod", "podZ", state=state) as got:
+            assert got is True and state.lost is False
+            r.store["kubeheal:incident-lock:prod:podZ"] = "stolen"       # another replica owns the key now
+            await asyncio.sleep(0.1)
+            assert state.lost is True
+    asyncio.run(run())

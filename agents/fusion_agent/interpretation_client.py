@@ -16,8 +16,9 @@ What is where, so nothing here pretends to be more than it is:
     back inside a decision.
   * Causal chain with attack onset T0 (S-INT-3): the DCM server returns the chain lines (their `T+x s`
     offsets are fixed template values in models/dcm/causal_chain_builder.py, not measurements). T0 comes only
-    from an event field `t0_ms` (the Security Agent's earliest suspicious syscall time, a contract field that
-    no agent publishes yet). The event `timestamp_ms` is the PUBLISH time, after the onset, and is never used
+    from an event field `t0_ms` (the Security Agent's earliest Falco syscall time for the process, published
+    when that time is known; an event without a usable Falco time carries no `t0_ms`). The event
+    `timestamp_ms` is the PUBLISH time, after the onset, and is never used
     as T0: restoring "before T0" from it could pick a snapshot that already holds encrypted data.
     Absent means absent: no field, no T0, no invented value. When several events of one incident carry
     `t0_ms`, the earliest is used (the safer end for a pre-T0 snapshot).

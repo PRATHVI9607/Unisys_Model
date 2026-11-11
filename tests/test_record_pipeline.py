@@ -84,6 +84,7 @@ def test_fusion_and_executor_records_share_one_incident_ledger():
         "namespace": "prod",
         "deployment": "payments",
         "pod_name": "payments-abc",
+        "namespace_tier": "prod",       # a missing or unknown tier never acts automatically
         "sec_risk": "0.95",
         "sec_label": "ransomware_active",
         "sec_ci_width": "0.01",

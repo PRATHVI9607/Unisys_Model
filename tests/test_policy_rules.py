@@ -11,7 +11,8 @@ from agents.fusion_agent.decision_policy import (
     make_decision,
 )
 
-OK = dict(models_ok=True, namespace_protected=False, metric_samples_seen=BURN_IN_SAMPLES, mode="enforce")
+OK = dict(models_ok=True, namespace_protected=False, metric_samples_seen=BURN_IN_SAMPLES, mode="enforce",
+          namespace_tier="staging")
 AUTO = (Decision.AUTO_CONTAIN, Decision.AUTO_PATCH)
 
 

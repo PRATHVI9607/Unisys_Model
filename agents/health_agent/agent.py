@@ -27,13 +27,19 @@ def emb_b64(vec) -> str:
 
 
 def namespace_tier(namespace: str) -> str:
-    """Map a namespace to its risk tier (prod / staging / dev)."""
+    """Map a namespace to its risk tier (prod / staging / dev / unknown).
+
+    A namespace that matches none of the known names is "unknown", not "dev": the decision policy scores an
+    unknown tier with the highest multiplier and never acts automatically on it. (The `kubeheal/tier` namespace
+    label is set by the manifests but is not read by any agent yet; the name rule is all there is.)"""
     n = (namespace or "").lower()
     if "prod" in n:
         return "prod"
     if "stag" in n:
         return "staging"
-    return "dev"
+    if "dev" in n:
+        return "dev"
+    return "unknown"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -269,6 +275,10 @@ class HealthAgent:
                 logger.info(f"Assessment {namespace}/{name}: "
                             f"health_risk={assessment['health_risk']:.2f} "
                             f"label={assessment['health_label']}")
+            else:
+                # The Health Model did not answer. Nothing is scored (fail closed), but the Fusion Agent is
+                # told so a human hears about it (S-POL-1). No cooldown: the next drift event retries.
+                await self._publish_model_unavailable(namespace, name)
         except Exception as e:
             logger.error(f"Error handling deployment event: {e}", exc_info=True)
 
@@ -448,6 +458,8 @@ class HealthAgent:
         return {
             "event_id": event_id, "namespace": namespace, "pod_name": name,
                 "deployment": name,
+            # Explicit: True only because the Health Model answered. Fusion treats a missing value as false.
+            "model_scored": True,
             "namespace_tier": namespace_tier(namespace),
             "health_risk": float(result.get("risk_score", 0.0)),
             "health_label": result.get("label", "benign"),
@@ -542,6 +554,28 @@ class HealthAgent:
             return SeverityLevel.LOW
         return SeverityLevel.BENIGN
 
+    async def _publish_model_unavailable(self, namespace: str, name: str) -> None:
+        """Tell the Fusion Agent that the Health Model did not answer for this workload. The event carries NO
+        score and NO embedding: model_scored=false and model_unavailable=true, maximum CI width. Fusion does not
+        decide on it; it escalates to a human once per workload and window. A publish failure is only logged
+        (the drift event is assessed again next time)."""
+        event_id = f"health-{datetime.utcnow().strftime('%Y%m%d-%H%M%S-%f')}-{name}"
+        payload = {
+            "event_id": event_id, "namespace": namespace, "pod_name": name, "deployment": name,
+            "namespace_tier": namespace_tier(namespace),
+            "health_label": "model_unavailable",
+            "health_ci_width": "1.0000",
+            "model_scored": "false",
+            "model_unavailable": "true",
+            "inference_method": "none",
+            "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
+        }
+        try:
+            await self.redis.xadd("kubeheal.health.events", payload)
+            logger.error(f"Published {event_id}: Health Model unavailable for {namespace}/{name}")
+        except Exception as e:
+            logger.error(f"Could not publish the model_unavailable event for {namespace}/{name}: {e}")
+
     async def _publish_assessment(self, a: Dict) -> None:
         """Publish the v4 HealthAssessment schema (Section 15.A.1) to the
         kubeheal.health.events stream + a hash for dashboard detail lookup."""
@@ -553,6 +587,7 @@ class HealthAgent:
             "namespace_tier": a["namespace_tier"],
             "health_risk": f"{a['health_risk']:.4f}",
             "health_label": a["health_label"],
+            "model_scored": "true" if a.get("model_scored") is True else "false",
             "health_ci_width": f"{a['health_ci_width']:.4f}",
             "field_attribution_json": json.dumps(a.get("field_attribution", {})),
             "top_field": a.get("top_field", ""),

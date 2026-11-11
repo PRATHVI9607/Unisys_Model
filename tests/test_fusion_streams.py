@@ -125,7 +125,8 @@ def test_consume_loop_reads_all_three_streams_and_sweeps_pending():
 
 def test_handle_entry_runs_under_a_lease():
     src = inspect.getsource(fusion.FusionAgentV4._handle_entry)
-    assert "reliability.lease" in src and "xack" in src
+    assert "reliability.lease" in src
+    assert "xack" in inspect.getsource(fusion.FusionAgentV4._handle_entry_body)
 
 
 def test_the_ack_comes_only_after_success_for_every_stream():

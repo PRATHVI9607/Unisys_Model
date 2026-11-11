@@ -37,6 +37,8 @@ class FusionConfig:
     #                                        process inside this window updates the incident
     incident_context_ttl_s: int = 86400    # INCIDENT_CONTEXT_TTL_S: how long incident context (for the restore
     #                                        trigger) is kept in Redis
+    model_unavailable_dedup_ttl_s: int = 300  # MODEL_UNAVAILABLE_DEDUP_TTL_S: one escalation per workload for a
+    #                                        Health Model outage inside this window (chosen default, not measured)
     burn_in_forced: bool = False           # BURN_IN_MODE=true forces burn-in on. It can never force it off.
 
     @classmethod
@@ -48,5 +50,6 @@ class FusionConfig:
             observe_period_s=_num(env, "OBSERVE_PERIOD_S", 300, int),
             incident_dedup_ttl_s=_num(env, "INCIDENT_DEDUP_TTL_S", 600, int),
             incident_context_ttl_s=_num(env, "INCIDENT_CONTEXT_TTL_S", 86400, int),
+            model_unavailable_dedup_ttl_s=_num(env, "MODEL_UNAVAILABLE_DEDUP_TTL_S", 300, int),
             burn_in_forced=str(env.get("BURN_IN_MODE", "false")).strip().lower() == "true",
         )

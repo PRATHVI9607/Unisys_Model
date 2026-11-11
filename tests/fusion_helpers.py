@@ -44,7 +44,8 @@ def sec_event(**kw):
 def health_event(**kw):
     ev = {"event_id": "health-1", "namespace": "prod", "deployment": "payments", "pod_name": "payments",
           "namespace_tier": "prod", "health_risk": "0.95", "health_label": "drift",
-          "health_ci_width": "0.05", "top_field": "spec.cpu", "timestamp_ms": str(NOW_MS + 1000)}
+          "health_ci_width": "0.05", "top_field": "spec.cpu", "model_scored": "true",
+          "timestamp_ms": str(NOW_MS + 1000)}
     ev.update(kw)
     return ev
 

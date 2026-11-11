@@ -38,7 +38,9 @@ class DecisionInput:
     correlation_score: float = 0.0
     compound_flag: bool = False
 
-    namespace_tier: str = "staging"
+    # "prod", "staging", "dev" or "unknown". Anything else (a missing value, a typo, "production") is treated
+    # as "unknown": the highest multiplier for the score, but never an automatic action.
+    namespace_tier: str = "unknown"
     # Circuit breaker counts (S-POL-6): enforced actions inside the last hour. The caller counts them
     # with a sliding window; the policy never reads a clock.
     circuit_breaker_containments: int = 0
@@ -75,6 +77,9 @@ class DecisionOutput:
 
 
 TIER_MULTIPLIERS = {"prod": 1.20, "staging": 1.00, "dev": 0.70}
+# An unknown tier uses the HIGHEST multiplier for the score (a larger multiplier makes a human review more
+# likely, and never makes an automatic action easier because an unknown tier can never act automatically).
+UNKNOWN_TIER_MULTIPLIER = max(TIER_MULTIPLIERS.values())
 COMPOUND_ESCALATION = 1.15
 CB_CONTAIN_LIMIT_PER_HOUR = 3
 CB_PATCH_LIMIT_PER_HOUR = 10
@@ -125,9 +130,17 @@ def _breaker_closed(count, limit: int) -> bool:
     return isinstance(count, int) and not isinstance(count, bool) and 0 <= count < limit
 
 
+def _tier(value) -> Optional[str]:
+    """The known tier name, or None for anything else (missing, wrong type, unrecognised, "unknown")."""
+    if isinstance(value, str) and value.strip().lower() in TIER_MULTIPLIERS:
+        return value.strip().lower()
+    return None
+
+
 def _decide(inp: DecisionInput) -> DecisionOutput:
     t = Thresholds()
-    tier_mult = TIER_MULTIPLIERS.get(inp.namespace_tier, 1.00)
+    tier = _tier(inp.namespace_tier)
+    tier_mult = TIER_MULTIPLIERS[tier] if tier else UNKNOWN_TIER_MULTIPLIER
 
     # Invalid numeric input is never trusted.
     if not _finite(inp.health_risk, inp.sec_risk):
@@ -166,6 +179,9 @@ def _decide(inp: DecisionInput) -> DecisionOutput:
             why.append(breaker_text)
         if protected:
             why.append("namespace is protected (kubeheal/protected) or its label state is unknown")
+        if tier is None:
+            why.append(f"namespace tier is unknown ({inp.namespace_tier!r}): no automatic action for an "
+                       "unknown tier, scored with the highest tier multiplier")
         return why
 
     # ── SECURITY: CONTAIN candidate (compound or security-only) ──
@@ -182,7 +198,7 @@ def _decide(inp: DecisionInput) -> DecisionOutput:
             return DecisionOutput(Decision.AUTO_CONTAIN, sec_adjusted,
                 f"Compound incident (DCM corr={inp.correlation_score:.2f}): "
                 f"sec_risk={inp.sec_risk:.2f}, health_risk={inp.health_risk:.2f}. "
-                f"Tier={inp.namespace_tier}. AUTO-CONTAIN.", True,
+                f"Tier={tier}. AUTO-CONTAIN.", True,
                 {"compound": True, "nl_summary": inp.nl_summary})
         return DecisionOutput(Decision.AUTO_CONTAIN, sec_adjusted,
             f"Security incident. sec_risk={inp.sec_risk:.2f}, label={inp.sec_label}. AUTO-CONTAIN.",

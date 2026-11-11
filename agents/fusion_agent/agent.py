@@ -46,9 +46,9 @@ from agents.common.stream_reliability import ReliabilityConfig, StreamReliabilit
 from agents.fusion_agent.breakers import BurnInCounter, contain_breaker, patch_breaker
 from agents.fusion_agent.config import FusionConfig
 from agents.fusion_agent.decision_policy import (
-    make_decision, DecisionInput, Decision,
+    make_decision, DecisionInput, Decision, TIER_MULTIPLIERS,
 )
-from agents.fusion_agent.incident_lock import acquire_incident_lock
+from agents.fusion_agent.incident_lock import LockState, acquire_incident_lock
 from agents.fusion_agent.interpretation_client import InterpretationClient, earliest_t0
 
 logging.basicConfig(level=logging.INFO)
@@ -66,6 +66,9 @@ ESCALATIONS_STREAM = "kubeheal.escalations"
 INCIDENT_PREFIX = "kubeheal:fusion:incident"      # hash per incident: context for updates and restore
 OPEN_PREFIX = "kubeheal:fusion:open"              # (namespace, pod, pid) -> incident id
 RESTORE_PREFIX = "kubeheal:fusion:restore"        # marker: a restore request was queued for this incident
+EXEC_REQ_PREFIX = "kubeheal:fusion:execreq"       # SET NX marker: this incident and action was queued once
+MODEL_DOWN_PREFIX = "kubeheal:fusion:modelunavail"  # SET NX marker: a health model outage was escalated lately
+AUTOMATIC = (Decision.AUTO_CONTAIN, Decision.AUTO_PATCH)
 RESTORE_KINDS = ("Deployment", "StatefulSet")     # what the Executor accepts (agents/executor/validation.py)
 
 
@@ -97,6 +100,23 @@ def _ci_width(event: Dict, name: str) -> Optional[float]:
 
 def _truthy(v) -> bool:
     return str(v).strip().lower() == "true"
+
+
+def tier_of(health: Dict, sec: Dict) -> str:
+    """The namespace tier named by the events. A missing, unrecognised or conflicting tier is "unknown":
+    the policy scores it with the highest multiplier but never lets it act automatically."""
+    tiers = {str(e.get("namespace_tier")).strip().lower() for e in (health, sec) if e and e.get("namespace_tier")}
+    if len(tiers) == 1:
+        tier = tiers.pop()
+        if tier in TIER_MULTIPLIERS:
+            return tier
+    return "unknown"
+
+
+class RetryLater(Exception):
+    """The entry could not be acted on yet (the incident lock is busy or was lost). It is NOT acknowledged: it
+    stays pending, is reclaimed (XAUTOCLAIM) and, after the configured number of deliveries, dead-lettered with
+    an escalation to a human, so an automatic action is never silently dropped."""
 
 
 def derive_incident_id(event: Dict) -> str:
@@ -189,15 +209,34 @@ class FusionAgentV4:
                     GROUP, self.consumer,
                     {HEALTH_STREAM: ">", SEC_STREAM: ">", ACTIONS_STREAM: ">"}, count=10, block=1000,
                 )
-                for stream, entries in msgs or []:
-                    for msg_id, fields in entries:
-                        await self._handle_entry(stream, msg_id, fields)
+                await self._handle_batch(msgs or [])
                 await asyncio.sleep(0.05)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.warning(f"consume error: {e}")
                 await asyncio.sleep(1)
+
+    async def _handle_batch(self, msgs):
+        """Entries of one read are handled one after another (their order matters for the incident state), so
+        EVERY entry is leased when it is read: while a slow entry runs, the idle time of the others stays near
+        zero and another replica cannot XAUTOCLAIM them. Each lease ends when its entry is done."""
+        leases = []
+        try:
+            for stream, entries in msgs:
+                for msg_id, fields in entries:
+                    cm = self.reliability.lease(stream, msg_id)
+                    await cm.__aenter__()
+                    leases.append((stream, msg_id, fields, cm))
+            while leases:
+                stream, msg_id, fields, cm = leases.pop(0)
+                try:
+                    await self._handle_entry(stream, msg_id, fields, leased=True)
+                finally:
+                    await cm.__aexit__(None, None, None)
+        finally:
+            for *_, cm in leases:                       # cancelled or crashed: release what is left
+                await cm.__aexit__(None, None, None)
 
     async def _reclaim_pending(self):
         """XAUTOCLAIM the entries a dead replica left pending (S-MQ-3); dead-letter the ones that keep failing."""
@@ -212,22 +251,30 @@ class FusionAgentV4:
         await self._escalate(incident_id, fields.get("namespace", ""), workload_of(fields) if fields else "",
                              f"{reason} (stream {stream}, entry {msg_id})")
 
-    async def _handle_entry(self, stream: str, msg_id: str, fields: Dict) -> bool:
+    async def _handle_entry(self, stream: str, msg_id: str, fields: Dict, leased: bool = False) -> bool:
         """Handle one stream entry. XACK only after success; a failed entry stays pending and is reclaimed
-        (XAUTOCLAIM) or, after N deliveries, dead-lettered."""
+        (XAUTOCLAIM) or, after N deliveries, dead-lettered. `leased` says the caller already holds the lease."""
+        if leased:
+            return await self._handle_entry_body(stream, msg_id, fields)
         async with self.reliability.lease(stream, msg_id):
-            try:
-                if stream == HEALTH_STREAM:
-                    await self._on_health(fields)
-                elif stream == ACTIONS_STREAM:
-                    await self._on_action_result(fields)
-                else:
-                    await self._on_security(fields)
-            except Exception as e:
-                logger.error(f"handling {stream}/{msg_id} failed, left pending: {e}", exc_info=True)
-                return False
-            await self.redis.xack(stream, GROUP, msg_id)
-            return True
+            return await self._handle_entry_body(stream, msg_id, fields)
+
+    async def _handle_entry_body(self, stream: str, msg_id: str, fields: Dict) -> bool:
+        try:
+            if stream == HEALTH_STREAM:
+                await self._on_health(fields)
+            elif stream == ACTIONS_STREAM:
+                await self._on_action_result(fields)
+            else:
+                await self._on_security(fields)
+        except RetryLater as e:
+            logger.warning(f"{stream}/{msg_id} not handled yet, left pending for a retry: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"handling {stream}/{msg_id} failed, left pending: {e}", exc_info=True)
+            return False
+        await self.redis.xack(stream, GROUP, msg_id)
+        return True
 
     def _key(self, fields: Dict) -> str:
         return f"{fields.get('namespace', 'default')}:{workload_of(fields)}"
@@ -246,7 +293,27 @@ class FusionAgentV4:
             for k in [k for k, (_, ts) in d.items() if now - ts > self.CORRELATION_WINDOW_S]:
                 d.pop(k, None)
 
+    async def _on_model_unavailable(self, f: Dict):
+        """The Health Agent could not get an answer from the Health Model (S-POL-1). Nothing was scored, so there
+        is no decision to make: a human is told, once per workload and window (SET NX, so repeated drift events
+        during an outage do not flood the escalation stream)."""
+        namespace, workload = f.get("namespace", ""), workload_of(f)
+        marker = f"{MODEL_DOWN_PREFIX}:{namespace}:{workload}"
+        if not await self.redis.set(marker, "1", nx=True, ex=self.cfg.model_unavailable_dedup_ttl_s):
+            return
+        try:
+            await self._escalate(derive_incident_id(f), namespace, workload,
+                                 "health_model_unavailable: the Health Agent saw drift but the Health Model did "
+                                 "not answer, so nothing was scored and no automatic action is possible; "
+                                 "human review required")
+        except Exception:
+            await self.redis.delete(marker)          # let the redelivery escalate again
+            raise
+
     async def _on_health(self, f: Dict):
+        if _truthy(f.get("model_unavailable")):
+            await self._on_model_unavailable(f)
+            return
         key = self._key(f)
         # P6-D5: one health event is one metric sample. Counted once per event id (a redelivery adds nothing).
         await BurnInCounter(self.redis).observe(f.get("event_id"))
@@ -298,7 +365,8 @@ class FusionAgentV4:
         if sec and not _truthy(sec.get("model_scored")):
             issues.append("security event not scored by the Security Model "
                           "(heuristic only, no syscall window, or model unreachable)")
-        if health and str(health.get("model_scored", "true")).strip().lower() == "false":
+        if health and not _truthy(health.get("model_scored")):
+            # a missing field counts as not scored: only an explicit "true" from the Health Agent is trusted
             issues.append("health event not scored by the Health Model")
         health_risk = float(health.get("health_risk", 0) or 0)
         sec_risk = float(sec.get("sec_risk", 0) or 0)
@@ -339,7 +407,7 @@ class FusionAgentV4:
             sec_syscall_top=sec.get("top_syscall", ""),
             correlation_score=correlation,
             compound_flag=compound,
-            namespace_tier=(health.get("namespace_tier") or sec.get("namespace_tier") or "staging"),
+            namespace_tier=tier_of(health, sec),
             circuit_breaker_containments=await contain_breaker(self.redis, namespace, self.clock).count(),
             circuit_breaker_patches=await patch_breaker(self.redis, namespace, workload, self.clock).count(),
             models_ok=models_ok,
@@ -437,14 +505,32 @@ class FusionAgentV4:
             logger.info(f"incident {incident_id} already has state {prior_state!r}; "
                         f"{out.decision.value} from the new event only updates the record")
         elif out.requires_incident_lock:
-            async with acquire_incident_lock(self.redis, namespace, workload) as got:
+            automatic = out.decision in AUTOMATIC
+            lock_state = LockState()
+            async with acquire_incident_lock(self.redis, namespace, workload, state=lock_state) as got:
                 if not got:
-                    logger.debug(f"lock held for {key}; skipping")
+                    if automatic:
+                        # Never drop an automatic action: leave the entry pending (not acked) so it is
+                        # reclaimed and retried; after the delivery limit it is dead-lettered and escalated.
+                        await self._append_ledger(incident_id, "action_deferred", {
+                            "decision": out.decision.value, "reason": "incident lock held by another handler",
+                            "namespace": namespace, "deployment": workload, "retry": "entry left pending"})
+                        raise RetryLater(f"lock held for {key}; {out.decision.value} not queued yet")
+                    logger.debug(f"lock held for {key}; the {out.decision.value} record is skipped")
                     return
-                outcome = await self._execute(namespace, workload, pod, out, inp, causal_chain, incident_id,
-                                              t0_ms=t0_ms)
-                if outcome == "queued_for_executor":
-                    await self.redis.hset(self._ctx_key(incident_id), mapping={"action_state": "queued"})
+                # The lock was taken just now: the state read at the start may be stale (a second replica can
+                # have queued this incident's action in between), so read it again.
+                fresh = (await self.redis.hget(self._ctx_key(incident_id), "action_state")) or ""
+                if fresh and fresh != state:
+                    logger.info(f"incident {incident_id} got state {fresh!r} while this event waited for the "
+                                f"lock; {out.decision.value} from this event is not acted on")
+                elif lock_state.lost and automatic:
+                    raise RetryLater(f"incident lock for {key} was lost before {out.decision.value} was queued")
+                else:
+                    outcome = await self._execute(namespace, workload, pod, out, inp, causal_chain, incident_id,
+                                                  t0_ms=t0_ms)
+                    if outcome in ("queued_for_executor", "already_queued"):
+                        await self.redis.hset(self._ctx_key(incident_id), mapping={"action_state": "queued"})
         else:
             await self._execute(namespace, workload, pod, out, inp, causal_chain, incident_id, t0_ms=t0_ms)
 
@@ -474,12 +560,14 @@ class FusionAgentV4:
                          "not queued")
             outcome = "not_queued_no_pod"
         elif out.decision == Decision.AUTO_CONTAIN:
-            await self._enqueue_exec(incident_id, "contain", namespace, workload, pod, out, inp)
+            if not await self._enqueue_exec(incident_id, "contain", namespace, workload, pod, out, inp):
+                return "already_queued"
             if not out.dry_run:
                 await contain_breaker(self.redis, namespace, self.clock).record(incident_id)
             outcome = "queued_for_executor"
         elif out.decision == Decision.AUTO_PATCH:
-            await self._enqueue_exec(incident_id, "patch", namespace, workload, pod, out, inp)
+            if not await self._enqueue_exec(incident_id, "patch", namespace, workload, pod, out, inp):
+                return "already_queued"
             if not out.dry_run:
                 await patch_breaker(self.redis, namespace, workload, self.clock).record(incident_id)
             outcome = "queued_for_executor"
@@ -501,7 +589,29 @@ class FusionAgentV4:
         await self.redis.xadd(ACTIONS_STREAM, entry)
         return outcome
 
-    async def _enqueue_exec(self, incident_id, action, namespace, workload, pod, out, inp):
+    async def _claim_request(self, incident_id: str, action: str) -> Optional[str]:
+        """SET NX marker per incident and action. Returns the marker key when this caller may queue the request,
+        None when it was already queued (two replicas handling the initial and the complete event of one
+        incident, or a redelivery). TTL is chosen, not measured: the incident context TTL."""
+        marker = f"{EXEC_REQ_PREFIX}:{incident_id}:{action}"
+        if await self.redis.set(marker, "1", nx=True, ex=self.cfg.incident_context_ttl_s):
+            return marker
+        return None
+
+    async def _enqueue_exec(self, incident_id, action, namespace, workload, pod, out, inp) -> bool:
+        """Queue one request on kubeheal.exec. False when this incident and action was already queued."""
+        marker = await self._claim_request(incident_id, action)
+        if marker is None:
+            logger.info(f"{action} for incident {incident_id} was already queued; no second request")
+            return False
+        try:
+            await self._xadd_exec(incident_id, action, namespace, workload, pod, out, inp)
+        except Exception:
+            await self.redis.delete(marker)          # nothing was queued: a retry must be able to queue it
+            raise
+        return True
+
+    async def _xadd_exec(self, incident_id, action, namespace, workload, pod, out, inp):
         await self.redis.xadd(EXEC_STREAM, {
             "incident_id": incident_id,
             "action": action,
@@ -568,25 +678,15 @@ class FusionAgentV4:
             return
         dry_run = self.mode.dry_run_for(namespace)
         contain_approved_by = ctx.get("approved_by") or "auto"
-        await self.redis.xadd(EXEC_STREAM, {
-            "incident_id": incident_id,
-            "action": "restore",
-            "namespace": namespace,
-            "deployment": workload,
-            "pod": pod,
-            "workload_kind": kind,
-            "t0_ms": t0,
-            "namespace_tier": ctx.get("namespace_tier", ""),
-            # The restore is Fusion's own automatic request: nobody approved it. Who approved the containment
-            # that preceded it is kept in a separate field.
-            "approved_by": "auto",
-            "contain_approved_by": contain_approved_by,
-            "dry_run": str(dry_run).lower(),
-            "source": "fusion",
-            "rationale": "restore after a successful containment, from the last snapshot before T0",
-            "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
-        })
-        await self.redis.set(marker, "1", ex=self.cfg.incident_context_ttl_s)
+        # SET NX before the xadd (it used to be get, xadd, set): of two replicas only one queues the restore.
+        if not await self.redis.set(marker, "1", nx=True, ex=self.cfg.incident_context_ttl_s):
+            return
+        try:
+            await self._xadd_restore(incident_id, namespace, workload, pod, kind, t0, dry_run, contain_approved_by,
+                                       ctx.get("namespace_tier", ""))
+        except Exception:
+            await self.redis.delete(marker)
+            raise
         await self._append_ledger(incident_id, "restore_requested", {
             "t0_ms": int(t0), "workload_kind": kind, "namespace": namespace, "deployment": workload,
             "pod": pod, "approved_by": "auto", "contain_approved_by": contain_approved_by,
@@ -595,6 +695,27 @@ class FusionAgentV4:
             "incident_id": incident_id, "action_type": "restore_requested",
             "target": json.dumps({"namespace": namespace, "deployment": workload, "pod": pod}),
             "t0_ms": t0, "outcome": "queued_for_executor", "dry_run": str(dry_run).lower(),
+            "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
+        })
+
+    async def _xadd_restore(self, incident_id, namespace, workload, pod, kind, t0, dry_run, contain_approved_by,
+                           tier):
+        await self.redis.xadd(EXEC_STREAM, {
+            "incident_id": incident_id,
+            "action": "restore",
+            "namespace": namespace,
+            "deployment": workload,
+            "pod": pod,
+            "workload_kind": kind,
+            "t0_ms": t0,
+            "namespace_tier": tier,
+            # The restore is Fusion's own automatic request: nobody approved it. Who approved the containment
+            # that preceded it is kept in a separate field.
+            "approved_by": "auto",
+            "contain_approved_by": contain_approved_by,
+            "dry_run": str(dry_run).lower(),
+            "source": "fusion",
+            "rationale": "restore after a successful containment, from the last snapshot before T0",
             "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
         })
 

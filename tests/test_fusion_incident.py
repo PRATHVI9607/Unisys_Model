@@ -309,14 +309,16 @@ def test_incident_state_survives_a_held_incident_lock():
     assert "incident_update" in steps and stream(a.redis, fusion.EXEC_STREAM) == []
 
 
-def test_a_held_lock_on_an_automatic_decision_leaves_the_incident_open_for_the_next_event():
+def test_a_held_lock_on_an_automatic_decision_is_retried_and_the_incident_stays_open():
     a = make_agent()
     lock_key = "kubeheal:incident-lock:prod:payments"
     run(a.redis.set(lock_key, "someone-else", nx=True, ex=10))
-    handle_sec(a, sec_event(event_id="sec-1"), "1-0")             # AUTO, but the lock is held: nothing queued
-    assert stream(a.redis, fusion.EXEC_STREAM) == []
+    ev = sec_event(event_id="sec-1")
+    # AUTO, but the lock is held: nothing queued and the entry is NOT acked (it is retried, not dropped)
+    assert run(a._handle_entry(fusion.SEC_STREAM, "1-0", ev)) is False
+    assert stream(a.redis, fusion.EXEC_STREAM) == [] and a.redis.acked == []
     run(a.redis.delete(lock_key))
-    handle_sec(a, sec_event(event_id="sec-2", entropy_phase="complete"), "2-0")
+    handle_sec(a, ev, "1-0")                                       # the redelivery of the same entry
     assert len(stream(a.redis, fusion.EXEC_STREAM)) == 1
     steps = [r["step"] for r in ledger_steps(a)]
-    assert steps.count("detection") == 1 and steps.count("incident_update") == 1
+    assert steps.count("detection") == 1 and steps.count("action_deferred") == 1
