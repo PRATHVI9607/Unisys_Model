@@ -9,7 +9,7 @@ chart changes and merges, provided it runs the full suite after each merge and k
 
 ## Active run state (2026-11-11, Codex)
 
-Codex is the active orchestrator and owns the ordered run below. No push is permitted. Owner stop points are credentials/passwords, model training, deleting user data, or changing `PROJECT_SPEC.md`. Current tips after the D4 merge: `demo` `66eb2ad`, `work` `501dea6`, `wave/V5-D4` `ad464f3`, `wave/V5-S2` `f6ecfa9`. D4 is merged and its full suite passed on `work`; next is V5-S2.
+Codex is the active orchestrator and owns the ordered run below. No push is permitted. Owner stop points are credentials/passwords, model training, deleting user data, or changing `PROJECT_SPEC.md`. D4 is merged into both `work` and `demo`; its full suite passed on both. Current branch tips: `work` includes D4 merge `501dea6` plus its docs record, `demo` `e377d6a`, `wave/V5-D4` `ad464f3`, `wave/V5-S2` `f6ecfa9`. Next is V5-S2.
 
 Owner decisions (all in `V5_INTEGRATION_PLAN.md` section 11): M1 option (b), M2, M3, D1, D2, D3, D5, D6, D7, plus the two latest answers Q1 and Q2.
 In short: LightGBM health and security bundles (split-conformal sets, TreeSHAP) run inside OUR architecture; an automatic action needs a prediction set of exactly one label (M2);
@@ -23,8 +23,8 @@ the eBPF sensor is optional and last (D6).
 
 | Branch | Worktree | Tip | State | What it needs |
 |---|---|---|---|---|
-| `work` | `../Unisys_Model-wt-metric-query` | `501dea6` | D4 merged; full suite after merge: 1363 passed, 3 skipped, 34 deselected. | Next: fix/review and merge S2, then continue in order. |
-| `demo` | main checkout `C:/My_projects_1/cLOUD/Unisys_Model` | `66eb2ad` | `work` merged in, plus `wave/V5-I2-demo` (demo scripts for the inference service). Current checkout. | Merge updated `work` after the D4 task. |
+| `work` | `../Unisys_Model-wt-metric-query` | see `git log -1 work` | D4 merged; full suite after merge: 1363 passed, 3 skipped, 34 deselected. | Next: fix/review and merge S2, then continue in order. |
+| `demo` | main checkout `C:/My_projects_1/cLOUD/Unisys_Model` | `e377d6a` | D4 from `work` merged; full suite: 1368 passed, 2 skipped, 34 deselected. Includes demo-only I2 scripts. | Merge updated `work` after each subsequent task. |
 | `wave/V5-D4` | `../Unisys_Model-wt-V5-D4` | `ad464f3` | Reviewed and merged into `work`; branch suite 1363 passed, 3 skipped, 34 deselected. Worktree clean. | Complete; keep branch. |
 | `wave/V5-S2` | `../Unisys_Model-wt-V5-S2` | `f6ecfa9` | Security Agent port built, 1376 passed in its worktree, reviewed once (verdict: do not merge as is); findings not yet fixed, not merged. Clean at Codex start. | Task 2, after D4. |
 | merged and safe to delete later (keep the branches, remove only worktrees you no longer need) | | | `wave/V5-M1`, `V5-D1`, `V5-D2`, `V5-D4a`, `V5-I2`, `V5-I2-demo`, `V5-D3`, `wave/P11`, `wip/docs-p6d2` | none |
@@ -84,7 +84,7 @@ Last known results: `work` 1304 passed, 3 skipped, 34 deselected; `demo` 1309 pa
 
 ### Task 1. Review fixes and merge of `wave/V5-D4` (Health Agent, `agents/health_agent/agent.py`, `inference_client.py`)
 
-Independent review verdict was merge after the demo-namespace item. The findings below were fixed on `wave/V5-D4`, reviewed by Codex, and the branch was merged into `work` as `501dea6`. Branch and post-merge full suite each passed (1363 passed, 3 skipped, 34 deselected); Helm was on PATH. No Kubernetes write was used. The eleven findings and their fixes are recorded on the V5-D4 line in `PROGRESS.md`.
+Independent review verdict was merge after the demo-namespace item. The findings below were fixed on `wave/V5-D4`, reviewed by Codex, and the branch was merged into `work` as `501dea6`, then into `demo` as `e377d6a`. Branch and work suites each passed (1363 passed, 3 skipped, 34 deselected); demo suite passed (1368 passed, 2 skipped, 34 deselected). Helm was on PATH. No Kubernetes write was used. The eleven findings and their fixes are recorded on the V5-D4 line in `PROGRESS.md`.
 
 1. Demo namespace: set `WATCH_NAMESPACES` in the chart/demo values (include `demo` if the demo workload stays there) and add the matching RoleBindings for `kubeheal-health-agent-read` in that namespace (RBAC test parity in `tests/test_rbac_*` and `k8s/rbac/rbac.yaml`).
 2. `_first_sight` (agent.py about 412): a Redis error pops `seen_hash` and nothing retries, so a quiet drifted workload is never assessed until its spec changes. Add a retry (scheduler retry set or periodic re-list).
@@ -97,7 +97,7 @@ Independent review verdict was merge after the demo-namespace item. The findings
 9. Early assessment (posture violation or failed rollout) queries a window of a few seconds, so the model effectively sees only the spec diff: widen the window or mark such events uncertain.
 10. `watch_loop`: no minimum interval between watch attempts or after a 410 (hot loop risk). Add about 1 s minimum.
 11. OBSERVE with inference down publishes a no-score notice per sample (Fusion's SET NX contains it); add per-spec dedup if cheap.
-Also: `field_attribution_json` is no longer published but `dashboard/fastapi_app.py`, `dashboard/incident_view.py` and `agents/fusion_agent/interpretation_client.py` still read it (handled in Task 9, make sure nothing crashes meanwhile). Next action is merge `work` into `demo`, then continue with Task 2.
+Also: `field_attribution_json` is no longer published but `dashboard/fastapi_app.py`, `dashboard/incident_view.py` and `agents/fusion_agent/interpretation_client.py` still read it (handled in Task 9, make sure nothing crashes meanwhile). Task 1 is complete; continue with Task 2.
 
 ### Task 2. Review fixes and merge of `wave/V5-S2` (Security Agent)
 
