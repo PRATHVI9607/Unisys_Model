@@ -54,6 +54,11 @@ from dashboard.mode_admin import ModeStore
 logger = logging.getLogger(__name__)
 
 EXEC_STREAM = "kubeheal.exec"
+# Same value as agents.executor.snapshots.FREEZE_PREFIX (tests/test_dashboard_freeze.py checks it); the
+# dashboard image does not import the Executor package.
+FREEZE_PREFIX = "kubeheal:snapfreeze"
+FREEZE_REASON_MIN_CHARS = 10   # chosen, not measured: a written reason must be more than a word
+BARE_CLAIM_MIN_AGE_S = 60      # chosen, not measured: reconcile leaves a younger bare claim to its owner
 CLAIM_KEY = "kubeheal:approval:{incident_id}"
 CLAIM_TTL_S = 10 * 60  # chosen, not measured; override with KUBEHEAL_APPROVAL_CLAIM_TTL_S
 LEDGER_APPEND_ATTEMPTS = 3      # tries to write `approved` after the request was queued
@@ -76,6 +81,10 @@ class DashboardServices:
     list_claims: Callable[[], Awaitable[List[tuple[str, str]]]]
     exec_entry_exists: Callable[[str], Awaitable[bool]]
     fetch_event: Callable[[str, str], Awaitable[Optional[Dict[str, Any]]]]
+    # SnapshotFreeze keys (namespace, pvc, key) held by an incident, and their removal. Optional so the
+    # older fakes keep working; the release tool answers 503 without them.
+    freeze_list: Optional[Callable[[str], Awaitable[List[tuple[str, str, str]]]]] = None
+    freeze_delete: Optional[Callable[[List[str]], Awaitable[None]]] = None
 
 
 def redis_services(ledger: Ledger, mode_store: ModeStore, get_redis: Callable[[], Any]) -> DashboardServices:
@@ -92,14 +101,16 @@ def redis_services(ledger: Ledger, mode_store: ModeStore, get_redis: Callable[[]
         return msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
 
     async def claim(incident_id: str) -> bool:
-        return bool(await _redis().set(CLAIM_KEY.format(incident_id=incident_id), "claimed", nx=True,
-                                       ex=_claim_ttl_s()))
+        return bool(await _redis().set(CLAIM_KEY.format(incident_id=incident_id),
+                                       f"{BARE_CLAIM_PREFIX}{int(time.time())}", nx=True, ex=_claim_ttl_s()))
 
     async def release(incident_id: str) -> None:
         await _redis().delete(CLAIM_KEY.format(incident_id=incident_id))
 
     async def claim_set(incident_id: str, value: str) -> None:
-        await _redis().set(CLAIM_KEY.format(incident_id=incident_id), value, xx=True, ex=_claim_ttl_s())
+        # No expiry: a claim that holds a queued stream id must outlive the TTL until `approved` is in the
+        # ledger, otherwise a repeated approve could queue the same request again.
+        await _redis().set(CLAIM_KEY.format(incident_id=incident_id), value, xx=True)
 
     async def claim_get(incident_id: str) -> Optional[str]:
         v = await _redis().get(CLAIM_KEY.format(incident_id=incident_id))
@@ -132,8 +143,39 @@ def redis_services(ledger: Ledger, mode_store: ModeStore, get_redis: Callable[[]
         return {(k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
                 for k, v in raw.items()}
 
+    async def freeze_list(incident_id: str) -> List[tuple[str, str, str]]:
+        r = _redis()
+        found = []
+        async for key in r.scan_iter(match=f"{FREEZE_PREFIX}:*"):
+            key = key.decode() if isinstance(key, bytes) else str(key)
+            value = await r.get(key)
+            value = value.decode() if isinstance(value, bytes) else value
+            if value == incident_id:
+                rest = key[len(FREEZE_PREFIX) + 1:]
+                namespace, _, pvc = rest.partition(":")
+                found.append((namespace, pvc, key))
+        return found
+
+    async def freeze_delete(keys: List[str]) -> None:
+        if keys:
+            await _redis().delete(*keys)
+
     return DashboardServices(ledger, mode_store, enqueue_exec, claim, release, claim_set, claim_get,
-                             list_claims, exec_entry_exists, fetch_event)
+                             list_claims, exec_entry_exists, fetch_event, freeze_list, freeze_delete)
+
+
+BARE_CLAIM_PREFIX = "claimed@"
+
+
+def _bare_claim_age_s(value: Optional[str]) -> Optional[float]:
+    """Age of a claim that holds no stream id yet, from `claimed@<epoch>`. None when unknown (an older
+    claim written as plain `claimed`), which callers treat as old."""
+    if value and value.startswith(BARE_CLAIM_PREFIX):
+        try:
+            return max(0.0, time.time() - float(value[len(BARE_CLAIM_PREFIX):]))
+        except ValueError:
+            return None
+    return None
 
 
 def _claim_ttl_s() -> int:
@@ -330,10 +372,15 @@ async def reconcile_approval_claims(svc: DashboardServices) -> Dict[str, int]:
                            ("approved_by", "action", "dry_run", "mode", "mode_readable", "note")}
                 payload.update({"exec_stream_id": queued["stream_id"], "reconciled_by": "startup"})
                 if await _append_with_retry(svc, incident_id, STEP_APPROVED, payload):
+                    await svc.release(incident_id)      # `approved` is in the ledger, the claim is done
                     counts["completed"] += 1
                 else:
                     counts["skipped"] += 1
             elif status == "pending":
+                age = _bare_claim_age_s(value)
+                if not queued and age is not None and age < BARE_CLAIM_MIN_AGE_S:
+                    counts["skipped"] += 1      # probably another replica's approval still in progress
+                    continue
                 await svc.release(incident_id)
                 counts["released"] += 1
         except Exception as exc:
@@ -372,6 +419,7 @@ async def approve(incident_id: str, request: Request,
         if not await _append_with_retry(svc, incident_id, STEP_APPROVED, payload):
             raise HTTPException(status_code=500, detail="the request is already queued but the ledger write still fails; "
                                                         "repeat the approve to finish the record, it will not queue again")
+        await svc.release(incident_id)
         return {"status": "already_queued", "incident_id": incident_id, "queued": False, "recorded": True}
 
     mode = await current_mode(svc)
@@ -415,6 +463,10 @@ async def approve(incident_id: str, request: Request,
     if not await _append_with_retry(svc, incident_id, STEP_APPROVED, {**payload, "exec_stream_id": stream_id}):
         raise HTTPException(status_code=500, detail="the request is queued but the ledger write failed; "
                                                     "repeat the approve to finish the record, it will not queue again")
+    try:
+        await svc.release(incident_id)          # `approved` is in the ledger, the claim is done
+    except Exception as exc:
+        logger.warning("approve %s: claim cleanup failed: %s", incident_id, type(exc).__name__)
     return {"status": "approved", "incident_id": incident_id, "action": fields["action"],
             "dry_run": False, "queued": True, "approved_by": admin.actor, "incident_closed": True}
 
@@ -452,6 +504,10 @@ async def release_claim(incident_id: str, request: Request,
     value = await svc.claim_get(incident_id)
     if value is None:
         raise HTTPException(status_code=404, detail="approval claim not found")
+    if _queued_claim(value):
+        # The request is already on kubeheal.exec. Releasing would let the next approve queue it again.
+        raise HTTPException(status_code=409, detail="the approval is already queued; approve again to finish "
+                                                    "the ledger record, it will not queue a second request")
     try:
         await _append(svc, incident_id, "claim_released", {
             "actor": admin.actor, "note": note, "claim_value": value,
@@ -461,6 +517,77 @@ async def release_claim(incident_id: str, request: Request,
         raise HTTPException(status_code=500, detail="the ledger write failed; the claim was not released")
     await svc.release(incident_id)
     return {"status": "claim_released", "incident_id": incident_id, "actor": admin.actor}
+
+
+# ---- SnapshotFreeze release (operator tool, P7-RR-10)
+
+class FreezeReleaseRequest(BaseModel):
+    force: bool = False
+    reason: Optional[str] = Field(default=None, max_length=1000)
+
+
+def _incident_closed(records: List[Dict[str, Any]]) -> bool:
+    """Closed means the Executor recorded a finished restore: an `executor_result` whose outcome is exactly
+    `restored`. Contained, kept-isolated, failed and escalated outcomes leave the incident open."""
+    return any(r.get("step") == "executor_result"
+               and str((r.get("payload") or {}).get("outcome", "")) == "restored" for r in records)
+
+
+@router.post("/api/incidents/{incident_id}/release-snapshot-freeze")
+async def release_snapshot_freeze(incident_id: str, request: Request,
+                                  admin: AdminIdentity = Depends(require_admin),
+                                  svc: DashboardServices = Depends(get_services)):
+    """Lift the rolling-snapshot freeze that one incident holds on its PVCs.
+
+    One incident id per call. Refused unless the incident is closed, or `force` is true with a written
+    reason. Only the Redis freeze keys are removed: no snapshot, PVC or other data is ever deleted. The
+    ledger entry (actor, reason) is written BEFORE the keys are removed. In mode test or unreadable the
+    call is a dry run: it records `snapshot_freeze_release_dry_run` and removes nothing."""
+    body = await _body(request, FreezeReleaseRequest)
+    _check_id(incident_id)
+    if svc.freeze_list is None or svc.freeze_delete is None:
+        raise HTTPException(status_code=503, detail="snapshot freeze access is not configured")
+    records = await _records(svc, incident_id)
+    if not records:
+        raise HTTPException(status_code=404, detail="incident not found")
+    reason = (body.reason or "").strip()
+    closed = _incident_closed(records)
+    if not closed:
+        if not body.force:
+            raise HTTPException(status_code=409, detail="the incident is not closed; pass force=true with a "
+                                                        "written reason to release the freeze anyway")
+        if len(reason) < FREEZE_REASON_MIN_CHARS:
+            raise HTTPException(status_code=422, detail=f"force needs a written reason of at least "
+                                                        f"{FREEZE_REASON_MIN_CHARS} characters")
+    held = await svc.freeze_list(incident_id)
+    if not held:
+        raise HTTPException(status_code=404, detail="this incident holds no snapshot freeze")
+    mode = await current_mode(svc)
+    pvcs = [{"namespace": ns, "pvc": pvc} for ns, pvc, _key in held]
+    entry = {"actor": admin.actor, "reason": reason or None, "forced": bool(body.force and not closed),
+             "incident_closed": closed, "pvcs": pvcs, "mode": mode["mode"], "mode_readable": mode["readable"]}
+    if mode["dry_run"]:
+        try:
+            await _append(svc, incident_id, "snapshot_freeze_release_dry_run", {
+                **entry, "note": "DRY RUN: would have released the freeze; nothing was removed"})
+        except Exception as exc:
+            logger.error("freeze release dry run %s: ledger write failed: %s", incident_id, type(exc).__name__)
+            raise HTTPException(status_code=500, detail="the ledger write failed")
+        return {"status": "dry_run", "incident_id": incident_id, "released": False, "pvcs": pvcs,
+                "actor": admin.actor}
+    try:
+        await _append(svc, incident_id, "snapshot_freeze_released", entry)
+    except Exception as exc:
+        logger.error("freeze release %s: ledger write failed: %s", incident_id, type(exc).__name__)
+        raise HTTPException(status_code=500, detail="the ledger write failed; the freeze was not released")
+    try:
+        await svc.freeze_delete([key for _ns, _pvc, key in held])
+    except Exception as exc:
+        logger.error("freeze release %s: key removal failed: %s", incident_id, type(exc).__name__)
+        raise HTTPException(status_code=502, detail="the release is recorded but removing the freeze failed; "
+                                                    "repeat the call")
+    return {"status": "released", "incident_id": incident_id, "released": True, "pvcs": pvcs,
+            "actor": admin.actor, "forced": entry["forced"]}
 
 
 # ---- incidents (read only)
