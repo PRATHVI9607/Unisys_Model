@@ -1,130 +1,48 @@
-# KubeHeal v4.0
-
-**Autonomous Configuration & Security Drift Correction in Kubernetes**
+# KubeHeal
 
 RVCE · Unisys "Agents Unleashed" · UIP · Mentor: Dr. Mohana
 Team: Ryan Dave Fernandes · P Koti Darshan · Rakshak S
 
----
+KubeHeal is an experimental Kubernetes control plane for detecting configuration drift and suspicious container activity. Its pipeline is Sense, Score, Decide, Act, and Record. The implementation is under active development; this repository does not establish production readiness.
 
-KubeHeal detects and autonomously heals two simultaneous production crises in
-Kubernetes — **configuration drift** (a CPU limit silently set to 50m instead
-of 500m) and **container ransomware** (high-entropy mass file encryption on a
-PersistentVolume) — and acts in **<8s** for critical threats.
+## Current status
 
-v4 splits the v3 DIT-Sec monolith into **two specialized models + a Dependency
-Correlation Module (DCM) + an Interpretation Layer**.
+- Health Agent watches labeled Deployments, compares their specs with a first-seen Redis baseline, and requests Prometheus metric windows before scoring drift.
+- Security Agent consumes Falco events and samples process write activity and entropy. Falco replay is available for controlled tests; fixtures are hand-written examples, not captured attacks.
+- Health Model, Security Model, DCM, Fusion Agent, Executor, dashboard, Redis streams, and an object-lock-compatible ledger have implementations and tests. See [SPEC_VS_CODE](docs/kubeheal/SPEC_VS_CODE.md) for item-level status and evidence.
+- The Health Model checkpoint was trained on the repository's existing dataset. Its live scores have not been validated on real cluster metric windows. Drift detection currently relies mainly on the Kubernetes spec diff; metric evidence in the checkpoint is limited. P12-H retraining and recalibration on live windows has not been approved or run.
+- The demo environment targets a local k3d cluster. A successful component or unit test does not by itself verify the full end-to-end workflow on a cluster. Current observed demo findings are recorded in [PROGRESS](docs/kubeheal/PROGRESS.md).
+- Training scripts are present, but no training should be inferred from their presence. Do not run training as part of setup.
 
-![architecture](docs/architecture-flow.png)
+## Local development
 
-> Full layer-by-layer walkthrough: **[docs/architecture-flow.md](docs/architecture-flow.md)**
+Use Python 3.11 and install the dependencies from `requirements.txt`. Some entries are pinned to an exact version (for example `torch==2.2.0`) and some are lower bounds or ranges (for example `torch-geometric>=2.5.0` and `numpy<2`), so installs are not fully reproducible. Then run the tests:
 
----
-
-## The v4 architecture
-
-```
-YAML diff + Prom metrics ─► HEALTH MODEL  (GATv2 + BiLSTM)   ─► health_risk + 128-dim emb ┐
-Falco syscalls + entropy ─► SECURITY MODEL (Transformer + Conv1D-SE) ─► sec_risk + 64-dim ┤
-                                       both embeddings ─► DCM ─► correlation_score ────────┤
-                                       all signals ─► INTERPRETATION ─► SHAP + NL summary  │
-                                       all signals ─► FUSION AGENT (3-signal policy) ◄──────┘
-                                                       └► AUTO-CONTAIN / AUTO-PATCH / HUMAN / OBSERVE / BENIGN
+```powershell
+$env:PYTHONPATH='.'
+.venv\Scripts\python.exe -m pytest tests/ -q
 ```
 
-| Model | Inputs | Encoders | Output |
-|-------|--------|----------|--------|
-| **Health** (`models/health_model/`) | YAML diff + 60×15 metrics | GATv2 (3L×8h) + BiLSTM (2L) → cross-attn | `health_risk`, 4-class label, field attribution, conformal CI, 128-dim emb |
-| **Security** (`models/security_model/`) | ≤256 syscalls + 30-step entropy | Transformer (4h×2L, Pre-LN, CLS) + Conv1D-SE (k=3·7·15) → cross-attn | `sec_risk`, 5-class label, syscall attribution, entropy spike, CI, 64-dim emb |
-| **DCM** (`models/dcm/`) | both embeddings | bidirectional cross-modal attention | `correlation_score`, `compound_flag`, causal chain |
+Model servers require compatible checkpoint files and their preprocessing sidecars. They fail closed when required checkpoints are missing or incompatible, except when `ALLOW_RANDOM_WEIGHTS=true` is set explicitly (see `services/ckpt.py`): the server then serves random weights and its `/health` response reports `random_weights=true`. Check each server's `/health` response before relying on scores. Random weights are for development and unit tests only and are not suitable for operation.
 
-> **Status of the drift pipeline:** Drift pipeline complete; inputs now match training preprocessing; live Health Model scores are not yet validated on real cluster windows. Retraining on live cluster data (P12-H) is a future step, not approved yet. The Health Model's metric inputs go through one shared preprocessing (`models/health_model/preprocess.py`) used by training and serving. Drift detection currently relies mainly on the configuration diff; metric-based evidence is limited in the current checkpoint and is addressed by P12-H. The Health Model server refuses to start if the checkpoint's preprocessing version (sidecar `<checkpoint>.preprocess.json`) differs from the code's `PREPROCESS_VERSION` (currently `v1-legacy`).
+## Kubernetes demo
 
----
+The demo scripts and k3d configuration are under `demo/`. Read `demo/README.md` and `docs/kubeheal/NEXT_FOR_CODEX.md` before using them. The global kill switch defaults to `test`, which permits sensing, scoring, decisions, and audit recording but prevents Kubernetes remediation writes.
 
-## Decision policy (Fusion Agent v4)
+## Training and promotion gates (not approved: do not run without the owner's approval)
 
-`agents/fusion_agent/decision_policy.py` — pure, fully unit-tested function.
-
-| Condition | Action |
-|-----------|--------|
-| compound + `sec_adj ≥ 0.85` | **AUTO-CONTAIN** (compound) |
-| `sec_adj ≥ 0.85` (security only) | **AUTO-CONTAIN** |
-| `health_adj ≥ 0.85` and `sec_risk < 0.4` | **AUTO-PATCH** (canary) |
-| `max(adj) ≥ 0.65` | **HUMAN** approval |
-| `max(adj) ≥ 0.40` | **OBSERVE** |
-| else | **BENIGN** |
-
-`adj = risk × tier(prod 1.20 / staging 1.00 / dev 0.70) × (compound? 1.15 : 1)`.
-Wide conformal CI (>0.15) or a tripped circuit breaker routes to human.
-Burn-in mode raises thresholds until 2000 metric samples exist.
-
----
-
-## Project structure
-
-```
-agents/
-  health_agent/    agent.py · prometheus_client.py (fresh-metric cache)
-  security_agent/  agent.py · proc_scanner.py (cgroups v1/v2 + LRU)
-  fusion_agent/    agent.py (3-signal) · decision_policy.py · incident_lock.py (heartbeat)
-models/
-  health_model/    yaml_gat_encoder · metric_bilstm_encoder · health_fusion_attention
-                   · health_output_head · health_model · health_conformal
-                   · dit-merged-complete.csv (real training data) · checkpoints/
-  security_model/  falco_transformer_encoder · entropy_conv1d_encoder
-                   · security_fusion_attention · security_output_head · security_model · checkpoints/
-  dcm/             cross_modal_attention · causal_chain_builder · correlation_head · checkpoints/
-  interpretation/  shap_explainer · field_name_mapper · nl_summary_generator
-  train_health_model.py · train_security_model.py · train_dcm.py
-  generate_security_training_data.py
-services/
-  health_model_server/  (FastAPI :8001)
-  security_model_server/ (FastAPI :8002)
-  dcm_server/            (FastAPI :8003)
-k8s/   health-model · security-model · dcm deployments · secrets template · rbac · crds
-tests/ test_decision_policy.py (25) · test_cgroups_compatibility.py · test_encoders.py
-docs/  architecture-flow.mmd · .md · .png
-```
-
----
-
-## Quick start (local)
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt          # torch, torch-geometric, shap, fastapi …
-
-# run the three model servers (loads trained checkpoints if present, else random weights)
-PYTHONPATH=. python services/health_model_server/main.py     # :8001
-PYTHONPATH=. python services/security_model_server/main.py   # :8002
-PYTHONPATH=. python services/dcm_server/main.py              # :8003
-
-# run the test suite
-PYTHONPATH=. pytest tests/ -q
-```
-
-Kubernetes deploy: `./scripts/install.sh` (Minikube + Redis + Prometheus +
-Falco + agents + the 3 model servers).
-
----
-
-## Training the models — run these (do NOT auto-run; GPU strongly preferred)
-
-> Real ransomware traces need a live Falco cluster; the security generator
-> synthesises behaviorally-faithful samples for offline training. The health
-> model trains on the **real** drift CSV already in the repo.
+Training is not approved for this project. Do not run any command in this section unless the owner has explicitly asked for it. Training is slow and GPU-bound, and real ransomware traces need a live Falco cluster; the security generator synthesises samples for offline training. The health model trains on the real drift CSV in the repository (`models/health_model/dit-merged-complete.csv`). The commands are listed for reference only.
 
 ```bash
 # 0. (Windows GPU) install CUDA torch first:
 #    pip install torch==2.2.0 --index-url https://download.pytorch.org/whl/cu121
 #    pip install torch-geometric torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.2.0+cu121.html
 
-# 1. Health Model — real data (models/health_model/dit-merged-complete.csv)
+# 1. Health Model, real data
 PYTHONPATH=. python -u models/train_health_model.py \
     --epochs 30 --batch-size 16 --patience 6
 
-# 2. Security training data (synthetic, fast)
+# 2. Security training data (synthetic)
 PYTHONPATH=. python models/generate_security_training_data.py \
     --output data/security_training.jsonl
 
@@ -132,16 +50,16 @@ PYTHONPATH=. python models/generate_security_training_data.py \
 PYTHONPATH=. python -u models/train_security_model.py \
     --data data/security_training.jsonl --epochs 25 --batch-size 32 --patience 5
 
-# 4. DCM — staged, AFTER 1 & 3 (freezes both base models)
+# 4. DCM, staged, AFTER 1 and 3 (freezes both base models)
 PYTHONPATH=. python -u models/train_dcm.py --epochs 25 --batch-size 32
 
-# 5. (optional) recalibrate conformal on a held-out set
+# 5. (optional) recalibrate conformal intervals on a held-out set
 PYTHONPATH=. python models/calibrate_conformal.py --coverage 0.90
 
-# 6. validate promotion gates (F1 / AUROC; latency advisory)
+# 6. check the promotion gates
 PYTHONPATH=. python models/validate_all_models.py
 
-# 7. export for serving — security/DCM → FP16 ONNX, health → torch bundle
+# 7. export for serving
 PYTHONPATH=. python models/export_security_model.py --quantize fp16
 PYTHONPATH=. python models/export_dcm.py --quantize fp16
 PYTHONPATH=. python models/export_health_model.py
@@ -150,40 +68,25 @@ PYTHONPATH=. python models/export_health_model.py
 PYTHONPATH=. python models/upload_to_registry.py --version v4.0.0
 ```
 
-Outputs land in `models/<model>/checkpoints/best_*.pt` + `*_conformal.json` +
-`*_report.json`. The servers auto-load the checkpoints on startup.
+Outputs land in `models/<model>/checkpoints/` as `best_*.pt`, `*_conformal.json` and `*_report.json`, and the servers load the checkpoints on startup.
 
-> ONNX note: all three models export to ONNX. The health GATv2 export is
-> **numerically parity-checked** against torch (it ships ONNX only if
-> max|Δlogits| ≤ 1e-3, else a validated torch bundle). DCM exports to true
-> **FP16**; security/health revert to validated **FP32** when transformer/GAT
-> Cast nodes reject FP16 (~2 MB models — marginal). A working, validated
-> artifact is produced in every case.
+Promotion gates are defined in `models/validate_all_models.py`: an F1 gate for the Health and Security models, an AUROC gate for the DCM, and an advisory (non-blocking) latency check. The thresholds are in that script; this README does not restate them. Missing checkpoints are reported as SKIP, not as failures, so a SKIP is not evidence that a model passed.
 
-**GPU note:** GATv2 builds one graph per sample in Python — CPU runs ~minutes
-per epoch; a GPU (RTX 3060+) finishes each model in minutes.
+## Documentation
 
----
+- [Architecture](docs/kubeheal/ARCHITECTURE.md) describes the implemented flow and labels planned pieces.
+- [Specification status](docs/kubeheal/SPEC_VS_CODE.md) maps the project specification IDs to code and evidence.
+- [Implementation progress](docs/kubeheal/PROGRESS.md) records checked work, observed results, and deferred items.
+- [Project specification](docs/kubeheal/PROJECT_SPEC.md) is the target design, not a claim that every item is implemented.
+- [Architecture flow walkthrough](docs/architecture-flow.md) is a layer-by-layer description; the diagram is rendered in [architecture-flow.png](docs/architecture-flow.png).
 
-## API contracts (Section 13)
+![architecture flow](docs/architecture-flow.png)
 
-| Server | Endpoint | Returns |
-|--------|----------|---------|
-| Health :8001 | `POST /health/score` | risk, label, label_probabilities, ci, field_attention_weights, top_field/metric, **health_embedding[128]** |
-| Security :8002 | `POST /security/score` | risk, label, ci, syscall_attention_weights, top_syscall, entropy_spike, **security_embedding[64]** |
-| DCM :8003 | `POST /dcm/correlate` | correlation_score, compound_flag, causal_chain, nl_summary |
-
-All three expose `GET /health` for K8s probes.
-
----
-
-## Re-render the architecture diagram
+To re-render the diagram from `docs/architecture-flow.mmd`:
 
 ```bash
 npx -y @mermaid-js/mermaid-cli -i docs/architecture-flow.mmd -o docs/architecture-flow.png -s 2 -b transparent
 ```
-
----
 
 ## License
 
