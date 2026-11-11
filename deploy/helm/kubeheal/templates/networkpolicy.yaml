@@ -5,7 +5,9 @@ optional egress lockdown is in networkpolicy-egress.yaml).
 These policies rely on the CNI allowing node-to-pod traffic, which is where kubelet probes come from. This
 has not been checked on a cluster; check it on k3d in P10 (probes failing under default-deny means the
 CNI blocks them).
-  model servers : agents (health, security, fusion), dashboard, Prometheus
+  model servers : agents (health, security, fusion), dashboard, Prometheus (legacy neural servers, only when
+                  modelServers.legacy.enabled)
+  inference     : health and security agents, Prometheus (inference.enabled)
   redis         : the five KubeHeal components that use it (see the note on the Executor in values.yaml)
   dashboard     : the ingress controller namespace, Prometheus
   other metrics : Prometheus
@@ -22,6 +24,7 @@ metadata:
 spec:
   podSelector: {}
   policyTypes: [Ingress]
+{{- if $ms.legacy.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -49,6 +52,31 @@ spec:
         - {protocol: TCP, port: {{ $ms.health.port }}}
         - {protocol: TCP, port: {{ $ms.security.port }}}
         - {protocol: TCP, port: {{ $ms.dcm.port }}}
+{{- end }}
+{{- if .Values.inference.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-inference-from-agents-and-prometheus
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchLabels: {app: {{ .Values.inference.name }}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [health-agent, security-agent]
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.prometheusNamespace }}
+      ports:
+        - {protocol: TCP, port: {{ .Values.inference.port }}}
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -128,7 +156,7 @@ spec:
             matchExpressions:
               - key: app
                 operator: In
-                values: [fusion-agent, executor, minio-bootstrap, {{ $ms.health.name }}, {{ $ms.security.name }}, {{ $ms.dcm.name }}, kubeheal-dashboard]
+                values: [fusion-agent, executor, minio-bootstrap, kubeheal-dashboard{{ if $ms.legacy.enabled }}, {{ $ms.health.name }}, {{ $ms.security.name }}, {{ $ms.dcm.name }}{{ end }}]
       ports:
         - {protocol: TCP, port: 9000}
 {{- end }}

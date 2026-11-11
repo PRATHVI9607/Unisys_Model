@@ -42,6 +42,9 @@ spec:
           env:
             {{- include "kubeheal.redisEnv" . | nindent 12 }}
             - {name: HEALTH_MODEL_URL, value: "http://{{ .Values.modelServers.health.name }}:{{ .Values.modelServers.health.port }}"}
+            {{- if .Values.inference.enabled }}
+            - {name: INFERENCE_URL, value: "http://{{ .Values.inference.name }}:{{ .Values.inference.port }}"}
+            {{- end }}
             - {name: PROMETHEUS_URL, value: {{ $ha.prometheusUrl | quote }}}
             - {name: NAMESPACE, value: {{ $ns | quote }}}
             - {name: LOG_LEVEL, value: {{ $ha.logLevel | quote }}}
@@ -92,6 +95,9 @@ spec:
             - {name: PROC_ROOT, value: /proc}
             {{- include "kubeheal.redisEnv" . | nindent 12 }}
             - {name: SECURITY_MODEL_URL, value: "http://{{ .Values.modelServers.security.name }}:{{ .Values.modelServers.security.port }}"}
+            {{- if .Values.inference.enabled }}
+            - {name: INFERENCE_URL, value: "http://{{ .Values.inference.name }}:{{ .Values.inference.port }}"}
+            {{- end }}
             # auto | live | off | replay. Replay is an explicit opt-in only (agents/security_agent/falco_client.py).
             - {name: FALCO_MODE, value: {{ $sa.falcoMode | quote }}}
             - {name: FALCO_EVENTS_PATH, value: {{ $sa.falcoEventsPath | quote }}}

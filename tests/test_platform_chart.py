@@ -75,6 +75,9 @@ def containers(docs):
 
 
 MODEL_SERVERS = {"kubeheal-health-model": 8001, "kubeheal-security-model": 8002, "kubeheal-dcm": 8003}
+# V5-I2: the neural model servers are legacy and off by default; the LightGBM inference service is on.
+LEGACY = "modelServers.legacy.enabled=true"
+INFERENCE = "kubeheal-inference"
 
 
 # ---- lint and template for all four values files ----------------------------------------------
@@ -188,7 +191,7 @@ def test_release_namespace_is_opt_in(fixture_file):
 
 @pytest.mark.parametrize("env", ENVS)
 def test_model_server_ha(env, fixture_file):
-    docs = render(env, fixture_file)
+    docs = render(env, fixture_file, LEGACY)
     for name, port in MODEL_SERVERS.items():
         dep = get(docs, "Deployment", name)
         assert dep["spec"]["replicas"] >= 2
@@ -205,8 +208,10 @@ def test_model_server_ha(env, fixture_file):
 
 
 def test_prod_topology_spread_is_hard(fixture_file):
-    dep = get(render("prod", fixture_file), "Deployment", "kubeheal-dcm")
-    assert dep["spec"]["template"]["spec"]["topologySpreadConstraints"][0]["whenUnsatisfiable"] == "DoNotSchedule"
+    docs = render("prod", fixture_file, LEGACY)
+    for name in ("kubeheal-dcm", INFERENCE):
+        dep = get(docs, "Deployment", name)
+        assert dep["spec"]["template"]["spec"]["topologySpreadConstraints"][0]["whenUnsatisfiable"] == "DoNotSchedule"
 
 
 def hpas(docs):
@@ -215,7 +220,9 @@ def hpas(docs):
 
 def test_default_hpa_is_queue_depth_with_a_chosen_default_target(fixture_file):
     docs = render("k3d-demo", fixture_file)
-    assert len(hpas(docs)) == 3                        # one per model server
+    assert [h["metadata"]["name"] for h in hpas(docs)] == [INFERENCE]       # legacy servers are off by default
+    docs = render("k3d-demo", fixture_file, LEGACY)
+    assert len(hpas(docs)) == 4                        # inference plus one per legacy model server
     for h in hpas(docs):
         pods = h["spec"]["metrics"][0]["pods"]
         assert pods["metric"]["name"] == "kubeheal_model_inflight_requests"
@@ -223,12 +230,12 @@ def test_default_hpa_is_queue_depth_with_a_chosen_default_target(fixture_file):
     text = (CHART / "values.yaml").read_text(encoding="utf-8")
     assert "CHOSEN DEFAULT, not a measurement" in text and "P11" in text
     # the env files no longer need the HPA target supplied: they render with only the lab example layered
-    assert len(hpas(render("prod", fixture_file))) == 3
+    assert len(hpas(render("prod", fixture_file))) == 1
 
 
 def test_latency_fallback_replaces_queue_and_never_both(fixture_file):
-    docs = render("k3d-demo", fixture_file, "hpa.mode=latency", "hpa.latency.targetAverageValue=3")
-    assert len(hpas(docs)) == 3                        # still exactly one per server
+    docs = render("k3d-demo", fixture_file, LEGACY, "hpa.mode=latency", "hpa.latency.targetAverageValue=3")
+    assert len(hpas(docs)) == 4                        # still exactly one per server
     for h in hpas(docs):
         assert h["spec"]["metrics"][0]["pods"]["metric"]["name"] == "kubeheal_model_latency_concurrency"
     rule = yaml.safe_load(get(docs, "ConfigMap", "kubeheal-prometheus-adapter-rule")["data"]["rule.yaml"])
@@ -240,8 +247,8 @@ def test_latency_fallback_replaces_queue_and_never_both(fixture_file):
 
 
 def test_cpu_hpa_is_the_weakest_fallback_and_needs_its_target(fixture_file):
-    docs = render("k3d-demo", fixture_file, "hpa.mode=cpu", "hpa.cpu.targetAverageUtilization=50")
-    assert len(hpas(docs)) == 3 and hpas(docs)[0]["spec"]["metrics"][0]["type"] == "Resource"
+    docs = render("k3d-demo", fixture_file, LEGACY, "hpa.mode=cpu", "hpa.cpu.targetAverageUtilization=50")
+    assert len(hpas(docs)) == 4 and hpas(docs)[0]["spec"]["metrics"][0]["type"] == "Resource"
     assert not by_kind(docs, "ConfigMap") or "kubeheal-prometheus-adapter-rule" not in \
         {d["metadata"]["name"] for d in by_kind(docs, "ConfigMap")}
     res = helm("template", "k", str(CHART), "-f", str(values_path("k3d-demo")), "--set", "hpa.mode=cpu", check=False)
@@ -266,7 +273,7 @@ def test_adapter_rule_and_scrape_snippet(fixture_file):
 
 
 def test_every_pod_carries_scrape_annotations_matching_a_declared_port(fixture_file):
-    docs = render("k3d-demo", fixture_file)
+    docs = render("k3d-demo", fixture_file, LEGACY)
     seen = set()
     for d in docs:
         if d["kind"] in ("Deployment", "DaemonSet") and d["metadata"]["name"] != "minio":
@@ -277,7 +284,7 @@ def test_every_pod_carries_scrape_annotations_matching_a_declared_port(fixture_f
             assert ann["prometheus.io/port"] in ports, d["metadata"]["name"]
             seen.add(d["metadata"]["name"])
     assert seen == {"health-agent", "security-agent", "fusion-agent", "executor", "kubeheal-dashboard",
-                    *MODEL_SERVERS}
+                    INFERENCE, *MODEL_SERVERS}
 
 
 # ---- workloads present, resources unset ---------------------------------------------------------
@@ -294,7 +301,7 @@ def k8s_workload_names():
 
 
 def test_chart_covers_every_k8s_workload(fixture_file):
-    docs = render("k3d-demo", fixture_file)
+    docs = render("k3d-demo", fixture_file, LEGACY)     # k8s/ still holds the legacy model server manifests
     rendered = {d["metadata"]["name"] for d in docs if d["kind"] in ("Deployment", "DaemonSet")}
     assert k8s_workload_names() <= rendered
     assert get(docs, "DaemonSet", "security-agent")["spec"]["template"]["spec"]["hostPID"] is True
@@ -420,7 +427,7 @@ def test_chart_never_creates_the_admin_token_secret(fixture_file):
 
 @pytest.mark.parametrize("env", ENVS)
 def test_network_policy(env, fixture_file):
-    docs = render(env, fixture_file)
+    docs = render(env, fixture_file, LEGACY)
     deny = get(docs, "NetworkPolicy", "default-deny-ingress")
     assert deny["spec"]["podSelector"] == {} and deny["spec"]["policyTypes"] == ["Ingress"]
     allow = get(docs, "NetworkPolicy", "allow-model-servers-from-agents-dashboard-prometheus")
@@ -557,13 +564,13 @@ def test_scoring_paths_counted_not_health_or_metrics():
 def test_egress_policy_off_by_default_and_on_when_asked(fixture_file):
     docs = render("k3d-demo", fixture_file)
     assert not any("Egress" in p["spec"]["policyTypes"] for p in by_kind(docs, "NetworkPolicy"))
-    docs = render("k3d-demo", fixture_file, "networkPolicy.egress.enabled=true",
+    docs = render("k3d-demo", fixture_file, LEGACY, "networkPolicy.egress.enabled=true",
                   "networkPolicy.egress.apiServerCIDR=192.0.2.1/32")
     pols = {p["metadata"]["name"]: p for p in by_kind(docs, "NetworkPolicy")
             if "Egress" in p["spec"]["policyTypes"]}
     assert set(pols) == {"default-deny-egress", "allow-dns-egress", "allow-api-server-egress",
                          "allow-redis-egress", "allow-minio-egress", "allow-model-server-egress",
-                         "allow-prometheus-egress"}
+                         "allow-inference-egress", "allow-prometheus-egress"}
     assert pols["default-deny-egress"]["spec"]["podSelector"] == {} and "egress" not in pols["default-deny-egress"]["spec"]
     dns = pols["allow-dns-egress"]["spec"]["egress"][0]
     assert {(p["protocol"], p["port"]) for p in dns["ports"]} == {("UDP", 53), ("TCP", 53)}
@@ -571,7 +578,17 @@ def test_egress_policy_off_by_default_and_on_when_asked(fixture_file):
     api = pols["allow-api-server-egress"]["spec"]["egress"][0]
     assert api["to"][0]["ipBlock"]["cidr"] == "192.0.2.1/32"
     assert pols["allow-redis-egress"]["spec"]["egress"][0]["ports"] == [{"protocol": "TCP", "port": 6379}]
-    assert {p["port"] for p in pols["allow-model-server-egress"]["spec"]["egress"][0]["ports"]} ==         set(MODEL_SERVERS.values())
+    assert {p["port"] for p in pols["allow-model-server-egress"]["spec"]["egress"][0]["ports"]} == \
+        set(MODEL_SERVERS.values())
+    inf = pols["allow-inference-egress"]["spec"]
+    assert inf["podSelector"]["matchExpressions"][0]["values"] == ["health-agent", "security-agent"]
+    assert inf["egress"][0]["to"][0]["podSelector"]["matchLabels"] == {"app": INFERENCE}
+    assert inf["egress"][0]["ports"] == [{"protocol": "TCP", "port": 8000}]
+    # without the legacy servers only the inference egress rule exists for the scorers
+    docs = render("k3d-demo", fixture_file, "networkPolicy.egress.enabled=true",
+                  "networkPolicy.egress.apiServerCIDR=192.0.2.1/32")
+    names = {p["metadata"]["name"] for p in by_kind(docs, "NetworkPolicy")}
+    assert "allow-inference-egress" in names and "allow-model-server-egress" not in names
 
 
 def test_egress_needs_the_api_server_address(fixture_file):
@@ -595,7 +612,7 @@ HARDENED = [("Deployment", "health-agent", "healthAgent"), ("Deployment", "fusio
 
 
 def test_hardening_switches_are_off_by_default_and_render_when_on(fixture_file):
-    off = render("k3d-demo", fixture_file)
+    off = render("k3d-demo", fixture_file, LEGACY)
     for kind, name, _key in HARDENED:
         sc = get(off, kind, name)["spec"]["template"]["spec"]["containers"][0]["securityContext"]
         assert "runAsNonRoot" not in sc and "readOnlyRootFilesystem" not in sc
@@ -604,7 +621,7 @@ def test_hardening_switches_are_off_by_default_and_render_when_on(fixture_file):
     for _k, _n, key in HARDENED:
         sets += [f"{key}.hardening.runAsNonRoot=true", f"{key}.hardening.readOnlyRootFilesystem=true",
                  f"{key}.hardening.runAsUser=1000"]
-    on = render("k3d-demo", fixture_file, *sets)
+    on = render("k3d-demo", fixture_file, LEGACY, *sets)
     for kind, name, _key in HARDENED:
         pod = get(on, kind, name)["spec"]["template"]["spec"]
         c = pod["containers"][0]
@@ -649,3 +666,167 @@ def test_images_that_write_the_ledger_install_the_minio_client():
     for name in ("Dockerfile.executor", "Dockerfile.fusion", "Dockerfile.dashboard"):
         text = (ROOT / "dockerfiles" / name).read_text(encoding="utf-8")
         assert "minio" in text, name
+
+
+# ---- V5-I2: the LightGBM inference service and the legacy gate -----------------------------------------
+
+def inference_docs(env, fixture, *sets):
+    docs = render(env, fixture, *sets)
+    return docs, get(docs, "Deployment", INFERENCE)
+
+
+@pytest.mark.parametrize("env", ENVS)
+def test_inference_is_on_and_legacy_is_off_by_default(env, fixture_file):
+    docs, dep = inference_docs(env, fixture_file)
+    for name in MODEL_SERVERS:
+        assert not [d for d in docs if d["metadata"]["name"] == name and d["kind"] != "ServiceAccount"], name
+    assert dep["spec"]["replicas"] >= 2
+    spec = dep["spec"]["template"]["spec"]
+    assert spec["topologySpreadConstraints"][0]["labelSelector"]["matchLabels"] == {"app": INFERENCE}
+    assert spec["automountServiceAccountToken"] is False
+    c = spec["containers"][0]
+    assert c["image"] == "kubeheal/inference-server:v5" and c["ports"][0]["containerPort"] == 8000
+    assert c["livenessProbe"]["httpGet"] == {"path": "/healthz", "port": 8000}
+    assert c["readinessProbe"]["httpGet"] == {"path": "/readyz", "port": 8000}
+    assert c["startupProbe"]["httpGet"] == {"path": "/healthz", "port": 8000}
+    assert "resources" not in c                                       # unset until measured
+    sc = c["securityContext"]
+    assert sc["runAsNonRoot"] is True and sc["runAsUser"] == 10001 and sc["readOnlyRootFilesystem"] is True
+    assert sc["allowPrivilegeEscalation"] is False and sc["capabilities"] == {"drop": ["ALL"]}
+    assert {"name": "tmp", "mountPath": "/tmp"} in c["volumeMounts"]
+    assert {"name": "tmp", "emptyDir": {}} in spec["volumes"]
+    ann = dep["spec"]["template"]["metadata"]["annotations"]
+    assert ann["prometheus.io/scrape"] == "true" and ann["prometheus.io/path"] == "/metrics"
+    assert ann["prometheus.io/port"] == "8000"
+    svc = get(docs, "Service", INFERENCE)
+    assert svc["spec"]["selector"] == {"app": INFERENCE} and svc["spec"]["ports"][0]["port"] == 8000
+    pdb = get(docs, "PodDisruptionBudget", INFERENCE)
+    assert pdb["spec"]["minAvailable"] == 1 and pdb["spec"]["selector"]["matchLabels"] == {"app": INFERENCE}
+    hpa = get(docs, "HorizontalPodAutoscaler", INFERENCE)
+    assert (hpa["spec"]["minReplicas"], hpa["spec"]["maxReplicas"]) == (2, 8)
+    assert hpa["spec"]["scaleTargetRef"]["name"] == INFERENCE
+    metric = hpa["spec"]["metrics"][0]
+    assert metric["type"] == "Pods" and metric["pods"]["metric"]["name"] == "kubeheal_model_inflight_requests"
+
+
+def test_legacy_gate_renders_the_neural_servers_again(fixture_file):
+    docs = render("k3d-demo", fixture_file, LEGACY)
+    for name in MODEL_SERVERS:
+        get(docs, "Deployment", name)
+        get(docs, "Service", name)
+        get(docs, "PodDisruptionBudget", name)
+        get(docs, "HorizontalPodAutoscaler", name)
+    get(docs, "Deployment", INFERENCE)
+
+
+def test_inference_can_be_switched_off(fixture_file):
+    docs = render("k3d-demo", fixture_file, "inference.enabled=false")
+    assert not [d for d in docs if d["metadata"]["name"] == INFERENCE]
+    envs = {e["name"] for e in get(docs, "Deployment", "health-agent")["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert "INFERENCE_URL" not in envs
+    names = {d["metadata"]["name"] for d in by_kind(docs, "NetworkPolicy")}
+    assert "allow-inference-from-agents-and-prometheus" not in names
+
+
+def test_agents_get_inference_url_next_to_the_legacy_urls(fixture_file):
+    docs = render("k3d-demo", fixture_file)
+    for kind, name, legacy in (("Deployment", "health-agent", "HEALTH_MODEL_URL"),
+                               ("DaemonSet", "security-agent", "SECURITY_MODEL_URL")):
+        envs = {e["name"]: e.get("value") for e in
+                get(docs, kind, name)["spec"]["template"]["spec"]["containers"][0]["env"]}
+        assert envs["INFERENCE_URL"] == "http://kubeheal-inference:8000"
+        assert legacy in envs                                       # legacy URL kept; agent code is unchanged
+    fusion = get(docs, "Deployment", "fusion-agent")["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert "INFERENCE_URL" not in {e["name"] for e in fusion}
+
+
+@pytest.mark.parametrize("env", ENVS)
+def test_inference_network_policy(env, fixture_file):
+    docs = render(env, fixture_file)
+    pol = get(docs, "NetworkPolicy", "allow-inference-from-agents-and-prometheus")["spec"]
+    assert pol["podSelector"]["matchLabels"] == {"app": INFERENCE} and pol["policyTypes"] == ["Ingress"]
+    frm = pol["ingress"][0]["from"]
+    pods = next(f for f in frm if "podSelector" in f)["podSelector"]["matchExpressions"][0]["values"]
+    assert pods == ["health-agent", "security-agent"]
+    assert any(f.get("namespaceSelector", {}).get("matchLabels", {}).get("kubernetes.io/metadata.name")
+               == "monitoring" for f in frm)
+    assert pol["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 8000}]
+    # the legacy ingress policy is gone while the legacy servers are off
+    names = {d["metadata"]["name"] for d in by_kind(docs, "NetworkPolicy")}
+    assert "allow-model-servers-from-agents-dashboard-prometheus" not in names
+    # MinIO ingress no longer lists names of servers that do not exist
+    minio = get(docs, "NetworkPolicy", "allow-minio-from-ledger-writers")
+    allowed = minio["spec"]["ingress"][0]["from"][0]["podSelector"]["matchExpressions"][0]["values"]
+    assert not (set(allowed) & set(MODEL_SERVERS))
+    legacy_minio = get(render(env, fixture_file, LEGACY), "NetworkPolicy", "allow-minio-from-ledger-writers")
+    allowed = legacy_minio["spec"]["ingress"][0]["from"][0]["podSelector"]["matchExpressions"][0]["values"]
+    assert set(MODEL_SERVERS) <= set(allowed)
+
+
+def test_inference_hpa_modes_follow_the_global_mode(fixture_file):
+    docs = render("k3d-demo", fixture_file, "hpa.mode=latency", "hpa.latency.targetAverageValue=3")
+    metric = get(docs, "HorizontalPodAutoscaler", INFERENCE)["spec"]["metrics"][0]
+    assert metric["pods"]["metric"]["name"] == "kubeheal_model_latency_concurrency"
+    docs = render("k3d-demo", fixture_file, "hpa.mode=cpu", "hpa.cpu.targetAverageUtilization=50")
+    assert get(docs, "HorizontalPodAutoscaler", INFERENCE)["spec"]["metrics"][0]["type"] == "Resource"
+    assert not hpas(render("k3d-demo", fixture_file, "hpa.mode=none"))
+    assert not hpas(render("k3d-demo", fixture_file, "inference.hpa.enabled=false"))
+    res = helm("template", "k", str(CHART), "-f", str(values_path("k3d-demo")), "--set", "hpa.mode=bogus", check=False)
+    assert res.returncode != 0 and "hpa.mode must be" in res.stderr       # still validated with legacy off
+
+
+def test_inference_resources_and_model_dir_are_settable(fixture_file):
+    _docs, dep = inference_docs("k3d-demo", fixture_file, "inference.resources.requests.cpu=1m",
+                                "inference.modelDir=/data/bundles", "inference.extraEnv.FOO=bar")
+    c = dep["spec"]["template"]["spec"]["containers"][0]
+    assert c["resources"] == {"requests": {"cpu": "1m"}}
+    envs = {e["name"]: e["value"] for e in c["env"]}
+    assert envs["KUBEHEAL_MODEL_DIR"] == "/data/bundles" and envs["FOO"] == "bar"
+    _docs, dep = inference_docs("k3d-demo", fixture_file, "inference.hardening.readOnlyRootFilesystem=false",
+                                "inference.hardening.runAsNonRoot=false")
+    sc = dep["spec"]["template"]["spec"]["containers"][0]["securityContext"]
+    assert "readOnlyRootFilesystem" not in sc and "runAsNonRoot" not in sc
+
+
+def test_inference_values_exist_in_every_environment_file():
+    for env in ENVS:
+        data = yaml.safe_load(values_path(env).read_text(encoding="utf-8"))
+        assert data["inference"]["enabled"] is True, env
+        assert "whenUnsatisfiable" in data["inference"]["topologySpread"], env
+    defaults = yaml.safe_load((CHART / "values.yaml").read_text(encoding="utf-8"))
+    assert defaults["modelServers"]["legacy"]["enabled"] is False
+    inf = defaults["inference"]
+    assert inf["enabled"] is True and inf["image"]["repository"] == "kubeheal/inference-server"
+    assert inf["image"]["tag"] and inf["replicas"] >= 2 and inf["hpa"]["enabled"] is True
+    assert inf["resources"] == {}
+
+
+def test_inference_dockerfile_and_dockerignore():
+    import fnmatch
+    text = (ROOT / "dockerfiles" / "Dockerfile.inference").read_text(encoding="utf-8")
+    assert "python:3.11-slim" in text and "USER 10001" in text and "models/bundles" in text
+    assert "kubeheal/requirements.txt" in text and "COPY services/inference_server/" in text
+    assert "COPY agents/common/" in text and "COPY kubeheal/" in text
+    reqs = (ROOT / "services" / "inference_server" / "requirements.txt").read_text(encoding="utf-8")
+    for name in ("fastapi", "uvicorn", "prometheus-client"):
+        assert name in reqs
+    # no .dockerignore pattern may exclude the bundles (last matching pattern wins, a leading ! re-includes)
+    patterns = [ln.strip() for ln in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+                if ln.strip() and not ln.startswith("#")]
+
+    def excluded(path):
+        parts = path.split("/")
+        state = False
+        for pat in patterns:
+            neg = pat.startswith("!")
+            pat = pat.lstrip("!").rstrip("/")
+            if any(fnmatch.fnmatchcase("/".join(parts[:i]), pat) for i in range(1, len(parts) + 1)):
+                state = not neg
+        return state
+
+    for f in ("models/bundles/health/model.txt", "models/bundles/health/meta.json",
+              "models/bundles/security/model.txt", "models/bundles/security/meta.json"):
+        assert not excluded(f), f
+    assert excluded("tests/test_platform_chart.py") and excluded("models/x.pt")      # the checker can say yes
+    for f in ("models/bundles/health/model.txt", "models/bundles/security/model.txt"):
+        assert b"\r\n" not in (ROOT / f).read_bytes(), f"{f} has CRLF; LightGBM refuses it"

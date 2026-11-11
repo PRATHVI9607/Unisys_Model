@@ -1,7 +1,7 @@
 # KubeHeal Helm chart
 
 Installs the KubeHeal control plane (health agent, security agent DaemonSet, fusion agent, Executor,
-dashboard, the three model servers, Redis, the MinIO ledger store, the kill switch, platform policy). It
+dashboard, the inference service (the three legacy neural model servers are optional), Redis, the MinIO ledger store, the kill switch, platform policy). It
 replaces `scripts/install.sh`, which stays in the repo for reference. Nothing here has been installed on a
 cluster yet: `helm lint` and `helm template` pass and the tests in `tests/test_platform_*.py` check the
 rendered objects. Cluster behaviour is checked on k3d in P10.
@@ -73,7 +73,26 @@ not measured; `tests` compare them with `agents/executor/config.py` DEFAULTS). O
 escalates to a human before it writes anything, instead of guessing. `SNAPSHOT_CLASS` names a VolumeSnapshotClass
 that must exist in the cluster (P10 creates `csi-hostpath-snapclass` on k3d).
 
-## Model servers
+## Inference service (V5-I2, default scorer)
+
+- `inference.enabled` (default true) renders `templates/inference.yaml`: one Deployment `kubeheal-inference` (port 8000,
+  image `kubeheal/inference-server:v5` from `dockerfiles/Dockerfile.inference`), a Service, a PodDisruptionBudget and one
+  HPA. It serves the two LightGBM bundles shipped in the image (`models/bundles`): `POST /v1/health/predict`,
+  `/v1/security/predict` and the `_batch` variants. Liveness is `/healthz`, readiness `/readyz` (200 only when BOTH
+  bundles are loaded); a missing or invalid bundle answers 503, never a fallback model.
+- The HPA uses the same `hpa.mode` and targets as the model servers below (queue-depth gauge
+  `kubeheal_model_inflight_requests`, so the prometheus-adapter rule is unchanged), bounds from `inference.hpa`.
+- The health and security agents get `INFERENCE_URL`. The agent code still reads `HEALTH_MODEL_URL` and
+  `SECURITY_MODEL_URL` until V5-D4 and V5-S2 land, so with the legacy servers off those two agents get no score and
+  fail closed (model unavailable notice).
+- Hardening is on by default for this pod (uid 10001, read-only root filesystem, emptyDir on `/tmp`). Not verified
+  on a cluster yet. `inference.modelDir` sets `KUBEHEAL_MODEL_DIR` (empty: the shipped bundles).
+- NetworkPolicy: only the health and security agents and Prometheus reach it.
+
+## Model servers (legacy neural servers)
+
+The Health, Security and DCM neural servers are LEGACY and render only with `modelServers.legacy.enabled=true`
+(default false). Nothing was deleted: code, images and templates are still in the repo.
 
 - 2 replicas, PodDisruptionBudget `minAvailable: 1`, topology spread (hard in `values-prod.yaml`, soft elsewhere).
 - Autoscaling `hpa.mode`: `queue` (default, min 2, max 8) uses the per-pod gauge
