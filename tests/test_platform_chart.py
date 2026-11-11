@@ -164,7 +164,8 @@ def test_k3d_placeholders_are_labelled():
 def test_tier_namespaces_quota_limitrange(env, fixture_file):
     docs = render(env, fixture_file)
     ns = {d["metadata"]["name"]: d for d in by_kind(docs, "Namespace")}
-    assert set(ns) == set(TIERS)    # the release namespace is created by `helm install --create-namespace`
+    expected_namespaces = set(TIERS) | ({"demo"} if env == "k3d-demo" else set())
+    assert set(ns) == expected_namespaces    # the release namespace is created by `helm install --create-namespace`
     for t in TIERS:
         assert ns[t]["metadata"]["labels"]["kubeheal/tier"] == t
         q = get(docs, "ResourceQuota", "kubeheal-quota", t)
@@ -184,7 +185,18 @@ def test_namespaces_create_false_keeps_policy(fixture_file):
 
 def test_release_namespace_is_opt_in(fixture_file):
     docs = render("k3d-demo", fixture_file, "namespaces.createReleaseNamespace=true")
-    assert {d["metadata"]["name"] for d in by_kind(docs, "Namespace")} == {"kubeheal", *TIERS}
+    assert {d["metadata"]["name"] for d in by_kind(docs, "Namespace")} == {"kubeheal", *TIERS, "demo"}
+
+
+def test_k3d_demo_watches_demo_and_grants_health_agent_read_access(fixture_file):
+    docs = render("k3d-demo", fixture_file)
+    health = get(docs, "Deployment", "health-agent")
+    env = {entry["name"]: entry.get("value") for entry in health["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["WATCH_NAMESPACES"] == "prod,staging,dev,demo"
+    assert get(docs, "Namespace", "demo")["metadata"]["labels"]["kubeheal.io/watch"] == "true"
+    binding = get(docs, "RoleBinding", "kubeheal-health-agent-read", "demo")
+    assert binding["roleRef"]["name"] == "kubeheal-health-agent-read"
+    assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "health-agent", "namespace": "kubeheal"}]
 
 
 # ---- model servers ------------------------------------------------------------------------------
@@ -502,7 +514,11 @@ def test_rbac_rendered_by_chart_matches_k8s_rbac_yaml(fixture_file):
     rbac_kinds = {"ServiceAccount", "ClusterRole", "ClusterRoleBinding", "Role", "RoleBinding"}
     ref = sorted((_norm(d) for d in ref_docs if d["kind"] in rbac_kinds), key=_key)
     got_docs = render("k3d-demo", fixture_file)
-    got = sorted((_norm(d) for d in got_docs if d["kind"] in rbac_kinds), key=_key)
+    # k3d-demo has one intentional extra read-only RoleBinding for its demo-only namespace;
+    # test_k3d_demo_watches_and_grants_health_agent_read_access covers that extension.
+    got = sorted((_norm(d) for d in got_docs if d["kind"] in rbac_kinds and not (
+        d["kind"] == "RoleBinding" and d["metadata"].get("namespace") == "demo" and
+        d["metadata"]["name"] == "kubeheal-health-agent-read")), key=_key)
     assert [_key(n) for n in got] == [_key(n) for n in ref]
     for g, r in zip(got, ref):
         assert g == r, f"{_key(g)} diverges from the k8s reference"
@@ -510,7 +526,7 @@ def test_rbac_rendered_by_chart_matches_k8s_rbac_yaml(fixture_file):
     ref_ns = {d["metadata"]["name"]: d["metadata"].get("labels", {}) for d in ref_docs if d["kind"] == "Namespace"}
     got_ns = {d["metadata"]["name"]: d["metadata"].get("labels", {})
               for d in render("k3d-demo", fixture_file, "namespaces.createReleaseNamespace=true")
-              if d["kind"] == "Namespace"}
+              if d["kind"] == "Namespace" and d["metadata"]["name"] != "demo"}
     assert ref_ns == got_ns
     assert get(got_docs, "ConfigMap", "kubeheal-mode")["data"] == \
         next(d for d in ref_docs if d["kind"] == "ConfigMap")["data"]
