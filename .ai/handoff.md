@@ -1,9 +1,9 @@
 # Handoff
 
 - **Agent/date:** Codex, 2026-11-11. Active orchestrator; Claude Code unavailable. Nothing pushed.
-- **Branches at merge gate:** `demo` `b877ab8` (main checkout), `work` `1d0b2e0` before the V5-D4 merge commit, `wave/V5-D4` `ad464f3` (reviewed, full suite passed), `wave/V5-S2` `f6ecfa9` (next, not merged). D4 merge is in progress; the full suite on `work` is pending.
+- **Branches at merge gate:** `demo` `b877ab8` (main checkout), `work` `501dea6` (V5-D4 merged), `wave/V5-D4` `ad464f3` (reviewed and merged), `wave/V5-S2` `f6ecfa9` (next, not merged). The D4 worktree is clean.
 - **Completed:** V5-M1, D1, D2, D4a, I2, D3 on `work`; demo-only I2 scripts on `demo`; active-agent handoff docs on both branches. V5-D4 fixes are committed and tested on its branch: fail-closed handling for missing baselines, missing metrics, short windows and stale assessments; idempotent Redis event publication with detail hash before stream append; retry coverage; intentional no-rescore behavior for rule evidence; watch pacing; stable OBSERVE no-score IDs; demo watch namespace RBAC.
-- **D4 tests:** focused Health Agent/chart/RBAC: 162 passed; full suite: 1363 passed, 3 skipped, 34 deselected. Helm was on PATH. These exclude only live-cluster tests. No cluster commands were run for D4.
+- **D4 tests:** focused Health Agent/chart/RBAC: 162 passed; full suite on the branch and after merge to `work`: 1363 passed, 3 skipped, 34 deselected. Helm was on PATH. These exclude only live-cluster tests. No cluster commands were run for D4.
 - **Decisions:** follow `docs/kubeheal/V5_INTEGRATION_PLAN.md` section 11, including the single-label conformal gate, D3 baseline promotion, and Q2 containment order: freeze, forensic snapshot, quarantine, scale to zero, restore only for ransomware; exfiltration escalates to HUMAN; suspicious never auto-contains.
 - **Cluster:** last recorded state from Claude is mode `test` on `k3d-kubeheal`, Helm revision 4 deployed, all pods running, inference service not installed. Recheck mode before cluster work; use only `--context k3d-kubeheal` and restore mode to `test` after scripted demo steps.
-- **Next:** finish the D4 merge, run the full suite on `work`, then merge `work` into `demo`; proceed to V5-S2 and the ordered tasks in `docs/kubeheal/NEXT_FOR_CODEX.md`. Never push, set `ALLOW_PUSH`, train, or use another cluster context.
+- **Next:** merge current `work` into `demo`, then proceed to V5-S2 and the ordered tasks in `docs/kubeheal/NEXT_FOR_CODEX.md`. Never push, set `ALLOW_PUSH`, train, or use another cluster context.
