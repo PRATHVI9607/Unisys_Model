@@ -1,6 +1,6 @@
 """
 Fusion Agent settings. Every number here that is not in the spec is chosen, not measured, documented and
-configurable through the environment. The spec numbers (tiers, thresholds, CI width, breaker limits,
+configurable through the environment. The spec numbers (tiers, thresholds, the one-label prediction-set gate, breaker limits,
 burn-in samples, 3x sampling) live in decision_policy.py and agents/common/sampling.py, not here.
 """
 
