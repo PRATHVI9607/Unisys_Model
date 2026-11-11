@@ -48,7 +48,13 @@ ESCALATIONS_STREAM = "kubeheal.escalations"
 GROUP = "executor"
 DONE_PREFIX = "kubeheal:exec:done"       # result marker per incident, action and dry-run flag (P6-R1)
 FLUSH_INTERVAL_S = 30                    # chosen, not measured: how often the fallback stream is flushed to MinIO
-INFLIGHT_TTL_S = 1800                    # chosen, not measured: frees the in-progress marker if the Executor dies
+INFLIGHT_TTL_S = 90                      # chosen default, not measured: how long a dead Executor's in-progress marker lives
+INFLIGHT_REFRESH_S = INFLIGHT_TTL_S / 3  # chosen default, not measured: a live run extends its marker this often
+# Compare-and-delete / compare-and-extend of the in-progress marker: only the owner (value == consumer name)
+# may touch it. The word "expire" appears only in the refresh script (the test fake tells them apart by it).
+_INFLIGHT_DELETE = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
+_INFLIGHT_REFRESH = ("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('expire', KEYS[1], ARGV[2]) "
+                     "else return 0 end")
 DONE_TTL_S = 7 * 24 * 3600               # chosen, not measured: how long a finished request is remembered
 # Outcomes that are not final: a later request for the same incident may legitimately run again.
 # Refused and escalated-before-running outcomes wrote nothing; a corrected request must be able to follow.
@@ -106,6 +112,8 @@ class ExecutorService:
         self.consumer = os.environ.get("HOSTNAME") or f"executor-{uuid.uuid4().hex[:6]}"
         self.mode = mode or ModeWatcher(on_change=self._mode_changed)
         self.running = False
+        self.inflight_ttl_s = INFLIGHT_TTL_S
+        self.inflight_refresh_s = INFLIGHT_REFRESH_S
         # P6-R1: reclaim of stale pending entries, dead letter after N deliveries, lease while handling
         self.reliability = StreamReliability(lambda: self.redis, GROUP, self.consumer,
                                              ReliabilityConfig.from_env())
@@ -150,6 +158,7 @@ class ExecutorService:
         self.batch_api = client.BatchV1Api()
         await self.mode.start(self.core_api)
         self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
+        await self._clear_own_inflight()
         if self.metric_source is None and self.cfg.prometheus_url:
             self.metric_source = PrometheusMetricSource(self.cfg.prometheus_url)
         self.scheduler = SnapshotScheduler(
@@ -213,7 +222,64 @@ class ExecutorService:
             t.add_done_callback(self._tasks.discard)
             return True
 
-        return await self.reliability.reclaim(EXEC_STREAM, run, self._dead_letter)
+        return await self.reliability.reclaim(EXEC_STREAM, run, self._dead_letter, self._run_alive)
+
+    async def _run_alive(self, stream: str, msg_id: str, fields: Dict) -> bool:
+        """True while a healthy run holds the in-progress marker of this request. Such a duplicate entry is
+        left pending (it is skipped as a redelivery once the run has written the done marker) and must not be
+        dead-lettered and escalated as if it had failed `deliveries` times."""
+        return bool(await self.redis.get(f"{self._done_key(fields, msg_id)}:inflight"))
+
+    # ---- in-progress marker: short TTL, refreshed by the live run, owner-checked
+    async def _inflight_release(self, key: str) -> bool:
+        """Delete the marker only if this consumer still owns it."""
+        run_script = getattr(self.redis, "eval", None)
+        if run_script is not None:
+            return bool(await run_script(_INFLIGHT_DELETE, 1, key, self.consumer))
+        if await self.redis.get(key) == self.consumer:      # client without EVAL: not atomic, tests only
+            await self.redis.delete(key)
+            return True
+        return False
+
+    async def _inflight_refresh(self, key: str) -> bool:
+        """Extend the marker only if this consumer still owns it."""
+        run_script = getattr(self.redis, "eval", None)
+        if run_script is not None:
+            return bool(await run_script(_INFLIGHT_REFRESH, 1, key, self.consumer, int(self.inflight_ttl_s)))
+        if await self.redis.get(key) == self.consumer:
+            await self.redis.set(key, self.consumer, ex=int(self.inflight_ttl_s))
+            return True
+        return False
+
+    async def _inflight_keeper(self, key: str) -> None:
+        """Runs beside a request: while the Executor is alive the marker never expires, if it dies the marker
+        expires after INFLIGHT_TTL_S and the redelivered entry runs. Uses real asyncio.sleep (the injected
+        `sleep` is a fake clock in tests)."""
+        while True:
+            await asyncio.sleep(self.inflight_refresh_s)
+            try:
+                if not await self._inflight_refresh(key):
+                    logger.warning(f"in-progress marker {key} is no longer owned by {self.consumer}")
+            except Exception as exc:
+                logger.warning(f"could not refresh in-progress marker {key}: {type(exc).__name__}")
+
+    async def _clear_own_inflight(self) -> int:
+        """At start: remove in-progress markers left by an earlier run under this consumer name (the pod
+        hostname survives a container restart), so the redelivered entry is not blocked until the TTL."""
+        scan = getattr(self.redis, "scan_iter", None)
+        if scan is None:
+            return 0
+        cleared = 0
+        try:
+            async for key in scan(match=f"{DONE_PREFIX}:*:inflight"):
+                key = key.decode() if isinstance(key, bytes) else str(key)
+                if await self.redis.get(key) == self.consumer and await self._inflight_release(key):
+                    cleared += 1
+        except Exception as exc:
+            logger.warning(f"could not clear stale in-progress markers: {type(exc).__name__}")
+        if cleared:
+            logger.warning(f"cleared {cleared} stale in-progress marker(s) owned by {self.consumer}")
+        return cleared
 
     async def _dead_letter(self, stream: str, msg_id: str, fields: Dict, deliveries: int, reason: str):
         """The request failed `deliveries` times. It may have run partly, so a human must look at it."""
@@ -273,9 +339,10 @@ class ExecutorService:
             # written after the action. SET NX an in-progress marker; the loser stays pending and is
             # skipped as a redelivery once the winner has written the done marker.
             inflight = f"{key}:inflight"
-            if not await self.redis.set(inflight, self.consumer, nx=True, ex=INFLIGHT_TTL_S):
+            if not await self.redis.set(inflight, self.consumer, nx=True, ex=int(self.inflight_ttl_s)):
                 logger.warning(f"{key} is already being executed; entry {msg_id} left pending")
                 return False
+            keeper = asyncio.create_task(self._inflight_keeper(inflight))
             try:
                 outcome = await self.execute(fields)
                 # The outcome is stored BEFORE the ledger and the actions entry, and both before the ack.
@@ -284,8 +351,10 @@ class ExecutorService:
                     await self._write_marker(key, outcome, recorded=False)
                 await self._finish(fields, outcome, key if final else None)
             finally:
+                keeper.cancel()
+                await asyncio.gather(keeper, return_exceptions=True)
                 try:
-                    await self.redis.delete(inflight)
+                    await self._inflight_release(inflight)
                 except Exception as exc:        # the TTL frees it
                     logger.warning(f"could not clear in-progress marker {inflight}: {type(exc).__name__}")
         except Exception as e:

@@ -9,6 +9,7 @@ import uuid
 from typing import Dict, List, Optional
 
 from agents.executor.actions import _write
+from agents.executor.support import to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +20,45 @@ def _job_name(incident_id: str) -> str:
     return f"kubeheal-entropy-{base[:37]}-{suffix}"
 
 
+SCAN_APP_LABEL = "kubeheal-restore-entropy"
+
+
+async def scan_node(core_api, namespace: str, pvcs: List[str]) -> Optional[str]:
+    """Node the scan Job must run on, or None for no pin.
+
+    A ReadWriteOnce volume (and a CSI hostpath volume on k3d) can only be reached from the node where the
+    pod that mounts it runs. So find a pod of the namespace that mounts each scanned PVC and take its
+    `spec.nodeName`. Every scanned PVC must resolve to the same single node; if one PVC has no running
+    pod, or the PVCs sit on different nodes, or the lookup fails, no pin is set (the Job is scheduled
+    freely, as before). Earlier scan Jobs are not counted. Needs only `list pods` (read)."""
+    try:
+        listing = to_dict(await core_api.list_namespaced_pod(namespace))
+    except Exception as exc:
+        logger.warning("scan node lookup failed, scanning without a node pin: %s", type(exc).__name__)
+        return None
+    nodes_by_claim: Dict[str, set] = {claim: set() for claim in pvcs}
+    for raw in listing.get("items") or []:
+        pod = to_dict(raw)
+        meta, spec, status = pod.get("metadata") or {}, pod.get("spec") or {}, pod.get("status") or {}
+        if (meta.get("labels") or {}).get("app") == SCAN_APP_LABEL or meta.get("deletionTimestamp"):
+            continue
+        if status.get("phase") in ("Succeeded", "Failed") or not spec.get("nodeName"):
+            continue
+        for volume in spec.get("volumes") or []:
+            claim = (volume.get("persistentVolumeClaim") or {}).get("claimName")
+            if claim in nodes_by_claim:
+                nodes_by_claim[claim].add(spec["nodeName"])
+    if not pvcs or any(not nodes for nodes in nodes_by_claim.values()):
+        return None
+    nodes = set().union(*nodes_by_claim.values())
+    if len(nodes) != 1:
+        logger.warning("scanned PVCs resolve to different nodes %s, scanning without a node pin", sorted(nodes))
+        return None
+    return next(iter(nodes))
+
+
 def job_body(name: str, incident_id: str, image: str, pvcs: List[str], timeout_s: float,
-             image_pull_secrets: Optional[List[str]] = None) -> Dict:
+             image_pull_secrets: Optional[List[str]] = None, node_name: Optional[str] = None) -> Dict:
     mounts, volumes, roots = [], [], []
     for index, claim in enumerate(pvcs):
         volume = f"restore-volume-{index}"
@@ -41,6 +79,8 @@ def job_body(name: str, incident_id: str, image: str, pvcs: List[str], timeout_s
                   "resources": {"requests": {"cpu": "100m", "memory": "128Mi"},
                                 "limits": {"cpu": "500m", "memory": "256Mi"}},
                   "volumeMounts": mounts}], "volumes": volumes}
+    if node_name:
+        pod_spec["nodeName"] = node_name
     if image_pull_secrets:
         pod_spec["imagePullSecrets"] = [{"name": secret} for secret in image_pull_secrets]
     return {
@@ -96,7 +136,8 @@ async def check_restored_pvcs(core_api, batch_api, gate, namespace: str, inciden
     if not image or not pvcs or core_api is None or batch_api is None:
         return {"clean": None, "reason": "scanner image, PVCs, or Kubernetes client unavailable"}
     name = _job_name(incident_id)
-    body = job_body(name, incident_id, image, pvcs, timeout_s, image_pull_secrets)
+    node_name = await scan_node(core_api, namespace, pvcs)
+    body = job_body(name, incident_id, image, pvcs, timeout_s, image_pull_secrets, node_name)
     try:
         await _write(gate, namespace, "create_restore_entropy_job",
                      batch_api.create_namespaced_job, namespace, body)

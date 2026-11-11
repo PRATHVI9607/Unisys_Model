@@ -58,7 +58,12 @@ class FakeRedis:
     async def xack(self, stream, group, msg_id):
         self.acked.append(msg_id)
 
-    async def eval(self, *a):
+    async def eval(self, script, n, key, token, *extra):
+        """Compare-and-delete / compare-and-expire of one key (the owner checks of the Executor)."""
+        if self.store.get(key) != token:
+            return 0
+        if "expire" not in script:
+            self.store.pop(key, None)
         return 1
 
 

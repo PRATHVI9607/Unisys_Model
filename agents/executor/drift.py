@@ -356,6 +356,11 @@ async def canary_patch(gate, apps_api, req: Request, golden: Optional[Dict], rec
             await _discard_pending(store, req, record, f"failed before anything was patched: {e}")
         if done:
             return f"patch_failed:{e}; completed {done}; the rollback point is in Redis"
+        if isinstance(e, LedgerUnavailable):
+            # Refused before anything was written (the "about to do" entry failed). `patch_failed` would write
+            # a 7-day done marker and a re-approval of this incident after MinIO recovers would be skipped;
+            # `escalated:` is not final, so the retry really runs. A human is still told.
+            return f"escalated:{e}"
         return f"patch_failed:{e}"
 
 

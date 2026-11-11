@@ -63,20 +63,44 @@ class Mode:
 
 
 class Redis:
+    """Just the commands the Executor tests use. `set(..., ex=)` records an expiry against `now`, which a test
+    moves forward with `advance` (a key past its expiry is gone for `get` and `scan_iter`)."""
+
     def __init__(self, store=None):
         self.store, self.added, self.acked = dict(store or {}), [], []
+        self.now, self.expiry = 0.0, {}
+
+    def advance(self, seconds):
+        self.now += seconds
+
+    def _alive(self, k):
+        exp = self.expiry.get(k)
+        if exp is not None and exp <= self.now:
+            self.store.pop(k, None)
+            self.expiry.pop(k, None)
+        return k in self.store
 
     async def get(self, k):
-        return self.store.get(k)
+        return self.store.get(k) if self._alive(k) else None
 
     async def set(self, k, v, nx=False, ex=None):
-        if nx and k in self.store:
+        if nx and self._alive(k):
             return None
         self.store[k] = v
+        self.expiry.pop(k, None)
+        if ex is not None:
+            self.expiry[k] = self.now + ex
         return True
 
     async def delete(self, k):
         self.store.pop(k, None)
+        self.expiry.pop(k, None)
+
+    async def scan_iter(self, match="*"):
+        import fnmatch
+        for k in list(self.store):
+            if self._alive(k) and fnmatch.fnmatchcase(k, match):
+                yield k
 
     async def xadd(self, s, f):
         self.added.append((s, f))

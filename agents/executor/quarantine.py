@@ -20,6 +20,7 @@ from typing import Dict, List, Optional
 
 from agents.executor.actions import ModeBlocked, _blocked_outcome, _write
 from agents.executor.config import ConfigMissing, ExecConfig
+from agents.executor.ledger_guard import LedgerUnavailable
 from agents.executor.snapshots import (GROUP, KIND_FORENSIC, PLURAL, VERSION, SnapshotFreeze,
                                        volume_snapshot)
 from agents.executor.support import Recorder, to_dict
@@ -74,6 +75,8 @@ async def workload_owns_pod(apps_api, namespace: str, pod: Dict, workload: str, 
 
 
 def _already_exists(e: Exception) -> bool:
+    if isinstance(e, LedgerUnavailable):      # its text can contain "conflict"; it is never "already exists"
+        return False
     s = str(e).lower()
     return "already exists" in s or "conflict" in s or getattr(e, "status", None) == 409
 
@@ -102,7 +105,7 @@ async def contain(gate, core_api, networking_api, apps_api, custom_api, req: Req
         try:
             await _write(gate, ns, planned[0], networking_api.create_namespaced_network_policy,
                          ns, quarantine_policy(req.incident_id))
-        except ModeBlocked:
+        except (ModeBlocked, LedgerUnavailable):
             raise
         except Exception as e:
             if not _already_exists(e):
@@ -142,7 +145,7 @@ async def contain(gate, core_api, networking_api, apps_api, custom_api, req: Req
                                                  {INCIDENT_LABEL: req.incident_id}))
                     done.append(planned[2])
                     await record("forensic_snapshot_created", {"pvc": c, "snapshot": sname})
-                except ModeBlocked:
+                except (ModeBlocked, LedgerUnavailable):
                     raise
                 except Exception as e:
                     if not _already_exists(e):

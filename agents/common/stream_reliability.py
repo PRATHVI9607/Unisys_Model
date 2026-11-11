@@ -83,6 +83,7 @@ class ReliabilityConfig:
 
 Handler = Callable[[str, str, Dict], Awaitable[bool]]
 DeadLetterHook = Callable[[str, str, Dict, int, str], Awaitable[None]]
+Defer = Callable[[str, str, Dict], Awaitable[bool]]
 
 
 @dataclass
@@ -142,9 +143,13 @@ class StreamReliability:
                 logger.warning(f"lease heartbeat for {stream}/{msg_id} failed: {e}")
 
     # ---- reclaim sweep ----------------------------------------------------------------------
-    async def reclaim(self, stream: str, handle: Handler, dead_letter: DeadLetterHook) -> SweepResult:
+    async def reclaim(self, stream: str, handle: Handler, dead_letter: DeadLetterHook,
+                      defer: Optional[Defer] = None) -> SweepResult:
         """One sweep over the stale pending entries of `stream`. `handle(stream, id, fields)` returns True
-        when the entry was handled and acknowledged. Never raises for one bad entry."""
+        when the entry was handled and acknowledged. Never raises for one bad entry. `defer(stream, id,
+        fields)` (optional) is asked before an entry is dead-lettered: True means "a run for this entry is
+        alive right now, do not escalate", and the entry stays pending (the Executor uses it for the
+        in-progress marker of a healthy long run)."""
         result = SweepResult()
         cursor = "0-0"
         while True:
@@ -154,11 +159,12 @@ class StreamReliability:
             cursor, entries = _split_claim(reply)
             for msg_id, fields in entries:
                 result.claimed += 1
-                await self._one(stream, msg_id, fields, handle, dead_letter, result)
+                await self._one(stream, msg_id, fields, handle, dead_letter, result, defer)
             if cursor in ("0-0", "0"):
                 return result
 
-    async def _one(self, stream, msg_id, fields, handle, dead_letter, result: SweepResult) -> None:
+    async def _one(self, stream, msg_id, fields, handle, dead_letter, result: SweepResult,
+                   defer: Optional[Defer] = None) -> None:
         if (stream, msg_id) in self._inflight:
             result.skipped += 1          # our own running entry: the lease keeps it ours
             return
@@ -174,6 +180,18 @@ class StreamReliability:
             result.skipped += 1
             return
         if deliveries > self.cfg.max_deliveries:
+            if defer is not None:
+                try:
+                    alive = bool(await defer(stream, msg_id, fields))
+                except Exception as e:
+                    logger.error(f"defer check for {stream}/{msg_id} failed: {e}; retry next sweep")
+                    result.skipped += 1
+                    return
+                if alive:
+                    logger.warning(f"{stream}/{msg_id} passed {self.cfg.max_deliveries} deliveries but a run "
+                                   "is alive; not dead-lettered, left pending")
+                    result.skipped += 1
+                    return
             await self._dead(stream, msg_id, fields, deliveries, dead_letter, result)
             return
         try:

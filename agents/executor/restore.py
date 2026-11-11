@@ -7,6 +7,11 @@ digests it actually ran, the source PVC specs and the candidate snapshots. Any g
 `escalated:<reason>` with nothing written. T0 comes from the request (`t0_ms`); the Executor never
 guesses it.
 
+Before the first write the corrective "about to do" entry `restore_begin` must reach MinIO (the fallback
+stream does not count). Without it nothing is written and the outcome is `escalated:ledger_unavailable...`:
+the protective writes below would otherwise run and the corrective PVC creation be refused, leaving the
+workload at zero replicas.
+
 Writes (each one through `_write`, so the kill switch can stop between any two):
   1 ensure the incident's deny-all NetworkPolicy exists
   2 remember the replica count (annotation `kubeheal/original-replicas`)
@@ -35,16 +40,18 @@ from typing import Callable, Dict, List, Optional
 
 from agents.executor.actions import ModeBlocked, _blocked_outcome, _write
 from agents.executor.config import ConfigMissing, ExecConfig
+from agents.executor.ledger_guard import LedgerUnavailable
 from agents.executor.quarantine import (INCIDENT_LABEL, QUARANTINE_LABEL, policy_name, pod_pvc_claims,
                                         quarantine_labels, quarantine_policy, workload_owns_pod)
 from agents.executor.snapshots import (GROUP, LABEL_PVC, SnapshotFreeze, list_snapshots,
                                        select_snapshot)
-from agents.executor.support import Recorder, poll_until, to_dict
+from agents.executor.support import Recorder, gate_open, poll_until, to_dict
 from agents.executor.validation import Request
 
 logger = logging.getLogger(__name__)
 
 REPLICAS_ANNOTATION = "kubeheal/original-replicas"
+RESTORE_BEGIN_STEP = "restore_begin"      # not in ledger_guard.PROTECTIVE_STEPS, so it is a corrective step
 # Only the pullable `<repo>@sha256:<64 hex>` form counts. A bare `sha256:<id>` (containerd reports the
 # image config id for images loaded without a registry, e.g. `k3d image import`) is not a manifest
 # digest and `repo@<id>` would not pull.
@@ -110,6 +117,8 @@ async def _ready(apps_api, kind, ns, name, want: int) -> bool:
 
 
 def _exists(e: Exception) -> bool:
+    if isinstance(e, LedgerUnavailable):      # its text can contain "conflict"; it is never "already exists"
+        return False
     s = str(e).lower()
     return "already exists" in s or "conflict" in s or getattr(e, "status", None) == 409
 
@@ -226,12 +235,24 @@ async def restore(gate, core_api, apps_api, networking_api, custom_api, req: Req
                                   "restore": {v: {k: p[k] for k in ("claim", "new_claim", "snapshot")}
                                               for v, p in plan.items()}})
 
+    # The restore is a corrective operation, but its first writes (policy, replica annotation, scale to zero)
+    # are protective and would go on without MinIO. Then the PVC creation would be refused and the workload
+    # left at zero replicas. So the corrective "about to do" entry is written FIRST and must reach MinIO;
+    # otherwise nothing is written at all and a human decides. Skipped when the gate is closed (a dry run
+    # or mode test): the first write below then ends in the usual "DRY RUN" outcome.
+    if hasattr(gate, "record_intent") and gate_open(gate, ns):
+        try:
+            await gate.record_intent(ns, RESTORE_BEGIN_STEP)
+        except LedgerUnavailable as e:
+            await record("restore_not_started", {"reason": str(e)})
+            return f"escalated:{e}; nothing was written"
+
     done: List[str] = []
     try:
         try:
             await _write(gate, ns, planned[0], networking_api.create_namespaced_network_policy,
                          ns, quarantine_policy(req.incident_id))
-        except ModeBlocked:
+        except (ModeBlocked, LedgerUnavailable):
             raise
         except Exception as e:
             if not _exists(e):
@@ -259,7 +280,7 @@ async def restore(gate, core_api, apps_api, networking_api, custom_api, req: Req
             try:
                 await _write(gate, ns, planned[3], core_api.create_namespaced_persistent_volume_claim,
                              ns, _pvc_body(p, req))
-            except ModeBlocked:
+            except (ModeBlocked, LedgerUnavailable):
                 raise
             except Exception as e:
                 if not _exists(e):
