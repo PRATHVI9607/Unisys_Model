@@ -16,7 +16,7 @@ Updated 2026-11-11 after the P10 Session 1 pause.
 | Branch | State | Worktree |
 |---|---|---|
 | `demo` | Current; includes P10 metric probe changes and merge `f4264d1` from `work` | `C:/My_projects_1/cLOUD/Unisys_Model` |
-| `work` | Core disk metric query fix at `382d137`; handoff docs will be copied from `demo` after this file is committed | `C:/My_projects_1/cLOUD/Unisys_Model-wt-metric-query` |
+| `work` | Core disk metric query fix at `382d137`; handoff docs synced from `demo` at `6ba9109` | `C:/My_projects_1/cLOUD/Unisys_Model-wt-metric-query` |
 | `wave/P11` | Unreviewed WIP commit `47e1b34`; no cluster access used | `C:/My_projects_1/cLOUD/Unisys_Model-wt-P11` |
 | `wip/docs-p6d2` | Unreviewed WIP commit `c7c9f5bf7a078702e2dd0c1d47d862df7ef1b77f`; includes P6-D2 and docs | `C:/My_projects_1/cLOUD/Unisys_Model-wt-docs` |
 | `main` | Base branch at `88ce586`, ahead of `origin/main` by one local commit | no worktree |
