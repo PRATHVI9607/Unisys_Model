@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 param(
     [ValidateRange(1, 64)] [int]$Vus = 32,
     [ValidateRange(30, 300)] [int]$DurationSeconds = 90,
@@ -137,8 +138,8 @@ try {
     } while ([DateTime]::UtcNow -lt $endpointDeadline)
     if (-not $endpoints) { throw 'Health Model Service has no ready endpoints; refusing to start k6.' }
     Write-Host "Health Model ready endpoints: $endpoints"
+    $jobStarted = $true   # set first so a partial apply is still cleaned up in finally
     K apply -f $jobPath | Out-Host
-    $jobStarted = $true
     Write-Host 'HPA before load:'
     Read-Hpa
 
@@ -184,4 +185,5 @@ finally {
     }
     K -n kubeheal delete networkpolicy kubeheal-k6-health-load --ignore-not-found | Out-Host
     K -n kubeheal delete configmap kubeheal-k6-health-load --ignore-not-found | Out-Host
+    Remove-Item -LiteralPath $cmPath, $policyPath, $jobPath -Force -ErrorAction SilentlyContinue
 }

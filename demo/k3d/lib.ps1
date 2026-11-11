@@ -52,23 +52,31 @@ function Initialize-Tools {
     }
 }
 
+# Native stderr is kept apart from stdout: kubectl/helm warnings must not end up in values that scripts compare
+# (jsonpath results, HPA reads). Both streams are only joined in the error message.
+function Split-NativeOutput($records) {
+    $err = @($records | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString() })
+    $out = @($records | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
+    return @{ Out = $out; Err = $err }
+}
+
 # kubectl pinned to the demo cluster. Output goes to the pipeline, errors throw.
 function K {
     # `$input` carries piped text (for example `... | K apply -f -`) to kubectl's stdin.
-    $out = $input | & $script:KubectlExe --context $script:Context @args 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "kubectl $($args -join ' ') failed: $($out -join "`n")" }
-    return $out
+    $parts = Split-NativeOutput ($input | & $script:KubectlExe --context $script:Context @args 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "kubectl $($args -join ' ') failed: $(($parts.Err + $parts.Out) -join "`n")" }
+    return $parts.Out
 }
 # kubectl that is allowed to fail (returns $null on failure).
 function KTry {
-    $out = $input | & $script:KubectlExe --context $script:Context @args 2>&1
+    $parts = Split-NativeOutput ($input | & $script:KubectlExe --context $script:Context @args 2>&1)
     if ($LASTEXITCODE -ne 0) { return $null }
-    return $out
+    return $parts.Out
 }
 function Hc {
-    $out = & $script:HelmExe --kube-context $script:Context @args 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "helm $($args -join ' ') failed: $($out -join "`n")" }
-    return $out
+    $parts = Split-NativeOutput (& $script:HelmExe --kube-context $script:Context @args 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "helm $($args -join ' ') failed: $(($parts.Err + $parts.Out) -join "`n")" }
+    return $parts.Out
 }
 function Apply-Url([string]$url) {
     Say "apply $url"

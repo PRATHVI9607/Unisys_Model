@@ -54,6 +54,7 @@ if ($Only.Count -eq 0 -or $Only -contains "victim-app") {
     docker build -t $ref demo/victim-app
     if ($LASTEXITCODE -ne 0) { throw "victim-app build failed" }
     docker push $ref | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "victim-app push failed" }
     $built += "victim-app"
 }
 if ($Only.Count -eq 0 -or $Only -contains "ransomware-sim") {
@@ -62,6 +63,7 @@ if ($Only.Count -eq 0 -or $Only -contains "ransomware-sim") {
     docker build -t $ref -f dockerfiles/Dockerfile.ransomware .
     if ($LASTEXITCODE -ne 0) { throw "ransomware-sim build failed" }
     docker push $ref | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "ransomware-sim push failed" }
     $built += "ransomware-sim"
 }
 

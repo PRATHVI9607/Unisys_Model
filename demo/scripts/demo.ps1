@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 param(
     [ValidateSet("status", "drift", "reset")]
     [string]$Action = "status",
@@ -32,6 +33,7 @@ function Set-CpuResources([string]$request, [string]$limit) {
 }
 
 function Read-LatestAction {
+    # No -a flag: the redis container sets REDISCLI_AUTH (chart redis template), so redis-cli authenticates itself.
     K exec redis-0 -n kubeheal '--' redis-cli XREVRANGE kubeheal.actions + - COUNT 1
 }
 

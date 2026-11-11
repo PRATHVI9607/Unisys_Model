@@ -6,6 +6,7 @@
 # Nothing here touches any other cluster.
 param(
     [switch]$SkipImages,
+    [ValidateSet("all", "cluster", "csi", "monitoring", "images", "install", "adapter", "victim")]
     [string]$Stage = "all"
 )
 
@@ -25,7 +26,7 @@ if (Want "cluster") {
     if (-not $exists) {
         Say "creating cluster $ClusterName (1 server, 2 agents, registry $RegistryHost)"
         & $K3dExe cluster create $ClusterName --servers 1 --agents 2 -p "8080:80@loadbalancer" `
-            --registry-create "$($RegistryName):0.0.0.0:$RegistryHostPort" --wait --timeout 240s
+            --registry-create "$($RegistryName):0.0.0.0:$RegistryHostPort" --kubeconfig-switch-context=false --wait --timeout 240s
         if ($LASTEXITCODE -ne 0) { throw "k3d cluster create failed" }
     } else {
         Say "cluster $ClusterName already exists"
@@ -122,8 +123,12 @@ $indented
     $vf = Join-Path $env:TEMP "kubeheal-adapter-values.yaml"
     Set-Content -Path $vf -Value $values -Encoding utf8
     Say "prometheus-adapter $($Versions.PrometheusAdapter)"
-    Hc upgrade --install prometheus-adapter prometheus-community/prometheus-adapter --version $Versions.PrometheusAdapter `
-        -n monitoring -f $vf --wait --timeout 5m | Out-Null
+    try {
+        Hc upgrade --install prometheus-adapter prometheus-community/prometheus-adapter --version $Versions.PrometheusAdapter `
+            -n monitoring -f $vf --wait --timeout 5m | Out-Null
+    } finally {
+        Remove-Item -LiteralPath $vf -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # ---------------------------------------------------------------- victim apps

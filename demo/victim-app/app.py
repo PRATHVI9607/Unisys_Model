@@ -1,11 +1,15 @@
 """Small demo workload with Prometheus request metrics."""
 
 import os
+import threading
 from pathlib import Path
 from time import perf_counter
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Histogram, generate_latest
+
+
+DISK_PROBE_MAX_BYTES = 1024 * 1024  # chosen default, not measured
 
 
 def create_app() -> FastAPI:
@@ -30,6 +34,8 @@ def create_app() -> FastAPI:
     )
 
     api = FastAPI(title="KubeHeal victim application")
+    disk_lock = threading.Lock()
+    disk_state = {"written": 0}
 
     @api.middleware("http")
     async def observe_requests(request: Request, call_next):
@@ -77,17 +83,26 @@ def create_app() -> FastAPI:
         return {"work_value": value}
 
     @api.get("/disk")
-    async def write_for_metrics():
-        """Write and sync bytes under the mounted victim data path for disk I/O telemetry."""
+    def write_for_metrics():
+        """Write and sync bytes under the mounted victim data path for disk I/O telemetry.
+
+        A plain `def` so FastAPI runs the blocking fsync in its thread pool, not on the event loop. The probe
+        file is a ring of DISK_PROBE_MAX_BYTES (chosen default, not measured): writes wrap around, so it never
+        grows without bound and nothing is deleted.
+        """
         path = Path(os.environ.get("KUBEHEAL_DISK_IO_PATH", "/data/.kubeheal-metric-probe"))
         payload = b"kubeheal-demo-disk-metric\n"
-        try:
-            with path.open("ab") as output:
-                output.write(payload)
-                output.flush()
-                os.fsync(output.fileno())
-        except OSError as exc:
-            raise HTTPException(status_code=503, detail="victim data path is not writable") from exc
+        with disk_lock:
+            offset = disk_state["written"] % DISK_PROBE_MAX_BYTES
+            try:
+                with path.open("r+b" if path.exists() else "wb") as output:
+                    output.seek(offset)
+                    output.write(payload)
+                    output.flush()
+                    os.fsync(output.fileno())
+            except OSError as exc:
+                raise HTTPException(status_code=503, detail="victim data path is not writable") from exc
+            disk_state["written"] += len(payload)
         disk_io_bytes.inc(len(payload))
         return {"bytes_written": len(payload)}
 
