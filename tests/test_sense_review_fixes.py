@@ -243,25 +243,38 @@ def test_an_event_without_a_usable_time_never_sets_first_seen():
     assert tracker.first_seen(4242) == ""
 
 
-def _security_agent(monkeypatch, model):
+def _service_body(risk=0.9, label="ransomware", **kw):
+    """The JSON the inference service answers (kubeheal.contracts.Prediction)."""
+    body = {"model_version": "security-test", "label": label, "risk": risk, "probabilities": {label: 1.0},
+            "prediction_set": [label], "uncertain": False, "top_factors": [], "latency_ms": 1.0}
+    body.update(kw)
+    return body
+
+
+def _security_agent(monkeypatch, body, status=200):
+    """An agent whose inference client talks to a fake service: `body` is the JSON it answers (None: the service
+    cannot be reached)."""
     from agents.security_agent import agent as sa
     from agents.security_agent.entropy_sampler import EntropySampler, ProcFdReader
+    from agents.security_agent.inference import InferenceClient
     ag = sa.SecurityAgent(redis_url="redis://unused", sampler=EntropySampler(ProcFdReader("/nonexistent-proc")))
     ag.redis, ag.running = _Redis(), True
     ag.redis.kv["kubeheal:pid:4242"] = json.dumps({"pid": 4242, "pod": "p", "namespace": "prod"})
 
-    async def fake_model(evts, series, signals):
-        return model
+    async def poster(url, payload, timeout_s):
+        if body is None:
+            raise ConnectionError("refused")
+        return status, body
+    ag.inference = InferenceClient("http://inference.invalid", poster=poster)
 
     async def no_mmap(pid):
         return False
-    monkeypatch.setattr(ag, "_call_security_model", fake_model)
     monkeypatch.setattr(ag, "_check_mmap_entropy", no_mmap)
     return ag
 
 
 def test_published_t0_is_the_first_seen_time_of_a_long_attack(monkeypatch):
-    ag = _security_agent(monkeypatch, {"risk_score": 0.9, "label": "ransomware_active", "ci_width": 0.1})
+    ag = _security_agent(monkeypatch, _service_body())
     tracker = FalcoWindowTracker(burst_threshold=3, cooldown_s=0, max_events=5, clock=_ticking_clock())
     captured = []
 
@@ -280,52 +293,56 @@ def test_published_t0_is_the_first_seen_time_of_a_long_attack(monkeypatch):
     assert p["t0_ms"] == str(1794303000 * 1000)
 
 
-# ---- H: a model answer that is NaN, incomplete or out of range -------------------------------------------
-def _publish_with_model(monkeypatch, model):
-    ag = _security_agent(monkeypatch, model)
+# ---- H: a service answer that is NaN, incomplete or out of range -----------------------------------------
+def _publish_with_model(monkeypatch, body, status=200):
+    ag = _security_agent(monkeypatch, body, status)
     ag.inotify_watcher.check_rename_burst = lambda events=None: 0.5          # heuristic floor 0.60
     evs = [{"syscall": "write", "fd_path": "/data/a", "ts": "2026-11-10T09:30:00Z"}] * 3
     run(ag._run_entropy_check(4242, evs, "replay"))
     return ag
 
 
-@pytest.mark.parametrize("model,reason", [
-    ({"risk_score": float("nan"), "ci_width": 0.1}, "risk_score_invalid"),
-    ({"risk_score": float("inf"), "ci_width": 0.1}, "risk_score_invalid"),
-    ({"risk_score": 1.5, "ci_width": 0.1}, "risk_score_invalid"),
-    ({"risk_score": "0.9", "ci_width": 0.1}, "risk_score_invalid"),
-    ({"label": "ransomware_active", "ci_width": 0.1}, "risk_score_missing"),
+@pytest.mark.parametrize("body,status,issue", [
+    (None, 200, "inference_unreachable"),                                     # service down or timeout
+    (_service_body(), 503, "inference_http_503"),                             # no bundle loaded
+    (_service_body(), 500, "inference_http_500"),
+    (_service_body(risk=float("nan")), 200, "inference_invalid_response"),
+    (_service_body(risk=float("inf")), 200, "inference_invalid_response"),
+    (_service_body(risk=1.5), 200, "inference_invalid_response"),
+    (_service_body(risk="0.9"), 200, "inference_invalid_response"),
+    (_service_body(label="ransomware_active"), 200, "inference_invalid_response"),   # not a security label
+    (_service_body(prediction_set="ransomware"), 200, "inference_invalid_response"),
+    (_service_body(prediction_set=["other"]), 200, "inference_invalid_response"),
+    (_service_body(uncertain="false"), 200, "inference_invalid_response"),
+    ({"detail": "x"}, 200, "inference_invalid_response"),
+    ([], 200, "inference_invalid_response"),
 ])
-def test_an_unusable_model_answer_falls_back_to_the_heuristic_and_cannot_auto_act(monkeypatch, model, reason, caplog):
+def test_an_unusable_service_answer_gives_no_score_and_falls_back_to_the_heuristic(monkeypatch, body, status,
+                                                                                    issue, caplog):
     with caplog.at_level(logging.WARNING):
-        ag = _publish_with_model(monkeypatch, model)
+        ag = _publish_with_model(monkeypatch, body, status)
     streams = [p for _, p in ag.redis.streams]
     assert len(streams) >= 1                                           # not suppressed, no KeyError, no dead task
     p = streams[-1]
     assert float(p["sec_risk"]) == pytest.approx(0.60) and not math.isnan(float(p["sec_risk"]))
-    assert p["model_scored"] == "false" and float(p["sec_ci_width"]) >= 1.0
-    assert p["model_issue"] == "invalid_model_response"
-    assert ag.rejected_model_results[reason] >= 1
-    assert "ignored" in caplog.text
+    assert p["model_scored"] == "false" and p["sec_uncertain"] == "true" and p["sec_prediction_set"] == "[]"
+    assert p["model_issue"] == issue
+    assert ag.redis.hashes["kubeheal:security:score:prod:p"]["model_scored"] == "false"
+    assert "not usable" in caplog.text or issue == "inference_unreachable"
 
 
-def test_a_valid_model_answer_is_still_used(monkeypatch):
-    ag = _publish_with_model(monkeypatch, {"risk_score": 0.91, "label": "ransomware_active", "ci_width": 0.1})
+def test_a_valid_service_answer_is_used(monkeypatch):
+    ag = _publish_with_model(monkeypatch, _service_body(risk=0.91))
     p = ag.redis.streams[-1][1]
     assert p["model_scored"] == "true" and float(p["sec_risk"]) == pytest.approx(0.91)
-    assert "model_issue" not in p and ag.rejected_model_results == {}
+    assert "model_issue" not in p and ag.inference.rejected == {}
+    assert ag.redis.hashes["kubeheal:security:score:prod:p"]["model_scored"] == "true"
 
 
-def test_a_nan_ci_width_becomes_the_maximum_width(monkeypatch):
-    ag = _publish_with_model(monkeypatch, {"risk_score": 0.91, "label": "x", "ci_width": float("nan")})
-    p = ag.redis.streams[-1][1]
-    assert p["model_scored"] == "true" and float(p["sec_ci_width"]) == pytest.approx(1.0)
-
-
-def test_nan_model_risk_is_not_suppressed_below_the_heuristic_threshold_behaviour(monkeypatch):
+def test_nan_service_risk_is_not_suppressed_below_the_heuristic_threshold_behaviour(monkeypatch):
     """The old code: max(nan, 0.95) is nan and nan >= 0.40 is False, so a clear ransomware heuristic was
     dropped. Now the heuristic score is published."""
-    ag = _security_agent(monkeypatch, {"risk_score": float("nan"), "ci_width": 0.1})
+    ag = _security_agent(monkeypatch, _service_body(risk=float("nan")))
     ag.inotify_watcher.check_rename_burst = lambda events=None: 0.5
     run(ag._run_entropy_check(4242, [{"syscall": "write", "fd_path": "/x", "ts": ""}], "replay"))
     assert float(ag.redis.streams[-1][1]["sec_risk"]) == pytest.approx(0.60)

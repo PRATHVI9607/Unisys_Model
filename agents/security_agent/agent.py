@@ -1,23 +1,23 @@
 import asyncio
-import base64
 import json
 import logging
 import math
 import os
-import struct
 import time
+from collections import deque
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, field
+from typing import Deque, Dict, List, Optional, Any, Tuple
 from enum import Enum
 
-import aiohttp
 import redis.asyncio as aioredis
 import kubernetes_asyncio
 from kubernetes_asyncio import client, config
 from agents.common.metrics import KubeHealMetrics
 from agents.common.sampling import sampling_factor, scaled_interval
+from agents.security_agent.counters import CounterSamples, read_pod_counters
+from agents.security_agent.inference import InferenceClient
 from agents.security_agent.proc_scanner import PodIndex, scan_pids
+from agents.security_agent.v5_window import top_syscall, window_from_normalised
 from agents.security_agent.entropy_sampler import EntropySampler, EntropyResult, shannon_entropy
 from agents.security_agent.falco_client import (
     falco_event_stream, replay_stream, resolve_falco_mode,
@@ -25,17 +25,13 @@ from agents.security_agent.falco_client import (
 from agents.security_agent.syscall_window import (
     FalcoWindowTracker, build_model_input, DEFAULT_BURST_THRESHOLD, DEFAULT_COOLDOWN_S,
 )
+from kubeheal.contracts import SECURITY_PUBLISH_RISK
+from kubeheal.features.security import MAX_WINDOW_EVENTS, security_features
 from pydantic import BaseModel, ConfigDict, Field
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 METRICS = KubeHealMetrics()
-
-
-def emb_b64(vec) -> str:
-    """Pack a float list as base64 float32 bytes for the Redis stream."""
-    vec = list(vec or [])
-    return base64.b64encode(struct.pack(f"{len(vec)}f", *vec)).decode() if vec else ""
 
 
 def namespace_tier(namespace: str) -> str:
@@ -52,11 +48,18 @@ def namespace_tier(namespace: str) -> str:
     return "unknown"
 
 
-def _finite_or(value, default: float) -> float:
-    """float(value) when it is a finite non-negative number, else `default` (a NaN width must not pass)."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+SCORE_KEY_PREFIX = "kubeheal:security:score"          # + ":<namespace>:<workload>"; Fusion reads it (SECURITY_SCORE_PREFIX)
+DEFAULT_SCORE_TTL_S = 60.0                              # chosen, not measured (env SECURITY_SCORE_TTL_S)
+HEURISTIC_LABEL = "suspicious"                          # label of a heuristic-only event: never an auto-contain label
+MAX_TRACKED_WORKLOADS = 1024                            # chosen, not measured: bound on the per-workload state maps
+
+
+def _positive_float(raw, default: float) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
         return default
-    return float(value) if math.isfinite(value) and value >= 0 else default
+    return value if math.isfinite(value) and value > 0 else default
 
 
 def falco_t0_ms(events: List[Dict]) -> Optional[int]:
@@ -162,7 +165,7 @@ class SecurityAgent:
         namespace: str = "kubeheal",
         redis_url: str = None,
         falco_grpc_addr: str = None,
-        security_model_url: str = None,
+        inference_url: str = None,
         entropy_threshold: float = 7.2,
         mmap_entropy_threshold: float = 7.0,
         mmap_size_threshold: int = 50 * 1024 * 1024,
@@ -171,10 +174,10 @@ class SecurityAgent:
         self.namespace       = namespace
         self.redis_url       = redis_url       or os.environ.get("REDIS_URL", "redis://redis-master:6379")
         self.falco_grpc_addr = falco_grpc_addr or os.environ.get("FALCO_GRPC_ADDR", "127.0.0.1:5060")
-        # v4: dedicated Security Model server (was the v3 DIT-Sec monolith)
-        self.security_model_url = security_model_url or os.environ.get(
-            "SECURITY_MODEL_URL", "http://kubeheal-security-model:8002"
-        )
+        # V5-S2: the LightGBM security bundle behind the inference service (POST /v1/security/predict)
+        self.inference = InferenceClient(inference_url, metrics=METRICS)
+        self.score_ttl_s = _positive_float(os.environ.get("SECURITY_SCORE_TTL_S"), DEFAULT_SCORE_TTL_S)
+        self.proc_root = os.environ.get("PROC_ROOT", "/proc")
         self.entropy_threshold = entropy_threshold
         self.mmap_entropy_threshold = mmap_entropy_threshold
         self.mmap_size_threshold = mmap_size_threshold
@@ -199,8 +202,12 @@ class SecurityAgent:
         self._falco_first_ts: Dict[int, str] = {}
         # checks that did not produce an event, by reason (logged as well; no Prometheus counter here)
         self.dropped_checks: Dict[str, int] = {}
-        # model answers that were not usable, by reason
-        self.rejected_model_results: Dict[str, int] = {}
+        self._pid_map: Dict[int, Dict] = {}                         # last PID scan: pid -> pod record
+        self._counters: Dict[Tuple[str, str], CounterSamples] = {}  # (namespace, pod) -> write/net samples
+        self._recent_risk: Dict[Tuple[str, str], Deque] = {}        # (namespace, workload) -> (wall s, risk)
+        self.score_write_errors = 0
+        self._wall = time.time                                      # tests replace it
+        self._mono = time.monotonic
 
     def _drop(self, reason: str, pid: int, detail: str = "") -> None:
         self.dropped_checks[reason] = self.dropped_checks.get(reason, 0) + 1
@@ -255,6 +262,7 @@ class SecurityAgent:
                 except Exception as e:
                     logger.warning(f"pod index refresh failed, using stale index: {e}")
                 pid_map = scan_pids(self.pod_index)
+                self._pid_map = pid_map
 
                 for pid, info in pid_map.items():
                     key = f"kubeheal:pid:{pid}"
@@ -278,6 +286,7 @@ class SecurityAgent:
         if mode == "off":
             return
         tracker = FalcoWindowTracker(
+            max_events=MAX_WINDOW_EVENTS,       # the v5 window cut (60 s, 512 events) is applied at scoring time
             burst_threshold=int(os.environ.get("FALCO_BURST_THRESHOLD", str(DEFAULT_BURST_THRESHOLD))),
             cooldown_s=float(os.environ.get("FALCO_TRIGGER_COOLDOWN_S", str(DEFAULT_COOLDOWN_S))),
         )
@@ -312,10 +321,13 @@ class SecurityAgent:
         the window, and start an entropy check on a burst or a Falco ransomware rule."""
         pid = evt.get("pid")
         if pid and evt.get("pod"):
+            # Carry the workload the PID scan would have stored. The scan writes the same key, and a record
+            # without `workload` made the event, and the score hash, be keyed by the POD name (never Fusion's join key).
             await self.redis.setex(
                 f"kubeheal:pid:{pid}", 300,
-                json.dumps({"pid": pid, "pod": evt["pod"],
-                            "namespace": evt.get("namespace", "default")}),
+                json.dumps(self._with_workload({"pid": pid, "pod": evt["pod"],
+                                                "namespace": evt.get("namespace", "default"),
+                                                "pod_uid": evt.get("pod_uid", "")})),
             )
         trigger = tracker.add(evt)
         if trigger:
@@ -403,6 +415,8 @@ class SecurityAgent:
             # the PID cache entry (300 s) expired or never existed: no pod to report against
             self._drop("pid_cache_expired", pid, "no kubeheal:pid entry; no event published")
             return
+        pid_info = self._with_workload(pid_info)
+        await self._sample_counters(pid, pid_info)           # baseline for the write and network rates
         mmap_detected = await self._check_mmap_entropy(pid)
 
         async def first_sample(result: EntropyResult, i: int) -> None:
@@ -419,6 +433,78 @@ class SecurityAgent:
                                             interval_provider=next_sample_interval)
         await self._assess_and_publish(pid, pid_info, result, events, source, mmap_detected, "complete")
 
+    # ---- workload, counters, score hash ------------------------------------------------------------------
+    def _with_workload(self, pid_info: Dict) -> Dict:
+        """pid_info with `workload` (the Deployment name for a Deployment-owned pod, else the controller, else the
+        pod: what the Health Agent and Fusion call `deployment`), `workload_kind`, `container` and `pod_uid` filled
+        from the pod index when the record lacks them."""
+        info = dict(pid_info)
+        namespace, pod = info.get("namespace", "default"), info.get("pod")
+        known = self.pod_index.lookup_pod(namespace, pod) if pod else None
+        if known is not None:
+            info["workload"] = info.get("workload") or known.workload
+            info["workload_kind"] = info.get("workload_kind") or known.workload_kind
+            info["container"] = info.get("container") or known.container
+        info["pod_uid"] = info.get("pod_uid") or info.get("uid") or (known.uid if known is not None else "")
+        info["workload"] = info.get("workload") or pod or "unknown"
+        return info
+
+    def _pod_pids(self, pid: int, pid_info: Dict) -> List[int]:
+        namespace, pod = pid_info.get("namespace", "default"), pid_info.get("pod")
+        pids = {pid}
+        pids.update(p for p, rec in self._pid_map.items()
+                    if rec.get("pod") == pod and rec.get("namespace") == namespace)
+        return sorted(p for p in pids if p)
+
+    async def _sample_counters(self, pid: int, pid_info: Dict) -> CounterSamples:
+        """Add one write-bytes and net-tx sample for the pod (blocking /proc reads run in a thread)."""
+        key = (pid_info.get("namespace", "default"), pid_info.get("pod") or "unknown")
+        samples = self._counters.get(key)
+        if samples is None:
+            if len(self._counters) >= MAX_TRACKED_WORKLOADS:
+                self._counters.pop(next(iter(self._counters)))
+            samples = self._counters[key] = CounterSamples()
+        net, wbytes = await asyncio.to_thread(read_pod_counters, self.proc_root, self._pod_pids(pid, pid_info))
+        samples.add(self._mono(), net, wbytes)
+        return samples
+
+    async def _record_score(self, namespace: str, workload: str, pred: Optional[Dict]) -> None:
+        """Write `kubeheal:security:score:<namespace>:<workload>` (sec_risk, ts_ms, model_scored) with an expiry:
+        what the Fusion Agent reads to know a FRESH Security Model response exists and what its raw risk is.
+
+        model_scored is "true" only when the service answered with a valid prediction. A failed window writes
+        "false" with an empty sec_risk, so a "true" from a moment earlier is overwritten (fail closed). When the
+        service answered, sec_risk is the highest model risk of this workload within the TTL: another process
+        of the same workload that scored low a second later must not hide a high one."""
+        now = self._wall()
+        key = (namespace, workload)
+        hist = self._recent_risk.get(key)
+        if hist is None:
+            if len(self._recent_risk) >= MAX_TRACKED_WORKLOADS:
+                self._recent_risk.pop(next(iter(self._recent_risk)))
+            hist = self._recent_risk[key] = deque()
+        while hist and now - hist[0][0] > self.score_ttl_s:
+            hist.popleft()
+        if pred is not None:
+            hist.append((now, pred["risk"]))
+            fields = {"sec_risk": f"{max(r for _, r in hist):.4f}", "model_scored": "true"}
+        else:
+            fields = {"sec_risk": "", "model_scored": "false"}
+        fields["ts_ms"] = str(int(now * 1000))
+        hkey = f"{SCORE_KEY_PREFIX}:{namespace}:{workload}"
+        try:
+            await self.redis.hset(hkey, mapping=fields)
+            await self.redis.expire(hkey, max(1, int(math.ceil(self.score_ttl_s))))
+        except Exception as e:           # a Redis error must not end the check; Fusion treats a missing hash as stale
+            self.score_write_errors += 1
+            logger.warning("score hash %s not written (%s); %d write error(s) so far", hkey, e,
+                           self.score_write_errors)
+
+    async def _predict(self, features: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The inference service's prediction for one feature window, or None (fail closed: unreachable, timeout,
+        non-200, unusable body). The single injectable point of the model call."""
+        return await self.inference.predict(features)
+
     async def _assess_and_publish(self, pid: int, pid_info: Dict, result: EntropyResult,
                                   events: List[Dict], source: str, mmap_detected: bool,
                                   phase: str) -> None:
@@ -431,18 +517,30 @@ class SecurityAgent:
             "high_entropy":      entropy_known and entropy_avg > self.entropy_threshold,
             "mmap_detected":     mmap_detected,
         }
+        pid_info = self._with_workload(pid_info)
+        namespace, workload = pid_info.get("namespace", "default"), pid_info["workload"]
 
-        # The Security Model needs a real syscall window. Without one (no Falco, no replay) the model is not
-        # called and nothing is fabricated: the event is scored from the entropy and /proc heuristics only
-        # and says so (model_scored=false, syscall_source=none).
-        sec = None
-        model_rejected = False
+        # The Security Model needs a real syscall window. Without one (no Falco, no replay, or only events v5 does
+        # not count) the service is not called and nothing is fabricated: the event is scored from the entropy and
+        # /proc heuristics only and says so (model_scored=false).
+        pred: Optional[Dict[str, Any]] = None
+        issue = ""
+        window: Tuple[List[Dict], int, int, float] = ([], 0, 0, 0.0)
         if events:
-            sec, model_rejected = self._usable_model_result(
-                await self._call_security_model(events, result.model_series(), early_signals), pid)
-        model_risk = float(sec["risk_score"]) if sec else None
+            window = window_from_normalised(events)
+            v5_events, _start, _end, window_s = window
+            if v5_events:
+                samples = await self._sample_counters(pid, pid_info)
+                features = security_features(v5_events, result.file_entropies(), window_s,
+                                             samples.total(2, window_s), samples.total(1, window_s))
+                pred = await self._predict(features)
+                issue = "" if pred else f"inference_{self.inference.last_issue or 'unreachable'}"
+                await self._record_score(namespace, workload, pred)
+            else:
+                issue = "no_scorable_events"
 
-        # Heuristic baseline (floor, clear ransomware signatures)
+        # Heuristic baseline: used ONLY when the service gave no score. A scored event carries the model's own
+        # risk, label and prediction set; mixing a heuristic into them would break that contract.
         heuristic_risk = 0.0
         if mmap_detected:
             heuristic_risk = 0.85
@@ -453,15 +551,16 @@ class SecurityAgent:
         if early_signals["high_entropy"] and early_signals["rename_burst"]:
             heuristic_risk = max(heuristic_risk, 0.95)
 
-        risk_score = max(model_risk or 0.0, heuristic_risk)
+        risk_score = pred["risk"] if pred else heuristic_risk
         logger.info(f"PID {pid} [{phase}] entropy="
                     f"{'n/a' if not entropy_known else format(entropy_avg, '.2f')} "
-                    f"valid_samples={result.valid_samples} risk={risk_score:.3f}")
+                    f"valid_samples={result.valid_samples} risk={risk_score:.3f} "
+                    f"model_scored={'true' if pred else 'false'}")
 
         # The Security Agent only senses and reports (S-SA-5). Containment is decided by the
         # Fusion Agent and executed by the Executor.
-        if risk_score >= 0.40:
-            # T0 is the earliest Falco time seen for this PID: the capped window (256 events) can start later
+        if risk_score >= SECURITY_PUBLISH_RISK:
+            # T0 is the earliest Falco time seen for this PID: the capped window can start later
             # than the real onset in a long attack, so the first-seen timestamp is added to it.
             first_ts = self._falco_first_ts.get(pid, "")
             t0_ms = falco_t0_ms(list(events) + ([{"ts": first_ts}] if first_ts else []))
@@ -470,15 +569,18 @@ class SecurityAgent:
                 "entropy_valid_samples": str(result.valid_samples),
                 "entropy_files_json": json.dumps(result.files),
                 "syscall_source": source if events else "none",
-                "model_scored": "true" if sec else "false",
+                "model_scored": "true" if pred else "false",
+                "top_syscall": top_syscall(events),
             }
+            if window[0]:
+                extra["window_start_ms"], extra["window_end_ms"] = str(window[1]), str(window[2])
+                extra["n_events"] = str(len(window[0]))
             if t0_ms is not None:
                 extra["t0_ms"] = str(t0_ms)
-            if events and not sec:
-                extra["model_issue"] = "invalid_model_response" if model_rejected else "model_unreachable"
+            if issue:
+                extra["model_issue"] = issue
             await self._publish_security_event(
-                pid_info, risk_score, early_signals, entropy_avg, sec,
-                extra=extra,
+                pid_info, risk_score, early_signals, entropy_avg, pred, extra=extra,
             )
 
     async def _publish_security_event(
@@ -487,22 +589,24 @@ class SecurityAgent:
         risk_score: float,
         early_signals: Dict,
         entropy: Optional[float] = None,
-        sec: Optional[Dict] = None,
+        pred: Optional[Dict] = None,
         label: Optional[str] = None,
         action: str = "observe",
         extra: Optional[Dict[str, str]] = None,
     ) -> None:
-        """Publish the v4 SecurityEvent schema (Section 15.A.1) to
-        kubeheal.security.events + a hash for dashboard detail lookup."""
+        """Publish the SecurityEvent to kubeheal.security.events + a hash for dashboard detail lookup. The field
+        names and formats are the ones the Fusion Agent reads (agents/fusion_agent/event_mapping.to_security_event).
+
+        `pred` is the validated inference answer (None: not model scored). An event without it carries a heuristic
+        risk, an EMPTY prediction set and uncertain=true, so it can never look certain: Fusion needs a model
+        score (models_ok) and exactly one label in the set before it acts automatically."""
         pod = pid_info.get("pod") or "unknown"
         namespace = pid_info.get("namespace", "default")
         event_id = f"sec-{datetime.utcnow().strftime('%Y%m%d-%H%M%S-%f')}-{pod}"
-        model_scored = bool(sec)
-        sec = sec or {}
+        model_scored = pred is not None
+        pred = pred or {}
 
-        sec_label = label or sec.get("label") or (
-            "ransomware_active" if risk_score >= 0.85 else "ransomware_staging"
-        )
+        sec_label = label or pred.get("label") or HEURISTIC_LABEL
 
         payload = {
             "event_id": event_id,
@@ -511,16 +615,18 @@ class SecurityAgent:
             "deployment": pid_info.get("workload") or pod,
             "workload_kind": pid_info.get("workload_kind", "Pod"),
             "namespace_tier": namespace_tier(namespace),
+            "pod_uid": pid_info.get("pod_uid", "") or "",
             "sec_risk": f"{risk_score:.4f}",
             "sec_label": sec_label,
-            # No model score (heuristic-only, or the Security Model was unreachable) must never look
-            # certain: publish the maximum width so the decision policy treats the event as uncertain and
-            # cannot reach AUTO_CONTAIN from it. The model's own width is used only when it scored.
-            "sec_ci_width": f"{_finite_or(sec.get('ci_width'), 1.0) if model_scored else 1.0:.4f}",
-            "top_syscall": sec.get("top_syscall", ""),
-            "syscall_attribution_json": json.dumps(sec.get("syscall_attention_weights", {})),
-            "entropy_spike_json": json.dumps(sec.get("entropy_spike", {})),
-            "security_embedding_b64": emb_b64(sec.get("security_embedding", [])),
+            "sec_prediction_set": json.dumps(pred.get("prediction_set", [])),
+            "sec_uncertain": "true" if (not model_scored or pred.get("uncertain", True)) else "false",
+            "top_factors_json": json.dumps(pred.get("top_factors", [])),
+            "model_version": pred.get("model_version", ""),
+            # Observed, not model output: kept because Fusion and the dashboard read them. The LightGBM model has
+            # no attention weights or entropy spike, so these stay empty ({}); the model's explanation is
+            # top_factors_json.
+            "syscall_attribution_json": "{}",
+            "entropy_spike_json": "{}",
             "early_signals_json": json.dumps(early_signals),
             "pid_target": str(pid_info.get("pid", 0)),
             # empty (not 0.0) when no sample of written data could be read
@@ -531,29 +637,10 @@ class SecurityAgent:
         payload.update(extra or {})
         await self.redis.xadd("kubeheal.security.events", payload)
         hkey = f"kubeheal:security:{event_id}"
-        await self.redis.hset(hkey, mapping={k: v for k, v in payload.items()
-                                             if k != "security_embedding_b64"})
+        await self.redis.hset(hkey, mapping=dict(payload))
         await self.redis.expire(hkey, 86400)
-        logger.info(f"Security event {event_id}: risk={risk_score:.2f} label={sec_label}")
-
-    def _usable_model_result(self, raw: Optional[Dict[str, Any]], pid: int):
-        """The Security Model's answer, or None when it is unusable. A missing, non-numeric, NaN, infinite or
-        out-of-range risk_score would poison `max(model, heuristic)` (NaN makes every comparison False and
-        suppresses the event) or raise KeyError, so such an answer is logged, counted and ignored: the event is
-        scored by the heuristic alone, marked model_scored=false with the maximum CI width.
-        Returns (usable result or None, True when an answer arrived but was rejected)."""
-        if raw is None:
-            return None, False
-        score = raw.get("risk_score") if isinstance(raw, dict) else None
-        if (isinstance(score, bool) or not isinstance(score, (int, float))
-                or not math.isfinite(score) or not 0.0 <= score <= 1.0):
-            reason = "risk_score_missing" if score is None else "risk_score_invalid"
-            self.rejected_model_results[reason] = self.rejected_model_results.get(reason, 0) + 1
-            logger.warning(f"Security Model answer for PID {pid} ignored ({reason}: {score!r}); using the "
-                           f"heuristic score only, not model scored. {self.rejected_model_results[reason]} "
-                           "ignored for this reason so far")
-            return None, True
-        return raw, False
+        logger.info(f"Security event {event_id}: risk={risk_score:.2f} label={sec_label} "
+                    f"model_scored={model_scored}")
 
     async def _get_pid_info(self, pid: int) -> Optional[Dict]:
         """Get PID info from cache."""
@@ -591,33 +678,6 @@ class SecurityAgent:
             logger.debug(f"mmap check error: {e}")
 
         return False
-
-    async def _call_security_model(
-        self,
-        events: List[Dict],
-        entropy_series: List[float],
-        early_signals: Dict[str, bool],
-    ) -> Optional[Dict[str, Any]]:
-        """Call the v4 Security Model /security/score. Returns the full v4
-        result (sec_risk, label, ci_width, top_syscall, entropy_spike,
-        security_embedding) or None if the server is unreachable."""
-        payload = build_model_input(events or [], entropy_series or [], early_signals or {})
-        started = time.perf_counter()
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.security_model_url}/security/score",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status == 200:
-                        return await resp.json()
-                    logger.warning(f"Security Model returned {resp.status}")
-        except Exception as e:
-            logger.debug(f"Security Model call failed: {e}")
-        finally:
-            METRICS.observe_model_latency("security", time.perf_counter() - started)
-        return None
 
 
 async def main():

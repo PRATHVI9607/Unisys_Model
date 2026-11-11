@@ -16,6 +16,8 @@ from datetime import datetime
 from typing import Callable, Dict, List, Optional, Sequence
 
 from agents.security_agent.falco_client import RANSOMWARE_SYSCALLS
+from agents.security_agent.v5_window import v5_syscall
+from kubeheal.features.security import OPEN_SYSCALLS
 
 # models/security_model/falco_transformer_encoder.py: MAX_SEQUENCE_LENGTH
 MODEL_MAX_EVENTS = 256
@@ -53,7 +55,8 @@ class Trigger:
 class FalcoWindowTracker:
     def __init__(self, burst_threshold: int = DEFAULT_BURST_THRESHOLD,
                  cooldown_s: float = DEFAULT_COOLDOWN_S, max_events: int = MODEL_MAX_EVENTS,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time):
+        self._wall = wall
         self.burst_threshold = burst_threshold
         self.cooldown_s = cooldown_s
         self.max_events = max_events
@@ -90,11 +93,17 @@ class FalcoWindowTracker:
         self._note_first_seen(pid, evt.get("ts", ""))
         # Keep the Falco source timestamp for Fusion's T0/restore decision. `build_model_input` deliberately
         # strips it from the Security Model's fixed event schema.
-        w.append({"syscall": sysc, "fd_path": evt.get("fd_path", ""), "ts": evt.get("ts", "")})
+        # V5-S2: the entry also keeps what the v5 feature mapping needs (open flags, rule path fields) and the
+        # arrival time, the fallback event time of an event without a Falco timestamp (agents/security_agent/v5_window.py).
+        w.append({"syscall": sysc, "fd_path": evt.get("fd_path", ""), "ts": evt.get("ts", ""),
+                  "flags": evt.get("flags", ""), "fs_name": evt.get("fs_name", ""),
+                  "fs_source": evt.get("fs_source", ""), "fs_target": evt.get("fs_target", ""),
+                  "seen_ms": int(self._wall() * 1000)})
         if len(w) > self.max_events:
             del w[: len(w) - self.max_events]
         renames = sum(1 for e in w if e["syscall"].startswith("rename"))
-        writes = sum(1 for e in w if "write" in e["syscall"] or e["syscall"] == "ftruncate")
+        writes = sum(1 for e in w if "write" in e["syscall"] or e["syscall"] == "ftruncate"
+                     or (e["syscall"] in OPEN_SYSCALLS and v5_syscall(e) == "open_w"))
         # A CRITICAL ransomware rule (the ransom-note rule) triggers on its own. The WARNING rules (mass write,
         # mass rename) fire on every single matching syscall, so they only count towards the burst threshold;
         # treating each of them as a trigger would start a check with a one-event window.

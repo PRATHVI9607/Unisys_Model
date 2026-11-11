@@ -65,6 +65,7 @@ class PodIndex:
 
     def __init__(self):
         self.by_uid: Dict[str, PodInfo] = {}
+        self.by_pod: Dict[Tuple[str, str], PodInfo] = {}     # (namespace, pod name) -> PodInfo
 
     async def refresh(self, core_api, apps_api) -> int:
         pods = await core_api.list_pod_for_all_namespaces()
@@ -94,9 +95,14 @@ class PodIndex:
                 container = p.spec.containers[0].name
             index[md.uid] = PodInfo(md.namespace, md.name, container, kind, workload, md.uid)
         self.by_uid = index
+        self.by_pod = {(i.namespace, i.pod): i for i in index.values()}
 
     def lookup(self, uid: str) -> Optional[PodInfo]:
         return self.by_uid.get(uid)
+
+    def lookup_pod(self, namespace: str, pod: str) -> Optional[PodInfo]:
+        """The pod by name (what a Falco event carries); None when the index does not know it (yet)."""
+        return self.by_pod.get((namespace, pod))
 
 
 def scan_pids(index: PodIndex, proc_root: Optional[str] = None) -> Dict[int, Dict[str, str]]:

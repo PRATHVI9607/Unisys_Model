@@ -180,13 +180,20 @@ def test_resolve_falco_mode(env, exists, expected):
 
 class FakeRedis:
     def __init__(self):
-        self.kv, self.streams, self.hashes = {}, [], {}
+        self.kv, self.streams, self.hashes, self.ttl = {}, [], {}, {}
 
     async def setex(self, k, ttl, v): self.kv[k] = v
     async def get(self, k): return self.kv.get(k)
     async def xadd(self, stream, payload): self.streams.append((stream, dict(payload)))
-    async def hset(self, k, mapping=None, **kw): self.hashes[k] = dict(mapping or {})
-    async def expire(self, *a): pass
+    async def hset(self, k, mapping=None, **kw): self.hashes.setdefault(k, {}).update(mapping or {})
+    async def expire(self, k, seconds): self.ttl[k] = seconds
+
+
+def pred(risk=0.91, label="ransomware", pset=None, uncertain=False, version="security-test"):
+    """What the inference client returns for a valid service answer."""
+    return {"risk": risk, "label": label, "prediction_set": [label] if pset is None else pset,
+            "uncertain": uncertain, "model_version": version,
+            "top_factors": [{"feature": "frac_rename", "value": 0.47, "contribution": 1.2}]}
 
 
 def _agent(monkeypatch, tmp_path, trace, sampler=None):
@@ -198,13 +205,12 @@ def _agent(monkeypatch, tmp_path, trace, sampler=None):
     ag.redis, ag.running = FakeRedis(), True
     calls = []
 
-    async def fake_model(evts, series, signals):
-        calls.append((evts, series, signals))
-        return {"risk_score": 0.91, "label": "ransomware_active", "ci_width": 0.1,
-                "top_syscall": "write", "security_embedding": [0.1, 0.2]}
+    async def fake_predict(features):
+        calls.append(features)
+        return pred()
 
     async def no_mmap(pid): return False
-    monkeypatch.setattr(ag, "_call_security_model", fake_model)
+    monkeypatch.setattr(ag, "_predict", fake_predict)
     monkeypatch.setattr(ag, "_check_mmap_entropy", no_mmap)
     return ag, calls
 
@@ -216,7 +222,7 @@ def _run_replay(ag):
     asyncio.run(go())
 
 
-def test_agent_replay_publishes_event_scored_by_the_model_input_from_the_trace(monkeypatch, tmp_path):
+def test_agent_replay_publishes_event_scored_from_the_features_of_the_trace(monkeypatch, tmp_path):
     from agents.security_agent.entropy_sampler import EntropySampler, ProcFdReader
     sampler = EntropySampler(ProcFdReader(str(tmp_path)))          # pid 4242 does not exist here: no entropy
     ag, calls = _agent(monkeypatch, tmp_path, RANSOM, sampler)
@@ -224,21 +230,21 @@ def test_agent_replay_publishes_event_scored_by_the_model_input_from_the_trace(m
 
     assert ag.falco_mode == "replay"
     assert len(calls) == 1                                          # one trigger, sampling ended at once
-    evts, series, signals = calls[0]
-    assert len(evts) == 15 and evts[0]["syscall"] == "write"
-    assert evts[0]["fd_path"] == "/data/file_0000.txt" and evts[0]["ts"].endswith("Z")
-    assert series == []                                             # entropy unavailable, not zeros
-    # the 15-event window holds 7 renames, not above InotifyWatcher's threshold of 10
-    assert signals["rename_burst"] is False and signals["high_entropy"] is False
+    f = calls[0]
+    assert f["n_events"] == 15.0 and f["frac_write"] == pytest.approx(8 / 15)   # raw writes map to open_w
+    assert f["frac_rename"] == pytest.approx(7 / 15)
+    assert f["n_entropy_samples"] == 0.0 and f["entropy_mean"] is None          # entropy unavailable, not zeros
 
     assert len(ag.redis.streams) == 1
     stream, p = ag.redis.streams[0]
     assert stream == "kubeheal.security.events"
     assert p["pod_name"] == "victim-app-7d9f8b6c5-x2k4q" and p["namespace"] == "demo"
     assert p["syscall_source"] == "replay" and p["model_scored"] == "true"
-    assert p["t0_ms"] == "1794303000000"
+    assert p["t0_ms"] == "1794303000000" and p["window_start_ms"] == "1794303000000"
     assert p["entropy"] == "" and p["entropy_valid_samples"] == "0" and p["entropy_phase"] == "complete"
-    assert float(p["sec_risk"]) == pytest.approx(0.91)
+    assert float(p["sec_risk"]) == pytest.approx(0.91) and p["sec_label"] == "ransomware"
+    assert p["sec_prediction_set"] == '["ransomware"]' and p["sec_uncertain"] == "false"
+    assert p["top_syscall"] == "write"
 
 
 def test_security_agent_reads_observe_request_before_its_next_entropy_sample(monkeypatch):
@@ -403,10 +409,10 @@ def _publish_heuristic_only(monkeypatch, tmp_path, events_present, model_up):
     ag.redis.kv["kubeheal:pid:99"] = json.dumps({"pid": 99, "pod": "p", "namespace": "prod"})
     ag.inotify_watcher.check_rename_burst = lambda events=None: 0.5      # heuristic floor 0.60 >= observe
 
-    async def down(evts, series, signals):
+    async def down(features):
         return None
     if not model_up:
-        monkeypatch.setattr(ag, "_call_security_model", down)
+        monkeypatch.setattr(ag, "_predict", down)
 
     async def go():
         evs = events(RANSOM)[:15] if events_present else None
@@ -416,29 +422,35 @@ def _publish_heuristic_only(monkeypatch, tmp_path, events_present, model_up):
     return ag.redis.streams[0][1]
 
 
-def test_heuristic_only_event_has_max_ci_width_and_cannot_auto_contain(monkeypatch, tmp_path):
+def test_heuristic_only_event_is_uncertain_and_cannot_auto_contain(monkeypatch, tmp_path):
     from agents.fusion_agent.decision_policy import make_decision, DecisionInput, Decision
     p = _publish_heuristic_only(monkeypatch, tmp_path, events_present=False, model_up=True)
     assert p["model_scored"] == "false" and p["syscall_source"] == "none"
-    assert float(p["sec_ci_width"]) >= 1.0
-    # even at the highest risk the policy sees an uncertain event: human, never AUTO_CONTAIN
-    # (V5-D3: the policy gate is the prediction set and models_ok; this event was not scored by the model)
-    out = make_decision(DecisionInput(sec_risk=0.99, sec_label="ransomware", sec_prediction_set=["ransomware"],
+    assert p["sec_prediction_set"] == "[]" and p["sec_uncertain"] == "true" and p["sec_label"] == "suspicious"
+    assert p["model_version"] == "" and p["top_factors_json"] == "[]"
+    # even at the highest risk the policy sees an unscored event: human, never AUTO_CONTAIN
+    out = make_decision(DecisionInput(sec_risk=0.99, sec_label="ransomware", sec_prediction_set=[],
                                       models_ok=p["model_scored"] == "true",
                                       namespace_tier="prod", mode="enforce"))
     assert out.decision != Decision.AUTO_CONTAIN and out.decision == Decision.HUMAN_CONTAIN
     assert out.dry_run is False
 
 
-def test_event_with_unreachable_model_has_max_ci_width(monkeypatch, tmp_path):
+def test_event_with_unreachable_service_is_not_model_scored_and_says_why(monkeypatch, tmp_path):
     p = _publish_heuristic_only(monkeypatch, tmp_path, events_present=True, model_up=False)
     assert p["model_scored"] == "false" and p["syscall_source"] == "replay"
-    assert float(p["sec_ci_width"]) >= 1.0
+    assert p["sec_uncertain"] == "true" and p["sec_prediction_set"] == "[]"
+    assert p["model_issue"].startswith("inference_")
+    assert float(p["sec_risk"]) == pytest.approx(0.60)            # the heuristic, never reported as the model's
 
 
-def test_model_scored_event_keeps_the_models_ci_width(monkeypatch, tmp_path):
+def test_model_scored_event_carries_the_services_risk_label_and_set(monkeypatch, tmp_path):
     p = _publish_heuristic_only(monkeypatch, tmp_path, events_present=True, model_up=True)
-    assert p["model_scored"] == "true" and float(p["sec_ci_width"]) == pytest.approx(0.1)
+    assert p["model_scored"] == "true" and float(p["sec_risk"]) == pytest.approx(0.91)   # not max() with 0.60
+    assert p["sec_label"] == "ransomware" and p["model_version"] == "security-test"
+    assert json.loads(p["top_factors_json"])[0]["feature"] == "frac_rename"
+    for gone in ("sec_ci_width", "security_embedding_b64"):
+        assert gone not in p
 
 
 def test_falco_priority_table_matches_the_official_enum():
