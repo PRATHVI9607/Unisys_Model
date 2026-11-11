@@ -93,6 +93,43 @@ subjects:
   - {kind: ServiceAccount, name: security-agent, namespace: kubeheal}
   - {kind: ServiceAccount, name: dashboard, namespace: kubeheal}
 ---
+# Health Agent failure evidence (V5-D1): the Health Agent lists the pods of the Deployments it
+# watches (waiting reasons, OOMKilled, readiness) and the HorizontalPodAutoscalers. This is a
+# separate read-only ClusterRole, used ONLY through namespaced RoleBindings, so kubeheal-observer
+# (shared with the Security Agent and the dashboard) is not widened and the autoscaling read
+# exists in prod, staging and dev only. No write verb.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: kubeheal-health-agent-read}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kubeheal-health-agent-read, namespace: prod}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal-health-agent-read}
+subjects:
+  - {kind: ServiceAccount, name: health-agent, namespace: kubeheal}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kubeheal-health-agent-read, namespace: staging}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal-health-agent-read}
+subjects:
+  - {kind: ServiceAccount, name: health-agent, namespace: kubeheal}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kubeheal-health-agent-read, namespace: dev}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubeheal-health-agent-read}
+subjects:
+  - {kind: ServiceAccount, name: health-agent, namespace: kubeheal}
+---
 # Fusion only needs namespace labels (tier, protected, mode override).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
