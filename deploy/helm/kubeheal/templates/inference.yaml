@@ -1,0 +1,125 @@
+{{- /*
+V5-I2: the LightGBM inference service. Serves the shipped health and security bundles (POST /v1/{health,security}/predict
+and predict_batch). Deployment (inference.replicas, topology spread), Service, PodDisruptionBudget (minAvailable 1)
+and, depending on hpa.mode, exactly one HPA (queue default: the per-pod gauge kubeheal_model_inflight_requests, which the
+inference server exports through agents/common/metrics.py, so the existing prometheus-adapter rule is unchanged).
+Probes: liveness /healthz (always 200 while the process runs), readiness /readyz (200 only when BOTH bundles are loaded).
+Requests and limits are rendered only when set in values (measure them with eval/resource_profile.py).
+The pod mounts no ServiceAccount token (it never talks to the Kubernetes API). No ServiceAccount of its own is created:
+the RBAC parity test pins the ServiceAccount list to k8s/rbac/rbac.yaml.
+*/ -}}
+{{- if .Values.inference.enabled }}
+{{- $i := .Values.inference }}
+{{- $ns := include "kubeheal.namespace" . }}
+{{- if not (has .Values.hpa.mode (list "queue" "latency" "cpu" "none")) }}{{ fail "hpa.mode must be queue, latency, cpu or none" }}{{ end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $i.name }}
+  namespace: {{ $ns }}
+  labels: {app: {{ $i.name }}, version: v5.0.0}
+spec:
+  replicas: {{ $i.replicas }}
+  selector:
+    matchLabels: {app: {{ $i.name }}}
+  template:
+    metadata:
+      labels: {app: {{ $i.name }}}
+      annotations:
+        {{- include "kubeheal.scrapeAnnotations" (dict "port" $i.port) | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- include "kubeheal.pullSecrets" . | nindent 6 }}
+      topologySpreadConstraints:
+        - maxSkew: {{ $i.topologySpread.maxSkew }}
+          topologyKey: {{ $i.topologySpread.topologyKey }}
+          whenUnsatisfiable: {{ $i.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels: {app: {{ $i.name }}}
+      containers:
+        - name: {{ $i.name }}-server
+          image: {{ include "kubeheal.image" (dict "root" . "image" $i.image) | quote }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - {containerPort: {{ $i.port }}, name: http}
+          env:
+            - {name: PORT, value: {{ $i.port | quote }}}
+            - {name: LOG_LEVEL, value: {{ $i.logLevel | quote }}}
+            {{- if $i.modelDir }}
+            - {name: KUBEHEAL_MODEL_DIR, value: {{ $i.modelDir | quote }}}
+            {{- end }}
+            {{- include "kubeheal.extraEnv" $i.extraEnv | nindent 12 }}
+          securityContext:
+{{ include "kubeheal.ctx" (dict "root" . "h" $i.hardening) | indent 12 }}
+{{- include "kubeheal.resources" $i.resources | nindent 10 }}
+{{- include "kubeheal.tmpMount" $i.hardening | nindent 10 }}
+          # Probe timings: chosen like the neural servers' (copied from k8s/*-deployment.yaml), not measured.
+          startupProbe: {httpGet: {path: /healthz, port: {{ $i.port }}}, periodSeconds: 5, failureThreshold: 40}
+          readinessProbe: {httpGet: {path: /readyz, port: {{ $i.port }}}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: {{ $i.port }}}, periodSeconds: 15, failureThreshold: 3}
+{{- include "kubeheal.tmpVolume" $i.hardening | nindent 6 }}
+      nodeSelector:
+{{ toYaml .Values.global.nodeSelector | indent 8 }}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: {{ $i.name }}, namespace: {{ $ns }}}
+spec:
+  selector: {app: {{ $i.name }}}
+  ports: [{port: {{ $i.port }}, targetPort: {{ $i.port }}, name: http}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $i.name }}
+  namespace: {{ $ns }}
+spec:
+  minAvailable: {{ $i.pdb.minAvailable }}
+  selector:
+    matchLabels: {app: {{ $i.name }}}
+{{- if $i.hpa.enabled }}
+{{- if or (eq .Values.hpa.mode "queue") (eq .Values.hpa.mode "latency") }}
+{{- $mode := .Values.hpa.mode }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $i.name }}
+  namespace: {{ $ns }}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ $i.name }}}
+  minReplicas: {{ $i.hpa.minReplicas }}
+  maxReplicas: {{ $i.hpa.maxReplicas }}
+  metrics:
+    # Pods metric served by prometheus-adapter (rule: ConfigMap kubeheal-prometheus-adapter-rule).
+    - type: Pods
+      pods:
+        metric:
+          name: {{ index .Values.hpa $mode "metricName" }}
+        target:
+          type: AverageValue
+          averageValue: {{ required (printf "hpa.%s.targetAverageValue is required when hpa.mode=%s" $mode $mode) (index .Values.hpa $mode "targetAverageValue") | quote }}
+{{- else if eq .Values.hpa.mode "cpu" }}
+---
+# WEAK FALLBACK (hpa.mode=cpu): utilisation is computed against the container CPU request, so
+# inference.resources.requests.cpu must be set.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $i.name }}
+  namespace: {{ $ns }}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ $i.name }}}
+  minReplicas: {{ $i.hpa.minReplicas }}
+  maxReplicas: {{ $i.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ required "hpa.cpu.targetAverageUtilization is required when hpa.mode=cpu (owner decision)" .Values.hpa.cpu.targetAverageUtilization }}
+{{- end }}
+{{- end }}
+{{- end }}

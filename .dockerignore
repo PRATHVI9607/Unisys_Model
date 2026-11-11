@@ -57,3 +57,6 @@ data/
 # models/*/checkpoints/ ARE kept so images are shareable/self-contained)
 models/*.pt
 models/*.onnx
+
+# The LightGBM bundles ARE needed at serve time (dockerfiles/Dockerfile.inference copies them). Keep this last.
+!models/bundles/

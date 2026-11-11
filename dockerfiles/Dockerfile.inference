@@ -1,0 +1,29 @@
+# LightGBM inference service (port 8000): the shipped health and security bundles, no torch.
+#   docker build -t kubeheal/inference-server:v5 -f dockerfiles/Dockerfile.inference .
+# Runs as a non-root user and needs no writable path: bytecode is compiled at build time and
+# PYTHONDONTWRITEBYTECODE is set, so the chart can use a read-only root filesystem (with an emptyDir on /tmp).
+FROM python:3.11-slim
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /bin/
+ENV UV_NO_CACHE=1 UV_SYSTEM_PYTHON=1
+# LightGBM links libgomp dynamically and python:3.11-slim does not ship it.
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY kubeheal/requirements.txt /tmp/kubeheal-requirements.txt
+COPY services/inference_server/requirements.txt /tmp/inference-requirements.txt
+RUN uv pip install --system -r /tmp/kubeheal-requirements.txt -r /tmp/inference-requirements.txt \
+    && rm /tmp/kubeheal-requirements.txt /tmp/inference-requirements.txt
+COPY kubeheal/ /app/kubeheal/
+COPY services/inference_server/ /app/services/inference_server/
+COPY agents/common/ /app/agents/common/
+# model.txt must keep LF line endings (LightGBM refuses CRLF): .gitattributes marks models/bundles/** as -text,
+# and .dockerignore must not exclude models/bundles (tests/test_inference_server.py checks both).
+COPY models/bundles/ /app/models/bundles/
+RUN python -m compileall -q /app/kubeheal /app/services /app/agents
+RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin kubeheal
+USER 10001
+ENV PYTHONPATH=/app PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENV PORT=8000
+ENV LOG_LEVEL=INFO
+EXPOSE 8000
+CMD ["python", "-m", "uvicorn", "services.inference_server.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -177,8 +177,43 @@ dashboard:
   resources: {}
   extraEnv: {}
 
+# ---- inference service (V5-I2): the LightGBM health and security bundles ---------------------
+# One Deployment serves both bundles (POST /v1/{health,security}/predict). It replaces the neural Health, Security
+# and DCM servers below, which are now off by default (modelServers.legacy.enabled). It loads the bundles shipped in
+# the image (models/bundles) and fails closed: /readyz is 503 until BOTH bundles are loaded.
+inference:
+  enabled: true
+  name: kubeheal-inference      # Service name; agents get INFERENCE_URL=http://<name>:<port>
+  image: {repository: kubeheal/inference-server, tag: v5}   # built by dockerfiles/Dockerfile.inference
+  port: 8000
+  replicas: 2                   # 2+ so the PDB can keep one pod during a drain
+  pdb:
+    minAvailable: 1
+  # Bounds of the HPA (spec S-CL-1: min 2, max 8). The mode (queue, latency, cpu, none) and its target come
+  # from the global `hpa:` block below, the same one the neural servers use.
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+  topologySpread:
+    topologyKey: kubernetes.io/hostname
+    maxSkew: 1
+    whenUnsatisfiable: ScheduleAnyway   # prod values use DoNotSchedule
+  logLevel: INFO
+  # Directory (inside the image) with <task>/model.txt and <task>/meta.json. Empty = the shipped bundles.
+  modelDir: ""
+  # The image creates uid 10001 and writes nothing, so the stricter settings are ON here (the neural servers keep
+  # them off). Not verified on a cluster yet: verify on k3d, and switch to false here if the pod cannot start.
+  hardening: {runAsNonRoot: true, readOnlyRootFilesystem: true, runAsUser: 10001}
+  resources: {}
+  extraEnv: {}
+
 # ---- model servers (S-CL-1, S-CL-2, S-CL-8) ----------------------------------------
+# LEGACY neural servers (GATv2 + BiLSTM, Transformer + Conv1D-SE, DCM). Code, images and templates stay in the repo;
+# nothing renders for them unless modelServers.legacy.enabled is true.
 modelServers:
+  legacy:
+    enabled: false
   replicas: 2                  # 2+ so the PDB can keep one pod during a drain
   pdb:
     minAvailable: 1
@@ -236,7 +271,7 @@ modelServers:
     resources: {}
     extraEnv: {}
 
-# Autoscaling for the model servers: min 2, max 8 (spec S-CL-1).
+# Autoscaling for the inference service and, when enabled, the legacy model servers: min 2, max 8 (spec S-CL-1).
 #   queue   : DEFAULT and required by the spec. Per-pod gauge kubeheal_model_inflight_requests, exported by
 #             each model server (scoring requests running plus waiting for a worker), served to the HPA by
 #             prometheus-adapter as a Pods metric (rule: ConfigMap kubeheal-prometheus-adapter-rule).
