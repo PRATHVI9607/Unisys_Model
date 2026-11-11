@@ -332,3 +332,59 @@ Review items left open for the owner to decide (not fixed, listed on purpose): (
 - The Health Agent image must be rebuilt to pick up the `ApiClient` fix before it can be verified on the cluster.
 - P7-RR-7, P7-RR-11, P7-RR-12, P6-D6 and P11-E1 to E7 remain as listed above. P12 training is not approved.
 - Remote `origin/main` ("v5") was analysed read-only: `docs/kubeheal/V5_INTEGRATION_PLAN.md`. Waiting for the owner's decisions; nothing ported.
+
+## V5 integration (owner decisions 2026-11-11; plan: `V5_INTEGRATION_PLAN.md`)
+
+Owner decisions (verbatim intent):
+- **M1:** option (b) now: v5's LightGBM health and security models (split-conformal sets and TreeSHAP) run inside OUR architecture (agents, Executor, ledger, kill switch, approvals, Helm). Option (c) (both model families on the same held-out lab data) is a later stretch goal. New lab collection through our own agents on `k3d-kubeheal` is allowed with scripted scenarios. Any training still needs the owner's go.
+- **M2:** an automatic action requires the conformal prediction set to be exactly one label (replaces the `CI_WIDTH_LIMIT` 0.15 guard). `decision_policy.py` stays pure; its tests are updated.
+- **M3:** the owner asks the teammate for the raw `collected/*.jsonl` files and the collection scripts. Nothing blocks on them.
+- **D1:** the 10x cut rule is inclusive: cut of 10x or more AND new value at or below 50m CPU / 32Mi memory (500m to 50m triggers).
+- **D2:** rule-based rollback (`failure_reasons`, posture violations) may bypass the model-confidence gate and burn-in ONLY. It still respects the kill switch, protected label, circuit breaker, incident lock, `has_baseline`, security risk below 0.4, the ledger-before-corrective-action rule, and the canary verification and rollback.
+- **D3:** baseline promotion is automatic under v5's conditions (benign, certain, rollout complete, no `failure_reasons`, no posture violation) in dev and staging; in prod a promotion candidate needs approval in the dashboard. Every promotion goes to the ledger.
+- **D5:** port cgroup-freeze containment: the Executor issues the contain request (kill-switch gate, ledger); the node-local Security Agent performs the freeze and also checks the mode. Containment order: freeze, forensic snapshot, quarantine, scale to 0, then restore.
+- **D6:** port the eBPF sensor as an optional event source, low priority; on k3d and Docker Desktop keep Falco or replay. Verification on a real Linux node comes later.
+- **D7:** port v5's Health Agent logic first (debounce, `failure_reasons`, posture rules, promotion), then re-apply P6-D2 on top, dropping what v5 makes redundant.
+- Also: fix the OBSERVE stale-object issue with a live spec read per sample. Chaos harness writes are accepted as designed.
+
+Consequences recorded here so later agents do not rediscover them:
+- LightGBM has no embeddings, so the learned DCM (which consumes the neural models' embeddings) cannot run on top of it. Correlation becomes the deterministic `compound_score` (V5-D3). The neural Health, Security and DCM servers and their training code stay in the repo as legacy, are not installed by default, and nothing is deleted.
+- Field attribution for patching no longer comes from a model: candidate fields come from the spec diff against the baseline (V5-D9). The model supplies label, risk, prediction set and top factors only.
+- `model.txt` files are text that LightGBM refuses to parse with CRLF line endings. `models/bundles/** -text` in `.gitattributes` (V5-M1).
+- Python 3.11 venv; v5 targets 3.13 and numpy 2. The shared package was loaded and run here on Python 3.11, numpy 1.26.4, pydantic 2.6.0 with `lightgbm` 4.7.0 installed into the venv (extras: the inference image needs `lightgbm`).
+
+Execution rules for this section: tasks run on `work` one wave at a time, at most 2 Sonnet builders in parallel on non-overlapping files, a read-only reviewer after each wave, the full suite after each merge, then `work` is merged into `demo`. No training, no push. Cluster commands only with `--context k3d-kubeheal`, and only by the orchestrator.
+
+### Wave 1
+- [ ] V5-M1 size: M. Shared pure package `kubeheal/` (features health, security, quantity; ml bundle and conformal; correlation; trimmed contracts with `Prediction`, `Factor`, labels, class risks, `SECURITY_PUBLISH_RISK`, `POLICY_REASON_PREFIX`), the two shipped bundles under `models/bundles/{health,security}` copied from `origin/main` blobs (LF), `.gitattributes` `-text` for them, ported tests, `requirements` extra for `lightgbm`. Files: `kubeheal/`, `models/bundles/`, `.gitattributes`, `tests/test_kubeheal_*`.
+- [ ] V5-D1 size: M. `failure_reasons` module (`pod_failure_reasons`, `readiness_never_passed`, `progress_deadline_exceeded`, `owned_by`, `rollout_complete`) in `agents/health_agent/failure_reasons.py`, tests, and the Health Agent RBAC verbs `pods list` and `horizontalpodautoscalers list` in `k8s/rbac/` and the Helm RBAC template with the parity test. Files: new module, tests, RBAC files.
+
+### Wave 2
+- [ ] V5-D2 size: M. Shared pure `kubeheal/posture.py`: `policy_violations(base, spec)` (privileged, root, capabilities, host namespaces, hostPath, inclusive 10x cuts per D1). Tests including 500m to 50m. Needs V5-M1.
+- [ ] V5-D4a size: M. Health Agent Prometheus window for the 11 raw metrics at a 15 s step (`agents/health_agent/metric_window.py`) and feature assembly (`health_features(old, new, window)`) wiring, no agent edits. Needs V5-M1.
+
+### Wave 3
+- [ ] V5-I2 size: L. LightGBM inference service `services/inference_server/` (v5 contract: `/v1/{health,security}/predict`, `predict_batch`, `/healthz`, `/readyz`, `/metrics` including `kubeheal_model_inflight_requests` for the HPA, fail closed on a missing bundle, 422 and size caps), `dockerfiles/Dockerfile.inference`, Helm template and values replacing the Health and Security model servers by default (DCM and neural servers off by default), tests. Needs V5-M1. Includes V5-I1 (serving contracts).
+- [ ] V5-D3 size: L. `decision_policy.py` and Fusion: prediction-set gate (M2), rule-based rollback path (D2), deterministic correlation in place of the DCM call, new `DecisionInput` fields, policy table tests. Reserved for the stronger agent; reviewed by Claude.
+
+### Wave 4
+- [ ] V5-D4 size: L. Health Agent integration: canonical spec hash and debounce, follow-up events, re-list on 410, `failure_reasons`, posture rules, features and inference call, new `HealthEvent` fields (label, risk, prediction set, `uncertain`, top factors, `changed_fields`, `failure_reasons`, `has_baseline`), live spec read per OBSERVE sample, re-apply P6-D2 on top (drop what v5 makes redundant). Needs V5-D1, D2, D4a, I2.
+- [ ] V5-D5 size: M. Baseline promotion (D3): automatic in dev and staging, candidate plus dashboard approval in prod, every promotion in the ledger. Part of the Health Agent work; the dashboard side is V5-I3.
+- [ ] V5-S2 size: M. Security Agent integration: windows to v5 security features, entropy hardening (`O_NOFOLLOW`, regular files, stat-signature cache), byte counters if the bundle uses them (V5-S3), new `SecurityEvent` fields. Needs V5-M1, I2.
+
+### Wave 5
+- [ ] V5-D6 size: M. Executor validation (selector match, no posture weakening against the live template) and V5-D9 candidate fields from `changed_fields` instead of model attribution (replaces `no_drift_at_field` escalation logic). Executor write paths: stronger agent only.
+- [ ] V5-S5 size: L. Containment (D5): Executor issues the contain request (gate, ledger), node-local Security Agent freezes the cgroup and checks the mode; order freeze, forensic snapshot, quarantine, scale to 0, restore. RBAC and chart changes. Stronger agent only.
+
+### Wave 6
+- [ ] V5-I3 size: M. Dashboard: promotion approvals (prod), top factors view from TreeSHAP, prediction set display.
+- [ ] V5-DOC size: M. README, AGENTS.md, ARCHITECTURE, SPEC_VS_CODE, PROJECT_SPEC amendments describing LightGBM, conformal sets, TreeSHAP and these decisions.
+
+### Later
+- [ ] V5-S1 size: S. Falco rule and values comparison, rule-versus-captured-syscalls sync test.
+- [ ] V5-S4 size: L. eBPF sensor as an optional event source (low priority; Falco or replay stay on k3d). Verification on a real Linux node later.
+- [ ] V5-F1 size: S. Quarantine ownerReference and UID preconditions, protected-owner and unknown-controller checks compared with v5.
+- [ ] V5-P1 size: S. CI workflow (pytest, `helm lint`, `helm template`, image builds).
+- [ ] V5-P3 size: S. Redis per-component ACL users.
+- [ ] V5-E1 size: L. Scripted lab scenarios on k3d (collection through our agents, mode `test`), v5 scenario sets on the P11 harness. Collection needs the owner's go per run; no training.
+- [ ] V5-M3 size: M. Option (c): both model families on the same held-out lab data (stretch).
