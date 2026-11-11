@@ -1,0 +1,581 @@
+{
+  "alpha": 0.1,
+  "class_risk": [
+    0.05,
+    0.6,
+    0.95
+  ],
+  "conformal_q": 0.31195320323091436,
+  "created_at": "2026-11-08T00:25:49+00:00",
+  "data": {
+    "groups": 277,
+    "legacy_csv": false,
+    "missing_dropout_rows": {
+      "app_metrics": 2998,
+      "metrics": 2998,
+      "resources": 2998
+    },
+    "rows": 2998,
+    "sha256": "a374e498b3e94c54b10d29a5289f8e945757a9eb8fc1d1076fba0ef7f5fb9509",
+    "source": {
+      "lab": "training/data/collected/health.jsonl"
+    },
+    "synthetic": false
+  },
+  "features": [
+    "cpu_limit_ratio",
+    "cpu_request_ratio",
+    "mem_limit_ratio",
+    "mem_request_ratio",
+    "cpu_limit_removed",
+    "mem_limit_removed",
+    "replicas_ratio",
+    "replicas_to_zero",
+    "image_changed",
+    "image_unpinned",
+    "privileged_added",
+    "root_user_added",
+    "capabilities_added",
+    "host_namespace_added",
+    "host_path_added",
+    "probe_changed",
+    "probe_removed",
+    "env_count_delta",
+    "env_values_changed",
+    "volume_mounts_removed",
+    "containers_delta",
+    "command_changed",
+    "n_changed_fields",
+    "spec_changed",
+    "cpu_util_mean",
+    "cpu_util_max",
+    "cpu_throttle_mean",
+    "mem_util_mean",
+    "mem_util_max",
+    "latency_p99_mean_s",
+    "latency_p99_max_s",
+    "latency_trend",
+    "error_ratio",
+    "request_rate_log",
+    "restarts_delta",
+    "ready_ratio"
+  ],
+  "labels": [
+    "benign",
+    "degradation",
+    "critical"
+  ],
+  "metrics": {
+    "best_iteration": 159,
+    "conformal": {
+      "alpha": 0.1,
+      "calibrated_on": "5-fold grouped out-of-fold probabilities, non-test groups, real serving rows",
+      "q": 0.311953
+    },
+    "cv5_grouped": {
+      "accuracy": 0.9521,
+      "confusion_matrix": [
+        [
+          1775,
+          11,
+          54
+        ],
+        [
+          6,
+          279,
+          4
+        ],
+        [
+          43,
+          11,
+          511
+        ]
+      ],
+      "coverage": 0.9005,
+      "macro_f1": 0.9386,
+      "mean_set_size": 0.9191,
+      "n": 2694,
+      "per_class": {
+        "benign": {
+          "f1": 0.9689,
+          "precision": 0.9731,
+          "recall": 0.9647,
+          "support": 1840
+        },
+        "critical": {
+          "f1": 0.9012,
+          "precision": 0.8981,
+          "recall": 0.9044,
+          "support": 565
+        },
+        "degradation": {
+          "f1": 0.9458,
+          "precision": 0.9269,
+          "recall": 0.9654,
+          "support": 289
+        }
+      },
+      "weighted_f1": 0.9522
+    },
+    "cv5_grouped_spec_changed": {
+      "accuracy": 0.9521,
+      "confusion_matrix": [
+        [
+          1775,
+          11,
+          54
+        ],
+        [
+          6,
+          279,
+          4
+        ],
+        [
+          43,
+          11,
+          511
+        ]
+      ],
+      "coverage": 0.9005,
+      "macro_f1": 0.9386,
+      "mean_set_size": 0.9191,
+      "n": 2694,
+      "per_class": {
+        "benign": {
+          "f1": 0.9689,
+          "precision": 0.9731,
+          "recall": 0.9647,
+          "support": 1840
+        },
+        "critical": {
+          "f1": 0.9012,
+          "precision": 0.8981,
+          "recall": 0.9044,
+          "support": 565
+        },
+        "degradation": {
+          "f1": 0.9458,
+          "precision": 0.9269,
+          "recall": 0.9654,
+          "support": 289
+        }
+      },
+      "weighted_f1": 0.9522
+    },
+    "gate": {
+      "baseline": "health-5.0.0-421cec83",
+      "cv5_grouped_spec_changed.macro_f1": {
+        "baseline": 0.9328,
+        "op": ">=",
+        "threshold": 0.9,
+        "value": 0.9386
+      },
+      "cv5_grouped_spec_changed.per_class.critical.recall": {
+        "baseline": 0.8929,
+        "op": ">=",
+        "threshold": 0.85,
+        "value": 0.9044
+      },
+      "cv5_grouped_spec_changed.per_class.degradation.recall": {
+        "baseline": 0.9832,
+        "op": ">=",
+        "threshold": 0.92,
+        "value": 0.9654
+      },
+      "heldout_family.pooled.macro_f1": {
+        "baseline": 0.8575,
+        "op": ">=",
+        "threshold": 0.62,
+        "value": 0.6605
+      }
+    },
+    "heldout_family": {
+      "note": "each lab family held out in turn (no row involving it trains, combined/revert included); tested on rows involving only that family; pooled = all held-out predictions",
+      "per_family": {
+        "args_break": {
+          "accuracy": 0.8,
+          "labels": {
+            "benign": 7,
+            "critical": 53
+          },
+          "macro_f1_present": 0.6875,
+          "n": 60
+        },
+        "args_stress": {
+          "accuracy": 0.3077,
+          "labels": {
+            "benign": 84,
+            "degradation": 46
+          },
+          "macro_f1_present": 0.4857,
+          "n": 130
+        },
+        "cpu_limit_down": {
+          "accuracy": 0.9541,
+          "labels": {
+            "benign": 144,
+            "degradation": 52
+          },
+          "macro_f1_present": 0.944,
+          "n": 196
+        },
+        "cpu_limit_up": {
+          "accuracy": 1.0,
+          "labels": {
+            "benign": 95
+          },
+          "macro_f1_present": 1.0,
+          "n": 95
+        },
+        "cpu_request": {
+          "accuracy": 0.9848,
+          "labels": {
+            "benign": 65,
+            "degradation": 1
+          },
+          "macro_f1_present": 0.4962,
+          "n": 66
+        },
+        "cpu_throttle": {
+          "accuracy": 0.8879,
+          "labels": {
+            "benign": 110,
+            "degradation": 104
+          },
+          "macro_f1_present": 0.8878,
+          "n": 214
+        },
+        "env": {
+          "accuracy": 1.0,
+          "labels": {
+            "benign": 110
+          },
+          "macro_f1_present": 1.0,
+          "n": 110
+        },
+        "image_missing": {
+          "accuracy": 0.0,
+          "labels": {
+            "critical": 67
+          },
+          "macro_f1_present": 0.0,
+          "n": 67
+        },
+        "image_valid": {
+          "accuracy": 0.0,
+          "labels": {
+            "benign": 142
+          },
+          "macro_f1_present": 0.0,
+          "n": 142
+        },
+        "mem_limit_down": {
+          "accuracy": 0.9146,
+          "labels": {
+            "benign": 125,
+            "critical": 36,
+            "degradation": 3
+          },
+          "macro_f1_present": 0.7734,
+          "n": 164
+        },
+        "mem_limit_up": {
+          "accuracy": 0.9925,
+          "labels": {
+            "benign": 132,
+            "degradation": 1
+          },
+          "macro_f1_present": 0.4981,
+          "n": 133
+        },
+        "mem_pressure": {
+          "accuracy": 0.8901,
+          "labels": {
+            "benign": 81,
+            "critical": 1,
+            "degradation": 9
+          },
+          "macro_f1_present": 0.5468,
+          "n": 91
+        },
+        "meta": {
+          "accuracy": 1.0,
+          "labels": {
+            "benign": 198
+          },
+          "macro_f1_present": 1.0,
+          "n": 198
+        },
+        "posture": {
+          "accuracy": 0.5868,
+          "labels": {
+            "benign": 35,
+            "critical": 86
+          },
+          "macro_f1_present": 0.5867,
+          "n": 121
+        },
+        "probe_break": {
+          "accuracy": 0.4505,
+          "labels": {
+            "benign": 19,
+            "critical": 92
+          },
+          "macro_f1_present": 0.444,
+          "n": 111
+        },
+        "probe_remove": {
+          "accuracy": 0.1017,
+          "labels": {
+            "benign": 59
+          },
+          "macro_f1_present": 0.1846,
+          "n": 59
+        },
+        "probe_tweak": {
+          "accuracy": 0.0,
+          "labels": {
+            "benign": 76
+          },
+          "macro_f1_present": 0.0,
+          "n": 76
+        },
+        "replicas_down": {
+          "accuracy": 1.0,
+          "labels": {
+            "benign": 30
+          },
+          "macro_f1_present": 1.0,
+          "n": 30
+        },
+        "replicas_up": {
+          "accuracy": 1.0,
+          "labels": {
+            "benign": 140
+          },
+          "macro_f1_present": 1.0,
+          "n": 140
+        },
+        "replicas_zero": {
+          "accuracy": 0.1515,
+          "labels": {
+            "benign": 5,
+            "critical": 28
+          },
+          "macro_f1_present": 0.1316,
+          "n": 33
+        },
+        "volume_mount_remove": {
+          "accuracy": 1.0,
+          "labels": {
+            "benign": 53
+          },
+          "macro_f1_present": 1.0,
+          "n": 53
+        }
+      },
+      "pooled": {
+        "accuracy": 0.7213,
+        "confusion_matrix": [
+          [
+            1332,
+            27,
+            351
+          ],
+          [
+            28,
+            187,
+            1
+          ],
+          [
+            227,
+            4,
+            132
+          ]
+        ],
+        "macro_f1": 0.6605,
+        "n": 2289,
+        "per_class": {
+          "benign": {
+            "f1": 0.808,
+            "precision": 0.8393,
+            "recall": 0.7789,
+            "support": 1710
+          },
+          "critical": {
+            "f1": 0.3117,
+            "precision": 0.2727,
+            "recall": 0.3636,
+            "support": 363
+          },
+          "degradation": {
+            "f1": 0.8618,
+            "precision": 0.8578,
+            "recall": 0.8657,
+            "support": 216
+          }
+        },
+        "weighted_f1": 0.7344
+      }
+    },
+    "latency_ms": {
+      "note": "single-row bundle.predict incl. TreeSHAP, num_threads=1",
+      "p50": 6.255,
+      "p99": 8.816
+    },
+    "missing_dropout_copies": {
+      "cv5_grouped": {
+        "accuracy": 0.8525,
+        "confusion_matrix": [
+          [
+            4613,
+            364,
+            543
+          ],
+          [
+            66,
+            777,
+            24
+          ],
+          [
+            82,
+            113,
+            1500
+          ]
+        ],
+        "coverage": 0.772,
+        "macro_f1": 0.8092,
+        "mean_set_size": 0.832,
+        "n": 8082,
+        "per_class": {
+          "benign": {
+            "f1": 0.8974,
+            "precision": 0.9689,
+            "recall": 0.8357,
+            "support": 5520
+          },
+          "critical": {
+            "f1": 0.7974,
+            "precision": 0.7257,
+            "recall": 0.885,
+            "support": 1695
+          },
+          "degradation": {
+            "f1": 0.7327,
+            "precision": 0.6196,
+            "recall": 0.8962,
+            "support": 867
+          }
+        },
+        "weighted_f1": 0.8588
+      },
+      "note": "fit-only rows, not in calibration or the gate; own metrics"
+    },
+    "split": {
+      "test": {
+        "groups": 28,
+        "rows": 1216
+      },
+      "train": {
+        "groups": 222,
+        "rows": 9592
+      },
+      "val": {
+        "groups": 27,
+        "rows": 1184
+      }
+    },
+    "test": {
+      "accuracy": 0.9211,
+      "confusion_matrix": [
+        [
+          194,
+          0,
+          10
+        ],
+        [
+          2,
+          28,
+          1
+        ],
+        [
+          9,
+          2,
+          58
+        ]
+      ],
+      "coverage": 0.852,
+      "macro_f1": 0.9024,
+      "mean_set_size": 0.8816,
+      "n": 304,
+      "per_class": {
+        "benign": {
+          "f1": 0.9487,
+          "precision": 0.9463,
+          "recall": 0.951,
+          "support": 204
+        },
+        "critical": {
+          "f1": 0.8406,
+          "precision": 0.8406,
+          "recall": 0.8406,
+          "support": 69
+        },
+        "degradation": {
+          "f1": 0.918,
+          "precision": 0.9333,
+          "recall": 0.9032,
+          "support": 31
+        }
+      },
+      "weighted_f1": 0.921
+    },
+    "test_spec_changed": {
+      "accuracy": 0.9211,
+      "confusion_matrix": [
+        [
+          194,
+          0,
+          10
+        ],
+        [
+          2,
+          28,
+          1
+        ],
+        [
+          9,
+          2,
+          58
+        ]
+      ],
+      "coverage": 0.852,
+      "macro_f1": 0.9024,
+      "mean_set_size": 0.8816,
+      "n": 304,
+      "per_class": {
+        "benign": {
+          "f1": 0.9487,
+          "precision": 0.9463,
+          "recall": 0.951,
+          "support": 204
+        },
+        "critical": {
+          "f1": 0.8406,
+          "precision": 0.8406,
+          "recall": 0.8406,
+          "support": 69
+        },
+        "degradation": {
+          "f1": 0.918,
+          "precision": 0.9333,
+          "recall": 0.9032,
+          "support": 31
+        }
+      },
+      "weighted_f1": 0.921
+    }
+  },
+  "task": "health",
+  "version": "health-5.0.0-a374e498"
+}

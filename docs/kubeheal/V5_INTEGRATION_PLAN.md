@@ -1,6 +1,6 @@
 # V5 integration plan
 
-Status: ANALYSIS ONLY. Nothing from v5 has been ported, merged or run. Waiting for the owner's decisions (section 8).
+Status: owner decisions received on 2026-11-11 (section 11). Execution is tracked in `docs/kubeheal/PROGRESS.md` (section "V5 integration") and the next steps are in `docs/kubeheal/NEXT_FOR_CODEX.md`. Sections 1 to 10 are the analysis as written before the decisions and are kept unchanged.
 
 ## 0. Basis and rules of this document
 
@@ -338,3 +338,20 @@ Suggested sequence: V5-0a, V5-0b, V5-D1, V5-D2, V5-D6, V5-D3, V5-I1, V5-S1, V5-S
 - No v5 test, script, sensor build, training or model load was run. No v5 number was reproduced.
 - Whether our Falco consumer can read the sensor's JSON unchanged, whether Falco or the sensor works on Docker Desktop here, and and whether the teammate still has the raw collected files are all unverified. Verified here by a presence check: the committed security export has no raw events.
 - Our own model numbers above are stored report values, not re-measured.
+
+## 11. Owner decisions (2026-11-11) and what they change
+
+| Id | Decision | Effect on this plan |
+|---|---|---|
+| M1 | Option (b) now: v5's LightGBM health and security models with split-conformal sets and TreeSHAP run inside our architecture. Option (c) is a later stretch goal. New lab collection through our own agents on `k3d-kubeheal` is allowed with scripted scenarios. Any training still needs the owner's go. | Section 6 is settled for now. V5-M1 (shared package and bundles) is done. V5-I2 (inference service), V5-D4 (Health Agent) and V5-S2 (Security Agent) move the system onto the bundles. V5-M3 (option c) stays a stretch task. The DCM cannot run on LightGBM (no embeddings): correlation becomes the deterministic `compound_score`; the neural servers stay as legacy code, off by default. |
+| M2 | An automatic action requires the conformal prediction set to be exactly one label. Replaces the `CI_WIDTH_LIMIT` 0.15 guard. `decision_policy.py` stays pure, its tests are updated. | V5-D3. Policy inputs change from CI widths to prediction sets. |
+| M3 | The owner asks the teammate for the raw `collected/*.jsonl` files and collection scripts. Nothing blocks on them. | V5-0b stays optional. |
+| D1 | The 10x cut rule is inclusive: cut of 10x or more AND new value at or below 50m CPU or 32Mi memory. | Done in V5-D2 (`wave/V5-D2`, unreviewed): 500m to 50m triggers. |
+| D2 | Rule-based rollback (`failure_reasons`, posture violations) may bypass the model-confidence gate and burn-in only; it still respects the kill switch, protected label, circuit breaker, incident lock, `has_baseline`, security risk below 0.4, the ledger-before-corrective-action rule, and the canary verification and rollback. | V5-D3. Open sub-question for the owner: does `models_ok` also still apply to the rule path (proposed: yes). |
+| D3 | Baseline promotion is automatic under v5's conditions in dev and staging; in prod a promotion candidate needs approval in the dashboard. Every promotion is written to the ledger. | V5-D5 (Health Agent side) and V5-I3 (dashboard side). Our write-once golden baseline (I5) becomes: write-once per approved promotion; the previous baseline is kept in the ledger. |
+| D5 | Port cgroup-freeze containment: the Executor issues the contain request (kill-switch gate, ledger); the node-local Security Agent freezes and also checks the mode. Order: freeze, forensic snapshot, quarantine, scale to 0, then restore. | V5-S5. Executor and RBAC changes, stronger agent only. |
+| D6 | Port the eBPF sensor as an optional event source, low priority; on k3d and Docker Desktop keep Falco or replay. Verification on a real Linux node later. | V5-S4, last. |
+| D7 | Port v5's Health Agent logic first, then re-apply P6-D2 on top, dropping what v5 makes redundant. | V5-D4 includes the P6-D2 re-application; the OBSERVE live spec read per sample is part of it. |
+| other | Fix the OBSERVE stale-object issue with a live spec read per sample. Chaos harness writes are accepted as designed. | Part of V5-D4. The earlier "left for the owner" items are closed. |
+
+Facts found while executing wave 1 that refine section 6: the shipped security bundle lists 40 features while the current feature code emits 45 (five transform features are missing from the bundle), so every caller must pass features through `ModelBundle.restrict()`; the shipped security bundle's conformal and accuracy figures are not evidence (synthetic classes, `conformal_q` of about 4e-6, serving floor 0.05 does the work). Details in `docs/kubeheal/PROGRESS.md`.
