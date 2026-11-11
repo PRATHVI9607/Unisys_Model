@@ -1,61 +1,50 @@
-# KubeHeal next agent handoff (Codex or Claude Code)
+# KubeHeal next agent handoff
 
-Updated 2026-11-11 after the P10 Session 1 pause.
+This file is tool-neutral. It is the first resume point for Codex, Claude Code, or another repository agent.
+Read `AGENTS.md`, `docs/kubeheal/PROGRESS.md`, and `.ai/handoff.md` before changing files or using the cluster.
 
-## Resume state
+## Current checkout
 
-- Current demo checkout: `C:/My_projects_1/cLOUD/Unisys_Model`, branch `demo`. Implementation checkpoint is merge commit `f4264d1` (demo contains the shared query fix from `work`). Read `git log -1 --oneline` for the handoff-doc commit at the tip.
-- Core branch: `work`, commit `382d137` (`fix: source demo disk I/O metric from victim app`). This change was built and exercised on k3d before merge to demo.
-- No push was performed. Never push or set `ALLOW_PUSH`.
-- Cluster `kubeheal` is running. Only use `--context k3d-kubeheal`; never touch `hybrid-demo` or any other context. `kubeheal-mode` is `test`. Prod victim CPU resources are restored to request `100m`, limit `500m`.
-- Victim app and Health Agent are currently running manually built registry tags ending in `:metric-probes`. The ignored generated image-tag values do not reference those tags; a later `up.ps1 -Stage install` or `-Stage victim` can replace them with older images. Update the normal image build/tag flow before relying on a reinstall.
-- Live query verification generated `/data/.kubeheal-metric-probe` on the prod victim PVC. This is a harmless test marker and was left in place. Temporary snapshot restore pod/PVC/snapshot were removed; the original PVC and rolling snapshots remain.
+- Active checkout: `C:/My_projects_1/cLOUD/Unisys_Model`, branch `demo`. Nothing is uncommitted after the Claude session of 2026-11-11 that wrote this file.
+- Do not push or set `ALLOW_PUSH`. No model training is approved. Shared core fixes go to `work` first, then merge `work` into `demo`; demo-only scripts stay under `demo/`.
+- Run `git branch -v` for the tips. Reviewed and merged on 2026-11-11: `wave/P11` into `work` (`a1590d1`), `wip/docs-p6d2` into `work` (`bbe55a0`), `work` into `demo` (`a02c508`). Full suite at `a02c508`: 935 passed, 2 skipped.
 
 ## Branches and worktrees
 
 | Branch | State | Worktree |
 |---|---|---|
-| `demo` | Current; includes P10 metric probe changes and merge `f4264d1` from `work` | `C:/My_projects_1/cLOUD/Unisys_Model` |
-| `work` | Core disk metric query fix at `382d137`; handoff docs synced from `demo` at `6ba9109` | `C:/My_projects_1/cLOUD/Unisys_Model-wt-metric-query` |
-| `wave/P11` | Unreviewed WIP commit `47e1b34`; no cluster access used | `C:/My_projects_1/cLOUD/Unisys_Model-wt-P11` |
-| `wip/docs-p6d2` | Unreviewed WIP commit `c7c9f5bf7a078702e2dd0c1d47d862df7ef1b77f`; includes P6-D2 and docs | `C:/My_projects_1/cLOUD/Unisys_Model-wt-docs` |
-| `main` | Base branch at `88ce586`, ahead of `origin/main` by one local commit | no worktree |
-| `wave/P5` | Historical merged branch at `8f1d8b6` | no worktree |
-| `wave/P6` | Historical merged branch at `7f95f6c` | no worktree |
-| `wave/P7` | Historical merged branch at `a294eb9` | no worktree |
-| `wave/P8` | Historical merged branch at `246b973` | no worktree |
-| `wave/P9` | Historical merged branch at `0451237` | no worktree |
-| `wave/docs-p6d2` | Inactive historical base at `e611844` | no worktree |
+| `demo` | Active | `C:/My_projects_1/cLOUD/Unisys_Model` |
+| `work` | Complete project, all core fixes | `C:/My_projects_1/cLOUD/Unisys_Model-wt-metric-query` (kept: it is the only checkout of `work`) |
+| `wave/P11`, `wip/docs-p6d2` | Merged into `work`; branches kept, worktrees removed | none |
+| `main`, `wave/P5` to `wave/P9`, `wave/docs-p6d2` | Base and historical | none |
 
-Remote refs at pause: `origin/HEAD -> origin/main`, `origin/main` (`b419053`), `origin/master` (`1ca9418`), `origin/test` (`e8e9feb`), `origin/kali` (`7e78f4b`), and `origin/feat/dit-sec-train-integrate` (`30f3b17`). No remote branch was changed.
+`origin/main` ("v5", a teammate's rewrite) was fetched and analysed only: `docs/kubeheal/V5_INTEGRATION_PLAN.md`. Nothing from it is ported. Wait for the owner's decisions listed in section 8 of that plan.
 
-The `wave/P11` and `wip/docs-p6d2` branches were not merged. Review each diff, bring it up to the current `work` base without overwriting work, and run the full test suite after each approved merge. Their focused tests passed (P11: 8; docs/P6-D2: 23), but the docs agent's full-suite run was blocked by environment/dependency/temp-path issues.
+## Cluster state
+
+Not re-checked by Claude in the 2026-11-11 review session (no cluster command was run). As last recorded by Codex: cluster `kubeheal` running, global mode `test`, prod and dev `victim-app` at request 100m / limit 500m, Health Model Deployment and HPA at 2 replicas, Security Agent in `FALCO_MODE=auto` (Falco not installed), temporary replay and k6 resources removed. Every Kubernetes command must use `--context k3d-kubeheal`; never `hybrid-demo`.
 
 ## Next tasks, in order
 
-1. **Finish P10-U4 driver and image reproducibility.** Touch `demo/scripts/demo.ps1`, `demo/k3d/images.ps1`, and only necessary demo docs. Add safe status, drift, reset, and clearly reported HUMAN/dry-run behavior. The drift patch must set both requests and limits to `50m`, then restore `100m`/`500m`. Bring `metric-probes` into the standard image-tag workflow. Do not touch `agents/fusion_agent/decision_policy.py`, `agents/executor/`, or `k8s/rbac/`. Verify with `.\demo\scripts\demo.ps1 -Action drift`, `.\demo\scripts\demo.ps1 -Action reset`, and `.\demo\k3d\up.ps1 -Stage victim` once the helper's Helm requirement is available.
-2. **Complete P10-U2 and D-5 Falco path.** Falco is absent; Security Agent logs show `FALCO_MODE=auto` resolves to `off` and `/proc` write tracking only. Helm was unavailable to `Initialize-Tools`; no Falco install/replay config was applied. Try a bounded install, or explicitly mount a hand-written replay fixture and label the result as replay. Keep live Falco claims separate. Do not change `FALCO_MODE` without recording it and restoring the intended mode. Verify logs and a replay event through the Security Agent/Fusion streams.
-3. **Run P10 D-6 fail-closed / HUMAN path.** The latest drift already produced `human_patch` with `dry_run=true` because the Health CI width was `0.2607`, above the `0.15` gate. If testing an outage, delete only a KubeHeal model pod with `--context k3d-kubeheal`, confirm HUMAN escalation, and let its controller restore the replica. Keep mode `test`; do not loosen policy or train models.
-4. **Run P10 D-8 HPA scale-out under k6 load.** Use pinned `grafana/k6:0.54.0` as an in-cluster Job with resource limits and pod anti-affinity from model servers. Target a scoring endpoint and capture HPA replicas/metrics before, during, and after. This is still unmeasured; no P11 cluster evaluation is approved by this handoff.
-5. **Complete P10-U6 acceptance.** Add remaining safe demo/reset steps, run setup/demo/reset twice, record only observed output in `PROGRESS.md` and `demo/README.md`. Snapshot/restore was separately verified once; the full demo suite was not.
+1. **Rebuild the Health Agent image and verify the aiohttp fix.** `b229491` fixed the per-call `ApiClient` leak; the running image predates it. `demo/k3d/images.ps1` then check the Health Agent log for `Unclosed client session`.
+2. **D-5 replay emits no Security event.** Reported by Codex: 21 hand-written events were consumed and the model-client latency metric advanced, but no `kubeheal.security.events` record appeared. Check `agents/security_agent/syscall_window.py` windowing and the publish threshold, add a focused test in `tests/test_sense_falco_replay.py`, then a bounded replay with the mode kept `test`. Do not claim live Falco.
+3. **Health Model attribution.** Both observed drift events have a flat `field_attribution_json` (`docs/kubeheal/results/p10-k3d-2026-11-11.md`), so `top_field` is arbitrary and the Executor escalates `no_drift_at_field`. Add focused tests before any fix. A model-independent option is deriving candidate fields from the spec diff (V5 plan, C9). Keep the 0.15 CI gate. Policy and Executor changes are for the stronger agent.
+4. **P10-U6 acceptance.** Full `up.ps1`, all demo steps, reset, twice in a row without manual fixes. Requires PowerShell 7. Keep mode `test`, keep drift injection paired at 50m request and limit, restore `100m/500m`. The demo scripts were reviewed and fixed on 2026-11-11 but not re-run end to end afterwards.
+5. Remaining checklist items in `PROGRESS.md`: P7-RR-7, RR-11, RR-12, P6-D6, P11-E1 to E7 (the P11 harness exists but has not been run), P12 not approved.
 
-For shared core fixes, edit and commit on `work` first, then merge `work` into `demo`. Keep demo-only files under `demo/`. The Health Agent aiohttp session leak is still open and belongs on `work`.
+## Known facts
 
-## Verified findings and open issues
+- P10 numbers confirmed from Codex's session log (k6 run, HPA 2 to 4 to 8 to 2, CI widths 0.2607 and 0.1192) are in `docs/kubeheal/results/p10-k3d-2026-11-11.md`. The 21 replayed events, the sample counts per channel and the 15 sample values in P10-V2 are reported but not confirmed.
+- The Executor logged a transient MinIO `S3Error` during bootstrap; the queued fallback record drained. Not reproduced.
+- Review items left open on purpose: see "Known review items not fixed" in `PROGRESS.md`.
 
-- On 2026-11-11 10:24 local time, the corrected verifier returned all 15 series under active traffic. The previous verifier used Service port 80 instead of 8000, so its app requests never reached the app. `http_error_rate` then had no series. The k3d kubelet exposed no `container_fs_*` series; `disk_io_bytes` now uses `kubeheal_victim_disk_io_bytes_total`, incremented after an app write and `fsync` under the mounted data path.
-- The Health Agent sets `health_ci_width=1.0` when any metric is missing. The Health Model computes its own width as `1 - max(class probability)`. After all channels were present, the 50m drift event had `metrics_missing=[]`, `health_ci_width=0.2607`, and Fusion recorded `human_patch` (`dry_run=true`, CI limit `0.15`). Automatic patch remains blocked. Do not change the CI gate or policy.
-- The Health Model pod logs confirmed the baked-in trained checkpoint loaded with preprocessing `v1-legacy`. Security Model `/health` reported a loaded baked-in checkpoint. No training was run.
-- Executor startup had one MinIO `S3Error` while bootstrap was still running. Redis stream `kubeheal.ledger.pending` later had length `0`; the queued record drained. The transient startup failure was not reproduced after bootstrap.
-- Health Agent still logs `Unclosed client session` per event.
-- Falco is not running. The security-agent auto mode is off on this machine; replay is not configured.
-- P10 snapshot restore succeeded: a snapshot of `prod/victim-data` restored to a temporary PVC, and the check pod read all 20 seeded files. Test resources were cleaned up.
-- P10-U7 custom-metric HPA discovery works at idle (`0/4` observed earlier); scale-out under load is untested.
-- Historical streams and incident keys remain in Redis; they are not cleanup targets without a reason.
+## Useful checks
 
-## Files and operations to avoid
-
-- Reserved for Claude/strong reviewer: `agents/fusion_agent/decision_policy.py`, Executor write paths in `agents/executor/`, and `k8s/rbac/`.
-- Do not run `models/train_*.py`; P12-H is not approved. Do not run destructive Git commands or delete user data.
-- Do not merge the two WIP branches until their diffs are reviewed against current `work` and the full suite is run after each merge.
-- Expected test command when dependencies and venv are available: `$env:PYTHONPATH='.'; .venv\Scripts\python.exe -m pytest tests/ -q -p no:warnings --basetemp=.pytest-tmp/<task>`.
+```powershell
+git status
+git branch -v
+git worktree list
+git log --oneline -15
+kubectl --context k3d-kubeheal -n kubeheal get configmap kubeheal-mode
+$env:PYTHONPATH='.'; .venv\Scripts\python.exe -m pytest tests/ -q -p no:warnings --basetemp=.pytest-tmp/<task>
+```
