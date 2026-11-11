@@ -679,8 +679,9 @@ class FusionAgentV4:
         params = out.action_params
         patch_fields = params.get("patch_fields") or []
         # The Executor does not read the Q2 fields below yet (later work); they are carried so it can.
-        # patch_field falls back to the first changed field when the Health event names no top field.
-        patch_field = (inp.health_field_top or (patch_fields[0] if patch_fields else ""))             if action == "patch" else ""
+        # patch_field: the model path names it in action_params; the rule path (no model attribution) uses the
+        # first changed field of the spec diff, never the unrelated top_field of a model score.
+        patch_field = (params.get("patch_field") or (patch_fields[0] if patch_fields else ""))             if action == "patch" else ""
         await self.redis.xadd(EXEC_STREAM, {
             "incident_id": incident_id,
             "action": action,
@@ -724,7 +725,10 @@ class FusionAgentV4:
 
     async def _maybe_request_restore(self, incident_id: str):
         """Queue `restore` on kubeheal.exec when the incident is contained AND T0 is known AND the workload kind
-        is one the Executor accepts. Otherwise escalate (once per reason). Never invents T0."""
+        is one the Executor accepts, and the containment was for a ransomware label (`restore_after`). Otherwise
+        escalate (once per reason), or, after an exfiltration containment, tell a human once (`human_followup`);
+        a contained incident with neither flag (suspicious, or a context from before this change) requests
+        nothing. Never invents T0."""
         ctx = await self.redis.hgetall(self._ctx_key(incident_id))
         if not ctx.get("contained"):
             return

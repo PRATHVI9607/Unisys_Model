@@ -56,7 +56,7 @@ def test_rule_path_with_a_fresh_security_key_auto_patches_and_carries_the_fields
     assert req["action"] == "patch" and req["dry_run"] == "false" and req["approved_by"] == "auto"
     assert json.loads(req["patch_fields"]) == ["containers[0].image"]
     assert json.loads(req["rule_reasons"]) == ["ImagePullBackOff"] and req["rule_path"] == "true"
-    assert req["patch_field"] == "spec.cpu"              # the event's top_field wins when present
+    assert req["patch_field"] == "containers[0].image"   # the rule path uses the diff, not the model top_field
     assert req["restore_after"] == "false" and req["human_followup"] == "false" and req["containment_label"] == ""
     assert escalations(a) == []                          # not the model_unavailable escalation
     payload = next(r["payload"] for r in ledger_steps(a) if r["step"] == "decision")
@@ -67,14 +67,11 @@ def test_rule_path_with_a_fresh_security_key_auto_patches_and_carries_the_fields
     assert parse_request(req)[0] == "ok"
 
 
-def test_rule_path_patch_field_falls_back_to_the_first_changed_field():
+def test_model_path_patch_keeps_the_top_field_as_the_patch_field():
     a = make_agent()
-    set_security_score(a)
-    ev = rule_health_event()
-    del ev["top_field"]
-    decide(a, health=ev)
+    decide(a, health=health_event())
     [req] = exec_requests(a)
-    assert req["patch_field"] == "containers[0].image"
+    assert req["action"] == "patch" and req["patch_field"] == "spec.cpu" and req["rule_path"] == "false"
 
 
 def test_rule_path_needs_no_burn_in_no_threshold_and_no_health_model():
