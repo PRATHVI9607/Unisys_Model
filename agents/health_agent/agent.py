@@ -46,6 +46,24 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 METRICS = KubeHealMetrics()
 
+# Chosen default cadence, not a measured profile. During an active OBSERVE request,
+# the workload's next assessment is scheduled at base/factor. No periodic assessment
+# runs when no OBSERVE request is active.
+HEALTH_OBSERVE_BASE_S = 60.0
+
+
+def observe_base_s_from_env() -> float:
+    raw = os.environ.get("HEALTH_OBSERVE_BASE_S")
+    if raw is None:
+        return HEALTH_OBSERVE_BASE_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("HEALTH_OBSERVE_BASE_S must be a positive number") from exc
+    if value <= 0 or not value < float("inf"):
+        raise ValueError("HEALTH_OBSERVE_BASE_S must be a positive finite number")
+    return value
+
 
 class SeverityLevel(str, Enum):
     BENIGN = "benign"
@@ -112,13 +130,13 @@ class HealthAgent:
         self.running = False
         self.watcher = None
 
-        # P6-D2: OBSERVE rescheduling. Opt-in, no default: see observe_base_s_from_env().
+        # P6-D2: periodic rescoring is limited to workloads with an active OBSERVE request.
         self.observe_base_s = (observe_base_s if observe_base_s is not None
                                else observe_base_s_from_env())
         self.clock = clock
-        # (namespace, deployment) -> clock() time of the last assessment. Only workloads whose spec
-        # differs from the golden baseline are tracked (nothing else is ever assessed).
-        self._drifted: Dict[Tuple[str, str], float] = {}
+        # (namespace, deployment) -> latest Deployment and clock() time of last assessment.
+        # Only workloads whose spec differs from the golden baseline are tracked.
+        self._drifted: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._observe_task: Optional[asyncio.Task] = None
 
         self.baseline_configmap = "kubeheal-baselines"
@@ -151,12 +169,9 @@ class HealthAgent:
 
         logger.info("Health Agent started successfully")
 
-        if self.observe_base_s:
-            self._observe_task = asyncio.create_task(self.observe_loop())
-            logger.info(f"OBSERVE rescheduling enabled: base interval {self.observe_base_s}s "
-                        f"(an active request samples every base/factor)")
-        else:
-            logger.info("OBSERVE rescheduling disabled (HEALTH_OBSERVE_BASE_S not set): event driven only")
+        self._observe_task = asyncio.create_task(self.observe_loop())
+        logger.info(f"OBSERVE rescheduling enabled: base interval {self.observe_base_s}s "
+                    "while an OBSERVE request is active")
 
         await self.watch_deployments()
 
@@ -180,6 +195,35 @@ class HealthAgent:
             await self.redis.aclose()
 
         logger.info("Health Agent stopped")
+
+    async def observe_loop(self) -> None:
+        """Rescore known drift only while Fusion's bounded OBSERVE request is active."""
+        try:
+            while self.running:
+                await asyncio.sleep(1)
+                try:
+                    await self.observe_tick()
+                except Exception:
+                    logger.exception("Health OBSERVE rescheduler pass failed; will retry")
+        except asyncio.CancelledError:
+            raise
+
+    async def observe_tick(self) -> None:
+        """Perform one scheduler pass; split out for deterministic unit tests."""
+        if not self.redis or not self.observe_base_s:
+            return
+        now = self.clock()
+        due = []
+        for key, state in list(self._drifted.items()):
+            namespace, name = key
+            factor = await sampling_factor(self.redis, namespace, workload=name)
+            interval = scaled_interval(self.observe_base_s, factor)
+            if factor > 1 and now - state["last_assessed"] >= interval:
+                # Advance before awaiting the handler so the next tick cannot duplicate it.
+                state["last_assessed"] = now
+                due.append(state["deployment"])
+        for deployment in due:
+            await self.handle_deployment_event("OBSERVE_SAMPLE", deployment)
 
     async def watch_deployments(self) -> None:
         """Watch Deployment changes, reconnecting across watch timeouts.
@@ -231,6 +275,10 @@ class HealthAgent:
             logger.info(f"handle_deployment_event STARTED: {event_type}")
             name = deployment.metadata.name
             namespace = deployment.metadata.namespace
+            drift_key = (namespace, name)
+            if event_type == "DELETED":
+                self._drifted.pop(drift_key, None)
+                return
             generation = deployment.metadata.generation or 0
             observed_gen = deployment.status.observed_generation or 0
 
@@ -246,9 +294,23 @@ class HealthAgent:
 
             logger.info(f"Processing event for {namespace}/{name}...")
 
-            in_cooldown = await self._check_cooldown(namespace, name)
+            # Scheduler-triggered samples are already bounded by the active OBSERVE key.
+            # Watch events retain the regular cooldown to avoid duplicate scoring.
+            in_cooldown = (event_type != "OBSERVE_SAMPLE" and
+                           await self._check_cooldown(namespace, name))
             logger.info(f"Cooldown check for {namespace}/{name}: {in_cooldown}")
             if in_cooldown:
+                # Keep a tracked workload pointed at its newest watch object. If it has
+                # returned to baseline, stop scheduling it even though scoring is cooling down.
+                state = self._drifted.get(drift_key)
+                if state:
+                    state["deployment"] = deployment
+                    try:
+                        golden = await baseline.load_baseline(self.redis, namespace, name)
+                        if golden and not baseline.is_drifted(golden, self._spec_json(deployment)):
+                            self._drifted.pop(drift_key, None)
+                    except Exception as e:
+                        logger.debug(f"Could not refresh tracked drift state for {namespace}/{name}: {e}")
                 logger.info(f"Skipping {namespace}/{name} - in cooldown")
                 return
 
@@ -272,8 +334,13 @@ class HealthAgent:
                 logger.info(f"Golden baseline recorded for {namespace}/{name}; no drift to assess")
                 return
             if not baseline.is_drifted(golden, new_spec):
+                self._drifted.pop(drift_key, None)
                 logger.info(f"{namespace}/{name} matches its golden baseline; skipping assessment")
                 return
+            self._drifted.setdefault(drift_key, {
+                "deployment": deployment,
+                "last_assessed": self.clock(),
+            })["deployment"] = deployment
             old_spec = golden["spec"]
             new_spec = baseline.drift_view(new_spec)
             logger.info(f"Spec drift vs golden baseline detected for {namespace}/{name}; assessing")
@@ -299,6 +366,8 @@ class HealthAgent:
             if assessment:
                 await self._publish_assessment(assessment)
                 await self._set_cooldown(namespace, name)
+                if drift_key in self._drifted:
+                    self._drifted[drift_key]["last_assessed"] = self.clock()
                 logger.info(f"Assessment {namespace}/{name}: "
                             f"health_risk={assessment['health_risk']:.2f} "
                             f"label={assessment['health_label']}")
