@@ -1,7 +1,7 @@
 # Remove the KubeHeal demo cluster (demo branch only). Deletes ONLY the cluster named `kubeheal` and its registry.
 #   .\demo\k3d\down.ps1
 . "$PSScriptRoot\lib.ps1"
-Initialize-Tools
+Initialize-Tools -SkipHelm
 
 $exists = (& $K3dExe cluster list -o json | ConvertFrom-Json | Where-Object { $_.name -eq $ClusterName })
 if (-not $exists) { Say "cluster $ClusterName does not exist, nothing to do"; return }

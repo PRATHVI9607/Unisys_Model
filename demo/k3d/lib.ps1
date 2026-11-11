@@ -37,12 +37,19 @@ function Find-Tool([string]$name, [string]$wingetDir) {
 }
 
 function Initialize-Tools {
-    $script:K3dExe  = Find-Tool "k3d"  "k3d.k3d"
-    $script:HelmExe = Find-Tool "helm" "Helm.Helm"
+    param(
+        [switch]$SkipK3d,
+        [switch]$SkipHelm,
+        [switch]$SkipDocker
+    )
     $script:KubectlExe = Find-Tool "kubectl" "Kubernetes.kubectl"
-    $script:DockerExe  = Find-Tool "docker" "Docker.DockerDesktop"
-    docker info --format '{{.ServerVersion}}' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Docker is not running." }
+    if (-not $SkipK3d) { $script:K3dExe = Find-Tool "k3d" "k3d.k3d" }
+    if (-not $SkipHelm) { $script:HelmExe = Find-Tool "helm" "Helm.Helm" }
+    if (-not $SkipDocker) {
+        $script:DockerExe = Find-Tool "docker" "Docker.DockerDesktop"
+        & $script:DockerExe info --format '{{.ServerVersion}}' | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Docker is not running." }
+    }
 }
 
 # kubectl pinned to the demo cluster. Output goes to the pipeline, errors throw.

@@ -4,15 +4,15 @@
 
 The `kubeheal` k3d cluster was exercised on 2026-11-11. It is left running with the global kill switch in `test` mode. The prod victim Deployment is restored to CPU request `100m` and limit `500m`.
 
-The victim app image and Health Agent image were manually built and rolled out with the `metric-probes` tag. The generated image-tag files are not updated, so a later chart reinstall can replace these images. The prod PVC contains the seeded files and one harmless `.kubeheal-metric-probe` file written during verification.
+The victim app and Health Agent were built through `demo/k3d/images.ps1` with the standard generated tag `b20261111113631` and rolled out with that tag. The per-image tag record and generated Helm values live in ignored files under `demo/k3d/`; they are local machine state. The prod PVC contains the seeded files and one harmless `.kubeheal-metric-probe` file written during verification.
 
 The verifier `scripts/verify_health_queries.py` now targets the victim Service port `8000` and generates a 5xx response, bounded CPU work, and a synced data-volume write. A 120-second live run returned all 15 Health Agent metric queries. This is evidence of series availability under generated traffic, not a performance claim.
 
 ## Observed drift behavior
 
-On 2026-11-11, the prod victim was temporarily changed to CPU requests `50m` and limits `50m`, then restored to `100m` / `500m`. The Health Agent event had all metric channels present and `health_ci_width=0.2607`. Fusion recorded `human_patch` with `dry_run=true` because the CI width exceeded the `0.15` automatic-action limit. Global mode remained `test`; no remediation write occurred and no policy threshold was changed.
+The status/drift/reset driver is `scripts/demo.ps1`. On 2026-11-11, it primed the metric window, changed both prod CPU request and limit to `50m`, then restored `100m` / `500m` in `finally`. The latest event had `metrics_missing=[]` and `health_ci_width=0.1192`; Fusion queued `auto_patch` with `dry_run=true` because global mode was `test`. Executor escalated because the model's top attribution was `template.spec.initContainers[0].securityContext`, not a drifted field. No remediation write occurred and no CI threshold was changed. An earlier fully populated drift window had width `0.2607` and produced `human_patch`.
 
-The earlier `health_ci_width=1.0` was the Health Agent's missing-input sentinel. The old verifier used the wrong victim Service port, so `http_error_rate` had no series. The kubelet also exposed no `container_fs_*` series; the demo disk input now comes from the victim app's fsync-backed byte counter.
+The earlier `health_ci_width=1.0` was the Health Agent's missing-input sentinel for `http_error_rate`: the verifier used Service port 80 instead of 8000. The kubelet exposed no `container_fs_*` series, so `disk_io_bytes` now comes from the victim app's fsync-backed byte counter. The corrected verifier returned all 15 query series.
 
 ## Verified snapshot behavior
 
@@ -20,10 +20,10 @@ A snapshot of `prod/victim-data` was restored to a temporary PVC on 2026-11-11. 
 
 ## Still pending
 
-- `scripts/demo.ps1` does not exist yet. P10-U4 needs a driver with status, drift, and reset steps, then the remaining safe scenarios.
-- Falco is not running here. The Security Agent's `FALCO_MODE=auto` resolves to `off` and falls back to `/proc` write tracking. Replay is not configured.
-- HPA custom-metric discovery is active at idle (`0/4` observed earlier); scale-out under k6 load has not been tested.
-- The fail-closed model outage scenario and complete P10 acceptance twice in a row remain pending.
-- Health Model live scores have not been validated against real training-distribution windows. P12-H retraining is not approved. The latest conformal CI still blocks automatic patching; do not change the gate for the demo.
+- The Security Agent's `FALCO_MODE=auto` resolves to `off`; live Falco is not running. A hand-written replay trace was temporarily mounted, all 21 events were consumed, and the model-client latency counter advanced. No security event was published; replay config and ConfigMap were removed afterwards.
+- D-6 fail-closed was verified on dev: a brief Health Model outage during paired 50m drift produced a Fusion HUMAN escalation. Health Model replicas and victim resources were restored; global mode remained `test`.
+- HPA custom-metric discovery is active. In one corrected `scripts/hpa_load.ps1` run on 2026-11-11, a pinned k6 Job used 32 VUs for 90 seconds. It sent 4,999 score requests; 4,993 returned 200 (99.87% checks), six requests failed during startup/recovery, and observed p95 request duration was 889.03 ms. The HPA metric rose from 0 to 16 and replicas scaled from 2 to 4 to 8; after load the metric returned to 0 and the HPA reconciled to 2. The temporary Job, ConfigMap, and narrow ingress policy were removed. This is one test run, not a performance guarantee.
+- Complete P10 acceptance twice in a row remains pending.
+- Health Model live scores have not been validated against real training-distribution windows. P12-H retraining is not approved. The CI gate remains 0.15 and must not be changed; the latest drift passed its width check but Executor escalated because the model's top field did not match the drifted field.
 
 See [PROGRESS](../docs/kubeheal/PROGRESS.md) for detailed measured query samples and [NEXT_FOR_CODEX](../docs/kubeheal/NEXT_FOR_CODEX.md) for the ordered continuation tasks.

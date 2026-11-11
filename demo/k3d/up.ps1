@@ -10,7 +10,10 @@ param(
 )
 
 . "$PSScriptRoot\lib.ps1"
-Initialize-Tools
+Initialize-Tools `
+    -SkipK3d:($Stage -notin @("all", "cluster")) `
+    -SkipHelm:($Stage -notin @("all", "monitoring", "install", "adapter")) `
+    -SkipDocker:($Stage -notin @("all", "cluster", "images"))
 Set-Location $RepoRoot
 
 function Want([string]$s) { return ($Stage -eq "all") -or ($Stage -eq $s) }

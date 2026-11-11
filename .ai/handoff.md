@@ -1,11 +1,10 @@
 # Handoff
 
-- **Agent:** Codex orchestrator
-- **Date:** 2026-11-11
-- **Status:** Paused at user request. Current checkout is `demo`; cluster `kubeheal` is running in mode `test`. Nothing pushed.
-- **Implementation checkpoint:** `f4264d1` on `demo`; shared disk metric query fix is `382d137` on `work`, merged into demo. The top commit contains this pause handoff.
-- **Cluster:** victim prod/dev and Health Agent use manually built `:metric-probes` images; generated chart image tags are stale. Prod victim is restored to request 100m / limit 500m. A harmless `.kubeheal-metric-probe` file remains on its PVC. Temporary snapshot-restore objects were removed.
-- **Open findings:** missing-metric CI sentinel is understood; with all 15 channels observed, latest width was 0.2607 and policy recorded `human_patch` with `dry_run=true` (gate 0.15 unchanged). Startup S3Error queue drained (`XLEN=0`). Health Agent aiohttp session leak remains. Falco auto mode resolves to off; replay/install incomplete. HPA scale-out and full P10 acceptance remain.
-- **WIP branches not merged:** `wave/P11` at `47e1b34` (`../Unisys_Model-wt-P11`); `wip/docs-p6d2` at `c7c9f5bf7a078702e2dd0c1d47d862df7ef1b77f` (`../Unisys_Model-wt-docs`). Work core query checkout: `../Unisys_Model-wt-metric-query` on `work`.
-
-Resume from [NEXT_FOR_CODEX.md](../docs/kubeheal/NEXT_FOR_CODEX.md). Read it before using the cluster or merging work.
+- **Agent/date:** Codex orchestrator, 2026-11-11.
+- **Branch/last commit:** `demo`, last committed base `e09e7f4`; P10 continuation and refreshed handoff files remain uncommitted. The owner requested a handoff to Claude; no stage/commit approval was given. No push.
+- **Goal/result:** Continued SESSION 1 P10. Added the status/drift/reset driver and standard image-tag flow; replayed the hand-written Falco fixture without obtaining a Security Agent event; verified D-6 HUMAN escalation and D-8 HPA scale-out. Updated `PROGRESS.md`, `demo/README.md`, and the tool-neutral [NEXT_FOR_CODEX.md](../docs/kubeheal/NEXT_FOR_CODEX.md).
+- **Files changed:** `demo/k3d/{down,images,lib,up}.ps1`, `demo/scripts/{demo.ps1,hpa_load.ps1,k6_health_model.js}`, `demo/README.md`, `docs/kubeheal/PROGRESS.md`, `docs/kubeheal/NEXT_FOR_CODEX.md`, `.ai/handoff.md`.
+- **Cluster:** k3d `kubeheal` running with `kubeheal-mode=test`; prod/dev victim CPU resources are 100m/500m; Health Model/HPA are 2/2, metric 0; Security Agent is `auto`; temporary replay/k6 resources removed; ledger pending queue length 0. A later `up.ps1 -Stage install` invocation was interrupted by the owner after about 168 seconds and is not verified complete. Post-interruption, all Deployments were ready and HPA metrics were available at 0; temporary pod sandbox/probe/custom-metric errors had recovered.
+- **Open issues:** D-5 replay produced no `kubeheal.security.events` record; latest dry-run drift attribution was `template.spec.initContainers[0].securityContext` rather than CPU, so Executor escalated; Health Agent aiohttp session leak remains; U6 full acceptance twice is incomplete. CI width 1.0 cause was missing `http_error_rate`; corrected query verifier now returns all 15 channels. Transient startup S3Error drained and was not reproduced.
+- **Unmerged branches:** `wave/P11` at `47e1b34` (`../Unisys_Model-wt-P11`) and `wip/docs-p6d2` at `c7c9f5b` (`../Unisys_Model-wt-docs`), both unreviewed and unmerged. `work` is at `3fcbef0` (`../Unisys_Model-wt-metric-query`).
+- **Next:** Claude should follow [NEXT_FOR_CODEX.md](../docs/kubeheal/NEXT_FOR_CODEX.md). Complete U6 after Helm is available, resolve replay-to-event, then investigate field attribution and aiohttp lifecycle on `work`. Do not change policy, Executor write paths, or RBAC; do not train or push. Do not stage/commit until the owner explicitly approves.

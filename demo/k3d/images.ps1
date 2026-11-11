@@ -9,7 +9,7 @@
 param([string[]]$Only = @())
 
 . "$PSScriptRoot\lib.ps1"
-Initialize-Tools
+Initialize-Tools -SkipK3d -SkipHelm
 Set-Location $RepoRoot
 
 # name -> Dockerfile
