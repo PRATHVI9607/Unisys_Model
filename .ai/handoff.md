@@ -2,25 +2,24 @@
 
 - **Agent:** Claude Code (orchestrator)
 - **Date:** 2026-11-11
-- **Branch:** `work` (nothing pushed). `wave/P6` is merged; its worktree was removed, the branch is kept.
-- **Goal:** Review Codex's work after `5cafe8b`, finish P7-RR-10, then P10 (k3d demo, `demo` branch) and P11.
+- **Status:** PAUSED by the owner. Nothing is running except the k3d cluster `kubeheal` (and its registry), and nothing is pushed.
+- **Branches:** `work` has every core fix. `demo` (checked out when paused) = `work` plus `demo/` scripts. Core fixes go to `work` first, then `git switch demo; git merge work`. `wave/P6` is merged, worktree removed, branch kept.
 
-## State
+## Done this session
 
-- Reviews done (two Sonnet reviewers, PASS WITH FIXES, all findings fixed or recorded): see "Review and fixes" at the end of `docs/kubeheal/PROGRESS.md`.
-- P7-RR-10 is DONE: ledger failure policy (`agents/executor/ledger_guard.py`, wired in `actions._write`) and the admin SnapshotFreeze release tool (`dashboard/admin_routes.py`). Owner decisions are applied; there are no pending owner questions.
-- P8-D5 was done by Codex (`b7436e3`); review fixes for the approval claim are in `8b6b61d`.
-- Full suite on this machine: 857 passed, 2 skipped (Python 3.11.9 venv). Run with `--basetemp=.pytest-tmp/<your-name>`, because `.pytest-tmp/run` is locked by an earlier session.
-- Third review findings 1 to 10 are fixed by a builder (Claude Code, 2026-11-11, 3 commits on `work`, not pushed): in-progress marker (90 s TTL, refreshed, owner-checked, no dead letter while alive), approve re-check after claim, ledger write timeout (`LEDGER_WRITE_TIMEOUT_S`, 5 s chosen default) and FileExistsError retry, ledger-refused requests return `escalated:ledger_unavailable` (not final), `restore_begin` corrective entry before the first restore write, flush batches plus `kubeheal.ledger.dead`, `LedgerUnavailable` is never "already exists", freeze release (reason always required, compare-and-delete), scan Job pinned to the node of the pod that mounts the PVC. Limit: a hung MinIO thread cannot be cancelled (documented in `ledger_guard.py`).
-- Known failing outside these changes: `tests/test_killswitch.py::test_live_watch_follows_configmap_without_polling` and `tests/test_rbac_k3d.py::test_rbac_matrix` (cluster tool, 100 s).
-- Not started: P10 and P11 (they need the cluster and stay with Claude). `k3d`, `helm` live under `%LOCALAPPDATA%\Microsoft\WinGet\Packages\...` and are not on PATH. Only ever use `--context k3d-kubeheal`; never touch `hybrid-demo`.
+- Reviewed everything after `5cafe8b` with Sonnet reviewers (three rounds), fixed all findings (see "Review and fixes" in `docs/kubeheal/PROGRESS.md`). Full suite on `work`: 897 passed, 2 skipped, plus 2 live-cluster tests that need the chart installed (`test_live_watch_follows_configmap_without_polling`, `test_rbac_k3d.py::test_rbac_matrix`).
+- P7-RR-10 done (ledger failure policy, SnapshotFreeze release tool). P8-D5 done (Codex) plus review fixes. `wave/P6` merged earlier by Codex; worktree removed.
+- P10-U1 partly done on `demo`: fresh k3d cluster with registry, snapshot CRDs and controller, CSI hostpath driver, `csi-hostpath-snapclass`, kube-prometheus-stack, images built and pushed, chart installed once. Found by running: Executor and Fusion images lacked `minio` (fixed on `work`, images rebuilt, not yet rolled out).
 
-## Open
+## Next (in this order)
 
-- P7-RR-11 (re-baseline after restore) and P7-RR-12 (restore resume action, scanner hardening) are open; see the checklist.
-- REV-3 graph contract test still needs `torch_geometric`. P6-D6 still has no legitimate KernelExplainer background data. P12-H training is not approved.
+1. `.\demo\k3d\up.ps1 -Stage install` (PowerShell; Helm upgrade recovers the failed release and rolls the new images). Check `kubectl --context k3d-kubeheal -n kubeheal get pods`.
+2. `-Stage adapter`, `-Stage victim`; then P10-V2 (each of the 15 Health Agent queries returns data), P10-U7 (queue-depth metric read by the HPA), rerun `scripts/rbac_check.py` and the two cluster tests.
+3. `demo/scripts/demo.ps1` in this order: D-1 to D-4 (drift, kill switch), then D-5, D-6, then D-7 to D-9. Falco attempt with a fixed time limit, else replay mode (P10-U2). `demo/README.md` only with observed results. Acceptance twice in a row (U6) last.
+4. P11 after P10. k6 is not installed: run the pinned `grafana/k6` image as a Job in the cluster.
 
-## Next
+## Rules that still apply
 
-1. P10: create `demo` from `work`; `demo/k3d/up.ps1`, `down.ps1`, victim apps, V2/V3/U7, then `demo/scripts/demo.ps1`, `demo/README.md` (only observed results).
-2. P11 evaluation harness after P10.
+- Only `--context k3d-kubeheal`; never touch `hybrid-demo`. Never push, never set `ALLOW_PUSH`, no destructive git commands, no training (P12 not approved), no invented numbers.
+- `k3d` and `helm` are not on PATH; `demo/k3d/lib.ps1` finds them. Pass `--basetemp=.pytest-tmp/<name>` to pytest.
+- Open task list: P7-RR-11, P7-RR-12, REV-3 graph test (needs `torch_geometric`), P6-D6 KernelExplainer background data.
