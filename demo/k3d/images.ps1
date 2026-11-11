@@ -1,6 +1,9 @@
 # Build the KubeHeal images and push them to the cluster registry (demo branch only).
 #   .\demo\k3d\images.ps1                      build and push everything
 #   .\demo\k3d\images.ps1 -Only executor,fusion-agent
+# V5-I2: `inference-server` is the LightGBM inference service (dockerfiles/Dockerfile.inference, no torch base needed).
+# The three neural model-server images are still built, but the chart only deploys them with
+# modelServers.legacy.enabled=true (default false).
 # Every build gets a fresh tag (b<timestamp>), because the nodes use IfNotPresent and would keep an old
 # image under a reused tag. The per-image tags are kept in demo/k3d/.image-tags.json and written to
 # demo/k3d/.generated-values.yaml, which up.ps1 passes to Helm (both ignored by git).
@@ -19,6 +22,7 @@ $images = [ordered]@{
     "fusion-agent"          = "dockerfiles/Dockerfile.fusion"
     "executor"              = "dockerfiles/Dockerfile.executor"
     "dashboard"             = "dockerfiles/Dockerfile.dashboard"
+    "inference-server"      = "dockerfiles/Dockerfile.inference"
     "health-model-server"   = "dockerfiles/Dockerfile.health_model"
     "security-model-server" = "dockerfiles/Dockerfile.security_model"
     "dcm-server"            = "dockerfiles/Dockerfile.dcm"
@@ -87,6 +91,7 @@ securityAgent: {image: {repository: $prefix/security-agent, tag: $(T 'security-a
 fusionAgent: {image: {repository: $prefix/fusion-agent, tag: $(T 'fusion-agent')}}
 executor: {image: {repository: $prefix/executor, tag: $(T 'executor')}}
 dashboard: {image: {repository: $prefix/dashboard, tag: $(T 'dashboard')}}
+inference: {image: {repository: $prefix/inference-server, tag: $(T 'inference-server')}}
 modelServers:
   health: {image: {repository: $prefix/health-model-server, tag: $(T 'health-model-server')}}
   security: {image: {repository: $prefix/security-model-server, tag: $(T 'security-model-server')}}

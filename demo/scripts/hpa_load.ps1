@@ -7,7 +7,7 @@ param(
 )
 
 # P10 D-8: bounded scoring load on the queue-depth HPA. The Job has no Kubernetes credentials;
-# its narrowly scoped temporary NetworkPolicy only admits it to the Health Model scoring port.
+# its narrowly scoped temporary NetworkPolicy only admits it to the inference service scoring port (POST /v1/health/predict).
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\k3d\lib.ps1"
 Initialize-Tools -SkipK3d -SkipHelm -SkipDocker
@@ -19,7 +19,7 @@ function Assert-TestMode {
 }
 
 function Read-Hpa {
-    $replicas = K -n kubeheal get hpa kubeheal-health-model `
+    $replicas = K -n kubeheal get hpa kubeheal-inference `
         -o 'jsonpath=current={.status.currentReplicas} desired={.status.desiredReplicas} metric={.status.currentMetrics[0].pods.current.averageValue}'
     Write-Host "$(Get-Date -Format o) $replicas"
 }
@@ -56,14 +56,14 @@ metadata:
   namespace: kubeheal
 spec:
   podSelector:
-    matchLabels: {app: kubeheal-health-model}
+    matchLabels: {app: kubeheal-inference}
   policyTypes: [Ingress]
   ingress:
     - from:
         - podSelector:
             matchLabels: {app: kubeheal-k6}
       ports:
-        - {protocol: TCP, port: 8001}
+        - {protocol: TCP, port: 8000}
 '@
 Set-Content -LiteralPath $policyPath -Value $policy -Encoding utf8
 
@@ -89,7 +89,7 @@ spec:
               podAffinityTerm:
                 topologyKey: kubernetes.io/hostname
                 labelSelector:
-                  matchLabels: {app: kubeheal-health-model}
+                  matchLabels: {app: kubeheal-inference}
       containers:
         - name: k6
           image: grafana/k6:0.54.0
@@ -116,9 +116,9 @@ try {
     $baselineDeadline = [DateTime]::UtcNow.AddSeconds($ScaleDownWaitSeconds)
     do {
         Read-Hpa
-        $baselineCurrent = KText @('-n', 'kubeheal', 'get', 'hpa', 'kubeheal-health-model',
+        $baselineCurrent = KText @('-n', 'kubeheal', 'get', 'hpa', 'kubeheal-inference',
             '-o', 'jsonpath={.status.currentReplicas}')
-        $baselineDesired = KText @('-n', 'kubeheal', 'get', 'hpa', 'kubeheal-health-model',
+        $baselineDesired = KText @('-n', 'kubeheal', 'get', 'hpa', 'kubeheal-inference',
             '-o', 'jsonpath={.status.desiredReplicas}')
         if ($baselineCurrent -eq '2' -and $baselineDesired -eq '2') { break }
         Start-Sleep -Seconds $SampleSeconds
@@ -131,13 +131,13 @@ try {
     K apply -f $policyPath | Out-Host
     $endpointDeadline = [DateTime]::UtcNow.AddSeconds(120)
     do {
-        $endpoints = KText @('-n', 'kubeheal', 'get', 'endpoints', 'kubeheal-health-model',
+        $endpoints = KText @('-n', 'kubeheal', 'get', 'endpoints', 'kubeheal-inference',
             '-o', 'jsonpath={.subsets[*].addresses[*].ip}')
         if ($endpoints) { break }
         Start-Sleep -Seconds 3
     } while ([DateTime]::UtcNow -lt $endpointDeadline)
-    if (-not $endpoints) { throw 'Health Model Service has no ready endpoints; refusing to start k6.' }
-    Write-Host "Health Model ready endpoints: $endpoints"
+    if (-not $endpoints) { throw 'Inference Service has no ready endpoints; refusing to start k6.' }
+    Write-Host "Inference ready endpoints: $endpoints"
     $jobStarted = $true   # set first so a partial apply is still cleaned up in finally
     K apply -f $jobPath | Out-Host
     Write-Host 'HPA before load:'
@@ -165,9 +165,9 @@ try {
     do {
         Start-Sleep -Seconds $SampleSeconds
         Read-Hpa
-        $current = KText @('-n', 'kubeheal', 'get', 'hpa', 'kubeheal-health-model',
+        $current = KText @('-n', 'kubeheal', 'get', 'hpa', 'kubeheal-inference',
             '-o', 'jsonpath={.status.currentReplicas}')
-        $desired = KText @('-n', 'kubeheal', 'get', 'hpa', 'kubeheal-health-model',
+        $desired = KText @('-n', 'kubeheal', 'get', 'hpa', 'kubeheal-inference',
             '-o', 'jsonpath={.status.desiredReplicas}')
         if ($current -eq '2' -and $desired -eq '2') { break }
     } while ([DateTime]::UtcNow -lt $scaleDownDeadline)
