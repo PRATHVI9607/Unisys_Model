@@ -73,18 +73,18 @@ class FakeRedis:
             stream, detail, marker = key, token, extra[0]
             if await self.get(marker) is not None:
                 return 0
-            # Redis executes the Lua script atomically. Check injected failures before
-            # mutating either the stream or detail hash to model that boundary.
-            self._maybe_fail("xadd")
+            # Match the Lua command order: a failed detail HSET must not leave a stream
+            # entry. An XADD failure may leave the expiring detail hash for a retry.
             self._maybe_fail("hset")
             fields = extra[1:]
             payload = dict(zip(fields[::2], fields[1::2]))
+            self.hashes[detail] = dict(payload)
+            self.expiry[detail] = self.now + 86400
+            self._maybe_fail("xadd")
             self._seq += 1
             entry_id = f"{int(self.now * 1000)}-{self._seq}"
             self.streams.setdefault(stream, []).append((entry_id, payload))
             self.added.append((stream, dict(payload)))
-            self.hashes[detail] = dict(payload)
-            self.expiry[detail] = self.now + 86400
             self.store[marker] = entry_id
             self.expiry[marker] = self.now + 86400
             return 1

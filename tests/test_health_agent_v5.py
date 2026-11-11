@@ -323,13 +323,14 @@ async def test_a_superseded_assessment_waiting_on_metrics_is_not_published(env):
 
 
 @scenario
-async def test_health_event_and_detail_hash_publish_atomically_and_idempotently(env):
+async def test_detail_hash_failure_before_stream_append_is_retryable_once(env):
     payload = {"event_id": "stable-event", "namespace": "prod", "health_label": "degradation"}
     env.redis.fail["hset"] = ha.aioredis.RedisError("detail write failed")
     with pytest.raises(ha.aioredis.RedisError):
         await env.agent._publish_event(payload)
     assert env.events == []
     assert "kubeheal:health:stable-event" not in env.redis.hashes
+    assert "kubeheal:health:published:stable-event" not in env.redis.store
 
     env.redis.fail.clear()
     await env.agent._publish_event(payload)

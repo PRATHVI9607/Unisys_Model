@@ -99,9 +99,9 @@ PUBLISH_HEALTH_EVENT_LUA = """
 if redis.call('EXISTS', KEYS[3]) == 1 then
   return 0
 end
-local entry_id = redis.call('XADD', KEYS[1], '*', unpack(ARGV))
 redis.call('HSET', KEYS[2], unpack(ARGV))
 redis.call('EXPIRE', KEYS[2], 86400)
+local entry_id = redis.call('XADD', KEYS[1], '*', unpack(ARGV))
 redis.call('SET', KEYS[3], entry_id, 'EX', 86400)
 return 1
 """
