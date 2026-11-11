@@ -51,6 +51,18 @@ def kubectl(context: str, args: Sequence[str], *, runner: Runner = subprocess.ru
     return result.stdout
 
 
+def assert_test_mode(context: str, *, runner: Runner = subprocess.run) -> None:
+    """Refuse to continue unless the global kill switch is exactly `test` (the same rule as demo/scripts/hpa_load.ps1).
+
+    Chaos and delete helpers act on the cluster themselves, outside the Executor. Running them while KubeHeal
+    can act (`enforce`, or an unreadable mode) would mix the test load with real remediation.
+    """
+    mode = kubectl(context, ["get", "configmap", "kubeheal-mode", "-n", "kubeheal", "-o", "jsonpath={.data.mode}"],
+                   runner=runner).strip()
+    if mode != "test":
+        raise RuntimeError(f"refusing to act: kubeheal-mode is {mode!r}, expected 'test'")
+
+
 def k6_script(target_url: str, pod_count: int, duration: str = "2m") -> str:
     """Build the k6 script. The harness maps k6 virtual users to simulated monitored pods as a
     stand-in (a VU is not a pod). The default duration 2m is a chosen default, not measured."""
@@ -164,6 +176,7 @@ def chaos_command(context: str, namespace: str, deployment: str, *, action: str,
     if action not in {"restart", "delete-one-pod"}:
         raise ValueError("action must be restart or delete-one-pod")
     _check_namespace(namespace)
+    assert_test_mode(context, runner=runner)
     if action == "restart":
         return kubectl(context, ["rollout", "restart", "deployment/" + deployment, "-n", namespace], runner=runner)
     pods = json.loads(kubectl(context, ["get", "pods", "-n", namespace, "-l", "app=" + deployment, "-o", "json"], runner=runner))
@@ -179,6 +192,7 @@ def database_pod_delete_command(context: str, namespace: str, pod: str, *, runne
     if not pod:
         raise ValueError("pod is required")
     _check_namespace(namespace)
+    assert_test_mode(context, runner=runner)
     return kubectl(context, ["delete", "pod", pod, "-n", namespace, "--wait=false"], runner=runner)
 
 
