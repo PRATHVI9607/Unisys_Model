@@ -1,7 +1,7 @@
 {{- /*
 OPTIONAL egress lockdown (networkPolicy.egress.enabled, off by default). Default-deny egress for every pod
 in the namespace, then explicit allows: kube-dns (UDP and TCP 53), the API server (needs
-networkPolicy.egress.apiServerCIDR), Redis, MinIO, the model servers and Prometheus. The Falco socket is a
+networkPolicy.egress.apiServerCIDR), Redis, MinIO, the inference service (and the legacy model servers when enabled) and Prometheus. The Falco socket is a
 hostPath file and needs no network rule. Not verified on a cluster yet (check on k3d in P10).
 */ -}}
 {{- if and .Values.networkPolicy.enabled .Values.networkPolicy.egress.enabled }}
@@ -90,7 +90,7 @@ spec:
     matchExpressions:
       - key: app
         operator: In
-        values: [fusion-agent, executor, minio-bootstrap, kubeheal-dashboard, {{ $ms.health.name }}, {{ $ms.security.name }}, {{ $ms.dcm.name }}]
+        values: [fusion-agent, executor, minio-bootstrap, kubeheal-dashboard{{ if $ms.legacy.enabled }}, {{ $ms.health.name }}, {{ $ms.security.name }}, {{ $ms.dcm.name }}{{ end }}]
   policyTypes: [Egress]
   egress:
     - to:
@@ -100,6 +100,28 @@ spec:
         - {protocol: TCP, port: 9000}
 {{- end }}
 ---
+{{- if .Values.inference.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-inference-egress
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [health-agent, security-agent]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app: {{ .Values.inference.name }}}
+      ports:
+        - {protocol: TCP, port: {{ .Values.inference.port }}}
+---
+{{- end }}
+{{- if $ms.legacy.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -124,6 +146,7 @@ spec:
         - {protocol: TCP, port: {{ $ms.security.port }}}
         - {protocol: TCP, port: {{ $ms.dcm.port }}}
 ---
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

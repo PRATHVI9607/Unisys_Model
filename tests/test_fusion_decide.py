@@ -4,8 +4,10 @@ import asyncio
 
 import pytest
 
-from fusion_helpers import (NOW_MS, StubInterp, emb, health_event, ledger_steps, make_agent, run, sec_event,
-                            stream)
+import json
+
+from fusion_helpers import (NOW_MS, StubInterp, emb, health_event, ledger_steps, make_agent, rule_health_event,
+                            run, sec_event, security_score_key, set_security_score, stream)
 from agents.fusion_agent import agent as fusion
 from agents.fusion_agent import breakers
 from agents.fusion_agent.breakers import BURN_IN_SEEN_KEY, BurnInCounter, SlidingWindowBreaker
@@ -36,7 +38,7 @@ def test_scored_event_in_an_open_unprotected_namespace_is_contained_automaticall
 
 
 @pytest.mark.parametrize("fields", [
-    {"model_scored": "false", "sec_ci_width": "1.0"},       # P5: heuristic only or no syscall window
+    {"model_scored": "false", "sec_uncertain": "true"},     # P5: heuristic only or no syscall window
     {"model_scored": "false"},
     {"model_scored": ""},
 ])
@@ -57,21 +59,54 @@ def test_event_without_a_model_scored_field_fails_closed():
     assert decisions(a) == ["human_contain"] and exec_requests(a) == []
 
 
-def test_max_ci_width_events_never_reach_auto_through_fusion():
-    for sec_ci, health_ci in (("1.0", "0.0"), ("0.0", "1.0")):
-        a = make_agent(interp=StubInterp(CorrelateResult(True, {"correlation_score": 0.9, "compound_flag": True,
-                                                                 "causal_chain": []})))
-        decide(a, health=health_event(health_ci_width=health_ci, health_embedding_b64=emb(seed=1)),
-               sec=sec_event(sec_ci_width=sec_ci, security_embedding_b64=emb(seed=2)))
-        assert decisions(a)[0].startswith("human_") and exec_requests(a) == []
+# ---- M2: a prediction set of more than one label blocks every automatic action end to end -----------------
+def test_a_two_label_set_blocks_automatic_action_end_to_end():
+    two = json.dumps(["ransomware", "exfiltration"])
     a = make_agent()
-    decide(a, health=health_event(health_ci_width="1.0", sec_risk="0"))
-    assert decisions(a)[0] == "human_patch" and exec_requests(a) == []
+    decide(a, sec=sec_event(sec_prediction_set=two))
+    assert decisions(a) == ["human_contain"] and exec_requests(a) == []
+    assert "one-label" in next(r["payload"]["rationale"] for r in ledger_steps(a) if r["step"] == "decision")
+    a = make_agent()
+    decide(a, health=health_event(health_prediction_set=json.dumps(["degradation", "critical"])))
+    assert decisions(a) == ["human_patch"] and exec_requests(a) == []
+    # a paired incident: the uncertain side blocks the compound containment too
+    a = make_agent()
+    decide(a, health=health_event(health_prediction_set=json.dumps(["degradation", "critical"])),
+           sec=sec_event())
+    assert decisions(a)[0].startswith("human_") and exec_requests(a) == []
+    a = make_agent()
+    decide(a, health=health_event(), sec=sec_event(sec_prediction_set=two))
+    assert decisions(a)[0].startswith("human_") and exec_requests(a) == []
+
+
+@pytest.mark.parametrize("bad", ["absent", "empty", "garbage", "not_a_list", "empty_list"])
+def test_a_malformed_prediction_set_is_uncertain_and_never_acts(bad):
+    for kind in ("security", "health"):
+        a = make_agent()
+        ev = sec_event() if kind == "security" else health_event()
+        name = "sec_prediction_set" if kind == "security" else "health_prediction_set"
+        if bad == "absent":
+            del ev[name]
+        else:
+            ev[name] = {"empty": "", "garbage": "[not json", "not_a_list": '{"a": 1}', "empty_list": "[]"}[bad]
+        decide(a, **({"sec": ev} if kind == "security" else {"health": ev}))
+        assert decisions(a) == [("human_contain" if kind == "security" else "human_patch")]
+        assert exec_requests(a) == []
+        # the ledger records what Fusion saw, with the marker for the unusable value
+        payload = next(r["payload"] for r in ledger_steps(a) if r["step"] == "decision")
+        assert payload["health_prediction_set" if kind == "health" else "sec_prediction_set"] in (
+            [], fusion.em.MALFORMED_SET)
+
+
+def test_a_wrong_label_in_a_one_label_set_is_uncertain():
+    a = make_agent()
+    decide(a, sec=sec_event(sec_prediction_set='["exfiltration"]'))     # the label says ransomware
+    assert decisions(a) == ["human_contain"] and exec_requests(a) == []
 
 
 def test_health_event_flagged_not_scored_is_human():
     a = make_agent()
-    decide(a, health=health_event(model_scored="false", health_ci_width="0.05"))
+    decide(a, health=health_event(model_scored="false"))
     assert decisions(a) == ["human_patch"] and exec_requests(a) == []
 
 
@@ -83,8 +118,56 @@ def pair(a, **dcm):
            sec=sec_event(security_embedding_b64=emb(seed=2)))
 
 
-def test_paired_events_with_a_dcm_answer_are_compound_and_contained():
+# ---- V5-D3: correlation is compound_score, no DCM call by default ------------------------------------------
+def test_without_a_dcm_a_paired_incident_still_decides_with_compound_score():
+    from kubeheal.correlation import COMPOUND_THRESHOLD
+    a = make_agent()                                   # dcm_url is empty: no DCM, no explain call
+    decide(a, health=health_event(), sec=sec_event())
+    assert a.interp.calls == 0 and decisions(a) == ["auto_contain"]
+    scores = next(r["payload"] for r in ledger_steps(a) if r["step"] == "scores")
+    assert scores["compound"] is True and scores["correlation_score"] >= COMPOUND_THRESHOLD
+    assert scores["correlation_reasons"] and "same workload" in scores["correlation_reasons"][0]
+    payload = next(r["payload"] for r in ledger_steps(a) if r["step"] == "decision")
+    assert payload["models_ok"] is True and payload["compound"] is True
+    assert payload["causal_chain"] and any(line.startswith("Correlation: ") for line in payload["causal_chain"])
+    assert stream(a.redis, fusion.DCM_STREAM) == []             # only a legacy DCM answer is published
+    assert exec_requests(a)[0]["action"] == "contain"
+    ent = next(f for f in stream(a.redis, fusion.ACTIONS_STREAM))
+    assert ent["compound"] == "True" and ent["nl_summary"]
+    assert "\u2014" not in ent["nl_summary"]                    # plain sentence, no em dash
+
+
+def test_a_missing_dcm_no_longer_makes_models_ok_false():
+    a = make_agent(interp=StubInterp(CorrelateResult(False, error="DCM down")))     # never called: dcm_url empty
+    decide(a, sec=sec_event())
+    payload = next(r["payload"] for r in ledger_steps(a) if r["step"] == "decision")
+    assert payload["models_ok"] is True and payload["model_issues"] == []
+
+
+def test_a_weak_pair_is_not_compound():
     a = make_agent()
+    decide(a, health=health_event(health_risk="0.05", health_label="benign",
+                                  health_prediction_set='["benign"]'),
+           sec=sec_event(sec_risk="0.2", sec_label="benign", sec_prediction_set='["benign"]'))
+    scores = next(r["payload"] for r in ledger_steps(a) if r["step"] == "scores")
+    assert scores["compound"] is False and decisions(a) == ["benign"]
+
+
+@pytest.mark.parametrize("ev_kind", ["security", "health"])
+def test_a_malformed_event_makes_models_ok_false_and_never_raises(ev_kind):
+    a = make_agent()
+    if ev_kind == "security":
+        decide(a, health=health_event(), sec=sec_event(sec_risk="not-a-number"))
+    else:
+        decide(a, health=health_event(health_risk="not-a-number"), sec=sec_event())
+    assert decisions(a)[0].startswith("human_") and exec_requests(a) == []
+    payload = next(r["payload"] for r in ledger_steps(a) if r["step"] == "decision")
+    assert payload["models_ok"] is False and any("malformed" in i for i in payload["model_issues"])
+
+
+# ---- legacy DCM path (only when DCM_URL is set) ---------------------------------------------------------------
+def test_paired_events_with_a_dcm_answer_are_compound_and_contained():
+    a = make_agent(legacy_dcm=True)
     pair(a)
     assert decisions(a) == ["auto_contain"]
     assert exec_requests(a)[0]["action"] == "contain"
@@ -92,7 +175,8 @@ def test_paired_events_with_a_dcm_answer_are_compound_and_contained():
 
 
 def test_missing_or_late_dcm_answer_is_human_not_a_zero_score():
-    a = make_agent(interp=StubInterp(CorrelateResult(False, error="DCM call exceeded its deadline of 5.0s")))
+    a = make_agent(interp=StubInterp(CorrelateResult(False, error="DCM call exceeded its deadline of 5.0s")),
+                   legacy_dcm=True)
     decide(a, health=health_event(health_embedding_b64=emb(seed=1)),
            sec=sec_event(security_embedding_b64=emb(seed=2)))
     assert decisions(a)[0].startswith("human_") and exec_requests(a) == []
@@ -102,7 +186,7 @@ def test_missing_or_late_dcm_answer_is_human_not_a_zero_score():
 
 
 def test_paired_events_without_an_embedding_cannot_ask_the_dcm_and_go_to_a_human():
-    a = make_agent()
+    a = make_agent(legacy_dcm=True)
     decide(a, health=health_event(), sec=sec_event())
     assert decisions(a)[0].startswith("human_") and a.interp.calls == 0
 
@@ -111,7 +195,8 @@ def test_a_late_interpretation_step_is_human():
     async def slow(health, sec):
         await asyncio.sleep(1)
         return {}
-    a = make_agent(interp=StubInterp(explainer=slow), cfg=FusionConfig(interpretation_deadline_s=0.02))
+    a = make_agent(interp=StubInterp(explainer=slow), cfg=FusionConfig(interpretation_deadline_s=0.02),
+                   legacy_dcm=True)
     decide(a, sec=sec_event())
     assert decisions(a) == ["human_contain"] and exec_requests(a) == []
 
@@ -119,7 +204,7 @@ def test_a_late_interpretation_step_is_human():
 def test_a_failing_interpretation_step_is_human():
     def broken(health, sec):
         raise RuntimeError("explainer crashed")
-    a = make_agent(interp=StubInterp(explainer=broken))
+    a = make_agent(interp=StubInterp(explainer=broken), legacy_dcm=True)
     decide(a, sec=sec_event())
     assert decisions(a) == ["human_contain"]
 
@@ -368,32 +453,7 @@ def test_a_replayed_entry_queues_one_request_and_counts_one_action():
     assert steps.count("detection") == 1 and steps.count("incident_update") == 1
 
 
-# ---- a present event without a usable CI width is uncertain, not certain ---------------------------------
-@pytest.mark.parametrize("missing", ["absent", "empty", "garbage"])
-def test_security_event_without_a_ci_width_never_reaches_auto(missing):
-    a = make_agent()
-    ev = sec_event()
-    if missing == "absent":
-        del ev["sec_ci_width"]
-    else:
-        ev["sec_ci_width"] = "" if missing == "empty" else "n/a"
-    decide(a, sec=ev)
-    assert decisions(a) == ["human_contain"] and exec_requests(a) == []
-
-
-@pytest.mark.parametrize("missing", ["absent", "empty", "garbage"])
-def test_health_event_without_a_ci_width_never_reaches_auto(missing):
-    a = make_agent()
-    ev = health_event()
-    if missing == "absent":
-        del ev["health_ci_width"]
-    else:
-        ev["health_ci_width"] = "" if missing == "empty" else "n/a"
-    decide(a, health=ev)
-    assert decisions(a) == ["human_patch"] and exec_requests(a) == []
-
-
 def test_an_absent_partner_event_does_not_make_the_incident_uncertain():
     a = make_agent()
-    decide(a, sec=sec_event())                 # no health event at all: its CI width is not an input
+    decide(a, sec=sec_event())                 # no health event at all: its prediction set is not an input
     assert decisions(a) == ["auto_contain"]

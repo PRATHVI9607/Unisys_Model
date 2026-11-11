@@ -80,7 +80,7 @@ export default function () {{ const r = http.get("{target_url}"); check(r, {{ "s
 
 
 def k6_job_manifest(name: str, namespace: str, target_url: str, pod_count: int,
-                    anti_affinity_labels: Sequence[str] = ("kubeheal-health-model", "kubeheal-security-model", "kubeheal-dcm")) -> dict:
+                    anti_affinity_labels: Sequence[str] = ("kubeheal-health-model", "kubeheal-security-model", "kubeheal-dcm", "kubeheal-inference")) -> dict:
     """Return ``{"objects": [ConfigMap, Job], "script": <k6 JS>}``.
 
     Only the two entries in ``objects`` are rendered and applied. The k6 script lives in the

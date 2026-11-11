@@ -46,6 +46,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # Pod name prefix -> (component id, values path in deploy/helm/kubeheal). Longest prefix wins.
 COMPONENTS: Dict[str, Tuple[str, Tuple[str, ...]]] = {
+    "kubeheal-inference": ("inference", ("inference",)),       # V5-I2 LightGBM inference service
     "kubeheal-health-model": ("health-model", ("modelServers", "health")),
     "kubeheal-security-model": ("security-model", ("modelServers", "security")),
     "kubeheal-dcm": ("dcm", ("modelServers", "dcm")),

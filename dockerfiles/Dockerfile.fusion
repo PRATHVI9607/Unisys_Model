@@ -5,14 +5,14 @@ WORKDIR /app
 RUN uv pip install --system \
     kubernetes-asyncio==29.0.1 redis==5.0.0 pydantic==2.6.0 aiohttp==3.9.0 "numpy<2" "prometheus-client>=0.20.0" "minio>=7.2.0"
 COPY agents/ /app/agents/
+COPY kubeheal/ /app/kubeheal/
 ENV REDIS_URL=redis://redis-master:6379
-ENV DCM_URL=http://kubeheal-dcm:8003
+# DCM_URL is unset on purpose (V5-D3): no DCM call. Set it only to use the optional legacy DCM path.
 ENV BURN_IN_MODE=false
 ENV NAMESPACE=kubeheal
 ENV METRICS_PORT=8081
 ENV LOG_LEVEL=INFO
 ENV MAX_AUTO_CONTAIN_PER_NS_PER_HOUR=3
 ENV MAX_AUTO_PATCH_PER_DEP_PER_HOUR=10
-ENV CI_WIDTH_THRESHOLD=0.15
 EXPOSE 8081
 CMD ["python", "-m", "agents.fusion_agent.agent"]

@@ -17,3 +17,10 @@ killSwitch:
 modelServers:
   topologySpread:
     whenUnsatisfiable: DoNotSchedule   # fail to schedule rather than stack both replicas on one node
+
+# LightGBM inference service (V5-I2), on by default. The neural model servers are off unless
+# modelServers.legacy.enabled=true.
+inference:
+  enabled: true
+  topologySpread:
+    whenUnsatisfiable: DoNotSchedule   # fail to schedule rather than stack both replicas on one node

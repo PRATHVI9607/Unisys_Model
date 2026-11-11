@@ -4,9 +4,12 @@ Each gets a Deployment (replicas from modelServers.replicas, topology spread), a
 PodDisruptionBudget (minAvailable 1) and, depending on hpa.mode, exactly one HPA (min 2, max 8):
 queue (default, per-pod in-flight gauge), latency (fallback) or cpu (weaker fallback).
 Requests and limits are rendered only when set in values (measure them with eval/resource_profile.py).
+V5-I2: these neural servers are LEGACY. Nothing renders unless modelServers.legacy.enabled is true; the LightGBM
+inference service (inference.yaml) is the default scorer.
 */ -}}
 {{- $ms := .Values.modelServers }}
 {{- $ns := include "kubeheal.namespace" . }}
+{{- if $ms.legacy.enabled }}
 {{- range $key := list "health" "security" "dcm" }}
 {{- $s := index $ms $key }}
 {{- if not (has $s.modelFormat (list "pt" "onnx")) }}{{ fail (printf "modelServers.%s.modelFormat must be pt or onnx" $key) }}{{ end }}
@@ -126,5 +129,6 @@ spec:
           averageUtilization: {{ required "hpa.cpu.targetAverageUtilization is required when hpa.mode=cpu (owner decision)" $.Values.hpa.cpu.targetAverageUtilization }}
 {{- else if ne $.Values.hpa.mode "none" }}
 {{- fail "hpa.mode must be queue, latency, cpu or none" }}
+{{- end }}
 {{- end }}
 {{- end }}
