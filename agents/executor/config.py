@@ -37,6 +37,7 @@ DEFAULTS = {
     "ROLLOUT_POLL_S": "5",
     "SNAPSHOT_CLASS": "csi-hostpath-snapclass",
     "PROMETHEUS_URL": "http://prometheus-operated.monitoring.svc.cluster.local:9090",
+    "RESTORE_ENTROPY_IMAGE_PULL_SECRETS": "",
 }
 
 

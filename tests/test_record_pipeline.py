@@ -50,6 +50,14 @@ class _KubeApi:
     def __init__(self):
         self.calls = []
 
+    async def read_namespaced_pod(self, name, namespace):
+        # containment verifies pod -> ReplicaSet -> Deployment ownership before creating anything
+        return {"metadata": {"name": name, "ownerReferences": [{"kind": "ReplicaSet", "name": "payments-rs"}]},
+                "spec": {"volumes": []}}
+
+    async def read_namespaced_replica_set(self, name, namespace):
+        return {"metadata": {"name": name, "ownerReferences": [{"kind": "Deployment", "name": "payments"}]}}
+
     async def create_namespaced_network_policy(self, namespace, body):
         self.calls.append(("quarantine", namespace))
 
