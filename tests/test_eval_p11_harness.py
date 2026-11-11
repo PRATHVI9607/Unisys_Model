@@ -7,6 +7,7 @@ import pytest
 from eval.p11_harness import (
     apply_k6_job,
     baseline_scenarios,
+    assert_test_mode,
     chaos_command,
     database_pod_delete_command,
     k6_job_manifest,
@@ -117,7 +118,7 @@ def test_context_allow_list_rejects_hybrid_demo_and_others():
 
 
 def test_namespace_allow_list_for_chaos_delete_restart():
-    fake = FakeRunner()
+    fake = FakeRunner(["test", "ok"] * 4)
     for bad in ("kube-system", "default", ""):
         with pytest.raises(ValueError):
             chaos_command("k3d-kubeheal", bad, "x", action="restart", runner=fake)
@@ -128,16 +129,16 @@ def test_namespace_allow_list_for_chaos_delete_restart():
     assert fake.calls == []
     for ok in ("prod", "staging", "dev", "kubeheal"):
         chaos_command("k3d-kubeheal", ok, "x", action="restart", runner=fake)
-    assert len(fake.calls) == 4
+    assert len(fake.calls) == 8   # a mode read plus the restart, for each namespace
 
 
 def test_chaos_and_pod_delete_are_injectable_and_bounded():
-    fake = FakeRunner(['{"items":[{"metadata":{"name":"model-0"}}]}', "deleted"])
+    fake = FakeRunner(["test", '{"items":[{"metadata":{"name":"model-0"}}]}', "deleted"])
     assert chaos_command("k3d-kubeheal", "kubeheal", "health-model", action="delete-one-pod", runner=fake) == "deleted"
     assert fake.calls[-1][0][-6:] == ["delete", "pod", "model-0", "-n", "kubeheal", "--wait=false"]
-    fake2 = FakeRunner(["deleted"])
+    fake2 = FakeRunner(["test", "deleted"])
     database_pod_delete_command("k3d-kubeheal", "prod", "db-0", runner=fake2)
-    assert fake2.calls[0][0][-1] == "--wait=false"
+    assert fake2.calls[-1][0][-1] == "--wait=false"
     with pytest.raises(ValueError):
         chaos_command("k3d-kubeheal", "kubeheal", "x", action="delete-all", runner=fake)
 
@@ -177,3 +178,19 @@ def test_baselines_and_precision_missing_values_are_explicit():
 def test_metadata_requires_timezone_aware_clock():
     with pytest.raises(ValueError):
         result_metadata("k3d", "scenario", now=datetime(2026, 11, 11))
+
+
+@pytest.mark.parametrize("mode", ["enforce", "", "Test", "enforce\n"])
+def test_chaos_and_delete_refuse_unless_mode_is_exactly_test(mode):
+    fake = FakeRunner([mode])
+    with pytest.raises(RuntimeError, match="kubeheal-mode"):
+        chaos_command("k3d-kubeheal", "prod", "x", action="restart", runner=fake)
+    assert len(fake.calls) == 1        # only the mode read happened, no write
+    fake = FakeRunner([mode])
+    with pytest.raises(RuntimeError):
+        database_pod_delete_command("k3d-kubeheal", "prod", "db-0", runner=fake)
+    assert len(fake.calls) == 1
+
+
+def test_assert_test_mode_accepts_test_with_trailing_newline():
+    assert assert_test_mode("k3d-kubeheal", runner=FakeRunner(["test\n"])) is None
