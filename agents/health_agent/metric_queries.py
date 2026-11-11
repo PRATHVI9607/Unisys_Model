@@ -99,8 +99,9 @@ METRIC_SPECS: List[MetricSpec] = [
                'sum(rate(container_network_transmit_bytes_total{%s}[1m]))' % _R,
                "standard", "cAdvisor (kubelet)"),
     MetricSpec("disk_io_bytes",
-               'sum(rate(container_fs_reads_bytes_total{%s}[1m]))+sum(rate(container_fs_writes_bytes_total{%s}[1m]))' % (_R, _R),
-               "standard", "cAdvisor (kubelet)"),
+               'sum(rate(kubeheal_victim_disk_io_bytes_total{%s}[1m]))' % _R,
+               "demo-victim-app contract",
+               "demo/victim-app fsyncs writes under its mounted data path and exports kubeheal_victim_disk_io_bytes_total"),
 ]
 
 SPEC_BY_COLUMN: Dict[str, MetricSpec] = {s.column: s for s in METRIC_SPECS}
