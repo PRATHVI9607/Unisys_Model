@@ -1,65 +1,162 @@
-# KubeHeal next agent handoff (one long Codex run)
+# KubeHeal next agent handoff (one long autonomous Codex run that finishes the project)
 
 This file is tool-neutral. It is the first resume point for Codex, Claude Code, or another repository agent.
-Read `AGENTS.md`, `docs/kubeheal/PROGRESS.md` (section "V5 integration" and the execution record at its end),
-`docs/kubeheal/V5_INTEGRATION_PLAN.md` (section 11 has the owner decisions) and `.ai/handoff.md` before changing files or using the cluster.
+Read `AGENTS.md`, `docs/kubeheal/PROGRESS.md` (checklist, section "V5 integration", and the execution records at its end),
+`docs/kubeheal/V5_INTEGRATION_PLAN.md` (section 11 holds every owner decision) and `.ai/handoff.md` before changing files or using the cluster.
 
-## State at handoff (2026-11-11, Claude Code, stopped by the owner's HOLD)
+Codex may do EVERY task in this file, including `agents/fusion_agent/decision_policy.py`, the Executor write paths, RBAC (`k8s/rbac/`, the chart RBAC template),
+chart changes and merges, provided it runs the full suite after each merge and keeps the safety rules below. Claude Code will only do a final review afterwards.
 
-- Owner decisions M1, M2, M3, D1, D2, D3, D5, D6, D7 are recorded in `PROGRESS.md` and the plan. In one line: LightGBM health and security bundles (conformal sets, TreeSHAP) run inside OUR architecture; an automatic action needs a one-label prediction set; deterministic correlation replaces the DCM; field attribution comes from the spec diff; baseline promotion is automatic in dev and staging and needs dashboard approval in prod; containment is requested by the Executor and done by the node-local Security Agent; the eBPF sensor is optional and last.
-- Merged into `work`, reviewed, suite green except one expected live row: V5-M1 (package `kubeheal/`, bundles in `models/bundles/`) and V5-D1 (`agents/health_agent/failure_reasons.py` plus Health Agent read RBAC).
-- Built on their own branches, NOT independently reviewed, NOT merged (the owner stopped all new agents before the reviewer could run): `wave/V5-D2` (`33eee4e`, `kubeheal/posture.py`) and `wave/V5-D4a` (`564d94d`, `agents/health_agent/metric_window.py`). Their worktrees `../Unisys_Model-wt-V5-D2` and `../Unisys_Model-wt-V5-D4a` still exist and are clean. Both were branched from the pre-review `wave/V5-M1` commit `9073b8e`; merging them into `work` (which already has M1 plus its review fix `012f7ec`) is expected to be clean.
-- Not started: V5-I2, V5-D3, V5-D4, V5-D5, V5-S2, V5-D6/D9, V5-S5, V5-I3, V5-DOC and the "Later" list. README, AGENTS.md and the docs still describe the neural models on purpose: do not change them until the code matches (V5-DOC).
-- The live RBAC test `tests/test_rbac_k3d.py::test_rbac_matrix` fails on exactly one row (`health-agent list horizontalpodautoscalers prod`) until the new ClusterRole `kubeheal-health-agent-read` is applied to the cluster. That is expected. Applying it is a cluster write for the orchestrator: do it with the Helm upgrade that V5-I2 triggers anyway (`demo/k3d/up.ps1 -Stage install`), not separately.
-- Cluster (as last recorded by Codex on 2026-11-11, not re-checked by Claude): `kubeheal` running, global mode `test`, prod and dev `victim-app` at 100m/500m, Health Model HPA at 2, Security Agent in `auto`, Falco not installed. Claude ran no cluster command in these sessions. Every Kubernetes command uses `--context k3d-kubeheal`; never `hybrid-demo`.
+## State at handoff (2026-11-11, Claude Code, final handoff)
 
-## Standing rules (unchanged)
+Owner decisions (all in `V5_INTEGRATION_PLAN.md` section 11): M1 option (b), M2, M3, D1, D2, D3, D5, D6, D7, plus the two latest answers Q1 and Q2.
+In short: LightGBM health and security bundles (split-conformal sets, TreeSHAP) run inside OUR architecture; an automatic action needs a prediction set of exactly one label (M2);
+correlation is the deterministic `compound_score` (no DCM); field attribution comes from the spec diff against the baseline; the 10x cut rule is inclusive (D1);
+the rule-based rollback (failure reasons or posture violations) skips only the set gate and burn-in and the Health Model response, and needs a FRESH Security Model response (Q1: missing or late means escalate to HUMAN);
+baseline promotion is automatic in dev and staging and needs dashboard approval in prod, every promotion is a ledger entry (D3);
+containment (D5, Q2): automatic for `ransomware` and `exfiltration` (certain, adjusted risk at or above 0.85): freeze, forensic snapshot, quarantine, scale to 0; the restore step runs only for `ransomware`, after `exfiltration` a human follows up; `suspicious` is never automatic; the Executor requests the freeze, the node-local Security Agent does it;
+the eBPF sensor is optional and last (D6).
 
-Never push, never set `ALLOW_PUSH`, no destructive git commands, no training (`models/train_*.py`, `training/`), keep global mode `test` unless a step says otherwise, no invented numbers (say "not measured"), plain text without em dashes. Reserved files (`agents/fusion_agent/decision_policy.py`, `agents/executor/` write paths, `k8s/rbac/`): implement only with tests, keep commits for them separate, and write "needs Claude review" next to them in `PROGRESS.md`. Work on `work` (worktrees `wave/V5-<id>` per task are fine), merge one task at a time with the full suite after each merge, then merge `work` into `demo`. Never end with uncommitted changes.
+### Branches and worktrees (nothing is pushed; never push)
 
-Practical lessons from this session:
-- Windows venv: `PYTHONPATH=. .venv\Scripts\python.exe -m pytest tests/ -q -p no:warnings --basetemp=<dir that exists>`. A fresh worktree has no `.pytest-tmp`; use a temp directory outside the repo.
-- Full suite without a cluster: add `--deselect tests/test_rbac_k3d.py --deselect tests/test_killswitch.py` (they run read-only kubectl against `k3d-kubeheal`). A run with helm hidden skips 48 chart tests, so do not use that as proof: the Helm parity tests need `helm` on PATH (PowerShell resolves it under `%LOCALAPPDATA%\Microsoft\WinGet\Packages`).
-- LightGBM refuses `model.txt` with CRLF. `.gitattributes` has `models/bundles/** -text`; never extract bundles with `git archive` on Windows (it converted them), read them with `git show origin/main:<path>`. The extracted v5 tree used for the plan lived in this session's scratch directory; `git fetch origin` and `git show origin/main:<path>` reproduce any file.
-- Python 3.11 only: v5 nests the same quote type inside f-strings (3.12+). Rewrite such lines. Always call `bundle.restrict(features)` before `predict` (the security bundle lists 40 features, the code emits 45).
-- Shell tips: write multi-line Python edits to a file and run it; heredocs with backslashes mangled escapes twice.
+| Branch | Worktree | Tip | State | What it needs |
+|---|---|---|---|---|
+| `work` | `../Unisys_Model-wt-metric-query` | see `git log -1 work` | Has M1, D1, D2, D4a, I2, D3 merged and reviewed. Full suite last run: 1304 passed, 3 skipped, 34 deselected (the two live cluster files). | Merge D4 and S2 after the fixes below. |
+| `demo` | main checkout `C:/My_projects_1/cLOUD/Unisys_Model` | see `git log -1 demo` | `work` merged in, plus `wave/V5-I2-demo` (demo scripts for the inference service). | Merge `work` into `demo` after every merge on `work`. |
+| `wave/V5-D4` | `../Unisys_Model-wt-V5-D4` | `2188a6e` | Health Agent port built, 1358 passed in its worktree, reviewed once (verdict: merge after the findings below), findings NOT yet fixed, NOT merged. | Section "Task 1". |
+| `wave/V5-S2` | `../Unisys_Model-wt-V5-S2` | `f6ecfa9` | Security Agent port built, 1376 passed in its worktree, reviewed once (verdict: do NOT merge as is), findings NOT yet fixed, NOT merged. | Section "Task 2". |
+| merged and safe to delete later (keep the branches, remove only worktrees you no longer need) | | | `wave/V5-M1`, `V5-D1`, `V5-D2`, `V5-D4a`, `V5-I2`, `V5-I2-demo`, `V5-D3`, `wave/P11`, `wip/docs-p6d2` | none |
 
-## Run order
+Both unmerged worktrees are clean (everything committed). Each branch was cut from `work` at `96b1d08`, so a merge is expected to conflict only in `docs/kubeheal/PROGRESS.md` and `.ai/handoff.md`: keep both sides' checklist facts and re-write `.ai/handoff.md` yourself.
 
-Step 0. `git status`, `git branch -v`, `git worktree list`, `git log --oneline -8` on `work` and `demo`. Run the full suite on `work` without the two live files; expect all green. Mark the first unchecked task `[~] Codex` in `PROGRESS.md`.
+### Cluster and Helm state (k3d-kubeheal, checked by Claude on 2026-11-11, read-only)
 
-Step 1. Review and merge `wave/V5-D2` then `wave/V5-D4a`: read each diff (`git diff work...wave/V5-D2`), check the pure modules do no I/O, run their tests plus the full suite, `git merge --no-ff`, full suite again. If a second agent is available, have it review read-only; otherwise do a written self-review into `PROGRESS.md`. Mark V5-D2 and V5-D4a `[x]`.
+- Context `k3d-kubeheal` only. Never `hybrid-demo`. `kubeheal-mode` ConfigMap value: `test`. Keep it `test` unless a step says otherwise.
+- Helm release `kubeheal` in namespace `kubeheal`: revision 4, status `deployed`, chart `kubeheal-0.1.0`. History: rev 2 superseded, rev 3 FAILED (server-side-apply conflict with the field manager `kubectl-set` on the `health-agent` image because the live image had been changed with `kubectl set image`), rev 4 deployed.
+- Values in use for rev 4: `deploy/helm/kubeheal/values-k3d-demo.yaml` plus the values returned by `helm get values kubeheal -n kubeheal -o yaml` (image repositories and tags, executor env, ingress `traefik`, `killSwitch.mode: test`), plus `--set healthAgent.image.tag=b20261111113631`. That last override pins the Health Agent to the LIVE tag, because the Helm values said `b20261111085903`. Any later `helm upgrade` must keep passing the live Health Agent tag (or must re-record it in the generated values) or the same conflict returns.
+- Live images: executor `...:b20261111092120`, fusion-agent `...:b20261111092120`, health-agent `...:b20261111113631`, dashboard `...:b20261111090959`, dcm, health-model and security-model servers `...:b20261111085903`, MinIO `docker.io/pgsty/silo:RELEASE.2026-11-09T00-00-00Z`. All pods Running at the check. The rev 4 upgrade applied the new ClusterRole `kubeheal-health-agent-read` and the RoleBindings in prod, staging and dev; `tests/test_rbac_k3d.py` and `tests/test_killswitch.py` then gave 34 passed.
+- The cluster does NOT yet run the LightGBM inference service: the chart on `work` renders it (`inference.enabled` default true, neural servers behind `modelServers.legacy.enabled` default false) but nothing was installed from it. Installing the current `work` chart takes the neural servers away; the agents on the cluster still call them. Install it only together with the new agent images (Tasks 1 to 3) or pass `--set modelServers.legacy.enabled=true` for a transition.
+- The inference image was never built: Docker Desktop on this machine had no DNS for ghcr.io and Docker Hub during the I2 build. Check `docker pull python:3.11-slim` first; if there is no network, say so in `PROGRESS.md` and do the cluster steps later.
+- Falco is not installed on the cluster (replay fallback). Prometheus (kube-prometheus-stack) and prometheus-adapter run in `monitoring`.
 
-Step 2. V5-I2 (inference service and chart). Files: `services/inference_server/main.py` (new), `dockerfiles/Dockerfile.inference` (new, Python 3.11, installs `kubeheal/requirements.txt` plus fastapi, uvicorn, prometheus-client), `deploy/helm/kubeheal/templates/inference.yaml` (new Deployment, Service, PDB, HPA), values files, `demo/k3d/images.ps1`, NetworkPolicy label updates, tests. Contract (copy v5's `docs/architecture.md` "Inference API", read it with `git show origin/main:docs/architecture.md`): `POST /v1/{health,security}/predict` and `predict_batch` (1 to 256 items) taking `{"features": {name: float|null}}`, body caps, 422 for unknown names and NaN or Inf, 503 when a bundle is not loaded (never serve without a bundle), `/healthz`, `/readyz` (200 only when both bundles load), `/metrics` including the gauge `kubeheal_model_inflight_requests` (use `agents/common/metrics.py` `add_inflight_middleware` so the existing queue-depth HPA and prometheus-adapter rule keep working), TreeSHAP `top_factors` computed only when the security risk is at least `SECURITY_PUBLISH_RISK`, health always. Load with `ModelBundle.load_default(task)` and pass every feature dict through `bundle.restrict()`. Chart: the new inference Deployment is on by default; the neural Health, Security and DCM servers move behind `modelServers.legacy.enabled: false` (code stays; nothing is deleted). Update agent env defaults (`INFERENCE_URL`), `demo/scripts/hpa_load.ps1` and `k6_health_model.js` to the new route and a real feature body. Acceptance: TestClient tests with the real bundles (predict, batch, fail closed with an empty model dir, 422 cases, the gauge exists), `tests/test_platform_chart.py` green with helm on PATH, `helm lint` and `helm template` clean for every values file. Then, with the owner's cluster, `demo/k3d/up.ps1 -Stage images` and `-Stage install`, rerun `tests/test_rbac_k3d.py` (the HPA row should now pass), and record the real `/readyz` output.
+## Safety rules (unchanged, apply to every task)
 
-Step 3. V5-D3 (policy and Fusion, reserved, separate commits). In `decision_policy.py` replace `health_ci_width`/`sec_ci_width` and `CI_WIDTH_LIMIT` with `health_prediction_set` and `sec_prediction_set` (`None` means that side has no event and counts as certain; otherwise exactly one non-empty label is certain; anything malformed is uncertain, fail closed). Add `rollback_reasons` (the Health event's `failure_reasons`), `spec_changed`, `has_baseline`, `changed_fields`. Rule path (owner D2): when `rollback_reasons` is non-empty, `spec_changed` and `has_baseline` are true and the raw security risk is below 0.4, produce an AUTO_PATCH candidate that bypasses ONLY the set-certainty gate and burn-in; the namespace-protected check, unknown-tier rule, circuit breaker, incident lock requirement, kill-switch `dry_run`, and (proposed, confirm with the owner) `models_ok` still apply. Put `rule_reasons` and `patch_fields` (from `changed_fields`) in the output params. Keep `health_field_top` only until V5-D9. In `agents/fusion_agent/agent.py` stop calling the DCM: compute correlation with `kubeheal.correlation.compound_score` (map the event dicts onto `kubeheal.contracts.HealthEvent` and `SecurityEvent`), keep `DCM_URL` optional legacy, build `nl_summary` from the correlation reasons and `top_factors`. Update `tests/test_decision_policy.py`, `test_policy_rules.py`, `test_fusion_*.py`. Acceptance: pure-policy table tests for set certainty on each side, the rule path including each remaining blocker, the unchanged breaker, protected and tier behaviour, plus a Fusion test with no DCM configured.
+Never push, never set `ALLOW_PUSH`, never restore the push URL, no destructive git commands (`reset --hard`, `clean`, forced checkout, branch -D), no training (`models/train_*.py`, `training/`), no invented numbers (write "not measured"; a number in a doc must come from a run you did, with date and machine), plain text without em dashes, Python 3.11 only (no same-quote nesting in f-strings), no Kubernetes write outside `agents/executor/` (`tests/test_no_writes_outside_executor.py`), every write through `actions._write` and the kill-switch gate, ledger entry BEFORE any corrective action request, global mode `test` unless a step says otherwise, every kubectl and helm command with `--context k3d-kubeheal` / `--kube-context k3d-kubeheal`, never touch `hybrid-demo`, `decision_policy.py` stays pure and fails closed, core fixes go to `work` first and then to `demo`, never end with uncommitted changes, update `.ai/handoff.md` and `PROGRESS.md` after every merge.
 
-Step 4. V5-D4 and V5-D5 (Health Agent, one agent file, one task at a time). Port from v5 `agents/health_agent/agent.py` (read with `git show origin/main:agents/health_agent/agent.py`): canonical spec hash with only a changed hash counting, per-workload debounce (60 s `ASSESS_DELAY_S`, never postponed past that after the first pending change, earlier on a posture violation or failed rollout polled every 2 s), follow-up events for late failure reasons, full list plus watch from the list's resourceVersion and re-list on 410, at most 8 concurrent assessments. Use `failure_reasons.failure_reasons`, `kubeheal.posture.policy_violations` (merged V5-D2, merge it first), `metric_window.fetch_window` and `kubeheal.features.health.health_features`, and call the inference service (`restrict` first). HPAs: list per namespace and set `WATCH_NAMESPACES=prod,staging,dev` in the chart (cluster-wide HPA list would get 403 under the new RBAC). Publish the new health event fields: `health_label`, `health_risk`, `health_prediction_set` (JSON list), `health_uncertain`, `top_factors_json`, `changed_fields_json`, `failure_reasons_json` (policy:* entries included), `has_baseline`, `spec_changed`, `model_scored`, `model_version`. Fail closed: inference unavailable means no score, keep the existing `model_unavailable` notice. P6-D2 on top (owner D7): re-apply the OBSERVE sampling from the merged `bbe55a0` code, drop what the debounce makes redundant, and make each OBSERVE sample do a live GET of the Deployment spec (fixes the stale-object issue). V5-D5: baseline promotion (owner D3). Promote when benign, certain, rollout complete (`failure_reasons.rollout_complete`), no `failure_reasons`, no posture violation: automatically in dev and staging; in prod write a candidate key and require approval in the dashboard (V5-I3). Every promotion, automatic or approved, is a ledger entry that keeps the previous baseline. The golden-baseline rule changes from "never overwritten" to "overwritten only by these two paths and `scripts/baseline_tool.py`"; update `baseline.py` docs and tests. Also keep P7-RR-11 in mind (re-baseline after restore).
+Process per task: worktree `../Unisys_Model-wt-<id>` on branch `wave/<id>` (or `wip/<id>` if unfinished), small commits, full suite, `git merge --no-ff` into `work`, full suite again, merge `work` into `demo`, update the checklist. If an independent reviewer (another agent) is available, use it for reserved files; otherwise write a self-review into `PROGRESS.md` listing what you checked.
 
-Step 5. V5-S2 (Security Agent). Map our normalised syscall windows to v5's `kubeheal.features.security.security_features(events, entropy_samples, window_s, ...)` input (events are dicts with `syscall`, `path`, `new_path`, `ts_ms`), pass through `restrict`, call `/v1/security/predict`, publish `sec_label`, `sec_risk`, `sec_prediction_set`, `sec_uncertain`, `top_factors_json`, `model_scored`, window bounds, only at or above `SECURITY_PUBLISH_RISK` with the existing cooldown. Entropy hardening from v5: every path component opened with `O_NOFOLLOW`, regular files only, a bounded LRU cache keyed by device, inode, size, mtime, ctime. Write-bytes and net-out counters (V5-S3) only if the bundle lists them: check the `features` list in `models/bundles/security/meta.json` for `write_bytes_per_s` and `net_out_bytes_per_s` before deciding (not checked here). Re-open D-5 (replay emitted no Security event) first: the new feature path should make the cause visible in tests.
-
-Step 6. V5-D6 and V5-D9 (Executor, reserved). Validation before any patch: pod-template labels match the Deployment selector (`matchExpressions` always escalates) and `kubeheal.posture.weakens_posture(live_template, baseline_template)` is empty. Replace model-attribution with candidate fields from `patch_fields` (the spec diff against the baseline): the Executor patches the drifted fields it can verify differ, escalates only when the diff is empty, and keeps the canary and rollback. Remove the `no_drift_at_field` dependence on model attribution.
-
-Step 7. V5-S5 (containment, reserved, owner D5). The Executor, behind the kill-switch gate and with a ledger entry first, publishes a contain request; the node-local Security Agent re-checks the mode, freezes the pod cgroup (`cgroup.freeze`) and answers on a result stream; the Executor waits a bounded time, then forensic snapshot, quarantine, scale to 0, restore (existing P7 code). The Executor never writes the cgroup itself. Needs a host cgroup mount on the Security Agent DaemonSet and RBAC and chart changes: security review needed, tests with fakes (no real cgroup in CI), fail safe when the freeze is not acknowledged.
-
-Step 8. V5-I3 (dashboard: prod promotion approvals, `top_factors` TreeSHAP view, prediction-set display). Then V5-DOC: update README, AGENTS.md, ARCHITECTURE, SPEC_VS_CODE and the PROJECT_SPEC amendments so they describe LightGBM, split-conformal sets, TreeSHAP and the owner decisions, only for what is actually merged and verified; mark anything not yet running as planned.
-
-Step 9. Later, in this order: V5-S1 (Falco rule comparison and sync test), V5-F1, V5-P1 (CI workflow), V5-P3 (Redis per-component ACL users), V5-E1 (scripted lab scenarios on k3d in mode `test`, results only from recorded runs; collection is allowed, training is not), V5-S4 (eBPF sensor as an optional event source, not verified on this machine), V5-M3 (option c, stretch). Also still open from earlier: P10-U6 acceptance twice, rebuild the Health Agent image to verify the `ApiClient` fix, P7-RR-7, RR-11, RR-12, P11-E1 to E7.
-
-## Owner answers to the two former open questions (2026-11-11, binding)
-
-1. Rule-based rollback does NOT require the Health Model response, but DOES require a fresh Security Model response (to confirm security risk below 0.4). Missing or late Security response: escalate to HUMAN.
-2. Automatic containment applies to `ransomware` and `exfiltration` (certain, adjusted risk at or above 0.85): freeze, forensic snapshot, quarantine, scale to 0. Restore runs only for `ransomware`; after `exfiltration` containment escalate to HUMAN. `suspicious` never triggers an automatic action.
-
-Implement both with tests in V5-D3 (policy) and V5-S5 (Executor containment). Recorded in `V5_INTEGRATION_PLAN.md` section 11 (Q1, Q2).
-
-## Useful checks
+## Verify commands
 
 ```powershell
-git status
-git branch -v
-git worktree list
-git log --oneline -15
-kubectl --context k3d-kubeheal -n kubeheal get configmap kubeheal-mode
-$env:PYTHONPATH='.'; .venv\Scripts\python.exe -m pytest tests/ -q -p no:warnings --basetemp=$env:TEMP\kubeheal-<task>
+cd C:\My_projects_1\cLOUD\Unisys_Model-wt-metric-query     # the work worktree
+$env:Path += ";$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Helm.Helm_Microsoft.Winget.Source_8wekyb3d8bbwe\windows-amd64"   # helm; without it 48 chart tests skip and prove nothing
+$env:PYTHONPATH='.'
+New-Item -ItemType Directory -Force $env:TEMP\kubeheal-t | Out-Null
+C:\My_projects_1\cLOUD\Unisys_Model\.venv\Scripts\python.exe -m pytest tests/ -q -p no:warnings --basetemp=$env:TEMP\kubeheal-t --deselect tests/test_rbac_k3d.py --deselect tests/test_killswitch.py
+# live read-only files (need the cluster): tests/test_rbac_k3d.py tests/test_killswitch.py
+kubectl --context k3d-kubeheal -n kubeheal get configmap kubeheal-mode -o jsonpath='{.data.mode}'
+helm --kube-context k3d-kubeheal list -n kubeheal
+git status; git branch -v; git worktree list; git log --oneline -8
 ```
+
+Last known results: `work` 1304 passed, 3 skipped, 34 deselected; `demo` 1309 passed, 2 skipped, 34 deselected (the demo checkout has the demo-only files). The 3 skips on `work` are the symlink and FIFO tests on Windows and the k6 body test that needs `demo/`.
+
+## Pitfalls (learned the hard way)
+
+- Windows venv at `C:\My_projects_1\cLOUD\Unisys_Model\.venv` (Python 3.11.9, numpy 1.26.4, pydantic 2.6.0, lightgbm 4.7.0). v5 targets Python 3.13: rewrite nested same-type quotes in f-strings.
+- LightGBM refuses `model.txt` with CRLF. `.gitattributes` has `models/bundles/** -text`. Never extract bundles with `git archive` on Windows. Read v5 files with `git show origin/main:<path>` (run `git fetch origin` first; fetch works, push does not).
+- Always pass feature dicts through `ModelBundle.restrict()` (the inference service does it). The shipped security bundle lists 40 features while the code emits 45; its conformal and accuracy figures are not evidence (synthetic classes, `conformal_q` about 3.87e-6, the serving floor 0.05 does the work). The health bundle's `field_attribution` of the old neural model was flat; patch fields now come from the spec diff.
+- `git worktree` branches: `git worktree remove ../Unisys_Model-wt-<id>` removes only the checkout, the branch stays. Do not `git stash` (shared stack).
+- Multi-line Python edits through a shell heredoc mangled backslash escapes twice. Write the script to a file with the Write tool and run it.
+- Python on Windows cannot read `/c/...` paths from Git Bash: use `cygpath -w`.
+- `helm upgrade` against objects touched by `kubectl set image` fails with a field-manager conflict (see Cluster state). Pass the live image tags, or `--force-conflicts`, knowingly.
+- `deploy/helm/kubeheal/templates/agents.yaml` still sets `HEALTH_MODEL_URL`, `SECURITY_MODEL_URL` and `DCM_URL` (on the Fusion Agent too). The agents no longer read the first two, and a set `DCM_URL` switches the Fusion Agent onto the legacy DCM path, which needs embeddings the LightGBM events do not carry (every paired incident would go to a human). Remove all three when the agents are merged (Task 3).
+- The new Health Agent defaults `WATCH_NAMESPACES` to `prod,staging,dev` (a cluster-wide HPA list is a 403 under our RBAC). The demo workload (`demo/victim-app.yaml`) runs in namespace `demo`; the chart sets no `WATCH_NAMESPACES`. Decide and set it (and the RBAC RoleBindings for any extra namespace) before the demo.
+- Fusion treats a security `model_scored` of false or a missing prediction set as "not certain": until the Health Agent (D4) and Security Agent (S2) are merged and deployed, NO automatic action can happen (fail closed). That is expected, not a bug.
+
+## Remaining tasks, in order
+
+### Task 0. Orient
+
+`git status`, `git branch -v`, `git worktree list`, `git log --oneline -8` on `work` and `demo`. Run the full suite on `work` (command above); expect all green. Mark the first task you start `[~] Codex` in `PROGRESS.md`.
+
+### Task 1. Review fixes and merge of `wave/V5-D4` (Health Agent, `agents/health_agent/agent.py`, `inference_client.py`)
+
+Independent review verdict: merge after the demo-namespace item. 97 touched tests pass; both mutation checks (debounce deadline moved; raw JSON not normalised) are caught. No Kubernetes write, RBAC covers every call. Findings to fix in the worktree `../Unisys_Model-wt-V5-D4` (rebase or merge `work` into it first), each with a test:
+
+1. Demo namespace: set `WATCH_NAMESPACES` in the chart/demo values (include `demo` if the demo workload stays there) and add the matching RoleBindings for `kubeheal-health-agent-read` in that namespace (RBAC test parity in `tests/test_rbac_*` and `k8s/rbac/rbac.yaml`).
+2. `_first_sight` (agent.py about 412): a Redis error pops `seen_hash` and nothing retries, so a quiet drifted workload is never assessed until its spec changes. Add a retry (scheduler retry set or periodic re-list).
+3. When no metric exists, the agent publishes the service's prediction set verbatim with `health_uncertain=true`, but Fusion gates only on the set. Fail closed: publish an empty (or full) set when there are no metrics, or make Fusion/the policy treat `health_uncertain=true` as uncertain (decision_policy.py is yours to edit; keep it pure and add table tests).
+4. `_publish_event` does `xadd` then `hset`/`expire`; a failing `hset` retries the `xadd` with a new `event_id` and opens a duplicate incident. Write the hash first or do not retry the `xadd`.
+5. Rule-evidence event published with inference down is never re-scored after recovery (acceptable; write that down as intended or add a re-score).
+6. `assess` does not re-check after acquiring the semaphore that `p.hash` still equals `seen_hash[key]`; drop a superseded pending assessment.
+7. Missing golden key inside `_assess` (for example a Redis flush) is re-created from the current drifted spec: treat as a failed assessment and tell a human instead.
+8. Module docstring says a `PostureError` "publishes nothing"; the code publishes a no-score notice with `assessment_error`. Fix the doc.
+9. Early assessment (posture violation or failed rollout) queries a window of a few seconds, so the model effectively sees only the spec diff: widen the window or mark such events uncertain.
+10. `watch_loop`: no minimum interval between watch attempts or after a 410 (hot loop risk). Add about 1 s minimum.
+11. OBSERVE with inference down publishes a no-score notice per sample (Fusion's SET NX contains it); add per-spec dedup if cheap.
+Also: `field_attribution_json` is no longer published but `dashboard/fastapi_app.py`, `dashboard/incident_view.py` and `agents/fusion_agent/interpretation_client.py` still read it (handled in Task 8, make sure nothing crashes meanwhile). Then: full suite, merge into `work`, merge `work` into `demo`, mark V5-D4 `[x]`.
+
+### Task 2. Review fixes and merge of `wave/V5-S2` (Security Agent)
+
+Independent review verdict: do NOT merge as is. 176 touched tests pass; no Kubernetes write; contract with Fusion matches; entropy hardening is correct. Fix in `../Unisys_Model-wt-V5-S2`:
+
+1. BUG (detection): `agents/security_agent/agent.py` about line 555 `risk_score = pred["risk"] if pred else heuristic_risk` plus the publish test at about line 563. With the shipped bundle the ransomware trigger window of the current `k8s/` Falco rules scores `benign` (0.05 to 0.15) even with entropy near 7.9, so NO event is published during an attack and the score hash says `model_scored=true, sec_risk` about 0.05, which Fusion's rule path reads as "security risk confirmed below 0.4". Fix: always compute the heuristic; when `heuristic_risk >= SECURITY_PUBLISH_RISK` and the model risk is below it (or absent), publish a heuristic-only event with `model_scored=false`, label `suspicious`, empty prediction set, `sec_uncertain=true` (it reaches a human only, never an automatic action), carry the model risk in a `model_risk` or `model_issue` field, and write the score hash with `model_scored=false` (or `sec_risk=max(model, heuristic)`) in that conflict so the rule rollback escalates. Land Task 5 (V5-S1) as soon as possible: it makes the model see the right features.
+2. BUG: `_record_score` is only called when scorable events exist, so an unscorable window (only mmap/msync, no Falco window on the /proc path, an exception in feature building) leaves an earlier "true, low" hash in place. Whenever an assessment runs and the model did not answer for it, write the hash with `model_scored=false`; wrap feature building in try/except that writes "false".
+3. BUG (deploy): `dockerfiles/Dockerfile.security` copies only `agents/`; the agent now imports `kubeheal.contracts` and `kubeheal.features.security`. Add `COPY kubeheal/ /app/kubeheal/` (as `Dockerfile.fusion` does) and a test that every top-level package the agent imports is copied (use `tests/test_dockerfiles*.py` if one exists).
+4. Frozen trigger snapshot: `_trigger_entropy_check` passes `list(trigger.events)` so the "initial" and "complete" assessments (60 s apart) score the same 15 events. Re-read `tracker.window(pid)` at each assessment.
+5. Hash is last-writer-wins across nodes and replicas and per-PID: do the max in Redis (Lua or WATCH/MULTI: keep the higher risk while the stored one is within TTL), one `ts_ms`, `hset` plus `expire` in one pipeline (a cancel between them leaves a hash with no TTL).
+6. Quiet workloads never get a hash, so the Q1 rule rollback of an idle drifted workload (the main case) always escalates to a human. Score each pod periodically with a real (possibly near-empty) window and real counters, only with a real inference answer.
+7. Tracker: prune events older than `WINDOW_S` before counting bursts, cap tracked pids (LRU), evict `_falco_first_ts` when a check ends (15 writes an hour apart currently fire a trigger).
+8. Pid reuse: key counters and the entropy sampler by `(pid, /proc/<pid>/stat starttime)`.
+9. `written_files` scans all fds before applying `max_files`: stop after N.
+Nits: pod missing from the pod index gives a pod-name workload for the first event (fail closed, fixed on the next assessment). Then full suite, merge, mark V5-S2 `[x]`, record the cause of D-5 as the builder wrote it in `PROGRESS.md` (the replay trace had no rename source and no open flags, so the model scored it benign; a hand-written trace shaped like the V5-S1 rules scores `ransomware` 0.95).
+
+### Task 3. Chart and agents consistency after D4 and S2
+
+Remove `HEALTH_MODEL_URL`, `SECURITY_MODEL_URL` and `DCM_URL` from `deploy/helm/kubeheal/templates/agents.yaml` (and `k8s/fusion-agent-deployment.yaml` `DCM_URL` and `CI_WIDTH_THRESHOLD`); set `WATCH_NAMESPACES`; keep `modelServers.legacy.enabled: false`; update `tests/test_agent_fusion_contract.py` so both agents are pinned on the new fields (`health_prediction_set`, `sec_prediction_set`, `failure_reasons_json`, `changed_fields_json`, `spec_changed`, `has_baseline`, `model_unavailable`, the Redis hash `kubeheal:security:score:*`) instead of the old ci_width and embeddings. `helm lint` and `helm template` for every values file, `tests/test_platform_chart.py` green with helm on PATH.
+
+### Task 4. Install the new stack on k3d-kubeheal (needs registry network; mode stays `test`)
+
+`demo/k3d/up.ps1 -Stage images` (builds `inference-server`, health-agent, security-agent, fusion-agent images; check the exit codes), then `-Stage install` (or a manual `helm upgrade` with the generated values; keep the pinning lesson above). Verify: `kubectl --context k3d-kubeheal -n kubeheal get pods`, the inference Service `/readyz` returns 200 (record the real output), `tests/test_rbac_k3d.py` and `tests/test_killswitch.py` pass, mode still `test`. Record the exact image tags and the Helm revision in `PROGRESS.md`. If the registry has no network, record that and continue with the offline tasks.
+
+### Task 5. V5-S1 Falco rules and replay traces (moved up: the model needs these fields)
+
+Compare v5's Falco rules and values (`git show origin/main:<path>`, find them with `git ls-tree -r origin/main --name-only | grep -i falco`) with `k8s/` and the chart; make our rules emit open flags and BOTH rename paths (source and target) and the fields `falco_client._normalise` reads; add a sync test between the rules and the captured syscall traces; refresh the recorded replay traces (`tests/fixtures/falco`, see its README) so the replay produces a model-visible ransomware window; re-run the D-5 replay on the cluster in mode `test` and record whether a Security event is published (true or false, with the log lines).
+
+### Task 6. V5-D5 baseline promotion (owner D3), Health Agent plus ledger plus dashboard hook
+
+Promote the baseline when the assessment is benign, certain (one-label set), rollout complete (`failure_reasons.rollout_complete`), no `failure_reasons`, no posture violation: automatically in dev and staging; in prod write a candidate key and require approval (dashboard, Task 8). Every promotion, automatic or approved, is a ledger entry that keeps the previous baseline. The golden-baseline rule changes from "never overwritten" to "overwritten only by these two paths and `scripts/baseline_tool.py`": update `agents/health_agent/baseline.py` docs and tests. Keep P7-RR-11 in mind (re-baseline after restore).
+
+### Task 7. V5-D6 and V5-D9 Executor validation and candidate fields (reserved files, tests required)
+
+Before any patch: pod-template labels match the Deployment selector (`matchExpressions` always escalates) and `kubeheal.posture.weakens_posture(live_template, baseline_template)` is empty (a `PostureError` escalates). Replace model attribution with the candidate fields from the request's `patch_fields` (the spec diff against the baseline): patch the drifted fields the Executor can verify differ, escalate only when the diff is empty, keep canary and rollback. Remove the `no_drift_at_field` dependence on model attribution and the `health_field_top` remnants in `decision_policy.py` (V5-D9). The Executor must also accept and ledger the new request fields Fusion already sends (`patch_fields`, `rule_path`, `rule_reasons`, `containment_label`, `restore_after`, `human_followup`). Add Executor tests; every write stays behind `actions._write`.
+
+### Task 8. V5-S5 containment (reserved: Executor, Security Agent, RBAC; owner D5 and Q2)
+
+The Executor, behind the kill-switch gate and with a ledger entry first, publishes a contain request; the node-local Security Agent re-checks the mode, freezes the pod cgroup (`cgroup.freeze`) and answers on a result stream; the Executor waits a bounded time, then forensic snapshot, quarantine, scale to 0, and (only when `restore_after` is true, that is `ransomware`) restore using the existing P7 code. After an `exfiltration` containment the Executor does not restore and escalates to HUMAN (Fusion already escalates once). The Executor never writes the cgroup itself. Needs a host cgroup mount on the Security Agent DaemonSet, RBAC and chart changes (security review: write the review into `PROGRESS.md`), tests with fakes (no real cgroup in CI), fail safe when the freeze is not acknowledged (escalate, do not continue). Use cgroup `io.stat` for the write-bytes counter when you have the mount (replaces the per-process counters, S2 finding 8).
+
+### Task 9. V5-I3 dashboard
+
+Prod promotion approvals (Task 6), TreeSHAP `top_factors` view, prediction-set display replacing the CI width, containment label and follow-up display, no reads of removed fields (`field_attribution_json`, `*_ci_width`, embeddings). Update `dashboard/` tests.
+
+### Task 10. Cluster acceptance and the open P10 and P11 items
+
+- P10-U6 acceptance twice (see `docs/kubeheal/PROGRESS.md` P10 and `docs/kubeheal/results/p10-k3d-2026-11-11.md` for what was confirmed and what was only reported). Record real numbers only.
+- P10 D-5 replay (Task 5) and the real `/readyz` output (Task 4).
+- P7-RR-7, RR-11, RR-12 and P11-E1 to E7 (`eval/p11_harness.py`, the harness allow-lists and `assert_test_mode` stay; every run in mode `test` unless the task says enforce on a scratch namespace; results only from recorded runs).
+- Rebuild and deploy the Health Agent image (done as part of Task 4) and verify the `ApiClient` fix on the cluster.
+- P13 documentation: the phase table in `PROGRESS.md` lists P11 and P13 as not started; open their checklist lines (and the P11-E1 to E7 lines) and finish them with real numbers only.
+
+### Task 11. V5-DOC (after the code runs, not before)
+
+Update `README.md`, `AGENTS.md`, `docs/kubeheal/ARCHITECTURE.md`, `SPEC_VS_CODE.md`, `PROJECT_SPEC.md` amendments, `docs/architecture-flow.md` and `demo/README.md` so they describe LightGBM health and security models with split-conformal prediction sets and TreeSHAP factors, the one-label gate (M2), the deterministic correlation, the rule-based rollback with its Security-freshness requirement (Q1), the baseline promotion rule (D3), and the containment order and labels (D5, Q2: freeze, forensic snapshot, quarantine, scale to 0, restore only for ransomware, human follow-up after exfiltration, suspicious never automatic). Describe only what is merged and verified; mark anything not running as planned. The neural models and DCM stay documented as legacy (off by default).
+
+### Task 12. Later, in this order
+
+V5-F1 (quarantine ownerReference and UID preconditions, protected-owner and unknown-controller handling), V5-P1 (CI workflow: pytest, `helm lint`, `helm template`, image builds), V5-P3 (Redis per-component ACL users), V5-E1 (scripted lab scenarios on k3d in mode `test`; collection through our agents is allowed, training is not), V5-S4 (eBPF sensor as an optional event source, not verifiable on this machine), V5-M3 (option c, stretch; training needs the owner's go). When everything above is merged: final suite on `work` and `demo`, `git status` clean, `.ai/handoff.md` current, then stop. The owner pushes.
+
+## Open owner items (do not block)
+
+- M3: the owner asks the teammate for the raw `collected/*.jsonl` files and collection scripts.
+- The tag `demo-2026-11-11` is created by the owner after the demo (AGENTS.md branch plan).
