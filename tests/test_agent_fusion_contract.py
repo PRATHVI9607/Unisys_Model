@@ -15,9 +15,13 @@ def published_keys(src, stream):
 
 def test_health_publishes_fusion_fields():
     pub = published_keys(HEALTH_SRC, "health")
-    for need in ["health_risk","health_label","health_ci_width","top_field",
-                 "namespace_tier","health_embedding_b64","event_id","deployment"]:
+    # V5-D4: the LightGBM fields Fusion reads (agents/fusion_agent/event_mapping.py); no CI width, no embedding.
+    for need in ["health_risk", "health_label", "health_prediction_set", "health_uncertain", "top_factors_json",
+                 "changed_fields_json", "failure_reasons_json", "has_baseline", "spec_changed", "model_scored",
+                 "model_version", "top_field", "namespace_tier", "event_id", "deployment", "timestamp_ms"]:
         assert need in pub, f"health agent must publish {need}"
+    for gone in ["health_ci_width", "health_embedding_b64"]:
+        assert gone not in pub, f"health agent must not publish {gone} any more"
 
 def test_security_publishes_fusion_fields():
     pub = published_keys(SEC_SRC, "security")

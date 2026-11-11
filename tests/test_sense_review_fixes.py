@@ -41,7 +41,7 @@ def test_security_event_of_an_unnamed_namespace_carries_tier_unknown():
     assert ag.redis.streams[0][1]["namespace_tier"] == "unknown"
 
 
-# ---- F: the Health Agent publishes model_scored explicitly -----------------------------------------------
+# ---- F: shared fakes (the Health Agent tests moved, see below) --------------------------------------------
 class _HealthResp:
     status = 200
 
@@ -91,66 +91,8 @@ class _Redis:
         return self.kv.get(k)
 
 
-def _health_agent(monkeypatch, fail=False):
-    import aiohttp
-    from agents.health_agent import agent as ha
-    monkeypatch.setattr(aiohttp, "ClientSession", lambda *a, **k: _Session(fail))
-    agent = ha.HealthAgent(redis_url="redis://unused")
-    agent.redis = _Redis()
-    return agent
-
-
-def test_a_scored_health_event_says_model_scored_true(monkeypatch):
-    agent = _health_agent(monkeypatch)
-    out = run(agent._assess_health("prod", "web", {"a": 1}, {"a": 2}, np.zeros((60, 15)), "Low"))
-    run(agent._publish_assessment(out))
-    assert agent.redis.streams[0][1]["model_scored"] == "true"
-
-
-def test_an_assessment_without_the_flag_is_published_as_not_scored(monkeypatch):
-    agent = _health_agent(monkeypatch)
-    out = run(agent._assess_health("prod", "web", {"a": 1}, {"a": 2}, np.zeros((60, 15)), "Low"))
-    out.pop("model_scored")
-    run(agent._publish_assessment(out))
-    assert agent.redis.streams[0][1]["model_scored"] == "false"
-
-
-def test_an_unreachable_health_model_still_scores_nothing_and_publishes_a_model_unavailable_event(monkeypatch):
-    agent = _health_agent(monkeypatch, fail=True)
-    assert run(agent._assess_health("prod", "web", {}, {}, np.zeros((60, 15)), "Low")) is None
-    run(agent._publish_model_unavailable("prod", "web"))
-    stream, p = agent.redis.streams[0]
-    assert stream == "kubeheal.health.events"
-    assert p["model_unavailable"] == "true" and p["model_scored"] == "false" and p["deployment"] == "web"
-    assert float(p["health_ci_width"]) >= 1.0
-    assert "health_risk" not in p and "health_embedding_b64" not in p        # nothing is scored or invented
-
-
-def test_the_health_outage_event_reaches_a_human_through_fusion(monkeypatch):
-    from fusion_helpers import make_agent, stream
-    from agents.fusion_agent import agent as fusion
-    agent = _health_agent(monkeypatch, fail=True)
-    run(agent._publish_model_unavailable("prod", "web"))
-    fields = agent.redis.streams[0][1]
-    fa = make_agent()
-    assert run(fa._handle_entry(fusion.HEALTH_STREAM, "1-0", fields)) is True
-    esc = stream(fa.redis, fusion.ESCALATIONS_STREAM)
-    assert len(esc) == 1 and esc[0]["required"] == "human" and esc[0]["deployment"] == "web"
-    assert stream(fa.redis, fusion.EXEC_STREAM) == []
-
-
-def test_a_published_health_assessment_passes_fusions_model_scored_check(monkeypatch):
-    from fusion_helpers import StubInterp, make_agent, run as frun, stream
-    from agents.fusion_agent import agent as fusion
-    agent = _health_agent(monkeypatch)
-    out = run(agent._assess_health("prod", "web", {"a": 1}, {"a": 2}, np.zeros((60, 15)), "Low"))
-    out["health_ci_width"] = 0.05
-    run(agent._publish_assessment(out))
-    fa = make_agent()
-    frun(fa._decide("prod:web", dict(agent.redis.streams[0][1]), None))
-    steps = [json.loads(v) for v in fa.store.objects.values()]
-    decision = next(r["payload"] for r in steps if r["step"] == "decision")
-    assert decision["models_ok"] is True and decision["model_issues"] == []
+# The Health Agent tests that lived here (model_scored, outage notice, Fusion contract) moved to
+# tests/test_health_agent_contract.py with the V5-D4 rewrite; the helpers above stay for the Security Agent tests.
 
 
 # ---- G: Falco time from gRPC, first-seen T0 ---------------------------------------------------------------
