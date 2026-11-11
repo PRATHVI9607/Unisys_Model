@@ -185,6 +185,17 @@ def test_restrict_drops_only_names_the_bundle_does_not_list(bundles):
         b.predict(full)                          # un-restricted: the extra names are rejected
 
 
+def test_restrict_keeps_typos_so_they_are_rejected_not_scored_as_missing(bundles):
+    b = bundles["security"]
+    typo = {"n_events": 1.0, "files_written_per_sec": 3.0}      # real name is files_written_per_s
+    kept = b.restrict(typo)
+    assert "files_written_per_sec" in kept
+    with pytest.raises(ValueError, match="unknown features"):
+        b.predict(kept)
+    h = bundles["health"]
+    assert "events_per_s" in h.restrict({"events_per_s": 1.0})   # a security name sent to the health bundle
+
+
 @pytest.mark.parametrize("bad", ["not_a_feature", "n_changed_fields_typo"])
 def test_unknown_feature_names_are_rejected(bundles, task, bad):
     b = bundles[task]

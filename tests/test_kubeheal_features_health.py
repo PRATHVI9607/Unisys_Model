@@ -35,8 +35,24 @@ SPEC = {
 }
 
 
+class _ModelLike:
+    """Stands in for a kubernetes_asyncio model: only `to_dict(serialize=True)` is used."""
+
+    def __init__(self, data):
+        self._data = data
+        self.calls = []
+
+    def to_dict(self, serialize=False):
+        self.calls.append(serialize)
+        return copy.deepcopy(self._data)
 
 
+def test_canonical_spec_accepts_a_model_object_via_to_dict_serialize():
+    model = _ModelLike(SPEC)
+    assert canonical_spec(model) == canonical_spec(SPEC)
+    assert model.calls == [True]
+    wrapped = _ModelLike({"spec": SPEC})
+    assert canonical_spec(wrapped) == canonical_spec(SPEC)
 
 
 def test_canonical_spec_forms_and_user_keys():

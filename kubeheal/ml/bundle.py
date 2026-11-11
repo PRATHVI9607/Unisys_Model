@@ -32,6 +32,8 @@ BUNDLES_DIR = Path(__file__).resolve().parents[2] / "models" / "bundles"
 def default_bundle_dir(task: str) -> Path:
     """Directory of the shipped bundle for `task` ("health" or "security")."""
     return BUNDLES_DIR / task
+
+
 # Features the live agents can send as None (kubeheal/features/*). LightGBM scores a NaN as 0 on a split whose
 # missing_type is not NaN (the feature had no NaN in training): cpu_limit_ratio=None (a Deployment without limits)
 # then reads as "limit cut to 0". Health: resource ratios (no limits/requests), replicas_ratio (from 0), every metric.
@@ -44,6 +46,17 @@ LIVE_NONE: dict[str, list[str]] = {
                  "recent_frac_rename_temp_replace", "recent_ext_added_frac", "recent_entropy_mean",
                  "recent_entropy_high_frac"],
 }
+
+
+def _feature_universe(task: str | None) -> set[str]:
+    """Every feature name the current feature code can emit for `task` (imported lazily)."""
+    if task == "health":
+        from kubeheal.features.health import HEALTH_FEATURES
+        return set(HEALTH_FEATURES)
+    if task == "security":
+        from kubeheal.features.security import SECURITY_FEATURES
+        return set(SECURITY_FEATURES)
+    return set()
 
 
 def nan_blind(model: lgb.Booster | Path, features: list[str]) -> list[str]:
@@ -107,14 +120,17 @@ class ModelBundle:
         (d / "meta.json").write_text(json.dumps(self.meta, indent=2, sort_keys=True) + "\n")
 
     def restrict(self, features: dict[str, float | None]) -> dict[str, float | None]:
-        """Drop the names this bundle does not list.
+        """Drop only the names that the current feature code emits but this bundle was not trained on.
 
         `matrix` rejects unknown names. The current feature code can emit more names than an older bundle was
-        trained on (the shipped security bundle omits the transform features), so callers that pass the full
-        feature dict from kubeheal.features run it through `restrict` first.
+        trained on (the shipped security bundle omits five transform features), so callers that pass the full
+        feature dict from kubeheal.features run it through `restrict` first. A name that is neither in the bundle
+        nor in the task's feature universe (a typo, a wrong task) is NOT dropped: it is kept so `matrix` raises,
+        instead of being silently scored as missing.
         """
         known = set(self.features)
-        return {k: v for k, v in features.items() if k in known}
+        universe = _feature_universe(self.meta.get("task"))
+        return {k: v for k, v in features.items() if k in known or k not in universe}
 
     def matrix(self, rows: list[dict[str, float | None]]) -> np.ndarray:
         """Feature dicts → (n, n_features) float matrix; unknown keys raise, missing → NaN."""
