@@ -16,7 +16,7 @@ import kubernetes_asyncio
 from kubernetes_asyncio import client, watch, config
 from kubernetes_asyncio.config import load_incluster_config
 from agents.health_agent import baseline
-from agents.common.sampling import OBSERVE_FACTOR, sampling_factor, scaled_interval
+from agents.common.sampling import sampling_factor, scaled_interval
 from agents.common.metrics import KubeHealMetrics
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -138,6 +138,12 @@ class HealthAgent:
         # Only workloads whose spec differs from the golden baseline are tracked.
         self._drifted: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._observe_task: Optional[asyncio.Task] = None
+        # One shared serializer for _spec_json; closed in stop(). Created lazily because
+        # constructing an ApiClient opens an aiohttp session.
+        self._serializer: Optional[client.ApiClient] = None
+        # Per-workload guard so a watch event and an OBSERVE_SAMPLE never score the same
+        # workload at the same time.
+        self._workload_locks: Dict[Tuple[str, str], asyncio.Lock] = {}
 
         self.baseline_configmap = "kubeheal-baselines"
 
@@ -169,6 +175,8 @@ class HealthAgent:
 
         logger.info("Health Agent started successfully")
 
+        # Set before the task exists so observe_loop never depends on watch_deployments ordering.
+        self.running = True
         self._observe_task = asyncio.create_task(self.observe_loop())
         logger.info(f"OBSERVE rescheduling enabled: base interval {self.observe_base_s}s "
                     "while an OBSERVE request is active")
@@ -184,12 +192,23 @@ class HealthAgent:
             self.watcher.stop()
 
         if self._observe_task:
-            self._observe_task.cancel()
-            try:
-                await self._observe_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            task = self._observe_task
             self._observe_task = None
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                # Swallow only the task's own cancellation. If this coroutine itself is being
+                # cancelled, re-raise so the caller's cancellation is not lost.
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+            except Exception:
+                logger.exception("Health OBSERVE task ended with an error")
+
+        if self._serializer is not None:
+            serializer, self._serializer = self._serializer, None
+            await serializer.close()
 
         if self.redis:
             await self.redis.aclose()
@@ -234,7 +253,6 @@ class HealthAgent:
         normal timeout.
         """
         logger.info("Starting Deployment watch (reconnecting)...")
-        self.running = True
         resource_version = None
         while self.running:
             try:
@@ -272,13 +290,29 @@ class HealthAgent:
 
     async def handle_deployment_event(self, event_type: str, deployment) -> None:
         try:
-            logger.info(f"handle_deployment_event STARTED: {event_type}")
             name = deployment.metadata.name
             namespace = deployment.metadata.namespace
             drift_key = (namespace, name)
             if event_type == "DELETED":
                 self._drifted.pop(drift_key, None)
+                if not self._workload_locks.get(drift_key, asyncio.Lock()).locked():
+                    self._workload_locks.pop(drift_key, None)
                 return
+            lock = self._workload_locks.setdefault(drift_key, asyncio.Lock())
+            if event_type == "OBSERVE_SAMPLE":
+                # A periodic sample yields to any scoring already in flight for this workload.
+                if lock.locked():
+                    logger.info(f"Skipping OBSERVE sample for {namespace}/{name}: scoring in flight")
+                    return
+            async with lock:
+                await self._handle_locked(event_type, deployment, namespace, name, drift_key)
+        except Exception as e:
+            logger.error(f"Error handling deployment event: {e}", exc_info=True)
+
+    async def _handle_locked(self, event_type: str, deployment, namespace: str, name: str,
+                             drift_key: Tuple[str, str]) -> None:
+        try:
+            logger.info(f"handle_deployment_event STARTED: {event_type}")
             generation = deployment.metadata.generation or 0
             observed_gen = deployment.status.observed_generation or 0
 
@@ -437,12 +471,13 @@ class HealthAgent:
             pass
         return None
 
-    @staticmethod
-    def _spec_json(deployment) -> Dict:
+    def _spec_json(self, deployment) -> Dict:
         """Deployment spec as camelCase JSON (what kubectl and the patch API use)."""
         if not deployment.spec:
             return {}
-        return client.ApiClient().sanitize_for_serialization(deployment.spec)
+        if self._serializer is None:
+            self._serializer = client.ApiClient()
+        return self._serializer.sanitize_for_serialization(deployment.spec)
 
     async def _query_blast_radius(self, namespace: str, deployment) -> str:
         """Query blast radius: Services + Ingresses."""

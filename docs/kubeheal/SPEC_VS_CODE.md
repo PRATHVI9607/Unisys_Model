@@ -49,7 +49,7 @@ This is a code review against `PROJECT_SPEC.md`, not a claim of production valid
 | S-DB-2 | Partial | Approval and incident ledger views exist in `dashboard/`; dashboard tests cover routes and claims. A full SHAP review view and production authentication posture are not established. |
 | S-REC-1 | Implemented | `agents/common/ledger.py` and `k8s/minio.yaml` configure append-only, object-lock writes. `tests/test_ledger.py`, `tests/test_ledger_guard.py`; see live check in `PROGRESS.md`. |
 | S-REC-2 | Implemented | Metrics in `agents/common/metrics.py`, Prometheus config and Grafana dashboard in `deploy/`; `tests/test_metrics.py`, `tests/test_grafana_dashboard.py`. |
-| S-REC-3 | Partial | Checkpoint registry helpers and upload code exist in `models/ckpt_registry.py` and `models/upload_to_registry.py`; registry lifecycle and promotion policy are not demonstrated. |
+| S-REC-3 | Partial | Checkpoint loading and validation helpers exist in `services/ckpt.py` and registry upload code in `models/upload_to_registry.py`; registry lifecycle and promotion policy are not demonstrated. |
 
 ## Decision policy
 
@@ -107,7 +107,7 @@ This is a code review against `PROJECT_SPEC.md`, not a claim of production valid
 
 | ID | Status | Evidence and limits |
 |---|---|---|
-| D-1 | Partial | k3d setup scripts and victim manifests are under `demo/k3d/`; repeatable acceptance is tracked as P10-U6. |
+| D-1 | Partial | k3d setup scripts and victim manifests are under `demo/k3d/` on the `demo` branch (not on this branch); repeatable acceptance is tracked as P10-U6. |
 | D-2 | Partial | Checkpoints are present and model servers enforce checkpoint loading. The live model-pod checkpoint state and end-to-end trained-model acceptance are not established here. |
 | D-3 | Partial | Drift is detected on k3d, but the observed decision was OBSERVE. Automatic patch acceptance has not been achieved; see P10 findings. |
 | D-4 | Not verified | Requires a patch decision to demonstrate dry-run wording. Current drift scoring does not reach that path. |
