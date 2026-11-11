@@ -226,3 +226,19 @@ def test_escalation_reaches_the_human_stream_even_when_the_ledger_is_down():
         "incident_id": INC, "t0_ms": str(T0 * 1000)}))
     # restore needs corrective ledger writes, so it stops early; either way a human was paged
     assert len(r.redis.stream(ESCALATIONS_STREAM)) == 1
+
+
+# ---- duplicate requests never run at the same time (P6/P8 review) -----------------------------------------
+
+def test_a_duplicate_entry_for_the_same_incident_and_action_does_not_run_concurrently():
+    r = R(freeze_old=False)
+    ex = make_executor(r, r.entropy)
+    base = {"namespace": "prod", "deployment": "db", "pod": "db-abc-1", "incident_id": INC, "action": "contain"}
+    key = ex._done_key(base, "1-0")
+    r.redis.store[f"{key}:inflight"] = "another-executor"          # the first request is still running
+    assert run(ex.handle_entry("kubeheal.exec", "2-0", dict(base))) is False
+    assert r.c.log == [] and r.redis.acked == []                    # nothing ran, left pending for a later skip
+    del r.redis.store[f"{key}:inflight"]
+    assert run(ex.handle_entry("kubeheal.exec", "2-0", dict(base))) is True
+    assert r.redis.stream(ACTIONS_STREAM)[-1]["outcome"] == "contained"
+    assert f"{key}:inflight" not in r.redis.store                   # cleared afterwards

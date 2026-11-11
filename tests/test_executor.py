@@ -36,6 +36,9 @@ class FakeRedis:
     async def get(self, k):
         return self.store.get(k)
 
+    async def delete(self, k):
+        self.store.pop(k, None)
+
     async def set(self, k, v, nx=False, ex=None):
         if nx and k in self.store:
             return None

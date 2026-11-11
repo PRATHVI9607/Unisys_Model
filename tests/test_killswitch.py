@@ -234,6 +234,15 @@ class Redis:
     async def get(self, k):
         return self.store.get(k)
 
+    async def set(self, k, v, nx=False, ex=None):
+        if nx and k in self.store:
+            return None
+        self.store[k] = v
+        return True
+
+    async def delete(self, k):
+        self.store.pop(k, None)
+
 
 class FlippingMode:
     """enforce for the first N checks, then test. A gated write asks twice (before and after its

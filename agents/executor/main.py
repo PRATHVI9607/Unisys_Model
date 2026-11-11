@@ -48,6 +48,7 @@ ESCALATIONS_STREAM = "kubeheal.escalations"
 GROUP = "executor"
 DONE_PREFIX = "kubeheal:exec:done"       # result marker per incident, action and dry-run flag (P6-R1)
 FLUSH_INTERVAL_S = 30                    # chosen, not measured: how often the fallback stream is flushed to MinIO
+INFLIGHT_TTL_S = 1800                    # chosen, not measured: frees the in-progress marker if the Executor dies
 DONE_TTL_S = 7 * 24 * 3600               # chosen, not measured: how long a finished request is remembered
 # Outcomes that are not final: a later request for the same incident may legitimately run again.
 # Refused and escalated-before-running outcomes wrote nothing; a corrected request must be able to follow.
@@ -267,12 +268,26 @@ class ExecutorService:
                                                "stream_id": msg_id, "recorded_outcome": outcome})
                 await self.redis.xack(stream, GROUP, msg_id)
                 return True
-            outcome = await self.execute(fields)
-            # The outcome is stored BEFORE the ledger and the actions entry, and both before the ack.
-            final = not outcome.startswith(NOT_FINAL_PREFIXES)
-            if final:
-                await self._write_marker(key, outcome, recorded=False)
-            await self._finish(fields, outcome, key if final else None)
+            # Two stream entries for the same incident and action (a duplicate approval, or a reclaim while
+            # the first run is still going) must not run at the same time: the done marker above is only
+            # written after the action. SET NX an in-progress marker; the loser stays pending and is
+            # skipped as a redelivery once the winner has written the done marker.
+            inflight = f"{key}:inflight"
+            if not await self.redis.set(inflight, self.consumer, nx=True, ex=INFLIGHT_TTL_S):
+                logger.warning(f"{key} is already being executed; entry {msg_id} left pending")
+                return False
+            try:
+                outcome = await self.execute(fields)
+                # The outcome is stored BEFORE the ledger and the actions entry, and both before the ack.
+                final = not outcome.startswith(NOT_FINAL_PREFIXES)
+                if final:
+                    await self._write_marker(key, outcome, recorded=False)
+                await self._finish(fields, outcome, key if final else None)
+            finally:
+                try:
+                    await self.redis.delete(inflight)
+                except Exception as exc:        # the TTL frees it
+                    logger.warning(f"could not clear in-progress marker {inflight}: {type(exc).__name__}")
         except Exception as e:
             logger.error(f"executing {msg_id} failed, left pending: {e}", exc_info=True)
             return False

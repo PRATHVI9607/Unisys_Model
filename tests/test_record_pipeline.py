@@ -26,6 +26,9 @@ class _Redis:
     async def get(self, key):
         return self.values.get(key)
 
+    async def delete(self, key):
+        self.values.pop(key, None)
+
     async def set(self, key, value, nx=False, ex=None):
         if nx and key in self.values:
             return None
