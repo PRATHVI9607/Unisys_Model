@@ -9,7 +9,7 @@ chart changes and merges, provided it runs the full suite after each merge and k
 
 ## Active run state (2026-11-11, Codex)
 
-Codex is the active orchestrator and owns the ordered run below. No push is permitted. Owner stop points are credentials/passwords, model training, deleting user data, or changing `PROJECT_SPEC.md`. D4 is merged into both `work` and `demo`; its full suite passed on both. Current branch tips: `work` includes D4 merge `501dea6` plus its docs record, `demo` `e377d6a`, `wave/V5-D4` `ad464f3`, `wave/V5-S2` `f6ecfa9`. Next is V5-S2.
+Codex is the active orchestrator and owns the ordered run below. No push is permitted. Owner stop points are credentials/passwords, model training, deleting user data, or changing `PROJECT_SPEC.md`. D4 is merged into both `work` and `demo`; its full suite passed on both. Current branch tips: `work` (see `git log -1 work`), `demo` `338fd34`, `wave/V5-D4` `ad464f3`, `wave/V5-S2` `f6ecfa9`. Active task: V5-S2.
 
 Owner decisions (all in `V5_INTEGRATION_PLAN.md` section 11): M1 option (b), M2, M3, D1, D2, D3, D5, D6, D7, plus the two latest answers Q1 and Q2.
 In short: LightGBM health and security bundles (split-conformal sets, TreeSHAP) run inside OUR architecture; an automatic action needs a prediction set of exactly one label (M2);
@@ -23,10 +23,10 @@ the eBPF sensor is optional and last (D6).
 
 | Branch | Worktree | Tip | State | What it needs |
 |---|---|---|---|---|
-| `work` | `../Unisys_Model-wt-metric-query` | see `git log -1 work` | D4 merged; full suite after merge: 1363 passed, 3 skipped, 34 deselected. | Next: fix/review and merge S2, then continue in order. |
-| `demo` | main checkout `C:/My_projects_1/cLOUD/Unisys_Model` | `e377d6a` | D4 from `work` merged; full suite: 1368 passed, 2 skipped, 34 deselected. Includes demo-only I2 scripts. | Merge updated `work` after each subsequent task. |
+| `work` | `../Unisys_Model-wt-metric-query` | see `git log -1 work` | D4 merged; full suite after merge: 1363 passed, 3 skipped, 34 deselected. | Fix/review and merge S2, then continue in order. |
+| `demo` | main checkout `C:/My_projects_1/cLOUD/Unisys_Model` | `338fd34` | D4 from `work` merged; full suite: 1368 passed, 2 skipped, 34 deselected. Includes demo-only I2 scripts. | Merge updated `work` after each subsequent task. |
 | `wave/V5-D4` | `../Unisys_Model-wt-V5-D4` | `ad464f3` | Reviewed and merged into `work`; branch suite 1363 passed, 3 skipped, 34 deselected. Worktree clean. | Complete; keep branch. |
-| `wave/V5-S2` | `../Unisys_Model-wt-V5-S2` | `f6ecfa9` | Security Agent port built, 1376 passed in its worktree, reviewed once (verdict: do not merge as is); findings not yet fixed, not merged. Clean at Codex start. | Task 2, after D4. |
+| `wave/V5-S2` | `../Unisys_Model-wt-V5-S2` | `f6ecfa9` | Security Agent port built, 1376 passed in its worktree, reviewed once (verdict: do not merge as is); Codex is fixing all findings now. Not merged. | Active: Task 2. |
 | merged and safe to delete later (keep the branches, remove only worktrees you no longer need) | | | `wave/V5-M1`, `V5-D1`, `V5-D2`, `V5-D4a`, `V5-I2`, `V5-I2-demo`, `V5-D3`, `wave/P11`, `wip/docs-p6d2` | none |
 
 Both unmerged worktrees are clean (everything committed). Each branch was cut from `work` at `96b1d08`, so a merge is expected to conflict only in `docs/kubeheal/PROGRESS.md` and `.ai/handoff.md`: keep both sides' checklist facts and re-write `.ai/handoff.md` yourself.
@@ -101,7 +101,7 @@ Also: `field_attribution_json` is no longer published but `dashboard/fastapi_app
 
 ### Task 2. Review fixes and merge of `wave/V5-S2` (Security Agent)
 
-Independent review verdict: do NOT merge as is. 176 touched tests pass; no Kubernetes write; contract with Fusion matches; entropy hardening is correct. Fix in `../Unisys_Model-wt-V5-S2`:
+Independent review verdict: do NOT merge as is. 176 touched tests pass; no Kubernetes write; contract with Fusion matches; entropy hardening is correct. Codex is fixing the following findings in `../Unisys_Model-wt-V5-S2`; do not merge until the full suite passes and the diff is reviewed:
 
 1. BUG (detection): `agents/security_agent/agent.py` about line 555 `risk_score = pred["risk"] if pred else heuristic_risk` plus the publish test at about line 563. With the shipped bundle the ransomware trigger window of the current `k8s/` Falco rules scores `benign` (0.05 to 0.15) even with entropy near 7.9, so NO event is published during an attack and the score hash says `model_scored=true, sec_risk` about 0.05, which Fusion's rule path reads as "security risk confirmed below 0.4". Fix: always compute the heuristic; when `heuristic_risk >= SECURITY_PUBLISH_RISK` and the model risk is below it (or absent), publish a heuristic-only event with `model_scored=false`, label `suspicious`, empty prediction set, `sec_uncertain=true` (it reaches a human only, never an automatic action), carry the model risk in a `model_risk` or `model_issue` field, and write the score hash with `model_scored=false` (or `sec_risk=max(model, heuristic)`) in that conflict so the rule rollback escalates. Land Task 5 (V5-S1) as soon as possible: it makes the model see the right features.
 2. BUG: `_record_score` is only called when scorable events exist, so an unscorable window (only mmap/msync, no Falco window on the /proc path, an exception in feature building) leaves an earlier "true, low" hash in place. Whenever an assessment runs and the model did not answer for it, write the hash with `model_scored=false`; wrap feature building in try/except that writes "false".
