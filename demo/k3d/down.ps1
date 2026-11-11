@@ -1,10 +1,18 @@
 # Remove the KubeHeal demo cluster (demo branch only). Deletes ONLY the cluster named `kubeheal` and its registry.
-#   .\demo\k3d\down.ps1
+#   .\demo\k3d\down.ps1          asks you to type the cluster name first
+#   .\demo\k3d\down.ps1 -Yes     no prompt (scripts)
+# This destroys every volume in the cluster: the victim PVCs, MinIO and the audit ledger, Redis.
+param([switch]$Yes)
+
 . "$PSScriptRoot\lib.ps1"
 Initialize-Tools -SkipHelm
 
 $exists = (& $K3dExe cluster list -o json | ConvertFrom-Json | Where-Object { $_.name -eq $ClusterName })
 if (-not $exists) { Say "cluster $ClusterName does not exist, nothing to do"; return }
+if (-not $Yes) {
+    $answer = Read-Host "This deletes cluster '$ClusterName' with all its volumes (ledger, MinIO, victim data). Type the cluster name to continue"
+    if ($answer -ne $ClusterName) { Say "not confirmed, nothing deleted"; return }
+}
 Say "deleting cluster $ClusterName (other clusters, for example hybrid-demo, are not touched)"
 & $K3dExe cluster delete $ClusterName
 if ($LASTEXITCODE -ne 0) { throw "k3d cluster delete failed" }
