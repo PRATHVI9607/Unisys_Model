@@ -39,6 +39,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -332,12 +333,14 @@ class HealthAgent:
         return self._serializer.sanitize_for_serialization(deployment.spec)
 
     def _dep_json(self, deployment) -> Dict:
-        """One API-shaped dict per Deployment, metadata and status included. Watch and list items already are
-        dicts; a model object goes through the shared serializer."""
-        if isinstance(deployment, dict):
-            return deployment
+        """One API-shaped dict per Deployment, metadata and status included, in ONE normal form: the output of
+        the shared serializer on the client's model object. Golden baselines and the Executor's live view use
+        that form (it drops null values such as the pod template's `creationTimestamp: null` and fields the
+        client does not model), so a raw JSON dict (list item, live GET) is first deserialized into the model."""
         if self._serializer is None:
             self._serializer = client.ApiClient()
+        if isinstance(deployment, dict):
+            deployment = self._serializer.deserialize(SimpleNamespace(data=json.dumps(deployment)), "V1Deployment")
         return self._serializer.sanitize_for_serialization(deployment) or {}
 
     @staticmethod
@@ -509,9 +512,9 @@ class HealthAgent:
             except aioredis.RedisError as e:
                 logger.warning(f"redis error assessing {key[0]}/{key[1]}: {e}; retrying in {RETRY_DELAY_S:.0f}s")
                 outcome = "retry"
-            except Exception:
+            except Exception as e:
                 logger.exception(f"assessment of {key[0]}/{key[1]} failed")
-                outcome = "error"
+                outcome = await self._failed(p, key[0], key[1], f"assessment failed: {e!r}")
             finally:
                 self.assessing.pop(key, None)
         ASSESSMENTS.labels(outcome).inc()
@@ -558,14 +561,14 @@ class HealthAgent:
             violations = policy_violations(old, view)
         except PostureError as e:
             # A failed assessment, never a verdict: nothing is published and no rule-based rollback can follow.
-            logger.error(f"posture of {ns}/{name} unreadable ({e}); no assessment published")
-            return "error"
+            logger.error(f"posture of {ns}/{name} unreadable ({e}); no verdict, a human is told")
+            return await self._failed(p, ns, name, f"posture unreadable: {e}")
 
         try:
             win = await self._fetch_window(self.session, self.prometheus_url, ns, name, window[0], window[1])
         except ValueError as e:
-            logger.error(f"cannot query metrics for {ns}/{name}: {e}; no assessment published")
-            return "error"
+            logger.error(f"cannot query metrics for {ns}/{name}: {e}; no verdict, a human is told")
+            return await self._failed(p, ns, name, f"metric query refused: {e}")
         missing = missing_metrics(win)
         features = health_features(old, view, win)
         no_metrics = all(features.get(k) is None for k in METRIC_FEATURES)
@@ -586,10 +589,7 @@ class HealthAgent:
             # Fail closed: no score and no rule evidence. A human is told (once per spec); the same spec is
             # tried again later. Nothing is stored as assessed.
             logger.error(f"inference unavailable for {ns}/{name}; no score published (fail closed)")
-            if p is None or not p.notified_unavailable:
-                await self._publish_model_unavailable(ns, name)
-                if p is not None:
-                    p.notified_unavailable = True
+            await self._notify_unavailable(p, ns, name)
             return "retry" if p is not None else "unavailable"
 
         await self._publish_event(payload)
@@ -601,6 +601,21 @@ class HealthAgent:
         logger.info(f"Assessment {ns}/{name}: label={pred.label} risk={pred.risk:.2f} set={pred.prediction_set} "
                     f"changed={changed[:5]} failures={reasons}")
         return "published"
+
+    async def _notify_unavailable(self, p: Optional[Pending], ns: str, name: str, error: str = "") -> None:
+        """The no-score notice, once per pending spec (a retry does not repeat it)."""
+        if p is not None:
+            if p.notified_unavailable:
+                return
+            p.notified_unavailable = True
+        await self._publish_model_unavailable(ns, name, error)
+
+    async def _failed(self, p: Optional[Pending], ns: str, name: str, error: str) -> str:
+        """A failed assessment is never a verdict: nothing is scored and no rule-based rollback can follow, but a
+        human is told once (the same notice as an inference outage, with the cause). Not retried: the spec
+        itself is the problem, and a changed spec is assessed again."""
+        await self._notify_unavailable(p, ns, name, error)
+        return "error"
 
     async def _predict_features(self, features: Dict) -> Optional[Prediction]:
         try:
@@ -664,7 +679,7 @@ class HealthAgent:
         await self.redis.expire(hkey, 86400)
         logger.info(f"Published {payload['event_id']}")
 
-    async def _publish_model_unavailable(self, namespace: str, name: str) -> None:
+    async def _publish_model_unavailable(self, namespace: str, name: str, error: str = "") -> None:
         """Tell the Fusion Agent that no score could be obtained for this workload. The event carries NO score:
         model_scored=false and model_unavailable=true, an empty prediction set. Fusion does not decide on it; it
         escalates to a human once per workload and window. A publish failure is only logged."""
@@ -679,6 +694,8 @@ class HealthAgent:
             "inference_method": "none",
             "timestamp_ms": str(int(self.wall() * 1000)),
         }
+        if error:
+            payload["assessment_error"] = error[:300]
         try:
             await self.redis.xadd(HEALTH_STREAM, payload)
             logger.error(f"Published {payload['event_id']}: no health score for {namespace}/{name}")
@@ -757,7 +774,7 @@ class HealthAgent:
     async def _read_deployment(self, namespace: str, name: str) -> Dict:
         resp = await self.apps_api.read_namespaced_deployment(
             name, namespace, _preload_content=False, _request_timeout=KUBE_TIMEOUT_S)
-        return json.loads(await resp.read())
+        return self._dep_json(json.loads(await resp.read()))
 
     @staticmethod
     def _get_baseline_sha(dep: Dict) -> Optional[str]:
@@ -854,9 +871,9 @@ class HealthAgent:
                 except aioredis.RedisError as e:
                     logger.warning(f"redis error in OBSERVE sample of {namespace}/{name}: {e}")
                     outcome = "error"
-                except Exception:
+                except Exception as e:
                     logger.exception(f"OBSERVE sample of {namespace}/{name} failed")
-                    outcome = "error"
+                    outcome = await self._failed(None, namespace, name, f"assessment failed: {e!r}")
                 ASSESSMENTS.labels("observe_" + outcome).inc()
             finally:
                 self.assessing.pop(key, None)
@@ -887,7 +904,7 @@ class HealthAgent:
                                 break
                             rv = getattr(w, "resource_version", None) or rv
                             if ev["type"] in ("ADDED", "MODIFIED", "DELETED"):
-                                await self.handle_deployment_event(ev["type"], ev["raw_object"])
+                                await self.handle_deployment_event(ev["type"], ev["object"])
                     finally:
                         if w in self._watchers:
                             self._watchers.remove(w)

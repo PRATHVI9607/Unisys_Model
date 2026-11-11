@@ -207,7 +207,12 @@ async def test_a_posture_error_is_a_failed_assessment_never_a_verdict(env, monke
         await env.tick(60)
     finally:
         ha.policy_violations = original
-    assert env.events == [] and env.predictions == []        # no event, no model call, nothing to roll back
+    # no score and nothing to roll back, but a human is told once, with the cause: the no-score notice
+    [notice] = env.events
+    assert notice["model_unavailable"] == "true" and notice["model_scored"] == "false"
+    assert "posture unreadable" in notice["assessment_error"]
+    assert "failure_reasons_json" not in notice and "health_risk" not in notice
+    assert env.predictions == []
     assert KEY not in env.agent.pending
 
 
@@ -216,7 +221,29 @@ async def test_a_metric_query_for_a_non_dns_name_is_a_failed_assessment(env):
     env.window_error = ValueError("invalid deployment name for a PromQL selector")
     await env.baseline_then_change(image="img:2")
     await env.tick(60)
-    assert env.events == [] and env.predictions == []
+    [notice] = env.events
+    assert notice["model_unavailable"] == "true" and "metric query refused" in notice["assessment_error"]
+    assert "failure_reasons_json" not in notice and env.predictions == []
+    await env.send("MODIFIED", dep(image="img:3"))        # a changed spec is assessed again, and told once more
+    await env.tick(60)
+    assert len(env.events) == 2
+
+
+@scenario
+async def test_an_unexpected_exception_in_an_assessment_tells_a_human_too(env):
+    await env.baseline_then_change(image="img:2")
+
+    def boom(*a, **k):
+        raise RuntimeError("bug")
+
+    original = ha.health_features
+    ha.health_features = boom
+    try:
+        await env.tick(60)
+    finally:
+        ha.health_features = original
+    [notice] = env.events
+    assert notice["model_unavailable"] == "true" and "assessment failed" in notice["assessment_error"]
 
 
 @scenario
@@ -370,7 +397,8 @@ async def test_410_gone_re_lists_and_watches_from_the_new_resource_version(env, 
 
     async def one_event_then_stop(w):
         w.resource_version = "25"
-        yield {"type": "MODIFIED", "raw_object": dep(image="img:2")}
+        d = dep(image="img:2")
+        yield {"type": "MODIFIED", "object": d, "raw_object": d}
         env.agent.running = False
 
     FakeWatch.script = [gone, one_event_then_stop]
@@ -498,3 +526,44 @@ def test_the_agent_package_makes_no_kubernetes_write_call():
     pattern = re.compile(r"\b(create|patch|delete|replace)_(namespaced_\w+|namespace\b|node\b|cluster_\w+)")
     for path in (Path(ha.__file__).parent).glob("*.py"):
         assert not pattern.search(path.read_text(encoding="utf-8")), path.name
+
+
+# ---- one normal form for specs --------------------------------------------------------------------------------
+@scenario
+async def test_a_raw_api_object_is_not_drift_against_a_golden_baseline_written_from_the_client_model(env):
+    """Golden baselines on a cluster were written from the client's model object (sanitize_for_serialization).
+    The raw API JSON carries `creationTimestamp: null` in the pod template and is compared with the same golden:
+    it must not look drifted."""
+    from kubernetes_asyncio import client as k8s
+    base = dep()
+    model = env.agent._serializer = k8s.ApiClient()
+    deployment = model.deserialize(__import__("types").SimpleNamespace(data=json.dumps(base)), "V1Deployment")
+    old_style = env.agent._spec_json(deployment)
+    await baseline.get_or_set_baseline(env.redis, "prod", "victim-app", old_style)
+    raw = json.loads(json.dumps(base))
+    raw["spec"]["template"]["metadata"]["creationTimestamp"] = None
+    raw["metadata"]["creationTimestamp"] = "2026-11-11T10:00:00Z"
+    await env.send("ADDED", raw)
+    assert env.agent.pending == {} and KEY not in env.agent._drifted
+    await env.send("MODIFIED", {**raw, "status": {"observedGeneration": 2}})
+    assert env.agent.pending == {}
+    # and the live read used by OBSERVE has the same form
+    env.apps.live[KEY] = raw
+    assert (await env.agent._read_deployment("prod", "victim-app"))["spec"] == old_style
+
+
+@scenario
+async def test_the_executor_can_build_a_patch_for_the_first_changed_field_of_an_event(env):
+    """The agent's changed_fields use the Executor's dotted path format: build_patch accepts them (pure, offline)."""
+    from agents.executor.drift import build_patch
+    await env.send("ADDED", dep(cpu="500m", image="img:1"))
+    await env.send("MODIFIED", dep(cpu="400m", image="img:2"))
+    await env.tick(60)
+    [event] = env.events
+    golden = await baseline.load_baseline(env.redis, "prod", "victim-app")
+    live = baseline.drift_view(env.agent.latest_dep[KEY]["spec"])
+    fields = json.loads(event["changed_fields_json"])
+    assert len(fields) == 2 and event["top_field"] == fields[0]
+    for field in fields:
+        plan = build_patch(golden["spec"], live, field)
+        assert plan.drifted == [field]
