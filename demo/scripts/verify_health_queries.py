@@ -26,10 +26,12 @@ def kget(path: str) -> str:
 
 
 def traffic(namespace: str, stop: threading.Event) -> None:
-    base = f"/api/v1/namespaces/{namespace}/services/victim-app:80/proxy"
+    # The victim Service exposes port 8000 (the app container port), not port 80.
+    base = f"/api/v1/namespaces/{namespace}/services/victim-app:8000/proxy"
     i = 0
     while not stop.is_set():
-        for p in ("/", f"/items/{i % 50}", "/health"):
+        # Exercise each app-backed channel: a real 5xx, bounded CPU work and a synced PV write.
+        for p in ("/", f"/items/{i % 50}", "/health", "/fail", "/cpu?milliseconds=200", "/disk"):
             kget(base + p)
         i += 1
 
