@@ -9,6 +9,7 @@ import pytest
 from test_dashboard_seed import AUTH, INC, client, harness, seed_incident  # noqa: F401
 
 PATH = f"/api/incidents/{INC}/release-snapshot-freeze"
+WHY = {"reason": "restore verified by operator"}      # a written reason is required in every case
 
 
 def key(ns, pvc):
@@ -85,6 +86,25 @@ def test_closed_incident_is_released_audited_first_and_keeps_other_incidents(cli
     assert entry["payload"]["incident_closed"] is True and entry["payload"]["forced"] is False
 
 
+@pytest.mark.parametrize("body", [{}, {"reason": None}, {"reason": ""}, {"reason": "   "}, {"reason": "too short"},
+                                  {"reason": "x" * 9}, {"force": True}])
+def test_a_written_reason_is_required_even_for_a_closed_incident(client, enforce, body):
+    """The owner rule asks for actor and reason on every release, so `closed` does not waive the reason."""
+    closed_incident(enforce)
+    f = Freezes(enforce, {key("prod", "data"): INC})
+    r = client.post(PATH, headers=AUTH, json=body)
+    assert r.status_code == 422, r.text
+    assert f.deleted == [] and "snapshot_freeze_released" not in enforce.steps()
+
+
+def test_reason_of_exactly_the_minimum_length_is_accepted_and_trimmed(client, enforce):
+    closed_incident(enforce)
+    Freezes(enforce, {key("prod", "data"): INC})
+    r = client.post(PATH, headers=AUTH, json={"reason": "  " + "x" * 10 + "  "})
+    assert r.status_code == 200
+    assert enforce.records()[-1]["payload"]["reason"] == "x" * 10
+
+
 def test_open_incident_is_refused_without_force(client, enforce):
     seed_incident(enforce, approval=False)
     f = Freezes(enforce, {key("prod", "data"): INC})
@@ -99,7 +119,7 @@ def test_only_a_finished_restore_closes_an_incident(client, enforce, outcome):
     seed_incident(enforce, approval=False)
     enforce.ledger.append(INC, "executor_result", {"action": "restore", "outcome": outcome})
     Freezes(enforce, {key("prod", "data"): INC})
-    assert client.post(PATH, headers=AUTH, json={}).status_code == 409
+    assert client.post(PATH, headers=AUTH, json=WHY).status_code == 409
 
 
 def test_force_needs_a_written_reason(client, enforce):
@@ -131,7 +151,7 @@ def test_unreadable_mode_is_a_dry_run(client, harness):
     harness.mode_store.fail_read = True
     closed_incident(harness)
     f = Freezes(harness, {key("prod", "data"): INC})
-    assert client.post(PATH, headers=AUTH, json={}).json()["status"] == "dry_run"
+    assert client.post(PATH, headers=AUTH, json=WHY).json()["status"] == "dry_run"
     assert f.deleted == []
 
 
@@ -140,26 +160,26 @@ def test_ledger_failure_means_nothing_is_released(client, enforce):
     closed_incident(enforce)
     f = Freezes(enforce, {key("prod", "data"): INC})
     use_ledger(FlakyLedger(enforce.ledger, "snapshot_freeze_released", 1))
-    assert client.post(PATH, headers=AUTH, json={}).status_code == 500
+    assert client.post(PATH, headers=AUTH, json=WHY).status_code == 500
     assert f.deleted == [] and f.keys
 
 
 def test_unknown_incident_unknown_freeze_and_bad_ids(client, enforce):
     Freezes(enforce, {})
-    assert client.post(PATH, headers=AUTH, json={}).status_code == 404            # no such incident
+    assert client.post(PATH, headers=AUTH, json=WHY).status_code == 404            # no such incident
     closed_incident(enforce)
-    assert client.post(PATH, headers=AUTH, json={}).status_code == 404            # holds no freeze
-    assert client.post("/api/incidents/..%2Fx/release-snapshot-freeze", headers=AUTH, json={}).status_code == 404
+    assert client.post(PATH, headers=AUTH, json=WHY).status_code == 404            # holds no freeze
+    assert client.post("/api/incidents/..%2Fx/release-snapshot-freeze", headers=AUTH, json=WHY).status_code == 404
 
 
 def test_removal_failure_is_reported_after_the_audit_entry(client, enforce):
     closed_incident(enforce)
     f = Freezes(enforce, {key("prod", "data"): INC})
     f.fail_delete = True
-    assert client.post(PATH, headers=AUTH, json={}).status_code == 502
+    assert client.post(PATH, headers=AUTH, json=WHY).status_code == 502
     assert enforce.records()[-1]["step"] == "snapshot_freeze_released" and f.keys
     f.fail_delete = False
-    assert client.post(PATH, headers=AUTH, json={}).status_code == 200 and f.deleted
+    assert client.post(PATH, headers=AUTH, json=WHY).status_code == 200 and f.deleted
 
 
 def test_only_redis_freeze_keys_are_touched():
@@ -173,7 +193,76 @@ def test_only_redis_freeze_keys_are_touched():
 
 def test_service_is_503_when_freeze_access_is_not_wired(client, enforce):
     closed_incident(enforce)
-    assert client.post(PATH, headers=AUTH, json={}).status_code == 503
+    assert client.post(PATH, headers=AUTH, json=WHY).status_code == 503
+
+
+# ---- compare-and-delete (review fix 6a) -----------------------------------------------------------------------
+
+def test_a_key_taken_over_by_another_incident_before_the_delete_is_left_in_place(client, enforce):
+    closed_incident(enforce)
+    f = Freezes(enforce, {key("prod", "data"): INC, key("prod", "logs"): INC})
+    svc = enforce.services()
+
+    async def freeze_list(incident_id):
+        out = []
+        for k, v in f.keys.items():
+            if v == incident_id:
+                ns, _, pvc = k[len("kubeheal:snapfreeze:"):].partition(":")
+                out.append((ns, pvc, k))
+        f.keys[key("prod", "logs")] = "inc-other"     # another incident takes the PVC after the listing
+        return out
+
+    async def delete_if_owned(keys, incident_id):
+        removed = []
+        for k in keys:
+            if f.keys.get(k) == incident_id:
+                del f.keys[k]
+                removed.append(k)
+        return removed
+
+    async def plain_delete(keys):                      # must NOT be used when the compare-and-delete exists
+        raise AssertionError("unconditional delete used")
+
+    svc.freeze_list, svc.freeze_delete, svc.freeze_delete_if_owned = freeze_list, plain_delete, delete_if_owned
+    from dashboard.fastapi_app import app
+    app.state.services = svc
+    r = client.post(PATH, headers=AUTH, json=WHY)
+    assert r.status_code == 200, r.text
+    assert r.json()["left_in_place"] == [key("prod", "logs")]
+    assert f.keys == {key("prod", "logs"): "inc-other"}            # ours is gone, theirs is untouched
+
+
+def test_redis_wiring_deletes_a_freeze_key_only_while_it_holds_the_incident_id():
+    from dashboard.admin_routes import redis_services
+
+    class R:
+        def __init__(self):
+            self.store = {key("prod", "a"): INC, key("prod", "b"): "inc-other"}
+
+        async def get(self, k):
+            return self.store.get(k)
+
+        async def delete(self, *keys):
+            for k in keys:
+                self.store.pop(k, None)
+
+    class WithEval(R):
+        def __init__(self):
+            super().__init__()
+            self.scripts = []
+
+        async def eval(self, script, n, k, token):
+            self.scripts.append((k, token))
+            if self.store.get(k) != token:
+                return 0
+            del self.store[k]
+            return 1
+
+    for redis in (R(), WithEval()):
+        svc = redis_services(None, None, lambda redis=redis: redis)
+        removed = asyncio.run(svc.freeze_delete_if_owned([key("prod", "a"), key("prod", "b")], INC))
+        assert removed == [key("prod", "a")] and redis.store == {key("prod", "b"): "inc-other"}
+    assert redis.scripts and all(token == INC for _k, token in redis.scripts)
 
 
 # ---- approval claim fixes from the review ------------------------------------------------------
@@ -181,7 +270,7 @@ def test_service_is_503_when_freeze_access_is_not_wired(client, enforce):
 def test_release_claim_refuses_a_queued_claim(client, enforce):
     seed_incident(enforce)
     enforce.claims[INC] = json.dumps({"stream_id": "1-0", "approved_by": "admin:a", "action": "patch"})
-    r = client.post(f"/api/approvals/{INC}/release-claim", headers=AUTH, json={})
+    r = client.post(f"/api/approvals/{INC}/release-claim", headers=AUTH, json=WHY)
     assert r.status_code == 409
     assert INC in enforce.claims and "claim_released" not in enforce.steps()
 

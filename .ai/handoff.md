@@ -11,7 +11,8 @@
 - P7-RR-10 is DONE: ledger failure policy (`agents/executor/ledger_guard.py`, wired in `actions._write`) and the admin SnapshotFreeze release tool (`dashboard/admin_routes.py`). Owner decisions are applied; there are no pending owner questions.
 - P8-D5 was done by Codex (`b7436e3`); review fixes for the approval claim are in `8b6b61d`.
 - Full suite on this machine: 857 passed, 2 skipped (Python 3.11.9 venv). Run with `--basetemp=.pytest-tmp/<your-name>`, because `.pytest-tmp/run` is locked by an earlier session.
-- A third reviewer is checking `fb4ba4b`, `8b6b61d`, `27d1748`, `48c6e87` and the drift fix; fix its findings if any remain unaddressed (see PROGRESS.md).
+- Third review findings 1 to 10 are fixed by a builder (Claude Code, 2026-11-11, 3 commits on `work`, not pushed): in-progress marker (90 s TTL, refreshed, owner-checked, no dead letter while alive), approve re-check after claim, ledger write timeout (`LEDGER_WRITE_TIMEOUT_S`, 5 s chosen default) and FileExistsError retry, ledger-refused requests return `escalated:ledger_unavailable` (not final), `restore_begin` corrective entry before the first restore write, flush batches plus `kubeheal.ledger.dead`, `LedgerUnavailable` is never "already exists", freeze release (reason always required, compare-and-delete), scan Job pinned to the node of the pod that mounts the PVC. Limit: a hung MinIO thread cannot be cancelled (documented in `ledger_guard.py`).
+- Known failing outside these changes: `tests/test_killswitch.py::test_live_watch_follows_configmap_without_polling` and `tests/test_rbac_k3d.py::test_rbac_matrix` (cluster tool, 100 s).
 - Not started: P10 and P11 (they need the cluster and stay with Claude). `k3d`, `helm` live under `%LOCALAPPDATA%\Microsoft\WinGet\Packages\...` and are not on PATH. Only ever use `--context k3d-kubeheal`; never touch `hybrid-demo`.
 
 ## Open

@@ -85,6 +85,9 @@ class DashboardServices:
     # older fakes keep working; the release tool answers 503 without them.
     freeze_list: Optional[Callable[[str], Awaitable[List[tuple[str, str, str]]]]] = None
     freeze_delete: Optional[Callable[[List[str]], Awaitable[None]]] = None
+    # Compare-and-delete: remove a key only while its value is still the given incident id. Returns the keys
+    # that were removed. Preferred over `freeze_delete` when present (older fakes only have `freeze_delete`).
+    freeze_delete_if_owned: Optional[Callable[[List[str], str], Awaitable[List[str]]]] = None
 
 
 def redis_services(ledger: Ledger, mode_store: ModeStore, get_redis: Callable[[], Any]) -> DashboardServices:
@@ -160,11 +163,32 @@ def redis_services(ledger: Ledger, mode_store: ModeStore, get_redis: Callable[[]
         if keys:
             await _redis().delete(*keys)
 
+    async def freeze_delete_if_owned(keys: List[str], incident_id: str) -> List[str]:
+        """Delete each key only while it still holds `incident_id`. Between the listing and the delete another
+        incident may have taken the PVC's freeze key over; that key must stay."""
+        r = _redis()
+        removed = []
+        for key in keys:
+            run_script = getattr(r, "eval", None)
+            if run_script is not None:
+                gone = bool(await run_script(_DELETE_IF_VALUE, 1, key, incident_id))
+            else:                                   # client without EVAL: not atomic
+                value = await r.get(key)
+                value = value.decode() if isinstance(value, bytes) else value
+                gone = value == incident_id
+                if gone:
+                    await r.delete(key)
+            if gone:
+                removed.append(key)
+        return removed
+
     return DashboardServices(ledger, mode_store, enqueue_exec, claim, release, claim_set, claim_get,
-                             list_claims, exec_entry_exists, fetch_event, freeze_list, freeze_delete)
+                             list_claims, exec_entry_exists, fetch_event, freeze_list, freeze_delete,
+                             freeze_delete_if_owned)
 
 
 BARE_CLAIM_PREFIX = "claimed@"
+_DELETE_IF_VALUE = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
 
 
 def _bare_claim_age_s(value: Optional[str]) -> Optional[float]:
@@ -427,6 +451,19 @@ async def approve(incident_id: str, request: Request,
     if not await svc.claim(incident_id):
         raise HTTPException(status_code=409, detail="another decision for this incident is in progress")
 
+    # The status read at the top may be stale: another approve could have queued, written `approved` and
+    # released its claim between that read and our claim. Read the ledger again now that the claim is ours.
+    try:
+        _recheck_records, recheck_status = await _load_pending_or_raise(svc, incident_id)
+    except BaseException:
+        await svc.release(incident_id)
+        raise
+    if recheck_status != "pending":
+        await svc.release(incident_id)
+        if recheck_status == "approved":
+            return {"status": "already_approved", "incident_id": incident_id, "queued": False}
+        raise HTTPException(status_code=409, detail=f"incident was already {recheck_status}")
+
     if mode["dry_run"]:
         # Mode is test or unreadable: queue a dry run and keep the incident open (approvable again in enforce mode).
         try:
@@ -539,26 +576,28 @@ async def release_snapshot_freeze(incident_id: str, request: Request,
                                   svc: DashboardServices = Depends(get_services)):
     """Lift the rolling-snapshot freeze that one incident holds on its PVCs.
 
-    One incident id per call. Refused unless the incident is closed, or `force` is true with a written
-    reason. Only the Redis freeze keys are removed: no snapshot, PVC or other data is ever deleted. The
-    ledger entry (actor, reason) is written BEFORE the keys are removed. In mode test or unreadable the
-    call is a dry run: it records `snapshot_freeze_release_dry_run` and removes nothing."""
+    One incident id per call. A written reason (at least FREEZE_REASON_MIN_CHARS characters) is always
+    required, a closed incident included. Refused unless the incident is closed, or `force` is true. Only
+    the Redis freeze keys are removed: no snapshot, PVC or other data is ever deleted. The ledger entry
+    (actor, reason) is written BEFORE the keys are removed. A key is deleted only while it still holds this
+    incident id (compare-and-delete); one taken over meanwhile is left in place. In mode test or unreadable
+    the call is a dry run: it records `snapshot_freeze_release_dry_run` and removes nothing."""
     body = await _body(request, FreezeReleaseRequest)
     _check_id(incident_id)
-    if svc.freeze_list is None or svc.freeze_delete is None:
+    # The owner rule asks for actor and reason on every release, a closed incident included.
+    if len((body.reason or "").strip()) < FREEZE_REASON_MIN_CHARS:
+        raise HTTPException(status_code=422, detail=f"a written reason of at least "
+                                                    f"{FREEZE_REASON_MIN_CHARS} characters is required")
+    if svc.freeze_list is None or (svc.freeze_delete is None and svc.freeze_delete_if_owned is None):
         raise HTTPException(status_code=503, detail="snapshot freeze access is not configured")
     records = await _records(svc, incident_id)
     if not records:
         raise HTTPException(status_code=404, detail="incident not found")
     reason = (body.reason or "").strip()
     closed = _incident_closed(records)
-    if not closed:
-        if not body.force:
-            raise HTTPException(status_code=409, detail="the incident is not closed; pass force=true with a "
-                                                        "written reason to release the freeze anyway")
-        if len(reason) < FREEZE_REASON_MIN_CHARS:
-            raise HTTPException(status_code=422, detail=f"force needs a written reason of at least "
-                                                        f"{FREEZE_REASON_MIN_CHARS} characters")
+    if not closed and not body.force:
+        raise HTTPException(status_code=409, detail="the incident is not closed; pass force=true with a "
+                                                    "written reason to release the freeze anyway")
     held = await svc.freeze_list(incident_id)
     if not held:
         raise HTTPException(status_code=404, detail="this incident holds no snapshot freeze")
@@ -580,14 +619,23 @@ async def release_snapshot_freeze(incident_id: str, request: Request,
     except Exception as exc:
         logger.error("freeze release %s: ledger write failed: %s", incident_id, type(exc).__name__)
         raise HTTPException(status_code=500, detail="the ledger write failed; the freeze was not released")
+    keys = [key for _ns, _pvc, key in held]
     try:
-        await svc.freeze_delete([key for _ns, _pvc, key in held])
+        if svc.freeze_delete_if_owned is not None:
+            removed = await svc.freeze_delete_if_owned(keys, incident_id)
+        else:
+            await svc.freeze_delete(keys)
+            removed = keys
     except Exception as exc:
         logger.error("freeze release %s: key removal failed: %s", incident_id, type(exc).__name__)
         raise HTTPException(status_code=502, detail="the release is recorded but removing the freeze failed; "
                                                     "repeat the call")
+    kept = [key for key in keys if key not in set(removed)]
+    if kept:
+        logger.warning("freeze release %s: %d key(s) no longer held by this incident were left in place",
+                       incident_id, len(kept))
     return {"status": "released", "incident_id": incident_id, "released": True, "pvcs": pvcs,
-            "actor": admin.actor, "forced": entry["forced"]}
+            "actor": admin.actor, "forced": entry["forced"], "left_in_place": kept}
 
 
 # ---- incidents (read only)

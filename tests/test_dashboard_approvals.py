@@ -165,6 +165,55 @@ def test_second_approve_does_nothing(client, enforce):
     assert harness.steps().count("approved") == 1
 
 
+def _first_approve_finishes_just_before_our_claim(harness, finish_as):
+    """The second approve read the ledger as pending; then the first approve queued, wrote `finish_as` and
+    released its claim, and only then does the second one get its claim (the race of the review finding)."""
+    svc = harness.services()
+    real_claim = svc.claim
+    state = {"first_done": False}
+
+    async def claim(incident_id):
+        if not state["first_done"]:
+            state["first_done"] = True
+            if finish_as == "approved":
+                harness.exec_requests.append({"incident_id": incident_id, "action": "patch"})   # the first run
+            harness.ledger.append(incident_id, finish_as, {"approved_by": "admin:other"})
+        return await real_claim(incident_id)
+
+    svc.claim = claim
+    from dashboard.fastapi_app import app
+    app.state.services = svc
+
+
+def test_a_second_approve_that_read_pending_does_not_queue_a_duplicate_after_the_first_finished(client, enforce):
+    harness = enforce
+    seed_incident(harness)
+    _first_approve_finishes_just_before_our_claim(harness, "approved")
+    r = post(client, f"/api/approvals/{INC}/approve", AUTH)
+    assert r.status_code == 200
+    assert r.json() == {"status": "already_approved", "incident_id": INC, "queued": False}
+    assert len(harness.exec_requests) == 1                      # only the first approve's request
+    assert harness.steps().count("approved") == 1
+    assert harness.claims == {}                                 # our claim was released again
+
+
+def test_a_second_approve_after_a_concurrent_reject_is_409_and_releases_its_claim(client, enforce):
+    harness = enforce
+    seed_incident(harness)
+    _first_approve_finishes_just_before_our_claim(harness, "rejected")
+    r = post(client, f"/api/approvals/{INC}/approve", AUTH)
+    assert r.status_code == 409
+    assert harness.exec_requests == [] and harness.claims == {}
+
+
+def test_the_recheck_also_covers_the_dry_run_path(client, harness):
+    seed_incident(harness)                                       # mode is test: a dry run would be queued
+    _first_approve_finishes_just_before_our_claim(harness, "approved")
+    r = post(client, f"/api/approvals/{INC}/approve", AUTH)
+    assert r.json()["status"] == "already_approved" and harness.claims == {}
+    assert len(harness.exec_requests) == 1
+
+
 def test_reject_writes_ledger_and_queues_nothing(client, harness):
     seed_incident(harness)
     r = post(client, f"/api/approvals/{INC}/reject", AUTH, {"note": "not now"})
