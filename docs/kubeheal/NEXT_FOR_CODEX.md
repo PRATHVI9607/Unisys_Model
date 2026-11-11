@@ -46,10 +46,12 @@ Step 8. V5-I3 (dashboard: prod promotion approvals, `top_factors` TreeSHAP view,
 
 Step 9. Later, in this order: V5-S1 (Falco rule comparison and sync test), V5-F1, V5-P1 (CI workflow), V5-P3 (Redis per-component ACL users), V5-E1 (scripted lab scenarios on k3d in mode `test`, results only from recorded runs; collection is allowed, training is not), V5-S4 (eBPF sensor as an optional event source, not verified on this machine), V5-M3 (option c, stretch). Also still open from earlier: P10-U6 acceptance twice, rebuild the Health Agent image to verify the `ApiClient` fix, P7-RR-7, RR-11, RR-12, P11-E1 to E7.
 
-## Open questions for the owner (do not block; record the answer in `PROGRESS.md`)
+## Owner answers to the two former open questions (2026-11-11, binding)
 
-1. Does `models_ok` also gate the rule-based rollback path? Proposed: yes (the owner's D2 lists only the confidence gate and burn-in as bypassed).
-2. The shipped security bundle's synthetic-only classes and floor-driven conformal sets (see `PROGRESS.md` execution record) mean its "certain" label is weak evidence for suspicious and exfiltration. Should automatic containment accept only the label `ransomware`? v5's AUTO_KILL accepts `ransomware` and `exfiltration` when certain; `exfiltration` and `suspicious` in the shipped bundle rest on synthetic data only.
+1. Rule-based rollback does NOT require the Health Model response, but DOES require a fresh Security Model response (to confirm security risk below 0.4). Missing or late Security response: escalate to HUMAN.
+2. Automatic containment applies to `ransomware` and `exfiltration` (certain, adjusted risk at or above 0.85): freeze, forensic snapshot, quarantine, scale to 0. Restore runs only for `ransomware`; after `exfiltration` containment escalate to HUMAN. `suspicious` never triggers an automatic action.
+
+Implement both with tests in V5-D3 (policy) and V5-S5 (Executor containment). Recorded in `V5_INTEGRATION_PLAN.md` section 11 (Q1, Q2).
 
 ## Useful checks
 
