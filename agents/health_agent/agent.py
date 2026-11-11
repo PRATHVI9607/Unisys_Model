@@ -16,6 +16,7 @@ import kubernetes_asyncio
 from kubernetes_asyncio import client, watch, config
 from kubernetes_asyncio.config import load_incluster_config
 from agents.health_agent import baseline
+from agents.common.sampling import OBSERVE_FACTOR, sampling_factor, scaled_interval
 from agents.common.metrics import KubeHealMetrics
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -87,6 +88,8 @@ class HealthAgent:
         health_model_url: str = None,
         cooldown_ttl: int = 300,
         prometheus_url: str = None,
+        observe_base_s: Optional[float] = None,
+        clock=time.monotonic,
     ):
         self.namespace = namespace
         self.redis_url = redis_url or os.environ.get("REDIS_URL", "redis://redis-master:6379")
@@ -108,6 +111,15 @@ class HealthAgent:
 
         self.running = False
         self.watcher = None
+
+        # P6-D2: OBSERVE rescheduling. Opt-in, no default: see observe_base_s_from_env().
+        self.observe_base_s = (observe_base_s if observe_base_s is not None
+                               else observe_base_s_from_env())
+        self.clock = clock
+        # (namespace, deployment) -> clock() time of the last assessment. Only workloads whose spec
+        # differs from the golden baseline are tracked (nothing else is ever assessed).
+        self._drifted: Dict[Tuple[str, str], float] = {}
+        self._observe_task: Optional[asyncio.Task] = None
 
         self.baseline_configmap = "kubeheal-baselines"
 
@@ -139,6 +151,13 @@ class HealthAgent:
 
         logger.info("Health Agent started successfully")
 
+        if self.observe_base_s:
+            self._observe_task = asyncio.create_task(self.observe_loop())
+            logger.info(f"OBSERVE rescheduling enabled: base interval {self.observe_base_s}s "
+                        f"(an active request samples every base/factor)")
+        else:
+            logger.info("OBSERVE rescheduling disabled (HEALTH_OBSERVE_BASE_S not set): event driven only")
+
         await self.watch_deployments()
 
     async def stop(self) -> None:
@@ -148,6 +167,14 @@ class HealthAgent:
 
         if self.watcher:
             self.watcher.stop()
+
+        if self._observe_task:
+            self._observe_task.cancel()
+            try:
+                await self._observe_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._observe_task = None
 
         if self.redis:
             await self.redis.aclose()
