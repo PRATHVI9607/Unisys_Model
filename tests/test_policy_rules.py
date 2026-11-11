@@ -296,3 +296,18 @@ def test_rule_path_is_a_dry_run_in_test_mode_and_the_policy_stays_pure():
     o = D(**{**RULE, "mode": "test"})
     assert o.decision == Decision.AUTO_PATCH and o.dry_run is True
     assert D(**RULE).dry_run is False
+
+
+@pytest.mark.parametrize("risk", [-1.0, -0.01, 1.01])
+def test_rule_path_does_not_trust_a_security_risk_outside_zero_one(risk):
+    o = D(**{**RULE, "sec_risk": risk})
+    if risk > 1:
+        assert o.decision not in AUTO                       # at or above the ceiling: normal flow
+    else:
+        assert o.decision == Decision.HUMAN_PATCH and "outside [0, 1]" in o.rationale
+
+
+@pytest.mark.parametrize("fields", [[], [""], None, "image"])
+def test_rule_path_needs_a_changed_field_to_restore(fields):
+    o = D(**{**RULE, "changed_fields": fields})
+    assert o.decision == Decision.HUMAN_PATCH and "no changed field" in o.rationale

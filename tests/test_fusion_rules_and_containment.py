@@ -83,7 +83,8 @@ def test_rule_path_needs_no_burn_in_no_threshold_and_no_health_model():
 
 def test_a_scored_security_event_in_the_decision_counts_as_fresh_and_supplies_the_raw_risk():
     a = make_agent()
-    sec = sec_event(sec_risk="0.1", sec_label="benign", sec_prediction_set='["benign"]')
+    sec = sec_event(sec_risk="0.1", sec_label="benign", sec_prediction_set='["benign"]',
+                    timestamp_ms=str(int(a.clock() * 1000)))
     decide(a, health=rule_health_event(), sec=sec)
     assert decisions(a) == ["auto_patch"]
     payload = next(r["payload"] for r in ledger_steps(a) if r["step"] == "decision")
@@ -295,3 +296,59 @@ def test_a_human_approved_suspicious_containment_requests_neither_restore_nor_fo
     assert run(a._handle_entry(fusion.SEC_STREAM, "1-0", ev)) is True
     contained(a, fusion.derive_incident_id(ev))
     assert restores(a) == [] and escalations(a) == []
+
+
+# ---- review fixes (V5-D3 review) ---------------------------------------------------------------------
+def _fresh_sec(a, **kw):
+    kw.setdefault("timestamp_ms", str(int(a.clock() * 1000)))
+    kw.setdefault("sec_risk", "0.1")
+    return sec_event(sec_label="benign", sec_prediction_set='["benign"]', **kw)
+
+
+@pytest.mark.parametrize("risk", ["-1", "-0.01", "1.5", "nan"])
+def test_a_security_event_with_an_out_of_range_risk_never_authorises_the_rule_path(risk):
+    a = make_agent()
+    decide(a, health=rule_health_event(), sec=_fresh_sec(a, sec_risk=risk))
+    assert decisions(a) and "auto_patch" not in decisions(a)
+    assert not [r for r in exec_requests(a) if r["action"] == "patch"]
+
+
+@pytest.mark.parametrize("risk", ["-3", "-0.5", "1.0001", "nan", "inf"])
+def test_a_score_hash_with_an_out_of_range_risk_is_not_fresh(risk):
+    a = make_agent()
+    set_security_score(a, sec_risk=risk)
+    assert run(a._security_score("prod", "payments")) == (False, None)
+    decide(a, health=rule_health_event())
+    assert "auto_patch" not in decisions(a)
+
+
+def test_an_old_or_undated_security_event_is_not_a_fresh_security_response():
+    for ts in ("1000", "", "abc", "nan"):
+        a = make_agent()
+        decide(a, health=rule_health_event(), sec=_fresh_sec(a, timestamp_ms=ts))
+        assert "auto_patch" not in decisions(a), ts
+    a = make_agent()
+    decide(a, health=rule_health_event(), sec=_fresh_sec(a))
+    assert decisions(a) == ["auto_patch"]
+
+
+def test_rule_path_without_a_changed_field_is_a_human_decision_not_a_queued_patch():
+    a = make_agent()
+    set_security_score(a)
+    decide(a, health=rule_health_event(changed_fields_json="[]"))
+    assert decisions(a) == ["human_patch"]
+    assert not [r for r in exec_requests(a) if r["action"] == "patch"]
+
+
+def test_one_health_event_is_patched_once_even_when_a_security_event_redecides_it():
+    a = make_agent()
+    set_security_score(a)
+    health = rule_health_event()
+    decide(a, health=health)
+    decide(a, health=health, sec=_fresh_sec(a, event_id="sec-9"))
+    assert len([r for r in exec_requests(a) if r["action"] == "patch"]) == 1
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-5", "x"])
+def test_security_fresh_s_must_be_a_finite_positive_number(value):
+    assert FusionConfig.from_env({"SECURITY_FRESH_S": value}).security_fresh_s == 30.0

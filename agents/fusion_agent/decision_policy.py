@@ -191,6 +191,12 @@ def _rule_path(inp, reasons, tier, health_adjusted):
     if inp.security_fresh is not True:
         why.append("no fresh Security Model response to confirm security risk below "
                    f"{RAW_SEC_RISK_PATCH_CEILING} (Q1: escalate to a human)")
+    if not 0.0 <= inp.sec_risk <= 1.0:
+        why.append(f"raw security risk {inp.sec_risk} is outside [0, 1], so it is not a trusted Security Model "
+                   "answer (Q1: escalate to a human)")
+    if not rule_params["patch_fields"]:
+        why.append("no changed field to restore (changed_fields is empty), so there is nothing the Executor "
+                   "could patch automatically")
     if not _breaker_closed(inp.circuit_breaker_patches, CB_PATCH_LIMIT_PER_HOUR):
         why.append(f"circuit breaker open: {inp.circuit_breaker_patches} patches for this Deployment this hour, "
                    f"limit {CB_PATCH_LIMIT_PER_HOUR}")
@@ -282,7 +288,7 @@ def _decide(inp: DecisionInput) -> DecisionOutput:
                 True, params)
         if inp.compound_flag:
             return DecisionOutput(Decision.AUTO_CONTAIN, sec_adjusted,
-                f"Compound incident (DCM corr={inp.correlation_score:.2f}): "
+                f"Compound incident (correlation={inp.correlation_score:.2f}): "
                 f"sec_risk={inp.sec_risk:.2f}, health_risk={inp.health_risk:.2f}. "
                 f"Tier={tier}. AUTO-CONTAIN.", True,
                 {"compound": True, "nl_summary": inp.nl_summary, **contain_extra})

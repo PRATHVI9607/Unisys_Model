@@ -385,7 +385,10 @@ class FusionAgentV4:
         # human: the intended fail-closed behaviour, not a bug.
         if sec:
             sec_risk = em.safe_float(sec.get("sec_risk"))
-            security_fresh, security_source = _truthy(sec.get("model_scored")), "event"
+            # a malformed event (sec_ev is None) or an old one is never a fresh Security Model response
+            security_fresh = (sec_ev is not None and _truthy(sec.get("model_scored"))
+                              and self._event_is_fresh(sec))
+            security_source = "event"
         else:
             fresh_hash, hash_risk = await self._security_score(namespace, workload)
             sec_risk = hash_risk if fresh_hash and hash_risk is not None else 0.0
@@ -592,11 +595,12 @@ class FusionAgentV4:
                     raise RetryLater(f"incident lock for {key} was lost before {out.decision.value} was queued")
                 else:
                     outcome = await self._execute(namespace, workload, pod, out, inp, causal_chain, incident_id,
-                                                  t0_ms=t0_ms)
+                                                  t0_ms=t0_ms, health_event_id=health.get("event_id"))
                     if outcome in ("queued_for_executor", "already_queued"):
                         await self.redis.hset(self._ctx_key(incident_id), mapping={"action_state": "queued"})
         else:
-            await self._execute(namespace, workload, pod, out, inp, causal_chain, incident_id, t0_ms=t0_ms)
+            await self._execute(namespace, workload, pod, out, inp, causal_chain, incident_id, t0_ms=t0_ms,
+                                health_event_id=health.get("event_id"))
 
         if is_update and t0_ms:
             # T0 may only have become known now (the complete event): a finished containment can restore now
@@ -609,7 +613,8 @@ class FusionAgentV4:
         # MinIO's client is synchronous; keep its network I/O off the event loop.
         await asyncio.to_thread(self.ledger.append, incident_id, step, payload)
 
-    async def _execute(self, namespace, workload, pod, out, inp, causal_chain, incident_id=None, t0_ms=None):
+    async def _execute(self, namespace, workload, pod, out, inp, causal_chain, incident_id=None, t0_ms=None,
+                       health_event_id=None):
         logger.info(f"DECISION {out.decision.value} {namespace}/{workload} "
                     f"score={out.adjusted_score:.2f} :: {out.rationale}")
         outcome = "logged"
@@ -630,7 +635,21 @@ class FusionAgentV4:
                 await contain_breaker(self.redis, namespace, self.clock).record(incident_id)
             outcome = "queued_for_executor"
         elif out.decision == Decision.AUTO_PATCH:
-            if not await self._enqueue_exec(incident_id, "patch", namespace, workload, pod, out, inp):
+            # One health event is patched once even when a later security event re-decides the buffered health
+            # event under a different incident id (the per-incident marker alone would not stop that).
+            health_marker = None
+            if health_event_id:
+                health_marker = f"{EXEC_REQ_PREFIX}-health:{health_event_id}:patch"
+                if not await self.redis.set(health_marker, "1", nx=True, ex=self.cfg.incident_context_ttl_s):
+                    logger.info(f"patch for health event {health_event_id} was already queued; no second request")
+                    return "already_queued"
+            try:
+                queued = await self._enqueue_exec(incident_id, "patch", namespace, workload, pod, out, inp)
+            except Exception:
+                if health_marker:
+                    await self.redis.delete(health_marker)
+                raise
+            if not queued:
                 return "already_queued"
             if not out.dry_run:
                 await patch_breaker(self.redis, namespace, workload, self.clock).record(incident_id)
@@ -776,15 +795,16 @@ class FusionAgentV4:
         if not await self.redis.set(marker, "1", nx=True, ex=self.cfg.incident_context_ttl_s):
             return
         try:
+            # Ledger entry BEFORE the request is queued (the ledger-before-corrective-action rule).
+            await self._append_ledger(incident_id, "restore_requested", {
+                "t0_ms": int(t0), "workload_kind": kind, "namespace": namespace, "deployment": workload,
+                "pod": pod, "approved_by": "auto", "contain_approved_by": contain_approved_by,
+                "dry_run": dry_run})
             await self._xadd_restore(incident_id, namespace, workload, pod, kind, t0, dry_run, contain_approved_by,
-                                       ctx.get("namespace_tier", ""))
+                                     ctx.get("namespace_tier", ""))
         except Exception:
             await self.redis.delete(marker)
             raise
-        await self._append_ledger(incident_id, "restore_requested", {
-            "t0_ms": int(t0), "workload_kind": kind, "namespace": namespace, "deployment": workload,
-            "pod": pod, "approved_by": "auto", "contain_approved_by": contain_approved_by,
-            "dry_run": dry_run})
         await self.redis.xadd(ACTIONS_STREAM, {
             "incident_id": incident_id, "action_type": "restore_requested",
             "target": json.dumps({"namespace": namespace, "deployment": workload, "pod": pod}),
@@ -822,6 +842,16 @@ class FusionAgentV4:
             "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
         })
 
+    def _event_is_fresh(self, event: Dict) -> bool:
+        """The event's own timestamp_ms is within SECURITY_FRESH_S of now (absent or unparsable: not fresh)."""
+        try:
+            ts_ms = float(event.get("timestamp_ms"))
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(ts_ms):
+            return False
+        return abs(self.clock() * 1000.0 - ts_ms) <= self.cfg.security_fresh_s * 1000.0
+
     async def _security_score(self, namespace: str, workload: str) -> Tuple[bool, Optional[float]]:
         """(fresh, risk) from the hash the Security Agent writes per workload (task V5-S2, not built yet):
         `kubeheal:security:score:<namespace>:<workload>` with fields sec_risk, ts_ms, model_scored.
@@ -840,7 +870,7 @@ class FusionAgentV4:
             risk = float(h["sec_risk"])
         except (KeyError, TypeError, ValueError):
             return False, None
-        if not (math.isfinite(ts_ms) and math.isfinite(risk)):
+        if not (math.isfinite(ts_ms) and math.isfinite(risk)) or not 0.0 <= risk <= 1.0:
             return False, None
         # abs(): a timestamp slightly ahead of this clock (clock skew) is as fresh as one slightly behind it
         if abs(self.clock() * 1000.0 - ts_ms) > self.cfg.security_fresh_s * 1000.0:

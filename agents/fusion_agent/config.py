@@ -5,6 +5,7 @@ burn-in samples, 3x sampling) live in decision_policy.py and agents/common/sampl
 """
 
 import logging
+import math
 import os
 from dataclasses import dataclass
 from typing import Mapping, Optional
@@ -21,8 +22,8 @@ def _num(env: Mapping[str, str], name: str, default, cast=float):
     except ValueError:
         logger.warning(f"{name}={raw!r} is not a number; using {default}")
         return default
-    if value <= 0:
-        logger.warning(f"{name}={raw!r} must be positive; using {default}")
+    if not math.isfinite(value) or value <= 0:
+        logger.warning(f"{name}={raw!r} must be a finite positive number; using {default}")
         return default
     return value
 
