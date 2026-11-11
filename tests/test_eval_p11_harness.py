@@ -50,7 +50,7 @@ def test_k6_job_is_pinned_limited_and_uses_pinned_image():
     term = affinity["preferredDuringSchedulingIgnoredDuringExecution"][0]
     assert term["weight"] == 100
     assert term["podAffinityTerm"]["labelSelector"]["matchExpressions"][0]["values"] == [
-        "kubeheal-health-model", "kubeheal-security-model", "kubeheal-dcm"]
+        "kubeheal-health-model", "kubeheal-security-model", "kubeheal-dcm", "kubeheal-inference"]
     assert job["spec"]["activeDeadlineSeconds"] == 900
     container = spec["containers"][0]
     assert container["image"] == "grafana/k6:0.54.0"
