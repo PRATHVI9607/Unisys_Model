@@ -110,7 +110,7 @@ metadata: {name: kubeheal-executor-entropy-read}
 rules:
   - apiGroups: [batch]
     resources: [jobs]
-    verbs: [get, list]
+    verbs: [get]
   - apiGroups: [""]
     resources: [pods/log]
     verbs: [get]

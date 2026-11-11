@@ -49,7 +49,11 @@ DONE_PREFIX = "kubeheal:exec:done"       # result marker per incident, action an
 DONE_TTL_S = 7 * 24 * 3600               # chosen, not measured: how long a finished request is remembered
 # Outcomes that are not final: a later request for the same incident may legitimately run again.
 # Refused and escalated-before-running outcomes wrote nothing; a corrected request must be able to follow.
-NOT_FINAL_PREFIXES = ("DRY RUN:", "stopped_mode_test", "refused:", "escalated:", "no_baseline_escalated")
+# `contain_failed`, `restore_failed` and `restored_kept_isolated` still escalate to a human, but a retry under
+# the same incident id must not be skipped for DONE_TTL_S. A retry of a partly run restore fails safe:
+# restore preflight cannot read the original pod and escalates before it writes anything.
+NOT_FINAL_PREFIXES = ("DRY RUN:", "stopped_mode_test", "refused:", "escalated:", "no_baseline_escalated",
+                      "contain_failed", "restore_failed", "restored_kept_isolated")
 
 
 class RequestGate:
@@ -193,10 +197,12 @@ class ExecutorService:
 
     async def _dead_letter(self, stream: str, msg_id: str, fields: Dict, deliveries: int, reason: str):
         """The request failed `deliveries` times. It may have run partly, so a human must look at it."""
-        METRICS.record_action(fields.get("action", "unknown"), "escalated")
-        METRICS.record_escalation("dead_lettered")
         await self._escalate(fields, reason)
         await self._record(fields, reason)
+        # Count only after both durable writes succeeded (same rule as _finish): a failure leaves the
+        # entry pending and it is dead-lettered again.
+        METRICS.record_action(fields.get("action", "unknown"), "escalated")
+        METRICS.record_escalation("dead_lettered")
 
     @staticmethod
     def _done_key(f: Dict, msg_id: str) -> str:

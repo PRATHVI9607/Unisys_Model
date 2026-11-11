@@ -197,3 +197,50 @@ def test_fusion_enqueues_for_executor_and_has_no_kubernetes_client():
     assert req["incident_id"].startswith("inc-")
     rec = dict(a.redis.added)[fusion.ACTIONS_STREAM]
     assert rec["outcome"] == "queued_for_executor" and rec["incident_id"] == req["incident_id"]
+
+
+@pytest.mark.parametrize("outcome", ["restored_kept_isolated:entropy still high", "restore_failed:boom",
+                                     "contain_failed:no pod"])
+def test_escalated_failure_outcomes_are_not_final_so_a_retry_is_not_skipped(outcome):
+    r = FakeRedis()
+    ex = ExecutorService(redis=r, mode=Mode(), record_step=lambda *args: None)
+    calls = []
+
+    async def execute(fields):
+        calls.append(len(calls))
+        return outcome if len(calls) == 1 else "restored"
+
+    ex.execute = execute
+    fields = {"action": "restore", "incident_id": "inc-1", "namespace": "prod"}
+    assert run(ex.handle_entry(EXEC_STREAM, "1-0", fields))
+    assert not any(k.startswith("kubeheal:exec:done") for k in r.store)      # no marker written
+    assert r.added and r.added[0][0] == "kubeheal.escalations"             # still escalated to a human
+    assert run(ex.handle_entry(EXEC_STREAM, "2-0", fields))
+    assert calls == [0, 1]                                                  # the retry really ran
+    assert any(k.startswith("kubeheal:exec:done") for k in r.store)         # final outcome is remembered
+
+
+def test_dead_letter_counts_metrics_only_after_the_escalation_and_record_succeeded(monkeypatch):
+    ex = ExecutorService(redis=FakeRedis(), mode=Mode())
+    order = []
+
+    async def escalate(fields, reason):
+        order.append("escalate")
+
+    async def record(fields, reason):
+        order.append("record")
+    ex._escalate, ex._record = escalate, record
+    monkeypatch.setattr("agents.executor.main.METRICS.record_action",
+                        lambda action, outcome: order.append("action_metric"))
+    monkeypatch.setattr("agents.executor.main.METRICS.record_escalation",
+                        lambda reason: order.append("escalation_metric"))
+    run(ex._dead_letter("s", "1-0", {"action": "patch"}, 3, "dead_lettered: x"))
+    assert order == ["escalate", "record", "action_metric", "escalation_metric"]
+
+    async def record_fails(fields, reason):
+        raise RuntimeError("ledger unavailable")
+    ex._record = record_fails
+    order.clear()
+    with pytest.raises(RuntimeError):
+        run(ex._dead_letter("s", "1-0", {"action": "patch"}, 3, "dead_lettered: x"))
+    assert order == ["escalate"]

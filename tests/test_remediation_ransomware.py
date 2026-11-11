@@ -141,6 +141,18 @@ def test_scheduler_skips_frozen_pvcs_and_never_prunes_them():
     assert out["created"] == [] and out["deleted"] == [] and out["skipped"] == ["prod/data:frozen"]
 
 
+def test_freeze_appearing_mid_prune_stops_the_remaining_deletes():
+    t = Sched()
+    t.seed(15)                                  # one more is created: four are over the limit of twelve
+
+    async def frozen_after_first_delete(ns, pvc):
+        return any(e[1] == "delete_snapshot" for e in t.c.log)
+    t.s.is_frozen = frozen_after_first_delete
+    out = run(t.s.run_once())
+    assert len(out["deleted"]) == 1             # the freeze was seen before the second delete
+    assert len(t.c.writes("delete_snapshot")) == 1
+
+
 def test_scheduler_needs_the_snapshot_class_and_stays_in_protected_namespaces():
     t = Sched(env={})
     out = run(t.s.run_once())
@@ -488,3 +500,21 @@ def test_missing_snapshot_class_is_recorded_once_not_every_cycle():
     for _ in range(4):
         run(t.s.run_once())
     assert t.records.count("snapshot_run_skipped") == 1
+
+
+# ---- review findings: a retry after a partial restore fails safe ---------------------------------------
+def test_retry_after_a_partial_restore_escalates_with_a_scaled_to_zero_hint_and_writes_nothing():
+    r = R()
+    r.c.stuck_scale_down = True
+    assert r.go().startswith("restore_failed:scale to zero did not settle")
+    before = len(r.c.log)
+
+    async def gone(name, ns):
+        err = Exception("pod not found")
+        err.status = 404
+        raise err
+    r.c.core.read_namespaced_pod = gone              # the original pod is gone after the scale down
+    out = r.go()
+    assert out.startswith("escalated:pod_not_found")
+    assert "scaled to zero" in out and "kubeheal/original-replicas" in out and "human review" in out
+    assert len(r.c.log) == before                    # the retry wrote nothing

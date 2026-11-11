@@ -13,7 +13,15 @@ import sys
 from collections import Counter
 from typing import Iterable
 
-ENTROPY_THRESHOLD = 7.2  # Matches SecurityAgent's existing default threshold.
+# 7.2 bits per byte: chosen default, not measured. It matches SecurityAgent's existing default. Limits of
+# a whole-file score against this threshold:
+#   - A file shorter than about 147 bytes cannot exceed 7.2 bits per byte (a Shannon estimate over n bytes
+#     is at most log2(n)), so short encrypted files always read as below the threshold.
+#   - Partial encryption (only part of a file, or intermittent encryption) dilutes a whole-file score,
+#     so a partly encrypted file can read below the threshold.
+#   - Compressed or media files (zip, gz, jpg, mp4) can read high without being encrypted, which keeps
+#     a restored volume isolated (fail safe, but a false alarm).
+ENTROPY_THRESHOLD = 7.2
 READ_CHUNK_BYTES = 64 * 1024
 
 

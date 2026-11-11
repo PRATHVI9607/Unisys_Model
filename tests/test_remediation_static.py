@@ -165,7 +165,7 @@ def test_entropy_scanner_read_permissions_are_namespaced():
     permissions = {(group, resource, verb) for rule in role["rules"]
                    for group in rule["apiGroups"] for resource in rule["resources"]
                    for verb in rule["verbs"]}
-    assert permissions == {("batch", "jobs", "get"), ("batch", "jobs", "list"),
+    assert permissions == {("batch", "jobs", "get"),
                            ("", "pods/log", "get")}
     bindings = [d for d in docs if d.get("kind") == "RoleBinding" and
                 d.get("roleRef", {}).get("name") == "kubeheal-executor-entropy-read"]

@@ -37,6 +37,7 @@ def job_body(name: str, incident_id: str, image: str, pvcs: List[str], timeout_s
                   "securityContext": {"allowPrivilegeEscalation": False,
                                       "readOnlyRootFilesystem": True,
                                       "capabilities": {"drop": ["ALL"]}},
+                  # CPU and memory requests and limits: chosen default, not measured.
                   "resources": {"requests": {"cpu": "100m", "memory": "128Mi"},
                                 "limits": {"cpu": "500m", "memory": "256Mi"}},
                   "volumeMounts": mounts}], "volumes": volumes}

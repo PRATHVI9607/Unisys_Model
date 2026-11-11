@@ -39,3 +39,10 @@
 
 - P7-RR-10 remains `[~] Codex` in `docs/kubeheal/PROGRESS.md`. Resolve the pending owner decisions before continuing the ledger failure and operator unfreeze items. Review restore crash recovery and any remaining per-incident gaps. Do not run cluster work or model training.
 - P7-RR-11 follows RR-9; it remains a candidate local task after RR-10 unless its dependencies add a constraint.
+
+## Review fixes in agents/executor (Claude builder, 2026-11-11, branch `work`)
+
+- drift.py: rollback point saved only after the gate allows the write; closed ("failed") when nothing was patched (ModeBlocked, pre-patch error, API 4xx); a missing `state` is terminal, only "pending" blocks. An ambiguous patch failure (timeout) keeps "pending" on purpose.
+- main.py: `contain_failed`, `restore_failed`, `restored_kept_isolated` are not final markers (still escalate); `_dead_letter` counts metrics after the record. restore.py: pod 404 in preflight escalates `pod_not_found` with a scaled-to-zero hint. No resume action.
+- snapshots.py re-checks freeze before every prune delete. Threshold and Job resource comments added. Job `list` verb removed from the entropy read role (k8s and Helm).
+- Not done: scanner Job runAsNonRoot (Dockerfile.executor has no USER, not verified), restore resume, scan-job node pinning, scanner image digest pinning.

@@ -340,3 +340,85 @@ def test_a_metric_source_that_raises_during_a_canary_window_rolls_back():
     assert out.startswith("rolled_back:window 1")
     assert "canary_metric_error" in s.steps() and s.steps()[-1] == "rolled_back"
     assert s.live_spec() == s.live_before            # the rollback restored the live spec
+
+
+# ---- review findings: no pending rollback point when nothing was patched --------------------------------
+def _stored(s):
+    return run(drift.RollbackStore(s.redis).load("prod", "web"))
+
+
+def test_dry_run_leaves_no_pending_rollback_point_and_a_later_live_request_patches():
+    gate = fk.ToggleGate()
+    s = Scenario(gate=gate)
+    gate.on = False
+    assert s.go().startswith("DRY RUN: would have PATCH prod/web")
+    assert (_stored(s) or {}).get("state") != "pending"
+    assert s.c.writes() == [] and "rollback_point_saved" not in s.steps()
+    gate.on = True
+    s.calls.clear()                                      # the metric fake counts calls: next one is "before"
+    assert s.go() == "patched_kept"                      # SAME incident id inc-1
+    assert "rollback_recovered_after_restart" not in s.steps()
+    assert s.live_spec()["template"]["spec"]["containers"][0]["resources"]["limits"]["cpu"] == "500m"
+    assert _stored(s)["state"] == "kept"
+
+
+def test_dry_run_does_not_block_a_later_different_incident():
+    gate = fk.ToggleGate()
+    s = Scenario(gate=gate)
+    gate.on = False
+    assert s.go().startswith("DRY RUN:")
+    gate.on = True
+    s.calls.clear()
+    req = Request(action="patch", namespace="prod", incident_id="inc-2", deployment="web", patch_field=CPU)
+    out = run(drift.canary_patch(s.gate, s.c.apps, req, s.golden, s.rec, s.source,
+                                 drift.RollbackStore(s.redis), ExecConfig(s.env), s.clock.sleep, s.clock))
+    assert out == "patched_kept"
+    assert "rollback_recovery_blocked" not in s.steps()
+
+
+def test_gate_closing_between_the_save_and_the_patch_closes_the_pending_record():
+    s = Scenario(gate=fk.Gate(allow=1))      # first query (before the save) opens, the write gate refuses
+    out = s.go()
+    assert out.startswith("DRY RUN: would have PATCH")
+    assert s.c.writes() == []
+    assert _stored(s)["state"] == "failed"
+    assert "rollback_point_discarded" in s.steps()
+
+
+class _ApiError(Exception):
+    def __init__(self, status):
+        super().__init__(f"api {status}")
+        self.status = status
+
+
+def test_patch_rejected_by_the_api_closes_the_pending_record():
+    s = Scenario()
+
+    async def reject(*a, **k):
+        raise _ApiError(422)
+    s.c.apps.patch_namespaced_deployment = reject
+    assert s.go().startswith("patch_failed:")
+    assert _stored(s)["state"] == "failed"
+
+
+def test_ambiguous_patch_failure_keeps_the_pending_record_for_recovery():
+    s = Scenario()
+
+    async def timeout(*a, **k):
+        raise TimeoutError("connection lost")        # the patch may have been applied
+    s.c.apps.patch_namespaced_deployment = timeout
+    assert s.go().startswith("patch_failed:")
+    assert _stored(s)["state"] == "pending"
+
+
+def test_rollback_record_without_a_state_is_terminal_not_pending():
+    s = Scenario()
+    run(drift.RollbackStore(s.redis).save("prod", "web", {
+        "incident_id": "inc-old", "rollback": [{"op": "replace", "path": "/spec/x", "value": 1}]}))
+    assert s.go() == "patched_kept"
+    assert "rollback_recovery_blocked" not in s.steps()
+    # the same incident id with a missing state must not trigger the recovery rollback either
+    s2 = Scenario()
+    run(drift.RollbackStore(s2.redis).save("prod", "web", {
+        "incident_id": "inc-1", "rollback": [{"op": "replace", "path": "/spec/x", "value": 1}]}))
+    assert s2.go() == "patched_kept" and "rollback_recovered_after_restart" not in s2.steps()

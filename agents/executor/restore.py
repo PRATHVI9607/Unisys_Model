@@ -19,6 +19,8 @@ Writes (each one through `_write`, so the kill switch can stop between any two):
     the policy. Not clean or unknown: keep isolated and escalate.
 
 The old PVC is never deleted or modified (it is the evidence) and stays frozen for rolling snapshots.
+A retry of a restore that stopped partway fails safe: the original pod is gone, preflight cannot read it
+and escalates (`pod_not_found`) before anything is written. There is no resume action; a human decides.
 A StatefulSet whose volume comes from `volumeClaimTemplates` cannot be repointed by a patch (those
 templates are immutable) and RBAC grants no PVC delete, so that case escalates before any write.
 After a restore the golden baseline (old claimName, image tag) no longer equals the live spec; it must
@@ -123,7 +125,17 @@ async def _preflight(core_api, apps_api, custom_api, req: Request) -> Dict:
             raise Escalate("replicas_unknown: workload is already at 0 and no remembered count exists")
         replicas = int(ann)
 
-    pod = to_dict(await core_api.read_namespaced_pod(req.pod, ns))
+    try:
+        pod = to_dict(await core_api.read_namespaced_pod(req.pod, ns))
+    except Exception as e:
+        if getattr(e, "status", None) == 404 or "not found" in str(e).lower():
+            # After a partial run the pod is gone (scaled to zero, or replaced by the restored pods).
+            # A retry must not guess; a human decides. Nothing has been written by this attempt.
+            raise Escalate(
+                f"pod_not_found: pod {req.pod} no longer exists. A previous restore attempt may have left "
+                f"{kind} {name} scaled to zero with annotation {REPLICAS_ANNOTATION} set (or already "
+                "repointed to restored PVCs); needs human review before any retry") from e
+        raise
     if not await workload_owns_pod(apps_api, ns, pod, name, kind):
         raise Escalate(f"pod_not_owned: {req.pod} is not owned by {kind} {name}")
 

@@ -3,7 +3,9 @@ Drift path: canary patch (S-RD-1 .. S-RD-4, P7-RR-1, P7-RR-2).
 ================================================================
 1. Read the live Deployment, diff its drift view against the golden baseline and keep ONLY the
    differences at or under the request's `patch_field` (never the whole pod template).
-2. Save the live spec and both patches as a rollback point (Redis, survives an Executor restart).
+2. Once the kill-switch gate allows the write, save the live spec and both patches as a rollback point
+   (Redis, survives an Executor restart). State "pending" only exists while a patch may be in flight: it
+   is closed ("failed") when nothing was patched.
 3. Patch as RFC 6902 JSON Patch (every replace/remove is guarded by a `test` op on the live value)
    with `strategy.rollingUpdate.maxUnavailable` forced to 0 for this rollout.
 4. Wait for the rollout, then watch CANARY_WINDOWS (3, from the spec) windows of p99 latency and CPU
@@ -237,13 +239,17 @@ async def canary_patch(gate, apps_api, req: Request, golden: Optional[Dict], rec
 
     done: List[str] = []
     planned = ["patch_deployment"]
+    saved = False            # a pending rollback point of this request is in the store
+    patch_started = False    # the patch call was issued and has not returned yet
     try:
         try:
             previous = await store.load(ns, name)
         except Exception as e:
             await record("rollback_point_read_failed", {"error": str(e)})
             return f"escalated:rollback_point_unreadable:{e}"
-        if previous and previous.get("state", "pending") == "pending":
+        # Only an explicit "pending" blocks. A record without a state is a legacy or foreign record and
+        # is treated as terminal, so it can never trigger a recovery rollback by accident.
+        if previous and previous.get("state") == "pending":
             previous_incident = previous.get("incident_id")
             if previous_incident != req.incident_id:
                 await record("rollback_recovery_blocked", {"pending_incident_id": previous_incident})
@@ -281,6 +287,12 @@ async def canary_patch(gate, apps_api, req: Request, golden: Optional[Dict], rec
         if not any((before or {}).get(k) is not None for k in METRIC_KEYS):
             return "escalated:no_pre_patch_metrics: nothing to compare the canary against"
 
+        # A "pending" rollback point must exist only while a patch may really be in flight. Check the gate
+        # first, so a dry run (or test mode) never leaves a pending record behind.
+        if not gate_open(gate, ns):
+            if gate is not None and hasattr(gate, "record_step"):
+                await gate.record_step(ns, planned[0], "blocked_by_kill_switch")
+            raise ModeBlocked(planned[0])
         try:
             await store.save(ns, name, {"incident_id": req.incident_id, "live_spec": live,
                                         "rollback": plan.rollback, "restore_strategy": plan.restore_strategy,
@@ -288,9 +300,12 @@ async def canary_patch(gate, apps_api, req: Request, golden: Optional[Dict], rec
         except Exception as e:
             await record("rollback_point_failed", {"error": str(e)})
             return f"escalated:rollback_point_not_saved:{e}"
+        saved = True
         await record("rollback_point_saved", {"rollback": plan.rollback})
 
+        patch_started = True
         await _write(gate, ns, planned[0], apps_api.patch_namespaced_deployment, name, ns, plan.forward)
+        patch_started = False
         done.append("patch_deployment")
         await record("patched", {"drifted": plan.drifted})
 
@@ -327,13 +342,36 @@ async def canary_patch(gate, apps_api, req: Request, golden: Optional[Dict], rec
         return "patched_kept"
     except ModeBlocked as b:
         await record("blocked", {"step": b.step})
+        if saved and not done:        # the gate closed between the save and the patch: nothing was patched
+            await _discard_pending(store, req, record, "blocked before the patch")
         return _blocked_outcome(f"PATCH {ns}/{name}", planned, done, b)
     except Exception as e:
         logger.error(f"drift path failed for {ns}/{name}: {e}")
         await record("failed", {"error": str(e)})
+        # Nothing was patched when the failure came before the patch call, or when the API refused the
+        # patch with a client error. An ambiguous failure of the patch call (timeout, connection loss)
+        # may have been applied, so that pending rollback point stays for recovery or a human.
+        if saved and not done and (not patch_started or _not_applied(e)):
+            await _discard_pending(store, req, record, f"failed before anything was patched: {e}")
         if done:
             return f"patch_failed:{e}; completed {done}; the rollback point is in Redis"
         return f"patch_failed:{e}"
+
+
+def _not_applied(exc: Exception) -> bool:
+    """True when the API server rejected the request outright (4xx), so the patch cannot have been applied."""
+    status = getattr(exc, "status", None)
+    return isinstance(status, int) and 400 <= status < 500 and status not in (408, 429)
+
+
+async def _discard_pending(store: RollbackStore, req: Request, record: Recorder, why: str) -> None:
+    """Make this request's pending rollback point terminal. Never raises: the outcome stays the same."""
+    try:
+        await store.set_state(req.namespace, req.deployment, req.incident_id, "failed")
+        await record("rollback_point_discarded", {"reason": why})
+    except Exception as e:
+        logger.error(f"could not close the pending rollback point of {req.namespace}/{req.deployment}: {e}")
+        await record("rollback_point_discard_failed", {"error": str(e)})
 
 
 async def _roll_back(gate, apps_api, req: Request, plan: PatchPlan, record: Recorder,

@@ -192,6 +192,9 @@ class SnapshotScheduler:
             if s is newest_ready:
                 continue
             sname = s["metadata"]["name"]
+            # A freeze can appear while this loop runs (a containment starts): look again before EACH delete.
+            if self.is_frozen and await self.is_frozen(ns, pvc):
+                return
             try:
                 await _write(self.gate, ns, "delete_old_rolling_snapshot",
                              self.custom_api.delete_namespaced_custom_object,
