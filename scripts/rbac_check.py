@@ -40,6 +40,9 @@ for sa in READERS:
 EXPECT += [
     ("health-agent", "watch deployments.apps", "prod", True),
     ("health-agent", "list services", "prod", True),
+    ("health-agent", "list horizontalpodautoscalers.autoscaling", "prod", True),
+    ("health-agent", "list horizontalpodautoscalers.autoscaling", "kube-system", False),
+    ("health-agent", "list horizontalpodautoscalers.autoscaling", "kubeheal", False),
     ("security-agent", "list pods", None, True),
     ("security-agent", "list replicasets.apps", None, True),
     ("fusion-agent", "get namespaces", None, True),
