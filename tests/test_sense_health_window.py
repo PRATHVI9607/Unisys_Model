@@ -291,8 +291,11 @@ def test_missing_metrics_publish_max_ci_width_but_keep_the_assessment(monkeypatc
     assert json.loads(pub["metrics_missing_json"]) == win.missing
     assert float(pub["health_risk"]) == pytest.approx(0.7)
     # the policy cannot auto-patch on it
-    d = make_decision(DecisionInput(health_risk=0.99, health_ci_width=float(pub["health_ci_width"]),
-                                    namespace_tier="prod", mode="enforce"))
+    # (V5-D3: until V5-D4 the Health Agent publishes no prediction set; a present health event without one
+    # is uncertain for the policy, so even a scored, certain-looking risk goes to a human)
+    d = make_decision(DecisionInput(health_risk=0.99, health_label="degradation", health_prediction_set=None,
+                                    models_ok=True, namespace_tier="prod", namespace_protected=False,
+                                    metric_samples_seen=10**6, mode="enforce"))
     assert d.decision == Decision.HUMAN_PATCH
 
 

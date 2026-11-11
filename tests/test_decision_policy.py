@@ -20,8 +20,11 @@ from agents.fusion_agent.decision_policy import (
 # P6: the policy fails closed on missing inputs, so the base case states them explicitly: all models
 # answered, namespace known to be unprotected, burn-in over. Tests for the new rules live in
 # tests/test_policy_rules.py.
+# V5-D3 (M2): an automatic action needs a one-label prediction set on the trigger side, and containment only
+# for the labels ransomware and exfiltration (Q2). The base case states both.
 OK = dict(models_ok=True, namespace_protected=False, metric_samples_seen=BURN_IN_SAMPLES,
-          namespace_tier="staging")
+          namespace_tier="staging", health_label="drift", health_prediction_set=["drift"],
+          sec_label="ransomware", sec_prediction_set=["ransomware"])
 
 
 def D(**kw):
@@ -66,8 +69,8 @@ def test_health_patch_cb_limit_escalates():
           circuit_breaker_patches=CB_PATCH_LIMIT_PER_HOUR)
     assert o.decision == Decision.HUMAN_PATCH
 
-def test_health_patch_wide_ci_escalates():
-    o = D(health_risk=0.95, sec_risk=0.0, namespace_tier="prod", health_ci_width=0.2)
+def test_health_patch_two_label_set_escalates():
+    o = D(health_risk=0.95, sec_risk=0.0, namespace_tier="prod", health_prediction_set=["drift", "benign"])
     assert o.decision == Decision.HUMAN_PATCH
 
 
@@ -81,8 +84,8 @@ def test_security_contain_cb_limit_escalates():
     o = D(sec_risk=0.95, namespace_tier="prod", circuit_breaker_containments=CB_CONTAIN_LIMIT_PER_HOUR)
     assert o.decision == Decision.HUMAN_CONTAIN
 
-def test_security_contain_wide_ci_escalates():
-    o = D(sec_risk=0.95, namespace_tier="prod", sec_ci_width=0.3)
+def test_security_contain_two_label_set_escalates():
+    o = D(sec_risk=0.95, namespace_tier="prod", sec_prediction_set=["ransomware", "suspicious"])
     assert o.decision == Decision.HUMAN_CONTAIN
 
 
@@ -100,9 +103,9 @@ def test_compound_escalation_applied():
     comp = D(sec_risk=0.80, namespace_tier="staging", compound_flag=True, correlation_score=0.7)
     assert comp.adjusted_score > base.adjusted_score
 
-def test_compound_wide_ci_human():
+def test_compound_two_label_set_human():
     o = D(health_risk=0.88, sec_risk=0.93, compound_flag=True,
-          correlation_score=0.84, namespace_tier="prod", sec_ci_width=0.25)
+          correlation_score=0.84, namespace_tier="prod", sec_prediction_set=["ransomware", "benign"])
     assert o.decision == Decision.HUMAN_CONTAIN
 
 def test_compound_cb_limit_human():

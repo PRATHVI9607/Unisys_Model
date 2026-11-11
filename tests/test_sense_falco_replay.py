@@ -422,8 +422,9 @@ def test_heuristic_only_event_has_max_ci_width_and_cannot_auto_contain(monkeypat
     assert p["model_scored"] == "false" and p["syscall_source"] == "none"
     assert float(p["sec_ci_width"]) >= 1.0
     # even at the highest risk the policy sees an uncertain event: human, never AUTO_CONTAIN
-    out = make_decision(DecisionInput(sec_risk=0.99, sec_label=p["sec_label"],
-                                      sec_ci_width=float(p["sec_ci_width"]),
+    # (V5-D3: the policy gate is the prediction set and models_ok; this event was not scored by the model)
+    out = make_decision(DecisionInput(sec_risk=0.99, sec_label="ransomware", sec_prediction_set=["ransomware"],
+                                      models_ok=p["model_scored"] == "true",
                                       namespace_tier="prod", mode="enforce"))
     assert out.decision != Decision.AUTO_CONTAIN and out.decision == Decision.HUMAN_CONTAIN
     assert out.dry_run is False
