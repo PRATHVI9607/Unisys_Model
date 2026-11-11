@@ -7,7 +7,9 @@ Read `AGENTS.md`, `docs/kubeheal/PROGRESS.md` (checklist, section "V5 integratio
 Codex may do EVERY task in this file, including `agents/fusion_agent/decision_policy.py`, the Executor write paths, RBAC (`k8s/rbac/`, the chart RBAC template),
 chart changes and merges, provided it runs the full suite after each merge and keeps the safety rules below. Claude Code will only do a final review afterwards.
 
-## State at handoff (2026-11-11, Claude Code, final handoff)
+## Active run state (2026-11-11, Codex)
+
+Codex is the active orchestrator and owns the ordered run below. No push is permitted. Owner stop points are credentials/passwords, model training, deleting user data, or changing `PROJECT_SPEC.md`. Current starting tips: `demo` `66eb2ad`, `work` `d478dcd`, `wave/V5-D4` `2188a6e`, `wave/V5-S2` `f6ecfa9`. The first active item is V5-D4 review fixes; it has not yet been changed in this run.
 
 Owner decisions (all in `V5_INTEGRATION_PLAN.md` section 11): M1 option (b), M2, M3, D1, D2, D3, D5, D6, D7, plus the two latest answers Q1 and Q2.
 In short: LightGBM health and security bundles (split-conformal sets, TreeSHAP) run inside OUR architecture; an automatic action needs a prediction set of exactly one label (M2);
@@ -21,10 +23,10 @@ the eBPF sensor is optional and last (D6).
 
 | Branch | Worktree | Tip | State | What it needs |
 |---|---|---|---|---|
-| `work` | `../Unisys_Model-wt-metric-query` | see `git log -1 work` | Has M1, D1, D2, D4a, I2, D3 merged and reviewed. Full suite last run: 1304 passed, 3 skipped, 34 deselected (the two live cluster files). | Merge D4 and S2 after the fixes below. |
-| `demo` | main checkout `C:/My_projects_1/cLOUD/Unisys_Model` | see `git log -1 demo` | `work` merged in, plus `wave/V5-I2-demo` (demo scripts for the inference service). | Merge `work` into `demo` after every merge on `work`. |
-| `wave/V5-D4` | `../Unisys_Model-wt-V5-D4` | `2188a6e` | Health Agent port built, 1358 passed in its worktree, reviewed once (verdict: merge after the findings below), findings NOT yet fixed, NOT merged. | Section "Task 1". |
-| `wave/V5-S2` | `../Unisys_Model-wt-V5-S2` | `f6ecfa9` | Security Agent port built, 1376 passed in its worktree, reviewed once (verdict: do NOT merge as is), findings NOT yet fixed, NOT merged. | Section "Task 2". |
+| `work` | `../Unisys_Model-wt-metric-query` | `d478dcd` | Has M1, D1, D2, D4a, I2, D3 merged and reviewed. Full suite last recorded: 1304 passed, 3 skipped, 34 deselected (the two live cluster files); not rerun by Codex yet. | Fix/review and merge D4, then S2; full suite after each. |
+| `demo` | main checkout `C:/My_projects_1/cLOUD/Unisys_Model` | `66eb2ad` | `work` merged in, plus `wave/V5-I2-demo` (demo scripts for the inference service). Current checkout. | Merge `work` after each task/merge as required. |
+| `wave/V5-D4` | `../Unisys_Model-wt-V5-D4` | `2188a6e` | Health Agent port built, 1358 passed in its worktree, reviewed once (verdict: merge after findings); findings not yet fixed, not merged. Clean at Codex start. | Active: Task 1. |
+| `wave/V5-S2` | `../Unisys_Model-wt-V5-S2` | `f6ecfa9` | Security Agent port built, 1376 passed in its worktree, reviewed once (verdict: do not merge as is); findings not yet fixed, not merged. Clean at Codex start. | Task 2, after D4. |
 | merged and safe to delete later (keep the branches, remove only worktrees you no longer need) | | | `wave/V5-M1`, `V5-D1`, `V5-D2`, `V5-D4a`, `V5-I2`, `V5-I2-demo`, `V5-D3`, `wave/P11`, `wip/docs-p6d2` | none |
 
 Both unmerged worktrees are clean (everything committed). Each branch was cut from `work` at `96b1d08`, so a merge is expected to conflict only in `docs/kubeheal/PROGRESS.md` and `.ai/handoff.md`: keep both sides' checklist facts and re-write `.ai/handoff.md` yourself.
