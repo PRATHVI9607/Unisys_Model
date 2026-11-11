@@ -182,3 +182,58 @@ def test_missing_metrics_and_health_features_accept_the_result():
     assert set(miss) == set(RAW_METRICS) - {"cpu_usage_cores", "cpu_limit_cores"}
     assert "replicas_updated" not in miss                     # extras never reported as model gaps
     health_features({}, {}, w)                                # None entries are accepted, no exception
+
+
+# -- review fixes (names are validated, malformed bodies are missing, trailing slash) ------------------
+def test_names_that_are_not_dns_1123_are_refused_before_any_query():
+    import pytest
+
+    for bad_ns, bad_dep in (('ns"}or{x="', "web"), ("shop", 'web"}or{a="'), ("shop", "a+b(c)"),
+                            ("", "web"), ("shop", ""), ("Shop", "web"), ("shop", "web\n")):
+        with pytest.raises(ValueError):
+            mw.build_queries(bad_ns, bad_dep)
+    session = FakeSession({})
+    with pytest.raises(ValueError):
+        run(mw.fetch_window(session, "http://prom:9090", 'ns"}or{x="', "web", 1.0, 61.0))
+    assert session.urls == []          # nothing was sent
+    with pytest.raises(ValueError):
+        mw.pod_regex("a+b(c)")
+    mw.build_queries("shop", "web-1.v2")   # a dotted DNS name is fine
+
+
+def test_parse_range_malformed_bodies_are_missing_not_exceptions():
+    for bad in ([], None, "x", {"status": "success", "data": []},
+                {"status": "success", "data": {"result": [{"values": [[1]]}]}},
+                {"status": "success", "data": {"result": ["notadict"]}},
+                {"status": "success", "data": {"result": [{"values": 5}]}}):
+        assert mw.parse_range(bad) is None
+    assert mw.parse_range(_ok([[1, "0"]])) == [0.0]        # a real zero stays data
+
+
+class _BadJsonResp(FakeResp):
+    async def json(self):
+        raise json.JSONDecodeError("bad", "", 0)
+
+
+class _BadJsonSession(FakeSession):
+    def get(self, url, params, timeout):
+        return _BadJsonResp({})
+
+
+class _TimeoutSession(FakeSession):
+    def get(self, url, params, timeout):
+        raise asyncio.TimeoutError()
+
+
+def test_bad_json_and_timeouts_mark_every_metric_missing():
+    for session in (_BadJsonSession({}), _TimeoutSession({})):
+        w = run(mw.fetch_window(session, "http://prom:9090", "shop", "web", 1.0, 61.0))
+        assert set(w) == set(mw.build_queries("shop", "web"))
+        assert all(v is None for v in w.values())
+        assert mw.missing_metrics(w) == list(RAW_METRICS)
+
+
+def test_trailing_slash_on_base_url():
+    session = FakeSession({})
+    run(mw.fetch_window(session, "http://prom:9090/", "shop", "web", 1.0, 61.0))
+    assert all(u == "http://prom:9090/api/v1/query_range" for u in session.urls)

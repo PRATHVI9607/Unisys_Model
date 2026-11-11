@@ -51,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 from typing import Any
 
 import aiohttp
@@ -67,6 +68,15 @@ QUERY_TIMEOUT_S = 10
 # Kubernetes' random-name alphabet (no vowels, no 0/1/3): the pod-template-hash (1-10 chars) and the pod suffix (5).
 _K8S_ALNUM = "[bcdfghjklmnpqrstvwxz2456789]"
 
+# Kubernetes object names are DNS-1123 subdomains. Anything else is refused, so a name can never inject PromQL.
+_DNS_NAME = re.compile(r"[a-z0-9]([-a-z0-9.]*[a-z0-9])?")
+
+
+def _check_name(kind: str, value: str) -> str:
+    if not isinstance(value, str) or len(value) > 253 or _DNS_NAME.fullmatch(value) is None:
+        raise ValueError(f"invalid {kind} name for a PromQL selector: {value!r}")
+    return value
+
 
 def pod_regex(deployment: str) -> str:
     """Pods of exactly this Deployment: <name>-<pod-template-hash>-<suffix> (PromQL regexes are anchored).
@@ -76,11 +86,12 @@ def pod_regex(deployment: str) -> str:
     shortcut: a sibling whose middle segment uses only that alphabet (CronJob "web" -> job web-29245678) still
     matches; join on kube_pod_owner/kube_replicaset_owner if that ever bites.
     """
-    return deployment.replace(".", r"\\.") + f"-{_K8S_ALNUM}{{1,10}}-{_K8S_ALNUM}{{5}}"
+    return _check_name("deployment", deployment).replace(".", r"\\.") + f"-{_K8S_ALNUM}{{1,10}}-{_K8S_ALNUM}{{5}}"
 
 
 def build_queries(namespace: str, deployment: str) -> dict[str, str]:
     """One PromQL per RAW_METRICS name (+ two rollout-progress series), scoped to this Deployment's pods, raw SI units."""
+    _check_name("namespace", namespace)
     pods = f'namespace="{namespace}",pod=~"{pod_regex(deployment)}"'
 
     def sel(*extra: str) -> str:
@@ -89,6 +100,8 @@ def build_queries(namespace: str, deployment: str) -> dict[str, str]:
     ctr = sel('container!=""', 'container!="POD"')   # real containers only (no pause / pod aggregate)
     dep = f'{{namespace="{namespace}",deployment="{deployment}"}}'
     # Selectors built outside the f-strings: Python 3.11 (our venv) cannot nest the same quote type (v5 targets 3.13).
+    # shortcut: the limit series carry no container filter, so an init container with limits would be summed in
+    # (limits overstated, utilisation understated). Not verified on a live Prometheus; the demo workloads have no init container.
     cpu_res, mem_res, err_sel = sel('resource="cpu"'), sel('resource="memory"'), sel('status=~"5.."')
     req = f"sum(rate(http_requests_total{sel()}[1m]))"
     return {
@@ -114,27 +127,35 @@ def build_queries(namespace: str, deployment: str) -> dict[str, str]:
 
 
 def parse_range(body: dict[str, Any]) -> list[float] | None:
-    """query_range response -> samples of the first series; NaN/Inf dropped; None when no usable data."""
-    if body.get("status") != "success":
+    """query_range response -> samples of the first series; NaN/Inf dropped; None when no usable data.
+
+    A malformed body also gives None (missing, never a guess). Dropping NaN/Inf compresses the series: the
+    spacing is then no longer step_s, which `health_features` does not know (it assumes METRIC_STEP_S).
+    """
+    try:
+        if body.get("status") != "success":
+            return None
+        result = (body.get("data") or {}).get("result") or []
+        if not result:
+            return None
+        values = result[0].get("values") or []
+        out: list[float] = []
+        for point in values:
+            try:
+                f = float(point[1])
+            except (TypeError, ValueError, IndexError, KeyError):
+                continue
+            if math.isfinite(f):
+                out.append(f)
+    except (AttributeError, TypeError):
         return None
-    result = (body.get("data") or {}).get("result") or []
-    if not result:
-        return None
-    out: list[float] = []
-    for _, v in result[0].get("values") or []:
-        try:
-            f = float(v)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(f):
-            out.append(f)
     return out or None
 
 
 async def _query(session: aiohttp.ClientSession, base_url: str, promql: str,
                  start: float, end: float, step_s: int) -> list[float] | None:
     params = {"query": promql, "start": f"{start:.3f}", "end": f"{end:.3f}", "step": str(step_s)}
-    async with session.get(f"{base_url}/api/v1/query_range", params=params,
+    async with session.get(f"{base_url.rstrip('/')}/api/v1/query_range", params=params,
                            timeout=aiohttp.ClientTimeout(total=QUERY_TIMEOUT_S)) as resp:
         if resp.status != 200:
             raise aiohttp.ClientResponseError(resp.request_info, (), status=resp.status,
