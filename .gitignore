@@ -19,3 +19,4 @@ data/*.jsonl
 .pytest-tmp*/
 demo/k3d/.generated-values.yaml
 demo/k3d/.image-tags.json
+demo/k3d/.admin-token
