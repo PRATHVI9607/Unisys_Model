@@ -98,10 +98,16 @@ METRIC_SPECS: List[MetricSpec] = [
     MetricSpec("network_transmit_bytes",
                'sum(rate(container_network_transmit_bytes_total{%s}[1m]))' % _R,
                "standard", "cAdvisor (kubelet)"),
+    # The demo victim app's fsync-backed counter wins when it exists (k3d kubelets here expose no container_fs_*
+    # series, found 2026-11-11). Any other workload falls back to the original cAdvisor expression, so the
+    # column is not reported missing (CI width 1.0, always HUMAN) just because the demo counter is absent.
     MetricSpec("disk_io_bytes",
-               'sum(rate(kubeheal_victim_disk_io_bytes_total{%s}[1m]))' % _R,
-               "demo-victim-app contract",
-               "demo/victim-app fsyncs writes under its mounted data path and exports kubeheal_victim_disk_io_bytes_total"),
+               'sum(rate(kubeheal_victim_disk_io_bytes_total{%s}[1m])) or '
+               '(sum(rate(container_fs_reads_bytes_total{%s}[1m]))+sum(rate(container_fs_writes_bytes_total{%s}[1m])))'
+               % (_R, _R, _R),
+               "standard",
+               "cAdvisor (kubelet) container_fs_*; the demo victim app's kubeheal_victim_disk_io_bytes_total, when "
+               "present, takes precedence"),
 ]
 
 SPEC_BY_COLUMN: Dict[str, MetricSpec] = {s.column: s for s in METRIC_SPECS}
