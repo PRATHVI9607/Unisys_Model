@@ -18,6 +18,16 @@ If MinIO and the fallback stream are both unavailable, no step runs at all (prot
 `record()` is for the records written after a step (results, errors): it tries MinIO, then the fallback,
 and raises only when both fail. The steps themselves are protected by the `intent()` barrier.
 
+Time limit: one ledger write waits at most `LEDGER_WRITE_TIMEOUT_S` (chosen default 5 s, not measured). A
+timeout counts as a failed write, so a hung MinIO delays the protective steps (quarantine, snapshot, scale to
+zero) by that long, not by minutes. Limit that cannot be fully removed: `asyncio.to_thread` cannot cancel a
+thread that is already blocked in the MinIO client. The timed-out call keeps running on its own worker and
+keeps holding the `Ledger` append lock until the client call returns, so later appends on the same `Ledger`
+queue behind it and time out too (they fall back to the stream) until MinIO answers. The workers are a
+dedicated small pool, so hung ledger calls cannot starve the other threads of the process. A timed-out write
+may still land in MinIO later: the same record can then also sit in the fallback stream, and a reader sees
+it twice (the flushed copy carries `deferred_from_fallback`).
+
 Entries flushed later get a later sequence number than the entries written meanwhile; the flushed
 payload carries `deferred_from_fallback`, the original `recorded_at` time and the fallback stream id, so
 a reader can order them and detect a duplicate (a crash between the MinIO write and the stream delete
@@ -27,12 +37,34 @@ re-sends that one entry on the next flush).
 import asyncio
 import json
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 FALLBACK_STREAM = "kubeheal.ledger.pending"
+DEAD_STREAM = "kubeheal.ledger.dead"     # malformed fallback entries, moved out of the way for a human
+DEFAULT_WRITE_TIMEOUT_S = 5.0            # chosen default, not measured; env LEDGER_WRITE_TIMEOUT_S
+APPEND_ATTEMPTS = 3                      # chosen default, not measured: tries on FileExistsError
+FLUSH_MAX_BATCHES = 20                   # chosen default, not measured: batches per flush call
+LEDGER_WORKERS = 4                       # chosen default, not measured: threads reserved for ledger writes
+
+
+def write_timeout_s(env=None) -> float:
+    raw = (os.environ if env is None else env).get("LEDGER_WRITE_TIMEOUT_S")
+    if raw in (None, ""):
+        return DEFAULT_WRITE_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if value <= 0:
+        logger.warning("LEDGER_WRITE_TIMEOUT_S=%r must be a positive number; using %s", raw,
+                       DEFAULT_WRITE_TIMEOUT_S)
+        return DEFAULT_WRITE_TIMEOUT_S
+    return value
 
 # Steps that proceed when only the fallback is available. Anything not listed is corrective.
 # `rollback_deployment`, `restore_strategy` and `recover_rollback_after_restart` return a Deployment to
@@ -63,15 +95,35 @@ def _now() -> str:
 
 
 class LedgerGuard:
-    def __init__(self, ledger, get_redis: Callable[[], Any], metrics=None):
+    def __init__(self, ledger, get_redis: Callable[[], Any], metrics=None,
+                 timeout_s: Optional[float] = None):
         self.ledger = ledger
         self.get_redis = get_redis
         self.metrics = metrics
+        self.timeout_s = write_timeout_s() if timeout_s is None else timeout_s
+        self._pool = ThreadPoolExecutor(max_workers=LEDGER_WORKERS, thread_name_prefix="ledger-write")
 
     # ---- low level
 
+    def _append_blocking(self, incident_id: str, step: str, payload: Dict) -> None:
+        """Runs in a worker thread. Another writer on the same incident can take the next sequence number
+        (FileExistsError); the listing is read again on the next try."""
+        for attempt in range(APPEND_ATTEMPTS):
+            try:
+                self.ledger.append(incident_id, step, payload)
+                return
+            except FileExistsError:
+                if attempt == APPEND_ATTEMPTS - 1:
+                    raise
+
     async def _to_ledger(self, incident_id: str, step: str, payload: Dict) -> None:
-        await asyncio.to_thread(self.ledger.append, incident_id, step, payload)
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(self._pool, self._append_blocking, incident_id, step, payload)
+        try:
+            await asyncio.wait_for(future, self.timeout_s)
+        except asyncio.TimeoutError as exc:
+            # The worker thread cannot be stopped (see the module docstring); we stop waiting for it.
+            raise TimeoutError(f"ledger write timed out after {self.timeout_s:g} s") from exc
 
     async def _to_fallback(self, incident_id: str, step: str, payload: Dict, error: Exception, kind: str) -> None:
         redis = self.get_redis()
@@ -135,34 +187,60 @@ class LedgerGuard:
         return depth
 
     async def flush(self, batch: int = 50) -> int:
-        """Move fallback entries to the ledger, oldest first. An entry is deleted from the stream only
-        after its ledger write succeeded; the first failure stops the run (MinIO is still down)."""
+        """Move fallback entries to the ledger, oldest first, batch after batch until the stream is empty or
+        the first ledger failure (MinIO is still down), at most FLUSH_MAX_BATCHES batches per call. An entry
+        is deleted from the stream only after its ledger write succeeded. A malformed entry (it can never be
+        written) is copied to DEAD_STREAM and removed, so it cannot block the head of the queue forever."""
         redis = self.get_redis()
         if redis is None:
             return 0
         flushed = 0
-        entries = await redis.xrange(FALLBACK_STREAM, min="-", max="+", count=batch)
-        for entry_id, fields in entries or []:
-            f = {_s(k): _s(v) for k, v in fields.items()}
-            try:
-                payload = json.loads(f.get("payload") or "{}")
-                if not isinstance(payload, dict):
-                    payload = {"value": payload}
-                incident_id, step = f["incident_id"], f["step"]
-            except (ValueError, KeyError):
-                logger.error("malformed fallback entry %s left in place", _s(entry_id))
-                continue
-            payload.update({"deferred_from_fallback": True, "recorded_at": f.get("recorded_at"),
-                            "fallback_stream_id": _s(entry_id)})
-            try:
-                await self._to_ledger(incident_id, step, payload)
-            except Exception as exc:     # includes FileExistsError (sequence key taken): retry next run
-                logger.warning("fallback flush stopped, ledger still failing: %s", type(exc).__name__)
+        for _batch in range(FLUSH_MAX_BATCHES):
+            entries = await redis.xrange(FALLBACK_STREAM, min="-", max="+", count=batch)
+            if not entries:
                 break
-            await redis.xdel(FALLBACK_STREAM, entry_id)
-            flushed += 1
+            removed, stop = 0, False
+            for entry_id, fields in entries:
+                f = {_s(k): _s(v) for k, v in (fields or {}).items()}
+                try:
+                    payload = json.loads(f.get("payload") or "{}")
+                    if not isinstance(payload, dict):
+                        payload = {"value": payload}
+                    incident_id, step = f["incident_id"], f["step"]
+                except (ValueError, KeyError):
+                    await self._to_dead(redis, entry_id, f, "malformed fallback entry")
+                    removed += 1
+                    continue
+                payload.update({"deferred_from_fallback": True, "recorded_at": f.get("recorded_at"),
+                                "fallback_stream_id": _s(entry_id)})
+                try:
+                    await self._to_ledger(incident_id, step, payload)
+                except (ValueError, TypeError) as exc:
+                    # the ledger refuses the id or step itself (for example a "/" in it): never writable
+                    await self._to_dead(redis, entry_id, f, f"ledger refused the entry: {exc}")
+                    removed += 1
+                    continue
+                except Exception as exc:     # MinIO still failing (or a timeout): retry on the next run
+                    logger.warning("fallback flush stopped, ledger still failing: %s", type(exc).__name__)
+                    stop = True
+                    break
+                await redis.xdel(FALLBACK_STREAM, entry_id)
+                flushed += 1
+                removed += 1
+            if stop or removed == 0 or len(entries) < batch:
+                break
         await self.pending_depth()
         return flushed
+
+    async def _to_dead(self, redis, entry_id, fields: Dict, reason: str) -> None:
+        """Dead-letter one fallback entry. The copy is written before the original is deleted."""
+        logger.error("%s %s moved to %s", reason, _s(entry_id), DEAD_STREAM)
+        await redis.xadd(DEAD_STREAM, {
+            "original_id": _s(entry_id), "reason": reason,
+            "fields_json": json.dumps(fields, sort_keys=True, default=str), "moved_at": _now()})
+        await redis.xdel(FALLBACK_STREAM, entry_id)
+        if self.metrics is not None and hasattr(self.metrics, "record_ledger_unavailable"):
+            self.metrics.record_ledger_unavailable("fallback_entry_dead")
 
     async def run_flusher(self, interval_s: float = 30.0, sleep: Callable = asyncio.sleep,
                           running: Callable[[], bool] = lambda: True) -> None:

@@ -9,7 +9,7 @@ import pytest
 
 from agents.common.ledger import InMemoryLedgerStore, Ledger
 from agents.common.metrics import KubeHealMetrics
-from agents.executor.ledger_guard import (FALLBACK_STREAM, PROTECTIVE_STEPS, LedgerGuard, LedgerUnavailable,
+from agents.executor.ledger_guard import (DEAD_STREAM, FALLBACK_STREAM, PROTECTIVE_STEPS, LedgerGuard, LedgerUnavailable,
                                           step_class)
 
 
@@ -21,9 +21,12 @@ class Stream:
     """Just the stream commands the guard uses."""
 
     def __init__(self):
-        self.entries, self.n, self.fail_xadd = [], 0, False
+        self.entries, self.n, self.fail_xadd, self.dead = [], 0, False, []
 
     async def xadd(self, stream, fields):
+        if stream == DEAD_STREAM:
+            self.dead.append(dict(fields))
+            return f"d{len(self.dead)}-0"
         if self.fail_xadd:
             raise ConnectionError("redis down")
         assert stream == FALLBACK_STREAM
@@ -168,10 +171,167 @@ def test_flush_stops_at_the_first_failure_and_keeps_the_rest():
     assert [e[1]["step"] for e in stream.entries] == ["b"]
 
 
-def test_malformed_fallback_entry_is_left_in_place():
+def test_malformed_fallback_entry_goes_to_the_dead_stream_and_does_not_block_the_queue():
     guard, ledger, stream, _ = build()
-    stream.entries.append(("9-0", {"incident_id": "inc-1"}))
-    assert run(guard.flush()) == 0 and len(stream.entries) == 1
+    stream.entries.append(("9-0", {"incident_id": "inc-1"}))                       # no step, no payload
+    stream.entries.append(("10-0", {"incident_id": "inc-1", "step": "a", "payload": "{not json"}))
+    stream.entries.append(("11-0", {"incident_id": "a/b", "step": "a", "payload": "{}"}))   # ledger refuses the id
+    run(guard.record("inc-2", "good", {"n": 1}))
+    ledger.down = True
+    run(guard.record("inc-2", "later", {"n": 2}))
+    ledger.down = False
+    assert run(guard.flush()) == 1                                        # the entry behind them still moved
+    assert stream.entries == []
+    assert [d["original_id"] for d in stream.dead] == ["9-0", "10-0", "11-0"]
+    assert all(d["reason"] and d["fields_json"] for d in stream.dead)
+
+
+def test_flush_loops_over_batches_until_empty():
+    guard, ledger, stream, _ = build()
+    ledger.down = True
+    for i in range(7):
+        run(guard.record("inc-1", f"s{i}", {}))
+    ledger.down = False
+    assert run(guard.flush(batch=3)) == 7 and stream.entries == []
+
+
+def test_flush_batch_loop_is_capped_and_stops_at_the_first_failure():
+    import agents.executor.ledger_guard as lg
+    guard, ledger, stream, _ = build()
+    ledger.down = True
+    for i in range(6):
+        run(guard.record("inc-1", f"s{i}", {}))
+    ledger.down = False
+    old = lg.FLUSH_MAX_BATCHES
+    lg.FLUSH_MAX_BATCHES = 2
+    try:
+        assert run(guard.flush(batch=2)) == 4 and len(stream.entries) == 2      # cap: 2 batches of 2
+    finally:
+        lg.FLUSH_MAX_BATCHES = old
+    real = ledger.append
+
+    def down(*a):
+        raise OSError("down")
+
+    ledger.append = down
+    assert run(guard.flush(batch=2)) == 0 and len(stream.entries) == 2
+    ledger.append = real
+
+
+# ---- write timeout (a hung MinIO must not delay the protective steps by minutes) ---------------------------
+
+class SlowLedger:
+    """append blocks `delay_s` in its worker thread (like a hung MinIO call), holding the Ledger lock."""
+
+    def __init__(self, delay_s):
+        self.ledger = Ledger(InMemoryLedgerStore())
+        self.delay_s = delay_s
+
+    def append(self, incident_id, step, payload):
+        import time
+        time.sleep(self.delay_s)
+        return self.ledger.append(incident_id, step, payload)
+
+
+def slow_guard(delay_s, timeout_s):
+    stream, metrics = Stream(), KubeHealMetrics()
+    return LedgerGuard(SlowLedger(delay_s), lambda: stream, metrics, timeout_s=timeout_s), stream
+
+
+def test_a_hung_ledger_write_times_out_and_a_protective_intent_goes_to_the_fallback():
+    import time
+    guard, stream = slow_guard(delay_s=0.6, timeout_s=0.05)
+    started = time.monotonic()
+    assert run(guard.intent("inc-1", "scale_to_zero", {"namespace": "prod"})) == "fallback"
+    assert time.monotonic() - started < 0.4                      # did not wait for the hung write
+    assert [e[1]["step"] for e in stream.entries] == ["intent_scale_to_zero"]
+
+
+def test_a_hung_ledger_write_stops_a_corrective_step_and_a_record_falls_back():
+    guard, stream = slow_guard(delay_s=0.6, timeout_s=0.05)
+    with pytest.raises(LedgerUnavailable) as e:
+        run(guard.intent("inc-1", "patch_deployment"))
+    assert "TimeoutError" in str(e.value) and e.value.klass == "corrective"
+    assert stream.entries == []
+    assert run(guard.record("inc-1", "result", {"outcome": "x"})) == "fallback"
+
+
+def test_later_calls_do_not_block_forever_behind_a_timed_out_one():
+    """The hung worker still holds the Ledger lock: the next call also times out (fast), and once the hung call
+    returns, writes work again. Neither the event loop nor the caller waits for it."""
+    import time
+    guard, stream = slow_guard(delay_s=0.4, timeout_s=0.05)
+
+    async def go():
+        t = time.monotonic()
+        first = await guard.record("inc-1", "a", {})
+        second = await guard.record("inc-1", "b", {})
+        fast = time.monotonic() - t
+        await asyncio.sleep(1.0)                                  # the hung calls finish
+        guard.ledger.delay_s = 0.0
+        third = await guard.record("inc-1", "c", {})
+        return first, second, third, fast
+
+    first, second, third, fast = run(go())
+    assert (first, second, third) == ("fallback", "fallback", "ledger")
+    assert fast < 0.3
+
+
+def test_write_timeout_default_and_env_override(monkeypatch):
+    from agents.executor.ledger_guard import DEFAULT_WRITE_TIMEOUT_S, write_timeout_s
+    assert write_timeout_s({}) == DEFAULT_WRITE_TIMEOUT_S == 5.0
+    assert write_timeout_s({"LEDGER_WRITE_TIMEOUT_S": "2.5"}) == 2.5
+    assert write_timeout_s({"LEDGER_WRITE_TIMEOUT_S": "junk"}) == DEFAULT_WRITE_TIMEOUT_S
+    assert write_timeout_s({"LEDGER_WRITE_TIMEOUT_S": "-1"}) == DEFAULT_WRITE_TIMEOUT_S
+    monkeypatch.setenv("LEDGER_WRITE_TIMEOUT_S", "7")
+    assert LedgerGuard(FlakyLedger(), lambda: None).timeout_s == 7.0
+
+
+# ---- sequence collisions with another writer ------------------------------------------------------------------
+
+class TakenOnceStore(InMemoryLedgerStore):
+    """Another writer takes the key we computed: put_if_absent raises FileExistsError `times` times, each time
+    after the other writer's object appeared at that key."""
+
+    def __init__(self, times=1):
+        super().__init__()
+        self.times = times
+
+    def put_if_absent(self, key, data):
+        if self.times:
+            self.times -= 1
+            super().put_if_absent(key, b"{}")
+            raise FileExistsError(key)
+        super().put_if_absent(key, data)
+
+
+def test_corrective_intent_survives_a_sequence_collision_on_a_healthy_store():
+    ledger = Ledger(TakenOnceStore(times=1))
+    guard = LedgerGuard(ledger, lambda: None, timeout_s=2)
+    assert run(guard.intent("inc-1", "patch_deployment")) == "ledger"
+    assert len(list(ledger.store.keys("incidents/inc-1/"))) == 2
+
+
+def test_ledger_append_retries_a_taken_sequence_number_but_not_forever():
+    ledger = Ledger(TakenOnceStore(times=2))
+    assert ledger.append("inc-1", "a", {}).sequence == 3
+    ledger = Ledger(TakenOnceStore(times=5))
+    with pytest.raises(FileExistsError):
+        ledger.append("inc-1", "a", {})
+
+
+def test_guard_retries_a_fake_ledger_that_raises_file_exists_once():
+    guard, ledger, stream, _ = build()
+    real, state = ledger.append, {"n": 0}
+
+    def once(incident_id, step, payload):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise FileExistsError("taken")
+        return real(incident_id, step, payload)
+
+    ledger.append = once
+    assert run(guard.intent("inc-1", "patch_deployment")) == "ledger" and state["n"] == 2
 
 
 def test_gated_write_is_blocked_by_a_corrective_ledger_failure_and_runs_for_a_protective_one():

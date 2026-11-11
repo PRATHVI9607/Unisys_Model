@@ -17,6 +17,9 @@ from typing import Any, Dict, Iterable, Optional, Protocol
 from urllib.parse import urlparse
 
 
+APPEND_ATTEMPTS = 3     # chosen default, not measured: tries when another writer took the sequence number
+
+
 class LedgerStore(Protocol):
     def keys(self, prefix: str) -> Iterable[str]: ...
     def put_if_absent(self, key: str, data: bytes) -> None: ...
@@ -97,25 +100,34 @@ class Ledger:
 
         with self._lock:
             prefix = f"incidents/{incident_id}/"
-            sequences = []
-            for key in self.store.keys(prefix):
-                name = key[len(prefix):]
+            # The next sequence number comes from a key listing, so another writer on the same incident
+            # (a second process, or a write that landed after a timeout) can take it first. put_if_absent
+            # then raises FileExistsError: list again and retry, a few times (chosen default, not measured).
+            for attempt in range(APPEND_ATTEMPTS):
+                sequences = []
+                for key in self.store.keys(prefix):
+                    name = key[len(prefix):]
+                    try:
+                        sequences.append(int(name.split("-", 1)[0]))
+                    except (ValueError, IndexError):
+                        continue
+                sequence = max(sequences, default=0) + 1
+                key = f"{prefix}{sequence:06d}-{step}.json"
+                record = {
+                    "incident_id": incident_id,
+                    "sequence": sequence,
+                    "step": step,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "payload": payload,
+                }
+                data = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
                 try:
-                    sequences.append(int(name.split("-", 1)[0]))
-                except (ValueError, IndexError):
+                    self.store.put_if_absent(key, data)
+                except FileExistsError:
+                    if attempt == APPEND_ATTEMPTS - 1:
+                        raise
                     continue
-            sequence = max(sequences, default=0) + 1
-            key = f"{prefix}{sequence:06d}-{step}.json"
-            record = {
-                "incident_id": incident_id,
-                "sequence": sequence,
-                "step": step,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "payload": payload,
-            }
-            data = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            self.store.put_if_absent(key, data)
-            return LedgerEntry(incident_id, sequence, step, key, payload)
+                return LedgerEntry(incident_id, sequence, step, key, payload)
 
 
 def ledger_from_env(env: Optional[Dict[str, str]] = None) -> Ledger:
