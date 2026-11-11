@@ -1,30 +1,69 @@
+"""
+KubeHeal Health Agent (V5-D4): watch Deployments, assess real spec changes, publish health events.
+================================================================================================
+Ported from the teammate's "v5" Health Agent and fitted into our architecture (Watch API, golden baseline,
+Redis stream events, OBSERVE sampling, shared ApiClient). The agent never writes to Kubernetes: the Executor is
+the only writer (tests/test_no_writes_outside_executor.py).
+
+Flow
+  watch      full list of the labelled Deployments, then a watch from the list's resourceVersion; a 410 Gone
+             (or any other failure) re-lists. WATCH_NAMESPACES (default prod,staging,dev; "*" = cluster wide)
+             scopes the Deployment lists and watches, the HPA lists and the pod lists.
+  change     only a CHANGED canonical spec hash counts (status-only and metadata-only updates do nothing).
+             The hash covers the drift view of the spec: `replicas` is left out, scaling is not drift.
+  debounce   per workload. The first pending change sets a deadline of ASSESS_DELAY_S (chosen, not measured).
+             Later changes replace the pending spec but never move the deadline. Every POLL_S the pending
+             spec is checked for hard evidence (a posture violation, or failure reasons seen on two
+             consecutive polls); with evidence the assessment starts at once.
+  assess     spec diff against the GOLDEN baseline, a Prometheus window, `health_features`, the inference
+             service. At most MAX_CONCURRENT_ASSESSMENTS run at the same time.
+  publish    one event per assessed spec on kubeheal.health.events, then follow-up events when failure
+             reasons appear late (bounded by FOLLOWUP_WINDOW_S).
+  fail closed  no answer from the inference service means NO score: the model_unavailable notice (or, when
+             Kubernetes itself shows failure reasons, a rule-evidence event that says model_unavailable). A spec
+             that cannot be read (PostureError) is a failed assessment and publishes a no-score notice with the
+             error for a human; it is never a model verdict or rule-evidence event.
+  OBSERVE    a Fusion OBSERVE request (bounded, in Redis) triples the sampling of a drifted workload. Each
+             sample does a LIVE GET of the Deployment, so it scores the current spec, never the object that
+             arrived with an old watch event.
+
+The golden baseline (agents/health_agent/baseline.py) is written once with SET NX on first sight and is only
+read here.
+"""
+
+from __future__ import annotations
+
 import asyncio
-import base64
+import hashlib
 import json
 import logging
-import hashlib
+import math
 import os
-import struct
 import time
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass
-from enum import Enum
+from dataclasses import dataclass, field
+from types import SimpleNamespace
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-import redis.asyncio as aioredis
+import aiohttp
 import kubernetes_asyncio
-from kubernetes_asyncio import client, watch, config
+import redis.asyncio as aioredis
+from kubernetes_asyncio import client, config, watch
+from kubernetes_asyncio.client.exceptions import ApiException
 from kubernetes_asyncio.config import load_incluster_config
-from agents.health_agent import baseline
-from agents.common.sampling import sampling_factor, scaled_interval
+from prometheus_client import Counter
+
 from agents.common.metrics import KubeHealMetrics
-from pydantic import BaseModel, ConfigDict, Field
-
-
-def emb_b64(vec) -> str:
-    """Pack a float list as base64 float32 bytes for the Redis stream."""
-    vec = list(vec or [])
-    return base64.b64encode(struct.pack(f"{len(vec)}f", *vec)).decode() if vec else ""
+from agents.common.sampling import sampling_factor, scaled_interval
+from agents.health_agent import baseline
+from agents.health_agent import inference_client
+from agents.health_agent.failure_reasons import failure_reasons, progress_deadline_exceeded, rollout_complete
+from agents.health_agent.metric_window import fetch_window, missing_metrics
+from kubeheal.contracts import Prediction
+from kubeheal.features.health import (
+    METRIC_FEATURES, canonical_spec, changed_paths, health_features, spec_hash,
+)
+from kubeheal.posture import PostureError, policy_violations
 
 
 def namespace_tier(namespace: str) -> str:
@@ -42,116 +81,182 @@ def namespace_tier(namespace: str) -> str:
         return "dev"
     return "unknown"
 
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 METRICS = KubeHealMetrics()
+ASSESSMENTS = Counter("kubeheal_health_assessments_total", "Health assessments by outcome", ["outcome"],
+                      registry=METRICS.registry)
+WATCH_ERRORS = Counter("kubeheal_health_watch_errors_total", "Deployment watch errors",
+                       registry=METRICS.registry)
 
-# Chosen default cadence, not a measured profile. During an active OBSERVE request,
-# the workload's next assessment is scheduled at base/factor. No periodic assessment
-# runs when no OBSERVE request is active.
-HEALTH_OBSERVE_BASE_S = 60.0
+HEALTH_STREAM = "kubeheal.health.events"
+WATCH_LABEL_SELECTOR = "kubeheal.io/watch=true"
+DEFAULT_WATCH_NAMESPACES = ("prod", "staging", "dev")
+ASSESSED_PREFIX = "kubeheal:healthagent:assessed"   # last assessed spec hash per workload (restart replays)
+PUBLISH_HEALTH_EVENT_LUA = """
+-- kubeheal:publish_health_event
+if redis.call('EXISTS', KEYS[3]) == 1 then
+  return 0
+end
+redis.call('HSET', KEYS[2], unpack(ARGV))
+redis.call('EXPIRE', KEYS[2], 86400)
+local entry_id = redis.call('XADD', KEYS[1], '*', unpack(ARGV))
+redis.call('SET', KEYS[3], entry_id, 'EX', 86400)
+return 1
+"""
+
+# All timings below are chosen defaults, not measured, and configurable where an env name is given.
+DEFAULT_ASSESS_DELAY_S = 60.0     # ASSESS_DELAY_S: latest assessment time after the first pending change
+DEFAULT_MAX_CONCURRENT = 8        # MAX_CONCURRENT_ASSESSMENTS
+HEALTH_OBSERVE_BASE_S = 60.0      # HEALTH_OBSERVE_BASE_S: base interval of OBSERVE samples (divided by the factor)
+POLL_S = 2.0                      # early-evidence and follow-up polling period
+TICK_S = 1.0                      # scheduler resolution
+RETRY_DELAY_S = 60.0              # re-assess after an inference or Redis failure
+WATCH_TIMEOUT_S = 300             # server-side watch timeout; the loop reconnects after it
+WATCH_RETRY_MIN_S = 1.0            # chosen minimum interval after idle timeout or 410 Gone
+KUBE_TIMEOUT_S = 10               # one Kubernetes read (pod list, Deployment get, HPA list)
+HPA_POLL_S = 30                   # re-list HorizontalPodAutoscalers this often
+# Follow-up window after the first event: the Deployment's progress deadline (or its default) plus a margin;
+# FOLLOWUP_WINDOW_S overrides the whole window.
+DEFAULT_PROGRESS_DEADLINE_S = 600
+FOLLOWUP_MARGIN_S = 60
+
+Key = Tuple[str, str]   # (namespace, deployment)
 
 
-def observe_base_s_from_env() -> float:
-    raw = os.environ.get("HEALTH_OBSERVE_BASE_S")
+def _positive_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
     if raw is None:
-        return HEALTH_OBSERVE_BASE_S
+        return default
     try:
         value = float(raw)
     except (TypeError, ValueError) as exc:
-        raise ValueError("HEALTH_OBSERVE_BASE_S must be a positive number") from exc
-    if value <= 0 or not value < float("inf"):
-        raise ValueError("HEALTH_OBSERVE_BASE_S must be a positive finite number")
+        raise ValueError(f"{name} must be a positive number") from exc
+    if value <= 0 or not math.isfinite(value):
+        raise ValueError(f"{name} must be a positive finite number")
     return value
 
 
-class SeverityLevel(str, Enum):
-    BENIGN = "benign"
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
+def observe_base_s_from_env() -> float:
+    return _positive_env("HEALTH_OBSERVE_BASE_S", HEALTH_OBSERVE_BASE_S)
 
 
-class HealthAssessment(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())  # allow model_* fields
-    event_id: str
-    target: Dict[str, str]
-    risk_score: float = Field(ge=0.0, le=1.0)
-    severity: SeverityLevel
-    patch_proposal: Optional[Dict[str, Any]] = None
-    explainability: Optional[Dict[str, Any]] = None
-    confidence_interval: Optional[Tuple[float, float]] = None
-    blast_radius: str = "unknown"
-    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    # Fields from the Health Model server's score response
-    model_used: Optional[str] = None  # "pytorch" or "heuristic"
-    model_score: Optional[float] = None  # model risk score, 0-1
-    heuristic_score: Optional[float] = None  # Score from heuristic, 0-1
-    inference_method: Optional[str] = (
-        None  # e.g., "health_model_v4"/"security_model_v4" or "heuristic"
-    )
+def assess_delay_s_from_env() -> float:
+    return _positive_env("ASSESS_DELAY_S", DEFAULT_ASSESS_DELAY_S)
+
+
+def max_concurrent_from_env() -> int:
+    return max(1, int(_positive_env("MAX_CONCURRENT_ASSESSMENTS", DEFAULT_MAX_CONCURRENT)))
+
+
+def watch_namespaces_from_env() -> List[Optional[str]]:
+    """Scopes to watch: a list of namespaces, None meaning cluster wide ("*")."""
+    raw = os.environ.get("WATCH_NAMESPACES", "")
+    names = [n.strip() for n in raw.split(",") if n.strip()] or list(DEFAULT_WATCH_NAMESPACES)
+    return [None if n == "*" else n for n in names]
+
+
+@dataclass
+class Pending:
+    """A changed spec waiting for its debounce deadline. One per workload."""
+    spec: Dict
+    dep: Dict
+    hash: str
+    t0_wall: float            # epoch s when the first still-pending change was seen
+    deadline: float           # clock() time at which the assessment starts at the latest
+    next_poll: float
+    event_id: str = ""               # stable across retries of this assessment
+    unavailable_event_id: str = ""   # stable no-score notice for the same pending spec
+    seen: set = field(default_factory=set)       # failure reasons seen on the last poll
+    posture_early: Optional[bool] = None
+    polling: bool = False
+    notified_unavailable: bool = False
+
+
+@dataclass
+class Tracked:
+    """A published spec whose rollout is unfinished: watched for failure reasons that appear late."""
+    hash: str
+    t0_wall: float
+    end: float                # clock() time at which following up stops
+    next_poll: float
+    payload: Dict
+    reported: set
+    seen: set = field(default_factory=set)
+    polling: bool = False
 
 
 class HealthAgent:
-    """
-    Kubernetes operator for Health Agent.
-    Watches YAML drift, assesses with the Health Model, publishes HealthAssessment.
-    """
+    """Kubernetes operator for the Health Agent."""
 
     def __init__(
         self,
         namespace: str = "kubeheal",
         redis_url: str = None,
-        health_model_url: str = None,
-        cooldown_ttl: int = 300,
+        inference_url: str = None,
         prometheus_url: str = None,
         observe_base_s: Optional[float] = None,
+        delay_s: Optional[float] = None,
+        max_concurrent: Optional[int] = None,
+        followup_window_s: Optional[float] = None,
         clock=time.monotonic,
+        wall=time.time,
     ):
         self.namespace = namespace
         self.redis_url = redis_url or os.environ.get("REDIS_URL", "redis://redis-master:6379")
-        # v4: dedicated Health Model server (was the v3 DIT-Sec monolith)
-        self.health_model_url = health_model_url or os.environ.get(
-            "HEALTH_MODEL_URL", "http://kubeheal-health-model:8001"
-        )
-        self.cooldown_ttl = cooldown_ttl
+        self.inference_url = inference_url or inference_client.inference_url_from_env()
+        self.inference_timeout_s = inference_client.timeout_from_env()
         self.prometheus_url = prometheus_url or os.environ.get(
-            "PROMETHEUS_URL",
-            "http://prometheus-operated.monitoring.svc.cluster.local:9090",
-        )
+            "PROMETHEUS_URL", "http://prometheus-operated.monitoring.svc.cluster.local:9090")
 
         self.redis: Optional[aioredis.Redis] = None
+        self.session: Optional[aiohttp.ClientSession] = None
         self.core_api: Optional[client.CoreV1Api] = None
         self.apps_api: Optional[client.AppsV1Api] = None
-        self.custom_api: Optional[client.CustomObjectsApi] = None
         self.networking_api: Optional[client.NetworkingV1Api] = None
+        self.autoscaling_api: Optional[client.AutoscalingV2Api] = None
 
         self.running = False
-        self.watcher = None
+        self._watchers: List[Any] = []
 
-        # P6-D2: periodic rescoring is limited to workloads with an active OBSERVE request.
+        self.delay_s = delay_s if delay_s is not None else assess_delay_s_from_env()
         self.observe_base_s = (observe_base_s if observe_base_s is not None
                                else observe_base_s_from_env())
-        self.clock = clock
-        # (namespace, deployment) -> latest Deployment and clock() time of last assessment.
-        # Only workloads whose spec differs from the golden baseline are tracked.
-        self._drifted: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        self._observe_task: Optional[asyncio.Task] = None
-        # One shared serializer for _spec_json; closed in stop(). Created lazily because
-        # constructing an ApiClient opens an aiohttp session.
+        self.max_concurrent = max_concurrent if max_concurrent is not None else max_concurrent_from_env()
+        if followup_window_s is None and os.environ.get("FOLLOWUP_WINDOW_S"):
+            followup_window_s = _positive_env("FOLLOWUP_WINDOW_S", 0.0)
+        self.followup_window_s = followup_window_s     # None: the Deployment's progress deadline plus a margin
+        self.clock = clock          # deadlines (monotonic)
+        self.wall = wall            # epoch seconds: metric windows, pod creation times, event timestamps
+
+        self.sem = asyncio.Semaphore(self.max_concurrent)
+        self.latest_dep: Dict[Key, Dict] = {}       # newest API-shaped Deployment seen (status included)
+        self.seen_hash: Dict[Key, str] = {}         # last seen spec hash: only a changed hash is a change
+        self.pending: Dict[Key, Pending] = {}
+        self.tracking: Dict[Key, Tracked] = {}
+        self.assessing: Dict[Key, str] = {}         # workload -> spec hash being assessed now
+        # OBSERVE: workloads whose spec differs from the golden baseline.
+        self._drifted: Dict[Key, Dict[str, Any]] = {}
+        self.hpa: Dict[str, set] = {}               # watch scope -> Deployments an HPA scales
+        self.tasks: set = set()
+        self._scheduler_task: Optional[asyncio.Task] = None
+        self._seq = 0
+        # One shared ApiClient: the typed APIs and the serializer all use it; closed in stop(). Created lazily
+        # because constructing an ApiClient opens an aiohttp session.
         self._serializer: Optional[client.ApiClient] = None
-        # Per-workload guard so a watch event and an OBSERVE_SAMPLE never score the same
-        # workload at the same time.
-        self._workload_locks: Dict[Tuple[str, str], asyncio.Lock] = {}
+
+        # Injection points (tests replace them; production uses the real ones).
+        self._fetch_window = fetch_window
+        self._predict = inference_client.predict_health
 
         self.baseline_configmap = "kubeheal-baselines"
 
+    # ── lifecycle ────────────────────────────────────────────────────────────
     async def start(self) -> None:
-        """Start the Health Agent."""
-        logger.info("Starting Health Agent (v4)...")
+        logger.info("Starting Health Agent (V5-D4)...")
         logger.info(f"Redis URL: {self.redis_url}")
-        logger.info(f"Health Model URL: {self.health_model_url}")
+        logger.info(f"Inference URL: {self.inference_url}")
         logger.info(f"Prometheus URL: {self.prometheus_url}")
 
         try:
@@ -165,35 +270,37 @@ class HealthAgent:
                 logger.error(f"Failed to load kubeconfig: {e2}")
                 raise
 
-        self.core_api = client.CoreV1Api()
-        self.apps_api = client.AppsV1Api()
-        self.custom_api = client.CustomObjectsApi()
-
-        self.networking_api = client.NetworkingV1Api()
-
+        if self._serializer is None:
+            self._serializer = client.ApiClient()
+        self.core_api = client.CoreV1Api(self._serializer)
+        self.apps_api = client.AppsV1Api(self._serializer)
+        self.networking_api = client.NetworkingV1Api(self._serializer)
+        self.autoscaling_api = client.AutoscalingV2Api(self._serializer)
         self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
+        self.session = aiohttp.ClientSession()
 
-        logger.info("Health Agent started successfully")
+        scopes = watch_namespaces_from_env()
+        logger.info(f"Health Agent watching {[s or '*' for s in scopes]} "
+                    f"(assess delay {self.delay_s}s, at most {self.max_concurrent} concurrent)")
+        for scope in scopes:   # before the first list, so HPA ownership is known
+            await self.refresh_hpas(scope)
 
-        # Set before the task exists so observe_loop never depends on watch_deployments ordering.
         self.running = True
-        self._observe_task = asyncio.create_task(self.observe_loop())
-        logger.info(f"OBSERVE rescheduling enabled: base interval {self.observe_base_s}s "
-                    "while an OBSERVE request is active")
-
-        await self.watch_deployments()
+        self._scheduler_task = asyncio.create_task(self.scheduler_loop())
+        await asyncio.gather(*(self.watch_loop(s) for s in scopes), *(self.hpa_loop(s) for s in scopes))
 
     async def stop(self) -> None:
-        """Stop the Health Agent."""
         logger.info("Stopping Health Agent...")
         self.running = False
+        for w in list(self._watchers):
+            try:
+                w.stop()
+            except Exception:
+                pass
 
-        if self.watcher:
-            self.watcher.stop()
-
-        if self._observe_task:
-            task = self._observe_task
-            self._observe_task = None
+        if self._scheduler_task:
+            task = self._scheduler_task
+            self._scheduler_task = None
             task.cancel()
             try:
                 await task
@@ -204,543 +311,731 @@ class HealthAgent:
                 if current is not None and current.cancelling():
                     raise
             except Exception:
-                logger.exception("Health OBSERVE task ended with an error")
+                logger.exception("Health scheduler task ended with an error")
 
+        for t in list(self.tasks):
+            t.cancel()
+        if self.tasks:
+            await asyncio.gather(*list(self.tasks), return_exceptions=True)
+
+        if self.session is not None:
+            session, self.session = self.session, None
+            await session.close()
         if self._serializer is not None:
             serializer, self._serializer = self._serializer, None
             await serializer.close()
-
         if self.redis:
             await self.redis.aclose()
-
         logger.info("Health Agent stopped")
 
-    async def observe_loop(self) -> None:
-        """Rescore known drift only while Fusion's bounded OBSERVE request is active."""
-        try:
-            while self.running:
-                await asyncio.sleep(1)
-                try:
-                    await self.observe_tick()
-                except Exception:
-                    logger.exception("Health OBSERVE rescheduler pass failed; will retry")
-        except asyncio.CancelledError:
-            raise
+    def _spawn(self, coro) -> asyncio.Task:
+        t = asyncio.create_task(coro)
+        self.tasks.add(t)
+        t.add_done_callback(self.tasks.discard)
+        return t
 
-    async def observe_tick(self) -> None:
-        """Perform one scheduler pass; split out for deterministic unit tests."""
-        if not self.redis or not self.observe_base_s:
-            return
-        now = self.clock()
-        due = []
-        for key, state in list(self._drifted.items()):
-            namespace, name = key
-            factor = await sampling_factor(self.redis, namespace, workload=name)
-            interval = scaled_interval(self.observe_base_s, factor)
-            if factor > 1 and now - state["last_assessed"] >= interval:
-                # Advance before awaiting the handler so the next tick cannot duplicate it.
-                state["last_assessed"] = now
-                due.append(state["deployment"])
-        for deployment in due:
-            await self.handle_deployment_event("OBSERVE_SAMPLE", deployment)
+    async def drain(self) -> None:
+        """Wait for every spawned task (tests)."""
+        while self.tasks:
+            await asyncio.gather(*list(self.tasks), return_exceptions=True)
 
-    async def watch_deployments(self) -> None:
-        """Watch Deployment changes, reconnecting across watch timeouts.
-
-        K8s closes watch streams every few minutes; v3 exited on the first
-        timeout. We wrap the watch in a reconnect loop, resume from the last
-        resourceVersion, and restart on 410 Gone — the agent never exits on a
-        normal timeout.
-        """
-        logger.info("Starting Deployment watch (reconnecting)...")
-        resource_version = None
-        while self.running:
-            try:
-                async with watch.Watch() as w:
-                    self.watcher = w
-                    async for event in w.stream(
-                        self.apps_api.list_deployment_for_all_namespaces,
-                        label_selector="kubeheal.io/watch=true",
-                        resource_version=resource_version,
-                        timeout_seconds=300,
-                    ):
-                        if not self.running:
-                            break
-                        obj = event["object"]
-                        if obj.metadata and obj.metadata.resource_version:
-                            resource_version = obj.metadata.resource_version
-                        await self.handle_deployment_event(event["type"], obj)
-            except asyncio.CancelledError:
-                break
-            except asyncio.TimeoutError:
-                # Expected: the watch hit timeout_seconds with no new events.
-                # Reconnect immediately, resuming from the last resourceVersion.
-                logger.debug("Watch idle timeout; reconnecting")
-            except kubernetes_asyncio.client.exceptions.ApiException as e:
-                if e.status == 410:   # resourceVersion too old → restart fresh
-                    logger.warning("Watch expired (410); restarting fresh")
-                    resource_version = None
-                else:
-                    logger.error(f"Watch API error: {e}; retry in 5s")
-                    await asyncio.sleep(5)
-            except Exception as e:
-                logger.error(f"Watch error: {e}; reconnecting in 5s", exc_info=True)
-                await asyncio.sleep(5)
-        logger.info("Deployment watch stopped")
-
-    async def handle_deployment_event(self, event_type: str, deployment) -> None:
-        try:
-            name = deployment.metadata.name
-            namespace = deployment.metadata.namespace
-            drift_key = (namespace, name)
-            if event_type == "DELETED":
-                self._drifted.pop(drift_key, None)
-                if not self._workload_locks.get(drift_key, asyncio.Lock()).locked():
-                    self._workload_locks.pop(drift_key, None)
-                return
-            lock = self._workload_locks.setdefault(drift_key, asyncio.Lock())
-            if event_type == "OBSERVE_SAMPLE":
-                # A periodic sample yields to any scoring already in flight for this workload.
-                if lock.locked():
-                    logger.info(f"Skipping OBSERVE sample for {namespace}/{name}: scoring in flight")
-                    return
-            async with lock:
-                await self._handle_locked(event_type, deployment, namespace, name, drift_key)
-        except Exception as e:
-            logger.error(f"Error handling deployment event: {e}", exc_info=True)
-
-    async def _handle_locked(self, event_type: str, deployment, namespace: str, name: str,
-                             drift_key: Tuple[str, str]) -> None:
-        try:
-            logger.info(f"handle_deployment_event STARTED: {event_type}")
-            generation = deployment.metadata.generation or 0
-            observed_gen = deployment.status.observed_generation or 0
-
-            logger.info(
-                f"Event {event_type} for {namespace}/{name} gen={generation}, observed_gen={observed_gen}"
-            )
-
-            # TEMPORARILY DISABLED FOR DEMO - re-enable after baseline system is set up
-            # should_skip = (generation == observed_gen and event_type == "MODIFIED")
-            # if should_skip:
-            #     logger.info(f"Skipping {namespace}/{name} - only status changed")
-            #     return
-
-            logger.info(f"Processing event for {namespace}/{name}...")
-
-            # Scheduler-triggered samples are already bounded by the active OBSERVE key.
-            # Watch events retain the regular cooldown to avoid duplicate scoring.
-            in_cooldown = (event_type != "OBSERVE_SAMPLE" and
-                           await self._check_cooldown(namespace, name))
-            logger.info(f"Cooldown check for {namespace}/{name}: {in_cooldown}")
-            if in_cooldown:
-                # Keep a tracked workload pointed at its newest watch object. If it has
-                # returned to baseline, stop scheduling it even though scoring is cooling down.
-                state = self._drifted.get(drift_key)
-                if state:
-                    state["deployment"] = deployment
-                    try:
-                        golden = await baseline.load_baseline(self.redis, namespace, name)
-                        if golden and not baseline.is_drifted(golden, self._spec_json(deployment)):
-                            self._drifted.pop(drift_key, None)
-                    except Exception as e:
-                        logger.debug(f"Could not refresh tracked drift state for {namespace}/{name}: {e}")
-                logger.info(f"Skipping {namespace}/{name} - in cooldown")
-                return
-
-            baseline_sha = await self._get_baseline_sha(namespace, name)
-
-            if not await self._validate_baseline(namespace, name, baseline_sha):
-                logger.warning(f"Baseline stale or invalid for {namespace}/{name}")
-                return
-
-            blast_radius = await self._query_blast_radius(namespace, deployment)
-
-            # camelCase JSON, the same shape the API server stores and that a patch needs.
-            new_spec = self._spec_json(deployment)
-
-            # Golden baseline: SET NX on first sight, never overwritten (S-HA-2). The diff is
-            # live versus golden (S-HA-3). The health model scores absolute state, so a spec
-            # equal to the golden baseline (steady state, status-only event) is not assessed.
-            golden, created = await baseline.get_or_set_baseline(
-                self.redis, namespace, name, new_spec)
-            if created:
-                logger.info(f"Golden baseline recorded for {namespace}/{name}; no drift to assess")
-                return
-            if not baseline.is_drifted(golden, new_spec):
-                self._drifted.pop(drift_key, None)
-                logger.info(f"{namespace}/{name} matches its golden baseline; skipping assessment")
-                return
-            self._drifted.setdefault(drift_key, {
-                "deployment": deployment,
-                "last_assessed": self.clock(),
-            })["deployment"] = deployment
-            old_spec = golden["spec"]
-            new_spec = baseline.drift_view(new_spec)
-            logger.info(f"Spec drift vs golden baseline detected for {namespace}/{name}; assessing")
-
-            # P5: a real 60-step query_range window (5 s step) per metric, with missing metrics
-            # flagged. No window at all (Prometheus down, every metric empty) means no assessment:
-            # the model must never be fed an invented all-zero window (fail closed).
-            from agents.health_agent.prometheus_client import (
-                wait_for_fresh_metric_window, PrometheusUnavailable,
-            )
-            try:
-                window = await wait_for_fresh_metric_window(namespace, name, self.prometheus_url)
-            except PrometheusUnavailable as e:
-                logger.error(f"No Prometheus window for {namespace}/{name}: {e}; "
-                             "no assessment published (fail closed)")
-                return
-
-            replicas = getattr(deployment.spec, "replicas", None) if deployment.spec else None
-            assessment = await self._assess_health(
-                namespace, name, old_spec, new_spec, window, blast_radius, replicas=replicas
-            )
-
-            if assessment:
-                await self._publish_assessment(assessment)
-                await self._set_cooldown(namespace, name)
-                if drift_key in self._drifted:
-                    self._drifted[drift_key]["last_assessed"] = self.clock()
-                logger.info(f"Assessment {namespace}/{name}: "
-                            f"health_risk={assessment['health_risk']:.2f} "
-                            f"label={assessment['health_label']}")
-            else:
-                # The Health Model did not answer. Nothing is scored (fail closed), but the Fusion Agent is
-                # told so a human hears about it (S-POL-1). No cooldown: the next drift event retries.
-                await self._publish_model_unavailable(namespace, name)
-        except Exception as e:
-            logger.error(f"Error handling deployment event: {e}", exc_info=True)
-
-    async def _check_cooldown(self, namespace: str, name: str) -> bool:
-        """Check if resource is in cooldown period."""
-        key = f"kubeheal:cooldown:{namespace}:{name}"
-        return await self.redis.exists(key)
-
-    async def _set_cooldown(self, namespace: str, name: str) -> None:
-        """Set cooldown period."""
-        key = f"kubeheal:cooldown:{namespace}:{name}"
-        await self.redis.setex(key, self.cooldown_ttl, "1")
-
-    async def _get_baseline_sha(self, namespace: str, name: str) -> Optional[str]:
-        """Get baseline SHA from annotation."""
-        try:
-            deployment = await self.apps_api.read_namespaced_deployment(name, namespace)
-            return deployment.metadata.annotations.get("kubeheal.io/baseline-sha")
-        except Exception as e:
-            logger.debug(f"Could not get baseline: {e}")
-            return None
-
-    async def _validate_baseline(
-        self, namespace: str, name: str, baseline_sha: Optional[str]
-    ) -> bool:
-        """Validate baseline integrity. Returns False only on confirmed mismatch."""
-        if not baseline_sha:
-            return True
-
-        try:
-            cm = await self.core_api.read_namespaced_config_map(
-                self.baseline_configmap, namespace
-            )
-            stored_sha = cm.data.get(name, "") if cm.data else ""
-
-            if stored_sha and stored_sha != baseline_sha:
-                logger.warning(f"Baseline SHA mismatch for {namespace}/{name}")
-                return False
-
-            annotation_date = await self._get_baseline_date(namespace, name)
-            if annotation_date:
-                age = datetime.utcnow() - annotation_date
-                if age > timedelta(days=30):
-                    logger.warning(f"Baseline stale (>30d) for {namespace}/{name} — reducing confidence")
-                    # Don't block, but caller can reduce confidence score
-
-            return True
-        except Exception as e:
-            logger.debug(f"Baseline validation skipped (ConfigMap not found): {e}")
-            return True  # proceed if ConfigMap doesn't exist yet
-
-    async def _get_baseline_date(self, namespace: str, name: str) -> Optional[datetime]:
-        """Get baseline annotation date."""
-        try:
-            deployment = await self.apps_api.read_namespaced_deployment(name, namespace)
-            date_str = deployment.metadata.annotations.get("kubeheal.io/baseline-date")
-            if date_str:
-                return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-        except:
-            pass
-        return None
-
+    # ── spec forms and hashing ───────────────────────────────────────────────
     def _spec_json(self, deployment) -> Dict:
         """Deployment spec as camelCase JSON (what kubectl and the patch API use)."""
-        if not deployment.spec:
+        if not getattr(deployment, "spec", None):
             return {}
         if self._serializer is None:
             self._serializer = client.ApiClient()
         return self._serializer.sanitize_for_serialization(deployment.spec)
 
-    async def _query_blast_radius(self, namespace: str, deployment) -> str:
-        """Query blast radius: Services + Ingresses."""
-        selector = (
-            deployment.spec.selector.match_labels or {}
-            if deployment.spec and deployment.spec.selector
-            else {}
-        )
+    def _dep_json(self, deployment) -> Dict:
+        """One API-shaped dict per Deployment, metadata and status included, in ONE normal form: the output of
+        the shared serializer on the client's model object. Golden baselines and the Executor's live view use
+        that form (it drops null values such as the pod template's `creationTimestamp: null` and fields the
+        client does not model), so a raw JSON dict (list item, live GET) is first deserialized into the model."""
+        if self._serializer is None:
+            self._serializer = client.ApiClient()
+        if isinstance(deployment, dict):
+            deployment = self._serializer.deserialize(SimpleNamespace(data=json.dumps(deployment)), "V1Deployment")
+        return self._serializer.sanitize_for_serialization(deployment) or {}
+
+    @staticmethod
+    def _hash(spec: Dict) -> str:
+        """Change detector: the canonical hash of the drift view (no `replicas`)."""
+        return spec_hash(baseline.drift_view(spec))
+
+    def hpa_owned(self, key: Key) -> bool:
+        """An HPA scales this Deployment. Informational: the drift view already ignores `replicas` (S-HA-3)."""
+        return any(key in targets for targets in self.hpa.values())
+
+    # ── events ───────────────────────────────────────────────────────────────
+    async def handle_deployment_event(self, event_type: str, deployment) -> None:
+        try:
+            dep = self._dep_json(deployment)
+            meta = dep.get("metadata") or {}
+            namespace, name = meta.get("namespace", ""), meta.get("name", "")
+            if not namespace or not name:
+                return
+            key = (namespace, name)
+            if event_type == "DELETED":
+                self._forget(key)
+                try:
+                    await self.redis.delete(self._assessed_key(key))
+                except Exception as e:
+                    logger.debug(f"could not clean up the assessed hash of {namespace}/{name}: {e}")
+                return
+            self.latest_dep[key] = dep            # status-only updates refresh the rollout evidence
+            if key in self.pending:
+                self.pending[key].dep = dep
+            spec = dep.get("spec") or {}
+            h = self._hash(spec)
+            if self.seen_hash.get(key) == h:      # status-only or metadata-only update: nothing to assess
+                return
+            first = key not in self.seen_hash
+            self.seen_hash[key] = h
+            if first:
+                await self._first_sight(key, dep, spec, h)
+            else:
+                self._mark_change(key, dep, spec, h)
+        except Exception as e:
+            logger.error(f"Error handling deployment event: {e}", exc_info=True)
+
+    def _forget(self, key: Key) -> None:
+        for d in (self.pending, self.tracking, self.latest_dep, self.seen_hash, self._drifted):
+            d.pop(key, None)
+
+    @staticmethod
+    def _assessed_key(key: Key) -> str:
+        return f"{ASSESSED_PREFIX}:{key[0]}:{key[1]}"
+
+    async def _first_sight(self, key: Key, dep: Dict, spec: Dict, h: str) -> None:
+        """First event for this workload in this process: the golden baseline is written once (SET NX); a
+        workload that already differs from it is tracked for OBSERVE and, when this spec was not assessed
+        before (an earlier process life), put on the debounce."""
+        namespace, name = key
+        try:
+            golden, created = await baseline.get_or_set_baseline(self.redis, namespace, name, spec)
+            if created:
+                logger.info(f"Golden baseline recorded for {namespace}/{name}; no drift to assess")
+                return
+            if not baseline.is_drifted(golden, spec):
+                logger.info(f"{namespace}/{name} matches its golden baseline")
+                return
+            self._drifted.setdefault(key, {"hash": h, "t0_wall": self.wall(), "last_assessed": self.clock()})
+            if await self.redis.get(self._assessed_key(key)) == h:
+                logger.info(f"{namespace}/{name} drifted spec was already assessed; waiting for a change")
+                return
+        except Exception as e:
+            logger.warning(f"first sight of {namespace}/{name} failed ({e}); will retry on the next event")
+            self.seen_hash.pop(key, None)
+            return
+        self._mark_change(key, dep, spec, h)
+
+    def _mark_change(self, key: Key, dep: Dict, spec: Dict, h: str) -> None:
+        """Debounce with a cap: the first pending change fixes the deadline; later changes replace the pending
+        spec and never postpone it."""
+        now = self.clock()
+        self.tracking.pop(key, None)              # a newer spec supersedes the one being followed up
+        p = self.pending.get(key)
+        if p is None:
+            self.pending[key] = Pending(spec=spec, dep=dep, hash=h, t0_wall=self.wall(),
+                                        deadline=now + self.delay_s, next_poll=now,
+                                        event_id=self._new_event_id(key[1]),
+                                        unavailable_event_id=self._new_event_id(key[1]))
+        else:
+            p.spec, p.dep, p.hash = spec, dep, h
+            p.seen, p.posture_early = set(), None
+            p.event_id = self._new_event_id(key[1])
+            p.unavailable_event_id = self._new_event_id(key[1])
+            p.notified_unavailable = False
+
+    # ── scheduler ────────────────────────────────────────────────────────────
+    async def scheduler_loop(self) -> None:
+        try:
+            while self.running:
+                await asyncio.sleep(TICK_S)
+                try:
+                    await self.tick()
+                except Exception:
+                    logger.exception("Health scheduler pass failed; will retry")
+        except asyncio.CancelledError:
+            raise
+
+    async def tick(self) -> None:
+        """One scheduler pass (split out so tests drive it with a fake clock): fire due assessments, poll for
+        early evidence, poll followed-up rollouts, schedule OBSERVE samples."""
+        now = self.clock()
+        for key, p in list(self.pending.items()):
+            if now >= p.deadline:
+                self._fire(key)
+            elif now >= p.next_poll and not p.polling and now + POLL_S < p.deadline:
+                p.polling = True
+                self._spawn(self._early_check(key, p))
+        for key, t in list(self.tracking.items()):
+            if now >= t.end:
+                self.tracking.pop(key, None)
+            elif now >= t.next_poll and not t.polling:
+                t.polling = True
+                self._spawn(self._follow_up(key, t))
+        await self.observe_tick()
+
+    def _fire(self, key: Key) -> None:
+        p = self.pending.pop(key, None)
+        if p is not None:
+            self._spawn(self.assess(key, p))
+
+    async def _early_check(self, key: Key, p: Pending) -> None:
+        """Assess now instead of at the deadline once the pending spec shows posture or failed-rollout evidence."""
+        h0, spec0, dep0 = p.hash, p.spec, p.dep
+        early = False
+        try:
+            golden = await baseline.load_baseline(self.redis, *key)
+            if golden is None or p.hash != h0:
+                return
+            view = baseline.drift_view(spec0)
+            if not baseline.is_drifted(golden, view):
+                return                              # back at the baseline: the deadline records it
+            if p.posture_early is None:
+                try:
+                    p.posture_early = bool(policy_violations(golden["spec"], view))
+                except PostureError as e:
+                    logger.warning(f"posture of {key[0]}/{key[1]} unreadable ({e}); waiting for the deadline")
+                    p.posture_early = False
+            if p.posture_early:
+                early = True
+            else:
+                async with self.sem:
+                    reasons = set(await self._failure_reasons(key, dep0, p.t0_wall))
+                if p.hash != h0:
+                    return
+                early = bool(reasons & p.seen)      # a transient (one ErrImagePull) waits for a repeat
+                p.seen = reasons
+        except Exception as e:
+            logger.warning(f"early-evidence check for {key[0]}/{key[1]} failed: {e}; waiting for the deadline")
+            return
+        finally:
+            p.polling = False
+            p.next_poll = self.clock() + POLL_S
+        if early and self.pending.get(key) is p and p.hash == h0:
+            self._fire(key)
+
+    # ── assessment ───────────────────────────────────────────────────────────
+    async def assess(self, key: Key, p: Pending) -> None:
+        async with self.sem:
+            # A queued assessment can wait behind the semaphore while a newer watch event
+            # supersedes it. Never score or publish the stale spec after acquiring capacity.
+            if self.seen_hash.get(key) != p.hash:
+                return
+            if key in self.assessing:
+                # An assessment or OBSERVE sample of this workload is in flight: wait, never score twice at once.
+                self._repend(key, p, POLL_S)
+                return
+            self.assessing[key] = p.hash
+            try:
+                outcome = await self._assess(key, p.spec, p.dep, since_wall=p.t0_wall,
+                                             window=(p.t0_wall, min(self.wall(), p.t0_wall + self.delay_s)), p=p)
+            except aioredis.RedisError as e:
+                logger.warning(f"redis error assessing {key[0]}/{key[1]}: {e}; retrying in {RETRY_DELAY_S:.0f}s")
+                outcome = "retry"
+            except Exception as e:
+                logger.exception(f"assessment of {key[0]}/{key[1]} failed")
+                outcome = await self._failed(p, key[0], key[1], f"assessment failed: {e!r}")
+            finally:
+                self.assessing.pop(key, None)
+        ASSESSMENTS.labels(outcome).inc()
+        if outcome == "retry":
+            self._repend(key, p, RETRY_DELAY_S)
+
+    def _repend(self, key: Key, p: Pending, delay: float) -> None:
+        """Put an assessment back on the debounce, unless the workload is gone or a newer change is pending."""
+        if key in self.pending or self.seen_hash.get(key) != p.hash:
+            return
+        now = self.clock()
+        p.deadline, p.next_poll, p.polling = now + delay, now + delay, False
+        self.pending[key] = p
+
+    async def _assess(self, key: Key, spec: Dict, dep: Dict, since_wall: float, window: Tuple[float, float],
+                      p: Optional[Pending] = None) -> str:
+        """Score one spec against the golden baseline and publish. Returns the outcome label."""
+        ns, name = key
+        h = self._hash(spec)
+        golden = await baseline.load_baseline(self.redis, ns, name)
+        if golden is None:
+            logger.error(f"Golden baseline missing for {ns}/{name}; refusing to use the live spec as baseline")
+            return await self._failed(p, ns, name, "golden baseline missing; assessment refused")
+        view = baseline.drift_view(spec)
+        if not baseline.is_drifted(golden, view):
+            self._drifted.pop(key, None)
+            await self._mark_assessed(key, h)
+            logger.info(f"{ns}/{name} matches its golden baseline; skipping assessment")
+            return "baseline"
+        st = self._drifted.get(key)
+        if st is None or st.get("hash") != h:
+            self._drifted[key] = {"hash": h, "t0_wall": since_wall, "last_assessed": self.clock()}
+        else:
+            st["last_assessed"] = self.clock()
+
+        if not await self._validate_baseline(ns, name, self._get_baseline_sha(dep)):
+            logger.warning(f"Baseline stale or invalid for {ns}/{name}")
+            return "baseline_invalid"
+
+        old = golden["spec"]
+        try:
+            violations = policy_violations(old, view)
+        except PostureError as e:
+            # A failed assessment, never a verdict: nothing is published and no rule-based rollback can follow.
+            logger.error(f"posture of {ns}/{name} unreadable ({e}); no verdict, a human is told")
+            return await self._failed(p, ns, name, f"posture unreadable: {e}")
 
         try:
-            services = await self.core_api.list_namespaced_service(
-                namespace,
-                label_selector=",".join([f"{k}={v}" for k, v in selector.items()]),
-            )
+            win = await self._fetch_window(self.session, self.prometheus_url, ns, name, window[0], window[1])
+        except ValueError as e:
+            logger.error(f"cannot query metrics for {ns}/{name}: {e}; no verdict, a human is told")
+            return await self._failed(p, ns, name, f"metric query refused: {e}")
+        missing = missing_metrics(win)
+        features = health_features(old, view, win)
+        no_metrics = all(features.get(k) is None for k in METRIC_FEATURES)
+        if no_metrics:
+            logger.warning(f"{ns}/{name}: no metric data at all (Prometheus down or no series); "
+                           "the model sees the spec diff only")
 
+        started = time.perf_counter()
+        pred = await self._predict_features(features)
+        METRICS.observe_model_latency("health", time.perf_counter() - started)
+
+        # Do not publish a result for a spec that was superseded while the model call was
+        # in flight. This check also protects OBSERVE samples against a newer watch event.
+        if self.seen_hash.get(key) != h:
+            logger.info(f"Discarding superseded health assessment for {ns}/{name}")
+            return "superseded"
+
+        reasons = sorted(set(await self._failure_reasons(key, dep, since_wall)) | set(violations))
+        changed = changed_paths(canonical_spec(old), canonical_spec(view))
+        blast = await self._query_blast_radius(ns, spec)
+        short_window = window[1] - window[0] < self.delay_s
+        payload = self._event_payload(ns, name, pred, reasons, changed, missing, no_metrics, blast,
+                                      event_id=p.event_id if p is not None else None,
+                                      short_window=short_window)
+
+        if pred is None and not reasons:
+            # Fail closed: no score and no rule evidence. A human is told (once per spec); the same spec is
+            # tried again later. Nothing is stored as assessed.
+            logger.error(f"inference unavailable for {ns}/{name}; no score published (fail closed)")
+            await self._notify_unavailable(p, ns, name)
+            return "retry" if p is not None else "unavailable"
+
+        if self.seen_hash.get(key) != h:
+            logger.info(f"Discarding superseded health assessment for {ns}/{name} before publish")
+            return "superseded"
+
+        await self._publish_event(payload)
+        await self._mark_assessed(key, h)
+        self._start_tracking(key, h, since_wall, payload, set(reasons))
+        if pred is None:
+            logger.error(f"inference unavailable for {ns}/{name}; published rule evidence only: {reasons}")
+            # Do not emit a second event after model recovery: Fusion may already have
+            # acted on this rule evidence, and a new event could duplicate remediation.
+            return "published_rule"
+        logger.info(f"Assessment {ns}/{name}: label={pred.label} risk={pred.risk:.2f} set={pred.prediction_set} "
+                    f"changed={changed[:5]} failures={reasons}")
+        return "published"
+
+    async def _notify_unavailable(self, p: Optional[Pending], ns: str, name: str, error: str = "") -> None:
+        """The no-score notice, once per pending spec (a retry does not repeat it)."""
+        if p is not None:
+            if p.notified_unavailable:
+                return
+            event_id = p.unavailable_event_id
+        else:
+            h = self.seen_hash.get((ns, name), "unknown")
+            event_id = self._stable_event_id(ns, name, h, "unavailable")
+        published = await self._publish_model_unavailable(ns, name, error, event_id=event_id)
+        if published and p is not None:
+            p.notified_unavailable = True
+
+    async def _failed(self, p: Optional[Pending], ns: str, name: str, error: str) -> str:
+        """A failed assessment is never a verdict: nothing is scored and no rule-based rollback can follow, but a
+        human is told once (the same notice as an inference outage, with the cause). Not retried: the spec
+        itself is the problem, and a changed spec is assessed again."""
+        await self._notify_unavailable(p, ns, name, error)
+        return "error"
+
+    async def _predict_features(self, features: Dict) -> Optional[Prediction]:
+        try:
+            return await self._predict(self.session, self.inference_url, features, self.inference_timeout_s)
+        except Exception as e:
+            logger.warning(f"inference call failed: {e!r}; no score")
+            return None
+
+    async def _mark_assessed(self, key: Key, h: str) -> None:
+        try:
+            await self.redis.set(self._assessed_key(key), h)
+        except Exception as e:
+            logger.debug(f"could not store the assessed hash of {key[0]}/{key[1]}: {e}")
+
+    def _new_event_id(self, name: str) -> str:
+        self._seq += 1
+        stamp = datetime.fromtimestamp(self.wall(), tz=timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        return f"health-{stamp}-{name}-{self._seq}"
+
+    @staticmethod
+    def _stable_event_id(namespace: str, name: str, spec_hash_value: str, kind: str) -> str:
+        material = f"{namespace}\0{name}\0{spec_hash_value}\0{kind}".encode()
+        digest = hashlib.sha256(material).hexdigest()[:24]
+        return f"health-{kind}-{digest}"
+
+    def _event_payload(self, ns: str, name: str, pred: Optional[Prediction], reasons: List[str],
+                      changed: List[str], missing: List[str], no_metrics: bool, blast: str,
+                      event_id: Optional[str] = None, short_window: bool = False) -> Dict[str, str]:
+        """The fields Fusion reads (agents/fusion_agent/event_mapping.py) plus the dashboard fields. Every value
+        is a string (Redis stream)."""
+        payload = {
+            "event_id": event_id or self._new_event_id(name), "namespace": ns, "pod_name": name, "deployment": name,
+            "namespace_tier": namespace_tier(ns),
+            "timestamp_ms": str(int(self.wall() * 1000)),
+            "spec_changed": "true", "has_baseline": "true",
+            "changed_fields_json": json.dumps(changed),
+            "failure_reasons_json": json.dumps(reasons),
+            # Not model attribution: the first changed field of the spec diff (the rule path uses the same).
+            "top_field": changed[0] if changed else "",
+            "patch_proposal_json": json.dumps({"restore_field": changed[0], "note": "restore to recorded baseline"}
+                                              if changed else {}),
+            "blast_radius": blast,
+            "metrics_missing_json": json.dumps(missing),
+        }
+        if pred is None:
+            # Rule evidence without a score: model_unavailable, no risk (Fusion reads it as 0), empty set.
+            payload.update({
+                "health_label": "model_unavailable", "health_prediction_set": "[]", "health_uncertain": "true",
+                "model_scored": "false", "model_unavailable": "true", "inference_method": "none",
+            })
+            return payload
+        payload.update({
+            "health_label": pred.label, "health_risk": f"{pred.risk:.4f}",
+            # No metrics or an early, undersized window means the health model has no reliable
+            # time series. An empty set is fail-closed because Fusion gates on this field.
+            "health_prediction_set": "[]" if (no_metrics or short_window) else json.dumps(list(pred.prediction_set)),
+            "health_uncertain": "true" if (pred.uncertain or no_metrics or short_window) else "false",
+            "top_factors_json": json.dumps([f.model_dump() for f in pred.top_factors]),
+            "model_scored": "true", "model_version": pred.model_version, "inference_method": "lightgbm",
+        })
+        return payload
+
+    async def _publish_event(self, payload: Dict[str, str]) -> None:
+        """Atomically publish one idempotent stream event and its detail hash."""
+        hkey = f"kubeheal:health:{payload['event_id']}"
+        marker = f"kubeheal:health:published:{payload['event_id']}"
+        fields = [part for key, value in payload.items() for part in (key, value)]
+        result = await self.redis.eval(PUBLISH_HEALTH_EVENT_LUA, 3, HEALTH_STREAM, hkey, marker, *fields)
+        if result:
+            logger.info(f"Published {payload['event_id']}")
+        else:
+            logger.info(f"Health event {payload['event_id']} was already published")
+
+    async def _publish_model_unavailable(self, namespace: str, name: str, error: str = "",
+                                         event_id: Optional[str] = None) -> bool:
+        """Tell the Fusion Agent that no score could be obtained for this workload. The event carries NO score:
+        model_scored=false and model_unavailable=true, an empty prediction set. Fusion does not decide on it; it
+        escalates to a human once per workload and window. A publish failure is only logged."""
+        payload = {
+            "event_id": event_id or self._new_event_id(name), "namespace": namespace, "pod_name": name,
+            "deployment": name,
+            "namespace_tier": namespace_tier(namespace),
+            "health_label": "model_unavailable",
+            "health_prediction_set": "[]",
+            "health_uncertain": "true",
+            "model_scored": "false",
+            "model_unavailable": "true",
+            "inference_method": "none",
+            "timestamp_ms": str(int(self.wall() * 1000)),
+        }
+        if error:
+            payload["assessment_error"] = error[:300]
+        try:
+            await self._publish_event(payload)
+            logger.error(f"Published {payload['event_id']}: no health score for {namespace}/{name}")
+            return True
+        except Exception as e:
+            logger.error(f"Could not publish the model_unavailable event for {namespace}/{name}: {e}")
+            return False
+
+    # ── follow-up events ─────────────────────────────────────────────────────
+    def _start_tracking(self, key: Key, h: str, t0_wall: float, payload: Dict, reported: set) -> None:
+        """After the first event the rollout can still fail (never Ready, ProgressDeadlineExceeded): follow up
+        until it completes, the spec is superseded or deleted, or the window ends."""
+        dep = self.latest_dep.get(key)
+        if dep is None or self.seen_hash.get(key) != h:
+            return
+        if key in self.tracking and self.tracking[key].hash == h:
+            return                                # an OBSERVE sample of the same spec keeps the running follow-up
+        if rollout_complete(dep) and not progress_deadline_exceeded(dep):
+            return
+        window = self.followup_window_s
+        if window is None:
+            window = ((dep.get("spec") or {}).get("progressDeadlineSeconds") or DEFAULT_PROGRESS_DEADLINE_S) \
+                + FOLLOWUP_MARGIN_S
+        now = self.clock()
+        self.tracking[key] = Tracked(hash=h, t0_wall=t0_wall, end=now + window, next_poll=now + POLL_S,
+                                     payload=dict(payload), reported=set(reported))
+
+    async def _follow_up(self, key: Key, t: Tracked) -> None:
+        """One follow-up poll: publish one more event when new failure reasons are confirmed on two consecutive
+        polls. The event is the first one with a new event_id and the union of reasons."""
+        try:
+            dep = self.latest_dep.get(key)
+            if self.tracking.get(key) is not t or dep is None or self.seen_hash.get(key) != t.hash:
+                self.tracking.pop(key, None) if self.tracking.get(key) is t else None
+                return
+            if rollout_complete(dep) and not progress_deadline_exceeded(dep):
+                self.tracking.pop(key, None)
+                return
+            async with self.sem:
+                now_reasons = set(await self._failure_reasons(key, dep, t.t0_wall))
+            new = (now_reasons & t.seen) - t.reported
+            t.seen = now_reasons
+            if not new or self.tracking.get(key) is not t or self.seen_hash.get(key) != t.hash:
+                return
+            follow = dict(t.payload)
+            combined_reasons = sorted(t.reported | new)
+            reason_digest = hashlib.sha256(json.dumps(combined_reasons).encode()).hexdigest()[:16]
+            follow.update({"event_id": self._stable_event_id(key[0], key[1], t.hash,
+                                                              f"followup-{reason_digest}"),
+                           "timestamp_ms": str(int(self.wall() * 1000)),
+                           "failure_reasons_json": json.dumps(combined_reasons)})
+            try:
+                await self._publish_event(follow)
+            except Exception as e:
+                logger.warning(f"follow-up for {key[0]}/{key[1]} not published: {e}; retrying")
+                return
+            t.reported |= new
+            logger.info(f"follow-up for {key[0]}/{key[1]}: {follow['failure_reasons_json']}")
+        except Exception as e:
+            logger.warning(f"follow-up poll for {key[0]}/{key[1]} failed: {e}")
+        finally:
+            t.polling = False
+            t.next_poll = self.clock() + POLL_S
+
+    # ── Kubernetes reads ─────────────────────────────────────────────────────
+    async def _failure_reasons(self, key: Key, dep: Dict, since_wall: float) -> List[str]:
+        """Authoritative failed-rollout evidence for the new spec. Pods are listed in the Deployment's own
+        namespace; an error (a 403 included) only loses the pod evidence, it is never a failure reason."""
+        match = ((dep.get("spec") or {}).get("selector") or {}).get("matchLabels") or {}
+        pods: List[Dict] = []
+        if self.core_api is not None and match:
+            try:
+                resp = await self.core_api.list_namespaced_pod(
+                    key[0], label_selector=",".join(f"{k}={v}" for k, v in match.items()),
+                    _preload_content=False, _request_timeout=KUBE_TIMEOUT_S)
+                pods = json.loads(await resp.read())["items"]
+            except (ApiException, aiohttp.ClientError, TimeoutError, ValueError, KeyError) as e:
+                logger.warning(f"pod listing for {key[0]}/{key[1]} failed ({getattr(e, 'status', e)}); "
+                               "no pod failure evidence")
+        return failure_reasons(dep, pods, since_wall, now=self.wall())
+
+    async def _read_deployment(self, namespace: str, name: str) -> Dict:
+        resp = await self.apps_api.read_namespaced_deployment(
+            name, namespace, _preload_content=False, _request_timeout=KUBE_TIMEOUT_S)
+        return self._dep_json(json.loads(await resp.read()))
+
+    @staticmethod
+    def _get_baseline_sha(dep: Dict) -> Optional[str]:
+        return ((dep.get("metadata") or {}).get("annotations") or {}).get("kubeheal.io/baseline-sha")
+
+    async def _validate_baseline(self, namespace: str, name: str, baseline_sha: Optional[str]) -> bool:
+        """Validate baseline integrity. Returns False only on confirmed mismatch."""
+        if not baseline_sha:
+            return True
+        try:
+            cm = await self.core_api.read_namespaced_config_map(self.baseline_configmap, namespace)
+            stored_sha = cm.data.get(name, "") if cm.data else ""
+            if stored_sha and stored_sha != baseline_sha:
+                logger.warning(f"Baseline SHA mismatch for {namespace}/{name}")
+                return False
+            return True
+        except Exception as e:
+            logger.debug(f"Baseline validation skipped (ConfigMap not found): {e}")
+            return True  # proceed if ConfigMap doesn't exist yet
+
+    async def _query_blast_radius(self, namespace: str, spec: Dict) -> str:
+        """Blast radius: Services + Ingresses."""
+        selector = ((spec or {}).get("selector") or {}).get("matchLabels") or {}
+        try:
+            services = await self.core_api.list_namespaced_service(
+                namespace, label_selector=",".join([f"{k}={v}" for k, v in selector.items()]))
             for svc in services.items:
                 if svc.spec.type == "LoadBalancer":
                     return "High"
-
             ingresses = await self.networking_api.list_namespaced_ingress(namespace)
-
             for ing in ingresses.items:
                 if ing.spec.backend and ing.spec.backend.service:
                     return "High"
-
             return "Low"
         except Exception as e:
             logger.debug(f"Blast radius query error: {e}")
             return "unknown"
 
-    async def _fetch_telemetry(self, namespace: str, name: str) -> Dict:
-        """Fetch Prometheus telemetry."""
-        try:
-            import aiohttp
+    # ── OBSERVE sampling ─────────────────────────────────────────────────────
+    async def observe_tick(self) -> None:
+        """Rescore known drift only while Fusion's bounded OBSERVE request is active."""
+        if not self.redis or not self.observe_base_s:
+            return
+        now = self.clock()
+        due: List[Key] = []
+        for key, state in list(self._drifted.items()):
+            namespace, name = key
+            factor = await sampling_factor(self.redis, namespace, workload=name)
+            interval = scaled_interval(self.observe_base_s, factor)
+            if factor > 1 and now - state["last_assessed"] >= interval:
+                # Advance before the sample runs so the next tick cannot duplicate it.
+                state["last_assessed"] = now
+                due.append(key)
+        for key in due:
+            self._spawn(self.observe_sample(key))
 
-            query = (
-                f'avg(rate(container_cpu_usage_seconds_total{{namespace="{namespace}",'
-                f'pod=~"{name}.*"}}[5s])) by (pod) * 100'
-            )
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{self.prometheus_url}/api/v1/query", params={"query": query}
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data.get("data", {}).get("result", [])
-
-            return {}
-        except Exception as e:
-            logger.debug(f"Telemetry fetch error: {e}")
-            return {}
-
-    async def _assess_health(
-        self,
-        namespace: str,
-        name: str,
-        old_spec: Optional[Dict],
-        new_spec: Dict,
-        metrics,                 # MetricWindow (or a bare np.ndarray [60,15], treated as no missing info)
-        blast_radius: str,
-        replicas: Optional[int] = None,
-    ) -> Optional[Dict]:
-        """Score the drift with the v4 Health Model server. Returns a v4 dict
-        (the schema the Fusion Agent + dashboard consume), or None when the
-        server is unreachable or not ready (fail closed, no heuristic score)."""
-        import aiohttp
-
-        values = getattr(metrics, "values", metrics)
-        missing = list(getattr(metrics, "missing", []) or [])
-        payload = {
-            "old_spec": old_spec or {},
-            "new_spec": new_spec or {},
-            "metrics": values.tolist() if hasattr(values, "tolist") else values,
-            # Extra keys: the Health Model server ignores them today (ScoreRequest has no such field);
-            # they are sent so the server can use the flags once it supports them (see P5 report).
-            "metrics_missing": missing,
-            # P5-Q2a: the server scales the RAW window with models/health_model/preprocess.py (the same
-            # code as training). The replica count feeds the channel that held app_instance_count in training.
-            "replicas": replicas,
-        }
-        result = None
-        started = time.perf_counter()
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.health_model_url}/health/score",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status == 200:
-                        result = await resp.json()
+    async def observe_sample(self, key: Key) -> None:
+        """One OBSERVE sample: a LIVE read of the Deployment, then a normal assessment of that current spec.
+        The object of an old watch event is never used (it can be stale)."""
+        namespace, name = key
+        async with self.sem:
+            if key in self.assessing:
+                logger.info(f"Skipping OBSERVE sample for {namespace}/{name}: scoring in flight")
+                return
+            self.assessing[key] = ""          # claimed before the first await
+            try:
+                try:
+                    dep = await self._read_deployment(namespace, name)
+                except ApiException as e:
+                    if e.status == 404:
+                        logger.info(f"{namespace}/{name} is gone; dropping it from OBSERVE tracking")
+                        self._forget(key)
                     else:
-                        logger.warning(f"Health Model returned {resp.status}")
-        except Exception as e:
-            logger.debug(f"Health Model call failed: {e}")
-        METRICS.observe_model_latency("health", time.perf_counter() - started)
+                        logger.warning(f"OBSERVE live read of {namespace}/{name} failed ({e.status}); skipped")
+                    return
+                except Exception as e:
+                    logger.warning(f"OBSERVE live read of {namespace}/{name} failed ({e!r}); skipped")
+                    return
+                spec = dep.get("spec") or {}
+                h = self._hash(spec)
+                st = self._drifted.get(key)
+                same = bool(st) and st.get("hash") == h
+                now_wall = self.wall()
+                self.latest_dep[key] = dep
+                # The live spec is now the newest known: an older pending change is superseded, and the watch
+                # event that reports this same spec later finds the hash already seen.
+                self.seen_hash[key] = h
+                self.pending.pop(key, None)
+                self.assessing[key] = h
+                try:
+                    outcome = await self._assess(
+                        key, spec, dep, since_wall=st["t0_wall"] if same else now_wall,
+                        window=(now_wall - self.delay_s, now_wall))
+                except aioredis.RedisError as e:
+                    logger.warning(f"redis error in OBSERVE sample of {namespace}/{name}: {e}")
+                    outcome = "error"
+                except Exception as e:
+                    logger.exception(f"OBSERVE sample of {namespace}/{name} failed")
+                    outcome = await self._failed(None, namespace, name, f"assessment failed: {e!r}")
+                ASSESSMENTS.labels("observe_" + outcome).inc()
+            finally:
+                self.assessing.pop(key, None)
 
-        event_id = f"health-{datetime.utcnow().strftime('%Y%m%d-%H%M%S-%f')}-{name}"
+    # ── watch loop ───────────────────────────────────────────────────────────
+    def _list_fn(self, scope: Optional[str]):
+        if scope:
+            return self.apps_api.list_namespaced_deployment, (scope,)
+        return self.apps_api.list_deployment_for_all_namespaces, ()
 
-        if result is None:
-            # Fail closed (P1 review): no model score means no assessment. The old local heuristic
-            # could emit risk 0.85 without a model, which can lead to an automatic action. The next
-            # drift event for this workload is assessed again because no cooldown is set.
-            logger.error(f"Health Model unavailable for {namespace}/{name}; "
-                         "no assessment published (fail closed)")
-            return None
+    async def watch_loop(self, scope: Optional[str]) -> None:
+        """Full list, then watch from the list's resourceVersion; re-list on 410 Gone or any other failure of the
+        resourceVersion. The agent never exits on a normal watch timeout."""
+        rv: Optional[str] = None
+        backoff = 1.0
+        while self.running:
+            try:
+                fn, args = self._list_fn(scope)
+                if rv is None:
+                    rv = await self.relist(scope)
+                async with watch.Watch() as w:
+                    self._watchers.append(w)
+                    try:
+                        async for ev in w.stream(fn, *args, label_selector=WATCH_LABEL_SELECTOR,
+                                                 resource_version=rv, timeout_seconds=WATCH_TIMEOUT_S,
+                                                 allow_watch_bookmarks=True):
+                            if not self.running:
+                                break
+                            rv = getattr(w, "resource_version", None) or rv
+                            if ev["type"] in ("ADDED", "MODIFIED", "DELETED"):
+                                await self.handle_deployment_event(ev["type"], ev["object"])
+                    finally:
+                        if w in self._watchers:
+                            self._watchers.remove(w)
+                backoff = 1.0
+            except asyncio.CancelledError:
+                break
+            except asyncio.TimeoutError:
+                logger.debug("Watch idle timeout; reconnecting")        # resume from the last resourceVersion
+                await asyncio.sleep(WATCH_RETRY_MIN_S)
+            except ApiException as e:
+                WATCH_ERRORS.inc()
+                if e.status == 410:
+                    logger.warning("Watch expired (410); re-listing")
+                    rv = None
+                    await asyncio.sleep(WATCH_RETRY_MIN_S)
+                else:
+                    logger.error(f"Watch API error: {e}; retry in {backoff:.0f}s")
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 60.0)
+            except Exception as e:
+                WATCH_ERRORS.inc()
+                logger.error(f"Watch error: {e!r}; re-listing in {backoff:.0f}s", exc_info=True)
+                rv = None
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
+        logger.info("Deployment watch stopped")
 
-        return {
-            "event_id": event_id, "namespace": namespace, "pod_name": name,
-                "deployment": name,
-            # Explicit: True only because the Health Model answered. Fusion treats a missing value as false.
-            "model_scored": True,
-            "namespace_tier": namespace_tier(namespace),
-            "health_risk": float(result.get("risk_score", 0.0)),
-            "health_label": result.get("label", "benign"),
-            # The Health Model server drops the missing-metric mask and scores the zero-filled columns, so
-            # with any missing metric its interval is not trustworthy: publish the maximum width (the policy
-            # then treats the assessment as uncertain) and keep the flags in metrics_missing_json. The
-            # assessment itself is not dropped. The real fix is a mask-aware server (tracked for P6 or
-            # later). The http_* columns will be missing for every workload that does not export them.
-            "health_ci_width": 1.0 if missing else float(result.get("ci_width", 0.0)),
-            "top_field": result.get("top_field", ""),
-            "top_metric": result.get("top_metric", ""),
-            "field_attribution": result.get("field_attention_weights", {}),
-            "health_embedding": result.get("health_embedding", []),
-            "patch_proposal": self._patch_from_field(result.get("top_field", ""), old_spec, new_spec),
-            "blast_radius": blast_radius,
-            "inference_method": "health_model_v4",
-            # P5: which of the 15 metrics had no real data (their window columns were 0.0 placeholders).
-            "metrics_missing": missing,
-            "metrics_observed": dict(getattr(metrics, "observed", {}) or {}),
-            **self._throttle_logging(values, missing),
-        }
+    async def relist(self, scope: Optional[str]) -> str:
+        """Replay every labelled Deployment as ADDED (the seen hash makes that idempotent), forget the in-memory
+        state of Deployments deleted while no watch was open, and return the list's resourceVersion. Golden
+        baselines in Redis are never touched."""
+        fn, args = self._list_fn(scope)
+        resp = await fn(*args, label_selector=WATCH_LABEL_SELECTOR, _preload_content=False,
+                        _request_timeout=KUBE_TIMEOUT_S * 6)
+        body = json.loads(await resp.read())
+        live: set = set()
+        for dep in body.get("items") or []:
+            meta = dep.get("metadata") or {}
+            live.add((meta.get("namespace", ""), meta.get("name", "")))
+            await self.handle_deployment_event("ADDED", dep)
+        for key in [k for k in self.seen_hash if k not in live and scope in (None, k[0])]:
+            self._forget(key)
+        return body["metadata"]["resourceVersion"]
 
-    @staticmethod
-    def _throttle_logging(values, missing) -> Dict:
-        """The REAL CFS throttle ratio is logged on its own: it is not a model input (the model's
-        throttle channel is the usage/limit proxy it was trained with, models/health_model/preprocess.py)."""
-        import numpy as np
-        from models.health_model.preprocess import cfs_throttle_percent
-        arr = np.asarray(values, dtype=np.float64)
-        if arr.ndim != 2 or arr.shape[0] == 0 or "cpu_throttle_percent" in (missing or []):
-            return {"cfs_throttle_percent": None}
-        return {"cfs_throttle_percent": float(cfs_throttle_percent(arr)[-1])}
+    # ── HPAs ─────────────────────────────────────────────────────────────────
+    async def hpa_loop(self, scope: Optional[str]) -> None:
+        while self.running:
+            await asyncio.sleep(HPA_POLL_S)
+            await self.refresh_hpas(scope)
 
-    def _patch_from_field(self, top_field: str, old_spec, new_spec) -> Optional[Dict]:
-        """Propose restoring the highest-attribution field to its baseline value."""
-        if not top_field or not old_spec:
-            return None
-        return {"restore_field": top_field, "note": "restore to recorded baseline"}
-
-    def _local_assessment(self, new_spec: Dict, telemetry: Dict) -> Dict:
-        """Local assessment fallback."""
-        risk_score = 0.0
-        patch_proposal = None
-        explainability = {}
-
-        containers = new_spec.get("template", {}).get("spec", {}).get("containers", [])
-
-        for i, container in enumerate(containers):
-            resources = container.get("resources", {})
-            limits = resources.get("limits", {})
-
-            cpu_limit = str(limits.get("cpu", "0"))   # may be int in some specs
-            if cpu_limit.endswith("m"):
-                cpu_millicores = int(cpu_limit.rstrip("m"))
-                if cpu_millicores < 100:
-                    risk_score = max(risk_score, 0.85)
-                    patch_proposal = {
-                        "containers": [
-                            {
-                                "name": container["name"],
-                                "resources": {"limits": {"cpu": "500m"}},
-                            }
-                        ]
-                    }
-                    explainability = {"cpu_limit": cpu_millicores, "attention": 0.89}
-
-                elif cpu_millicores < 200:
-                    risk_score = max(risk_score, 0.65)
-
-        return {
-            "risk_score": risk_score,
-            "patch_proposal": patch_proposal,
-            "explainability": explainability,
-            "confidence_interval": (risk_score - 0.05, risk_score + 0.05)
-            if risk_score > 0
-            else None,
-            "model_used": "heuristic",
-            "model_score": None,
-            "heuristic_score": risk_score,
-            "inference_method": "Heuristic fallback (local assessment)",
-        }
-
-    def _score_to_severity(self, score: float) -> SeverityLevel:
-        """Convert risk score to severity."""
-        if score >= 0.85:
-            return SeverityLevel.CRITICAL
-        elif score >= 0.65:
-            return SeverityLevel.HIGH
-        elif score >= 0.40:
-            return SeverityLevel.MEDIUM
-        elif score >= 0.20:
-            return SeverityLevel.LOW
-        return SeverityLevel.BENIGN
-
-    async def _publish_model_unavailable(self, namespace: str, name: str) -> None:
-        """Tell the Fusion Agent that the Health Model did not answer for this workload. The event carries NO
-        score and NO embedding: model_scored=false and model_unavailable=true, maximum CI width. Fusion does not
-        decide on it; it escalates to a human once per workload and window. A publish failure is only logged
-        (the drift event is assessed again next time)."""
-        event_id = f"health-{datetime.utcnow().strftime('%Y%m%d-%H%M%S-%f')}-{name}"
-        payload = {
-            "event_id": event_id, "namespace": namespace, "pod_name": name, "deployment": name,
-            "namespace_tier": namespace_tier(namespace),
-            "health_label": "model_unavailable",
-            "health_ci_width": "1.0000",
-            "model_scored": "false",
-            "model_unavailable": "true",
-            "inference_method": "none",
-            "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
-        }
+    async def refresh_hpas(self, scope: Optional[str]) -> None:
+        """Deployments an HPA scales, listed PER namespace (a cluster-wide HPA list is a 403 under our RBAC).
+        A failure keeps the last known set."""
         try:
-            await self.redis.xadd("kubeheal.health.events", payload)
-            logger.error(f"Published {event_id}: Health Model unavailable for {namespace}/{name}")
-        except Exception as e:
-            logger.error(f"Could not publish the model_unavailable event for {namespace}/{name}: {e}")
-
-    async def _publish_assessment(self, a: Dict) -> None:
-        """Publish the v4 HealthAssessment schema (Section 15.A.1) to the
-        kubeheal.health.events stream + a hash for dashboard detail lookup."""
-        payload = {
-            "event_id": a["event_id"],
-            "namespace": a["namespace"],
-            "pod_name": a["pod_name"],
-            "deployment": a.get("deployment", a["pod_name"]),
-            "namespace_tier": a["namespace_tier"],
-            "health_risk": f"{a['health_risk']:.4f}",
-            "health_label": a["health_label"],
-            "model_scored": "true" if a.get("model_scored") is True else "false",
-            "health_ci_width": f"{a['health_ci_width']:.4f}",
-            "field_attribution_json": json.dumps(a.get("field_attribution", {})),
-            "top_field": a.get("top_field", ""),
-            "top_metric": a.get("top_metric", ""),
-            "health_embedding_b64": emb_b64(a.get("health_embedding", [])),
-            "patch_proposal_json": json.dumps(a.get("patch_proposal") or {}),
-            "blast_radius": a.get("blast_radius", "unknown"),
-            "inference_method": a.get("inference_method", ""),
-            "metrics_missing_json": json.dumps(a.get("metrics_missing", [])),
-            "metrics_observed_json": json.dumps(a.get("metrics_observed", {})),
-            # real CFS ratio, last step, logged only ("" when unavailable); not a model input
-            "cfs_throttle_percent": ("" if a.get("cfs_throttle_percent") is None
-                                     else f"{a['cfs_throttle_percent']:.4f}"),
-            "timestamp_ms": str(int(datetime.utcnow().timestamp() * 1000)),
-        }
-        await self.redis.xadd("kubeheal.health.events", payload)
-        # hash (sans large embedding) for the dashboard detail endpoint
-        hkey = f"kubeheal:health:{a['event_id']}"
-        await self.redis.hset(hkey, mapping={k: v for k, v in payload.items()
-                                             if k != "health_embedding_b64"})
-        await self.redis.expire(hkey, 86400)
-        logger.info(f"Published {a['event_id']}")
+            if scope:
+                resp = await self.autoscaling_api.list_namespaced_horizontal_pod_autoscaler(
+                    scope, _preload_content=False, _request_timeout=KUBE_TIMEOUT_S)
+            else:
+                resp = await self.autoscaling_api.list_horizontal_pod_autoscaler_for_all_namespaces(
+                    _preload_content=False, _request_timeout=KUBE_TIMEOUT_S)
+            items = json.loads(await resp.read())["items"]
+        except (ApiException, aiohttp.ClientError, TimeoutError, ValueError, KeyError) as e:
+            logger.warning(f"HPA listing ({scope or '*'}) failed ({getattr(e, 'status', e)}); keeping the last set")
+            return
+        targets = set()
+        for h in items:
+            ref = (h.get("spec") or {}).get("scaleTargetRef") or {}
+            if ref.get("kind") == "Deployment":
+                targets.add(((h.get("metadata") or {}).get("namespace", ""), ref.get("name", "")))
+        self.hpa[scope or "*"] = targets
 
 
 async def main():

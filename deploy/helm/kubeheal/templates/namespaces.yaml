@@ -18,6 +18,15 @@ metadata:
   labels:
     kubeheal/tier: {{ $tier }}
 {{- end }}
+{{- range $watchNamespace := .Values.healthAgent.additionalWatchNamespaces }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $watchNamespace }}
+  labels:
+    kubeheal.io/watch: "true"
+{{- end }}
 {{- end }}
 {{- range $tier := splitList " " (include "kubeheal.tiers" .) }}
 {{- $q := index $.Values.namespaces.quotas $tier | default dict }}

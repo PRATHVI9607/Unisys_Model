@@ -13,6 +13,11 @@ ingress:
   className: traefik          # k3s ships Traefik, not NGINX
   host: ""
 
+# The demo workload manifest under demo/ runs in `demo`; the Health Agent needs both
+# WATCH_NAMESPACES and a namespaced HPA read binding there.
+healthAgent:
+  additionalWatchNamespaces: [demo]
+
 networkPolicy:
   enabled: true
   prometheusNamespace: monitoring

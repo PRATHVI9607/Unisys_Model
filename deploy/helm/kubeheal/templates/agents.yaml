@@ -45,6 +45,7 @@ spec:
             {{- if .Values.inference.enabled }}
             - {name: INFERENCE_URL, value: "http://{{ .Values.inference.name }}:{{ .Values.inference.port }}"}
             {{- end }}
+            - {name: WATCH_NAMESPACES, value: {{ join "," (concat (splitList " " (include "kubeheal.tiers" .)) .Values.healthAgent.additionalWatchNamespaces) | quote }} }
             - {name: PROMETHEUS_URL, value: {{ $ha.prometheusUrl | quote }}}
             - {name: NAMESPACE, value: {{ $ns | quote }}}
             - {name: LOG_LEVEL, value: {{ $ha.logLevel | quote }}}
