@@ -641,3 +641,11 @@ def test_executor_env_matches_config_defaults():
     for f in ("values.yaml", "values-k3d-demo.yaml"):
         env = yaml.safe_load((CHART / f).read_text(encoding="utf-8"))["executor"]["env"]
         assert env == mod.DEFAULTS, f
+
+
+def test_images_that_write_the_ledger_install_the_minio_client():
+    """ledger_from_env imports `minio` when LEDGER_BACKEND=minio. A cluster run (P10) found the Executor and Fusion
+    images without it: both crash-looped at start. Every image whose component writes the ledger must install it."""
+    for name in ("Dockerfile.executor", "Dockerfile.fusion", "Dockerfile.dashboard"):
+        text = (ROOT / "dockerfiles" / name).read_text(encoding="utf-8")
+        assert "minio" in text, name
