@@ -359,7 +359,7 @@ def test_resources_unset_by_default_and_settable(env, fixture_file):
 # ---- Executor ----------------------------------------------------------------------------------
 
 EXEC_VARS = ["PROMETHEUS_URL", "SNAPSHOT_CLASS", "CANARY_WINDOW_S", "ROLLOUT_TIMEOUT_S",
-             "ROLLOUT_POLL_S", "RESTORE_ENTROPY_IMAGE_PULL_SECRETS"]
+             "ROLLOUT_POLL_S", "CONTAIN_FREEZE_TIMEOUT_S", "RESTORE_ENTROPY_IMAGE_PULL_SECRETS"]
 
 
 def exec_env(docs):

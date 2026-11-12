@@ -36,6 +36,7 @@ DEFAULTS = {
     "ROLLOUT_TIMEOUT_S": "180",
     "ROLLOUT_POLL_S": "5",
     "SNAPSHOT_CLASS": "csi-hostpath-snapclass",
+    "CONTAIN_FREEZE_TIMEOUT_S": "10",
     "PROMETHEUS_URL": "http://prometheus-operated.monitoring.svc.cluster.local:9090",
     "RESTORE_ENTROPY_IMAGE_PULL_SECRETS": "",
 }
@@ -76,6 +77,12 @@ class ExecConfig:
     @property
     def rollout_poll_s(self) -> float:
         return self._positive_float("ROLLOUT_POLL_S")
+
+    @property
+    def freeze_timeout_s(self) -> float:
+        """How long the Executor waits for the Security Agent's verified freeze answer (V5-S5). The default 10 s
+        is a chosen default, not a measurement."""
+        return self._positive_float("CONTAIN_FREEZE_TIMEOUT_S")
 
     @property
     def snapshot_class(self) -> str:

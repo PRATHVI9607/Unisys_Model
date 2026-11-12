@@ -73,7 +73,7 @@ def write_timeout_s(env=None) -> float:
 PROTECTIVE_STEPS = frozenset({
     "create_quarantine_policy", "label_pod", "forensic_snapshot",
     "ensure_quarantine_policy", "remember_replicas", "scale_to_zero",
-    "create_rolling_snapshot",
+    "create_rolling_snapshot", "request_freeze",
     "rollback_deployment", "restore_strategy", "recover_rollback_after_restart",
 })
 

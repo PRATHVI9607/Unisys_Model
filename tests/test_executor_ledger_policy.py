@@ -448,7 +448,7 @@ def test_ledger_refused_patch_is_escalated_not_final_and_a_retry_runs_after_mini
 def test_ledger_refused_contain_is_not_final_and_a_retry_runs_after_minio_recovers():
     r = R(freeze_old=False)
     led = FlakyLedger()
-    led.down_steps = {"intent_create_quarantine_policy"}     # MinIO and the fallback both refuse that one entry
+    led.down_steps = {"intent_forensic_snapshot"}     # MinIO and the fallback both refuse the first protective step (V5-S5 order)
     ex = make_executor(r, r.entropy)
     ex.ledger = led
     ex.ledger_guard.ledger = led
@@ -456,7 +456,7 @@ def test_ledger_refused_contain_is_not_final_and_a_retry_runs_after_minio_recove
     broken = {"on": True}
 
     async def xadd(stream, fields, *a, **k):
-        if broken["on"] and stream == FALLBACK_STREAM and fields.get("step") == "intent_create_quarantine_policy":
+        if broken["on"] and stream == FALLBACK_STREAM and fields.get("step") == "intent_forensic_snapshot":
             raise ConnectionError("fallback down")
         return await real_xadd(stream, fields, *a, **k)
 
@@ -537,8 +537,9 @@ def test_contain_does_not_treat_a_ledger_refusal_as_an_existing_policy():
     from agents.executor.validation import Request
     r = R(freeze_old=False)
     req = Request(action="contain", namespace="prod", incident_id=INC, deployment="db", pod="db-abc-1")
+    # no snapshot class: the quarantine policy is the first write, which is what this test is about
     out = run(quarantine.contain(RefusingGate("create_quarantine_policy"), r.c.core, r.c.net, r.c.apps,
-                                 r.c.custom, req, Recorder(None, INC), ExecConfig(RR_ENV)))
+                                 r.c.custom, req, Recorder(None, INC), ExecConfig({})))
     assert out.startswith("contain_failed:") and "ledger_unavailable" in out
     assert r.c.log == []                                      # the label and the snapshot did not follow
 

@@ -303,6 +303,7 @@ def _exec_request(incident_id: str, records: List[Dict[str, Any]], approver: str
     """Executor request for an approved HUMAN decision, or HTTPException if it cannot be built.
     Field names follow agents/executor/validation.py; the Executor validates again and re-checks the mode."""
     decision = step_payload(records, "decision").get("decision")
+    containment: Dict[str, str] = {}
     detection = step_payload(records, "detection")
     namespace = detection.get("namespace") or ""
     deployment = detection.get("deployment") or ""
@@ -323,6 +324,15 @@ def _exec_request(incident_id: str, records: List[Dict[str, Any]], approver: str
     elif decision == "human_contain":
         action = "contain"
         field, patch_fields = "", []
+        decision_record = step_payload(records, "decision")
+        # What Fusion decided (Q2): the Executor freezes only for ransomware and exfiltration, and Fusion restores
+        # only after a containment with restore_after. An approval must send the same values, otherwise a
+        # human-approved ransomware containment would skip the freeze and still be followed by a restore.
+        containment = {
+            "containment_label": str(decision_record.get("containment_label") or ""),
+            "restore_after": "true" if decision_record.get("restore_after") is True else "false",
+            "human_followup": "true" if decision_record.get("human_followup") is True else "false",
+        }
         if not (namespace and pod):
             raise HTTPException(status_code=422, detail="cannot approve: the incident names no pod to contain")
     else:
@@ -335,6 +345,7 @@ def _exec_request(incident_id: str, records: List[Dict[str, Any]], approver: str
         "pod": pod,
         "patch_field": str(field),
         "patch_fields": json.dumps(patch_fields),
+        **containment,
         "approved_by": approver,
         "dry_run": "true" if dry_run else "false",
         "source": "dashboard",
