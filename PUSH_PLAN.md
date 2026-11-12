@@ -1,62 +1,51 @@
-# Push plan (draft, do not push)
+# Push plan (owner-only, do not push from this session)
 
-The owner pushes. This file is a rehearsal checklist and must be refreshed after the final green merge. Never set `ALLOW_PUSH` and never run a push command from an agent session. Current base refs at authoring: `work` `f29dd1c`, `demo` `9986b73`, `origin/main` `48a59aa7195ea14f8366a4338293f095c8803daf`. These are starting refs, not final push hashes.
+Last checked 2026-11-12 23:05 IST. Branch tips before this audit update: `work` `b1e2dc3`, `demo` `992b732`, `origin/main` `48a59aa7195ea14f8366a4338293f095c8803daf`. Work is merged into demo. Nothing has been pushed and `ALLOW_PUSH` was not set.
 
 ## Ten-line change summary versus `origin/main`
 
-1. Replaces legacy neural scoring in the active path with shipped LightGBM Health and Security bundles.
-2. Uses split-conformal prediction sets and TreeSHAP factors; requires exactly one label for automatic action.
-3. Uses deterministic Health/Security correlation in Fusion; legacy DCM and neural servers are disabled by default.
-4. Keeps the kill switch fail-closed in test mode and records would-have actions without Kubernetes writes.
-5. Routes Kubernetes writes through the Remediation Executor with request validation and per-write mode checks.
-6. Adds Health Agent baseline candidates, automatic dev/staging promotion, dashboard prod approval, and ledger records.
-7. Adds canary drift remediation, snapshots, restore, entropy rescan, quarantine, and cgroup freeze containment paths.
-8. Adds dashboard incident, kill-switch, baseline, containment, ledger, and release controls.
-9. Adds local k3d deployment, monitoring, HPA/load scaffolding, replay fixtures, and demo evidence workflow.
-10. Adds safety tests, P11 evaluation tooling, acceptance scripts, operator docs, and measured evidence where available.
+1. Moves active scoring to LightGBM Health and Security models with split-conformal sets and TreeSHAP explanations.
+2. Requires a single-label conformal result before automated decisions and uses the inclusive D1 10x rule.
+3. Adds deterministic Health/Security Fusion and D-5 replay into the Security event path.
+4. Adds fail-closed test mode, a kill switch, and would-have ledger entries without Kubernetes writes.
+5. Makes Executor the Kubernetes writer and validates requests before writes.
+6. Adds signed Redis containment request/result messages using the dedicated HMAC Secret.
+7. Adds baseline candidates, dev/staging promotion, prod dashboard approval, and ledger records.
+8. Adds freeze, forensic snapshot, quarantine, restore, entropy rescan, and release workflows.
+9. Adds incident and baseline dashboard controls, queue-depth HPA, Grafana panels, and k3d deployment assets.
+10. Adds safety tests, live acceptance scripts, P11 evaluation scaffolding, runbook steps, and evidence artifacts.
 
-This summary describes intended/implemented scope accumulated in the local branches. Reconcile every line with the final `git diff origin/main...demo`; remove or qualify any item not merged or verified. Do not claim measured model or performance quality from synthetic bundle metadata.
+## Current verification
 
-## Final checks after the rehearsal
+- Full suites: `work` 2,158 passed, 11 skipped in 90.05s; `demo` 2,158 passed, 11 skipped in 66.43s. Default suite leaves cluster/Redis/MinIO/mode tests opt-in.
+- F3 is live-verified through restore; Sense input was scripted because Falco is absent. F4 HMAC test-mode smoke passed signed, unsigned, and tampered message cases.
+- Cluster runs demo tag `b20261112215116`, Helm revision 13, mode `test`. Last readback was 2026-11-12 22:28 IST. Any later cluster touch checks `docs/kubeheal/CLUSTER_LOCK.md`; commit a lock before enforce or Helm upgrade and remove it after.
+- Secret/artifact scan of the 377-path `origin/main...demo` diff found one credential-pattern match: a 21-character placeholder-like test fixture assignment in `tests/test_dashboard_seed.py`. No `.env`, kubeconfig, virtual environment, or binary artifact was changed in that diff. `.gitignore` excludes local environments, generated values, image tags, admin token, and pytest temp data; model checkpoint exceptions are intentional.
+- `git diff --check origin/main...demo` reports existing whitespace in CSI comments, trailing spaces in captured k6 transcripts, and blank lines at EOF. This was not a clean check.
+- The cluster HPA repeat scaled 2 -> 8 -> 2 with 12 refused checks; an earlier HPA run passed 121,088/121,088 and Grafana API/Prometheus evidence is saved, but a visual screenshot is missing.
 
-Run from the repository root in PowerShell. `work` must be green before merging, then `demo` must be green after the merge. Live tests are separate explicit commands and are not part of the default suite.
+## Feature state before final rehearsal
 
-```powershell
-git status
-git log --oneline -10 work
-git log --oneline -10 demo
-git diff --check origin/main...work
-git diff --check origin/main...demo
-Push-Location ..\Unisys_Model-wt-metric-query
-$env:PYTHONPATH='.'
-.\.venv\Scripts\python.exe -m pytest tests/ -q -p no:warnings --basetemp=$env:TEMP\kubeheal-final-work --deselect tests/test_rbac_k3d.py
-Pop-Location
-Push-Location .
-$env:PYTHONPATH='.'
-.\.venv\Scripts\python.exe -m pytest tests/ -q -p no:warnings --basetemp=$env:TEMP\kubeheal-final-demo --deselect tests/test_rbac_k3d.py
-Pop-Location
-```
+- F1 DONE: opt-in live-test safety guard, scratch pod absent, merged worktree metadata pruned.
+- F2 DONE: D-5 replay emitted a real scored Security event and Fusion/Executor test-mode evidence.
+- F3 DONE: live containment through restore; scripted Sense caveat above.
+- F4 DONE: live test-mode HMAC smoke refused unsigned and tampered messages.
+- F5 NOT DONE: live baseline promotion and ledger entry not verified.
+- F6 NOT DONE: full live Executor validation acceptance not verified.
+- F7 NOT DONE: live M2/D1/rollback sequence not verified.
+- F8 NOT DONE: populated dashboard approval/rejection/release walkthrough not verified.
+- F9 NOT DONE: paired kill-switch test/enforce live scenario has no validated safe trigger.
+- F10 NOT DONE: live canary patch and bad-p99 rollback not verified.
+- F11 NOT DONE: scaling was measured, but post-merge run had 12 refusals and no Grafana screenshot.
+- F12 NOT DONE: `up.ps1` acceptance has not passed twice from a clean baseline.
+- F13 NOT DONE: accepted P11 evaluation not measured; uncovered metrics remain `not measured`.
 
-After each default suite, run the live RBAC acceptance only when explicitly scheduled and safe: `$env:KUBEHEAL_LIVE_RBAC_TEST='1'; ..\Unisys_Model\.venv\Scripts\python.exe -m pytest tests/test_rbac_k3d.py -q; Remove-Item Env:KUBEHEAL_LIVE_RBAC_TEST`. The kill-switch integration test intentionally changes mode and must run only as a scripted demo step with `KUBEHEAL_LIVE_KILLSWITCH_TEST=1`, then verify that mode is restored to `test`.
+## Remaining steps before owner push
 
-## Merge and scan commands
+1. After the 23:30 IST merge cutoff, rehearse `docs/kubeheal/DEMO_RUNBOOK.md` once from a fresh cluster start. Capture output/screenshots under `docs/kubeheal/demo-evidence/`; use only verified features as live steps and record explicit skips for the rest.
+2. If any code changes, rerun the full suite on work, merge only green work into demo, then rerun the full suite on demo and record exact counts.
+3. Update README.md and AGENTS.md with final verified design and measured figures only; retain the `Verified on k3d` qualification.
+4. Refresh `docs/kubeheal/PROGRESS.md`, `.ai/handoff.md`, this plan, and mode `test`; commit each completed task.
+5. Review `git diff --check`, the full diff against origin, secret/artifact scan, and `git status`; do not include local credentials, environments, or large binaries.
 
-Review the final diffs before staging. Never merge a red branch. Run these only after recorded green suites:
-
-```powershell
-git switch demo
-git merge --no-ff work
-```
-
-Secret and artifact review, scoped to the actual final diff:
-
-```powershell
-git diff --name-only origin/main...demo
-git diff --check origin/main...demo
-git status --short
-rg -n -i "(AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|password\s*[:=]|token\s*[:=]|secret\s*[:=]|\.env|kubeconfig)" --glob "!*.png" --glob "!*.lock" .
-```
-
-Review every match manually, including ignored/untracked files and generated artifacts. Confirm no `.venv`, kubeconfig, Secret data, private keys, `.env`, or unreviewed large binaries are in the diff. Confirm `.gitignore` excludes local environments, secrets, generated images/values, and demo scratch output.
-
-Before handing control to the owner, update `docs/kubeheal/PROGRESS.md`, `.ai/handoff.md`, this plan's work/demo hashes, exact suite counts, F1-F13 states, verified-on-k3d note, and the rehearsed runbook result. Record unmeasured values as `not measured`. No agent pushes.
+The owner performs any eventual push. Never run `git push`, never set `ALLOW_PUSH`, and do not claim a feature or metric that is not supported by saved evidence.
