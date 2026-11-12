@@ -26,7 +26,8 @@ Rules this module keeps (pinned by tests/test_containment_agent.py and tests/tes
     is still recorded.
   * The target directory is found from the VALIDATED pod UID, not from the path /proc shows (see "Path logic").
     cgroup v2 only. The result is checked hard: under the cgroup root, no symlinks, below `kubepods` or
-    `kubepods.slice`, named exactly like the pod directory, exactly one match.
+    `kubepods.slice`, named exactly like the pod directory, exactly one match, and holding a container
+    directory of a container id seen in the pod's own /proc entries.
   * A freeze that cannot be confirmed is `failed` (`freeze_not_confirmed`). The cgroup is left as it is: there
     is NO automatic thaw (a half frozen pod must be looked at by a human or by an explicit thaw request).
   * A request id that already has a result is acknowledged and ignored. A message is acknowledged only after its
@@ -210,7 +211,7 @@ def write_cgroup_freeze(directory: str, value: str, cgroup_root: str) -> None:
         raise ValueError("cgroup directory is not below a kubepods component")
     if parts[-1] in _QOS_DIRS or not _UID_IN_NAME.search(parts[-1]):
         raise ValueError("cgroup directory is not a pod directory (no pod uid, or a QoS directory)")
-    fd = os.open(os.path.join(real_dir, "cgroup.freeze"), os.O_WRONLY)
+    fd = os.open(os.path.join(real_dir, "cgroup.freeze"), os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
         os.write(fd, value.encode("ascii"))
     finally:
@@ -316,15 +317,40 @@ def find_pod_dir(real_root: str, name: str) -> str:
     return matches[0]
 
 
+def require_container_dir(directory: str, container_ids) -> None:
+    """The found pod directory must hold a container directory (never a symlink) of a container the pod's own
+    processes were seen in: cgroupfs names it `<container id>`, systemd `<runtime>-<container id>.scope`. The pod
+    uid picks the directory, this ties it to the container ids read from /proc, so a directory that merely carries
+    the right name but has none of the pod's containers in it is refused (`cgroup_container_missing`)."""
+    prefixes = {c[:12] for c in container_ids if len(c) >= 12}
+    try:
+        with os.scandir(directory) as it:
+            for entry in it:
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                ident = entry.name[:-len(".scope")] if entry.name.endswith(".scope") else entry.name
+                ident = ident.rsplit("-", 1)[-1]
+                if ident[:12] in prefixes:
+                    return
+    except OSError:
+        pass
+    raise _Refuse(STATUS_REFUSED, "cgroup_container_missing: the pod directory holds none of the pod's container ids")
+
+
 def resolve_pod_cgroup(pod_index: PodIndex, namespace: str, pod: str, pod_uid: str,
                        proc_root: str, cgroup_root: str) -> Tuple[str, str]:
     """(absolute directory, path relative to the cgroup root) of the pod's cgroup. The pod's pids prove which pod
     directory NAME to look for (from their /proc cgroup path); the directory itself is found under the cgroup
     root by `find_pod_dir`. Raises _Refuse with status refused or failed."""
-    pids = [pid for pid, rec in scan_pids(pod_index, proc_root).items()
-            if rec.get("uid") == pod_uid and rec.get("namespace") == namespace and rec.get("pod") == pod]
+    recs = {pid: rec for pid, rec in scan_pids(pod_index, proc_root).items()
+            if rec.get("uid") == pod_uid and rec.get("namespace") == namespace and rec.get("pod") == pod}
+    pids = list(recs)
     if not pids:
         raise _Refuse(STATUS_FAILED, "pod_pids_not_found: no process of the pod is visible on this node")
+    container_ids = {str(rec.get("container_id") or "") for rec in recs.values()} - {""}
     names, saw_v1, v2_seen = set(), False, False
     for pid in sorted(pids):
         for line in _read_cgroup_lines(proc_root, pid):
@@ -348,10 +374,15 @@ def resolve_pod_cgroup(pod_index: PodIndex, namespace: str, pod: str, pod_uid: s
         raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: no cgroup v2 path of the pod carries its uid")
     if len(names) > 1:
         raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: the pod's processes report different pod cgroups")
+    name = next(iter(names))
     real_root = os.path.realpath(cgroup_root)
-    directory = os.path.realpath(find_pod_dir(real_root, next(iter(names))))
+    candidate = find_pod_dir(real_root, name)
+    directory = os.path.realpath(candidate)
+    if directory != candidate or os.path.basename(directory) != name:
+        raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: the pod directory is not the directory that was found")
     if directory == real_root or os.path.commonpath([real_root, directory]) != real_root:
         raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: directory is outside the cgroup root")
+    require_container_dir(directory, container_ids)
     return directory, "/".join(PurePath(directory).relative_to(real_root).parts)
 
 

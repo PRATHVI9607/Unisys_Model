@@ -290,9 +290,9 @@ def test_the_real_mode_watcher_is_used_global_absolute_label_only_stricter():
 @pytest.mark.parametrize("line,status,reason", [
     # a `.` or `..` after the first normal component is refused (only a LEADING run of `..` is allowed)
     (f"0::/x/../kubepods/burstable/pod{UID}/{CID}" + NL, "refused", "cgroup_path_mismatch"),
-    (f"0::/../a/../pod{UID}/{CID}" + NL, "refused", "cgroup_path_mismatch"),
+    (f"0::/../a/../pod{UID}/{CID}" + NL, "failed", "pod_pids_not_found"),          # anchored scan: not mapped
     (f"0::/./kubepods/burstable/pod{UID}/{CID}" + NL, "refused", "cgroup_path_mismatch"),
-    (f"0::/kubepods/../../../etc/pod{UID}/{CID}" + NL, "refused", "cgroup_path_mismatch"),
+    (f"0::/kubepods/../../../etc/pod{UID}/{CID}" + NL, "failed", "pod_pids_not_found"),
     (f"12:memory:/kubepods/burstable/pod{UID}/{CID}" + NL, "failed", "cgroup_v1_not_supported"),
     (f"12:memory:/kubepods/burstable/pod{UID}/{CID}" + NL + f"11:cpu:/kubepods/burstable/pod{UID}/{CID}" + NL,
      "failed", "cgroup_v1_not_supported"),
@@ -646,14 +646,14 @@ def test_resolve_refuses_a_directory_that_is_outside_the_root_or_the_root_itself
     s = Scene(tmp_path)
     outside = tmp_path / "outside" / f"pod{UID}"
     outside.mkdir(parents=True)
-    monkeypatch.setattr(ct, "find_pod_dir", lambda root, name: str(s.root / ".." / "outside" / f"pod{UID}"))
+    monkeypatch.setattr(ct, "find_pod_dir", lambda root, name: os.path.realpath(str(outside)))
     with pytest.raises(ct._Refuse) as e:
         ct.resolve_pod_cgroup(s.index, "prod", "web-1", UID, str(s.proc), str(s.root))
     assert e.value.status == "refused" and "outside the cgroup root" in e.value.reason
     monkeypatch.setattr(ct, "find_pod_dir", lambda root, name: root)                       # the root itself
     with pytest.raises(ct._Refuse) as e:
         ct.resolve_pod_cgroup(s.index, "prod", "web-1", UID, str(s.proc), str(s.root))
-    assert "outside the cgroup root" in e.value.reason
+    assert e.value.status == "refused"                       # the root itself is not the directory that was found
 
 
 def test_an_expired_freeze_of_a_frozen_cgroup_is_failed_expired_but_frozen(tmp_path):
@@ -714,7 +714,8 @@ def real_scene(tmp_path, proc_line, rel_dir, **kw):
     (s.proc / "self" / "cgroup").write_text("0::/" + NL)
     (s.proc / "999" / "cgroup").write_text("0::/../../../../init" + NL)             # a node process
     s.pod_dir = s.root.joinpath(*rel_dir)
-    (s.pod_dir / "ctr").mkdir(parents=True)
+    s.ctr = s.pod_dir / (f"cri-containerd-{CID}.scope" if rel_dir[-1].endswith(".slice") else CID)
+    s.ctr.mkdir(parents=True)
     (s.pod_dir / "cgroup.freeze").write_text("0")
     (s.pod_dir / "cgroup.events").write_text("populated 1" + NL + "frozen 0" + NL)
     return s
@@ -743,7 +744,7 @@ def test_real_k3d_layouts_freeze_the_pod_directory_and_never_a_scope_or_a_qos_di
     assert result["status"] == "frozen" and result["frozen"] == "1", result
     assert result["cgroup"] == "/".join(rel)
     assert s.writes == ["1"] and s.freeze_file() == "1"
-    assert not (s.pod_dir / "ctr" / "cgroup.freeze").exists()                    # the container scope was not touched
+    assert not (s.ctr / "cgroup.freeze").exists()                    # the container scope was not touched
     for parent in s.pod_dir.parents:
         if parent == s.root:
             break
@@ -773,21 +774,101 @@ def test_the_proc_scanner_maps_the_relative_forms_and_nothing_else():
         assert parse_cgroup_line(line) is None, line
 
 
-def test_a_crafted_dot_dot_in_the_middle_of_a_real_layout_is_refused(tmp_path):
+def test_a_crafted_dot_dot_in_the_middle_of_a_real_layout_is_never_frozen(tmp_path):
     line, rel = REAL["burstable"]
     s = real_scene(tmp_path, f"0::/../../../burstable/../pod{UID}/{CID}", rel)
     result = s.handle()
-    assert (result["status"], result["reason"].split(":")[0]) == ("refused", "cgroup_path_mismatch")
-    assert s.writes == [] and s.freeze_file() == "0"
+    assert result["status"] in ("refused", "failed") and s.writes == [] and s.freeze_file() == "0"
+    for path in (f"/../../../burstable/../pod{UID}/{CID}", f"/../a/./pod{UID}/{CID}"):     # the second line of defence
+        with pytest.raises(ct._Refuse) as e:
+            ct.pod_dir_name(path, UID)
+        assert e.value.reason.startswith("cgroup_path_mismatch: path has a dot component")
 
 
 def test_the_name_comes_from_the_pod_uid_not_from_where_the_path_says_the_pod_is(tmp_path):
     # the only thing taken from /proc is the pod directory NAME; the place is found in the mounted tree
     s = real_scene(tmp_path, f"0::/../../../besteffort/pod{UID}/{CID}", ("kubepods", "burstable", f"pod{UID}"))
     assert s.handle()["status"] == "frozen"
-    (tmp_path / "two").mkdir()
-    s2 = real_scene(tmp_path / "two", f"0::/system.slice/pod{UID}/{CID}", ("kubepods", f"pod{UID}"))
-    assert s2.handle()["cgroup"] == f"kubepods/pod{UID}"
+
+
+def test_a_path_outside_the_kubelet_layout_is_not_mapped_to_the_pod(tmp_path):
+    # the anchored relative forms: `/system.slice/pod<uid>/<cid>` (with or without leading `..`) is not a pod
+    from agents.security_agent.proc_scanner import parse_cgroup_line
+    for line in (f"0::/system.slice/pod{UID}/{CID}", f"0::/../../../system.slice/pod{UID}/{CID}",
+                 f"0::/../../x/burstable/pod{UID}/{CID}"):
+        assert parse_cgroup_line(line) is None, line
+    s = real_scene(tmp_path, f"0::/system.slice/pod{UID}/{CID}", ("kubepods", f"pod{UID}"))
+    result = s.handle()
+    assert result["status"] == "failed" and result["reason"].startswith("pod_pids_not_found")
+    assert s.writes == []
+
+
+def test_the_pod_directory_must_hold_a_container_of_the_pod(tmp_path):
+    line, rel = REAL["guaranteed"]
+    s = real_scene(tmp_path, line, rel)
+    s.ctr.rename(s.pod_dir / ("f" * 64))                                         # a container id nobody saw in /proc
+    result = s.handle()
+    assert (result["status"], result["reason"].split(":")[0]) == ("refused", "cgroup_container_missing")
+    assert s.writes == [] and s.freeze_file() == "0"
+
+
+def test_a_file_or_a_symlink_named_like_the_container_does_not_count(tmp_path):
+    line, rel = REAL["guaranteed"]
+    s = real_scene(tmp_path, line, rel)
+    s.ctr.rmdir()
+    s.ctr.write_text("not a directory")
+    result = s.handle()
+    assert result["reason"].startswith("cgroup_container_missing") and s.writes == []
+
+
+def test_the_systemd_container_scope_is_matched_by_its_id(tmp_path):
+    line, rel = REAL["systemd_guaranteed"]
+    s = real_scene(tmp_path, line, rel)
+    assert s.handle()["status"] == "frozen"
+    (tmp_path / "bad").mkdir()
+    s2 = real_scene(tmp_path / "bad", line, rel)
+    s2.ctr.rename(s2.pod_dir / ("cri-containerd-" + "e" * 64 + ".scope"))
+    assert s2.handle()["reason"].startswith("cgroup_container_missing")
+
+
+def test_a_uid_inside_another_component_name_is_refused_as_an_unknown_form():
+    with pytest.raises(ct._Refuse) as e:
+        ct.pod_dir_name(f"/../../x-pod{UID}-y/{CID}", UID)
+    assert "unknown form" in e.value.reason
+    with pytest.raises(ct._Refuse) as e:
+        ct.pod_dir_name(f"/../../pod{UID}x/{CID}", UID)
+    assert "unknown form" in e.value.reason
+
+
+def test_only_a_strict_lowercase_uuid_is_mapped_by_the_relative_form():
+    from agents.security_agent.proc_scanner import parse_cgroup_line
+    for bad in ("5F2C1A9E-1111-4222-8333-444455556666", "5f2c1a9e-1111-4222-8333-4444555566", "5f2c1a9e1111422283334444555566",
+                "5f2c1a9e-1111-4222-8333-444455556666-1"):
+        assert parse_cgroup_line(f"0::/../../pod{bad}/{CID}") is None, bad
+
+
+def _fake_symlinks(monkeypatch, *names):
+    """Report a symlink for any path whose last component is in `names` (real symlinks need rights on Windows)."""
+    real = ct._kind
+    monkeypatch.setattr(ct, "_kind", lambda path: "link" if os.path.basename(path) in names else real(path))
+
+
+def test_a_symlink_named_like_the_pod_directory_is_refused_even_where_symlinks_cannot_be_made(tmp_path, monkeypatch):
+    line, rel = REAL["guaranteed"]
+    s = real_scene(tmp_path, line, rel)
+    _fake_symlinks(monkeypatch, f"pod{UID}")
+    result = s.handle()
+    assert (result["status"], result["reason"].split(":")[0]) == ("refused", "cgroup_path_mismatch")
+    assert "symlink" in result["reason"] and s.writes == [] and s.freeze_file() == "0"
+
+
+def test_an_intermediate_symlink_is_not_walked_even_where_symlinks_cannot_be_made(tmp_path, monkeypatch):
+    line, rel = REAL["burstable"]
+    s = real_scene(tmp_path, line, rel)
+    _fake_symlinks(monkeypatch, "kubepods", "burstable")
+    result = s.handle()
+    assert (result["status"], result["reason"].split(":")[0]) == ("refused", "cgroup_dir_missing")
+    assert s.writes == [] and s.freeze_file() == "0"
 
 
 def test_two_places_with_the_pod_name_are_ambiguous(tmp_path):
