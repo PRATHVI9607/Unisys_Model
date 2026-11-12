@@ -460,3 +460,9 @@ Review method: the `kubeheal-reviewer` agent type was not registered in this ses
 - Commit `ce5a183` adds UUIDs to temporary Job, ConfigMap, NetworkPolicy, and local staging names. Cluster cleanup checks the run-id label, uses create rather than apply, catches failures independently, and attempts local temp-file removal. The script now checks that HPA returns to its 2-replica baseline.
 - Focused HPA staging and cleanup tests: 4 passed. PowerShell 7 parser and `git diff --check` passed. No live HPA rerun yet.
 
+
+### Candidate integration verification (2026-11-12)
+
+- Candidate branch `wave/codex-demo-candidate` combines the verified F1/F3 work changes with the demo runbook and HPA cleanup branch for pre-rehearsal testing. This is not yet the official `demo` merge.
+- Full suite on the candidate passed: 2073 passed, 11 skipped in 60.34 s. Live cluster tests were opt-in and not run. HPA focused staging/cleanup tests: 4 passed. Live HPA rerun remains pending.
+- P11 output coverage is being expanded to E1-E7 and V5-E1; only bounded E1/E2 scenarios will be run live, with all other fields explicitly `not measured` and a reason.
