@@ -17,15 +17,17 @@ Rules this module keeps (pinned by tests/test_containment_agent.py and tests/tes
   * The mode comes from `agents.common.killswitch.ModeWatcher` (the global mode is absolute, a namespace label
     can only be stricter). It is read at validation and AGAIN immediately before the write. Not `enforce`, or
     unreadable, is a `dry_run` result and nothing is written. A FREEZE also needs a namespace without the
-    `kubeheal/protected` label (`namespace_protected`) and never targets the agent's own pod or an ancestor
-    of it (`self_pod`, from <PROC_ROOT>/self/cgroup).
+    `kubeheal/protected` label (`namespace_protected`) and never targets the agent's own pod (`self_pod`; env
+    POD_UID and POD_NAME come from the downward API. Without a valid POD_UID the consumer still starts but
+    refuses every freeze with `self_pod_unknown`: fail closed).
   * A THAW is the safe direction (owner decision): it works in any mode, also `test` and unreadable, so
     flipping the panic button to test can never leave a pod frozen with no way back. It must come from
     `requested_by` operator (an executor thaw is `bad_requested_by`) and passes every other check. `mode_seen`
     is still recorded.
-  * The cgroup path comes from /proc (`0::/path` lines, cgroup v2 only) and is checked hard: under the cgroup
-    root, no `..`, below a `kubepods` component, and it must carry the pod UID. No guessing of systemd versus
-    cgroupfs layouts.
+  * The target directory is found from the VALIDATED pod UID, not from the path /proc shows (see "Path logic").
+    cgroup v2 only. The result is checked hard: under the cgroup root, no symlinks, below `kubepods` or
+    `kubepods.slice`, named exactly like the pod directory, exactly one match, and holding a container
+    directory of a container id seen in the pod's own /proc entries.
   * A freeze that cannot be confirmed is `failed` (`freeze_not_confirmed`). The cgroup is left as it is: there
     is NO automatic thaw (a half frozen pod must be looked at by a human or by an explicit thaw request).
   * A request id that already has a result is acknowledged and ignored. A message is acknowledged only after its
@@ -36,6 +38,29 @@ Rules this module keeps (pinned by tests/test_containment_agent.py and tests/tes
     root, below a `kubepods` or `kubepods.slice` component, end in a component that carries a pod UID, and not
     be a QoS slice.
   * The /proc scan runs in a thread (asyncio.to_thread), so the event loop is not blocked.
+
+Path logic (fixed after the first real k3d run, cgroup v2, cgroupfs driver, hostPID, host cgroup root mounted
+read-write at /host/cgroup). What was observed from inside the agent pod: its own /proc/self/cgroup is `0::/`
+(a PRIVATE cgroup namespace whose root is the agent's own container cgroup); other pods' processes show paths
+RELATIVE to that root with leading `..` components, for example `0::/../../pod<uid>/<ctr>` (Guaranteed),
+`0::/../../../burstable/pod<uid>/<ctr>` (Burstable, one more `..` for the QoS directory) and node processes
+`0::/../../../../init`; there is no `kubepods` word in these paths. The mount shows the node cgroup root with a
+`kubepods` directory (no `kubepods.slice`), so pod directories are <root>/kubepods/pod<uid>,
+<root>/kubepods/burstable/pod<uid> and <root>/kubepods/besteffort/pod<uid>. The first version refused every real
+pod (`..` components, no kubepods word). Now:
+  (a) the pod's pids come from the PodIndex scan (proc_scanner also reads the relative forms), and their v2 line
+      is read; (b) only a LEADING run of `..` is allowed and stripped; a `.` or `..` after the first normal
+      component is refused; the pod-level directory NAME is the one path component that is exactly `pod<uid>`
+      (cgroupfs) or `kubepods[-burstable|-besteffort]-pod<uid_with_underscores>.slice` (systemd), never its
+      parent and never a container scope below it; (c) that name is looked up in the mounted tree at exactly six
+      places (<root>/kubepods/<name>, <root>/kubepods/{burstable,besteffort}/<name> and the same under
+      kubepods.slice with kubepods-{burstable,besteffort}.slice), depth at most 3, no recursive walk, lstat only,
+      no symlink is followed (a symlink named like the pod directory is refused); exactly one match is needed
+      (none: `cgroup_dir_missing`, several: `cgroup_path_ambiguous`); (d) the writer keeps its own guards.
+  Own pod: with a private cgroup namespace the agent cannot tell its own pod from its own cgroup path, so the
+  primary protection is the env POD_UID. The own-cgroup-path check stays only as an extra when that path is a
+  normal absolute path that carries a pod UID.
+  NOT verified: the actual cgroup.freeze write on Docker Desktop (no test can do that).
 
 Timing. CONTAIN_REQUEST_TTL_S defaults to 30 s (chosen): the Executor waits CONTAIN_FREEZE_TIMEOUT_S, 10 s, for
 the result and then reports `freeze_unconfirmed`; a request that reaches this agent later than the Executor
@@ -55,9 +80,9 @@ status `frozen` with `frozen` equal to `1` as NOT frozen.
 import asyncio
 import logging
 import os
-import posixpath
 import re
 import socket
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import PurePath
@@ -124,6 +149,9 @@ class ContainmentConfig:
     cgroup_root: str = "/sys/fs/cgroup"
     group: str = GROUP
     consumer: str = ""
+    own_pod_uid: str = ""            # env POD_UID (downward API metadata.uid); empty or malformed: freezes refused
+    own_pod_name: str = ""           # env POD_NAME
+    own_namespace: str = "kubeheal"  # env NAMESPACE
 
     @property
     def stream(self) -> str:
@@ -141,8 +169,16 @@ class ContainmentConfig:
         if len(node) > 253 or not _DNS_SUBDOMAIN.fullmatch(node):
             logger.warning("containment consumer not started: NODE_NAME is not a valid node name")
             return None
+        own_uid = (env.get("POD_UID") or "").strip().lower()
+        if not _POD_UID.fullmatch(own_uid):
+            own_uid = ""
+            logger.warning("POD_UID is not set (or not a pod uid): every freeze will be refused with "
+                           "self_pod_unknown (set it from the downward API, metadata.uid)")
         return cls(
             node=node,
+            own_pod_uid=own_uid,
+            own_pod_name=(env.get("POD_NAME") or "").strip(),
+            own_namespace=(env.get("NAMESPACE") or "kubeheal").strip(),
             request_ttl_s=_positive(env.get("CONTAIN_REQUEST_TTL_S"), DEFAULT_REQUEST_TTL_S),
             verify_s=_positive(env.get("CONTAIN_FREEZE_VERIFY_S"), DEFAULT_VERIFY_S),
             proc_root=env.get("PROC_ROOT") or "/proc",
@@ -175,7 +211,7 @@ def write_cgroup_freeze(directory: str, value: str, cgroup_root: str) -> None:
         raise ValueError("cgroup directory is not below a kubepods component")
     if parts[-1] in _QOS_DIRS or not _UID_IN_NAME.search(parts[-1]):
         raise ValueError("cgroup directory is not a pod directory (no pod uid, or a QoS directory)")
-    fd = os.open(os.path.join(real_dir, "cgroup.freeze"), os.O_WRONLY)
+    fd = os.open(os.path.join(real_dir, "cgroup.freeze"), os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
         os.write(fd, value.encode("ascii"))
     finally:
@@ -212,40 +248,110 @@ def _read_cgroup_lines(proc_root: str, pid: int) -> List[str]:
         return []
 
 
-def pod_cgroup_components(path: str, pod_uid: str) -> List[str]:
-    """The pod-level cgroup directory (as path components below the cgroup root) for a v2 path taken from
-    /proc/<pid>/cgroup, or raises _Refuse(cgroup_path_mismatch).
+def pod_dir_name(path: str, pod_uid: str) -> str:
+    """The NAME of the pod-level cgroup directory for a v2 path taken from /proc/<pid>/cgroup, or raises
+    _Refuse(cgroup_path_mismatch).
 
-    The pod directory is the parent of the container scope directory: the path component that carries the pod
-    UID (dash form or underscore form). It must come after a `kubepods` component (`kubepods` for the cgroupfs
-    driver, `kubepods.slice` for systemd). A `.` or `..` component anywhere is refused: /proc already gives an
-    absolute path, so a `..` is never legitimate here."""
-    comps = path.split("/")
-    if any(c in ("..", ".") for c in comps):
+    The path may start with a run of `..` (a private cgroup namespace shows other pods relative to its own root);
+    only that leading run is allowed and it is dropped. A `.` or `..` after the first normal component is
+    refused. The name is the path component that is exactly `pod<uid>` (cgroupfs) or
+    `kubepods[-burstable|-besteffort]-pod<uid_with_underscores>.slice` (systemd): never its parent, never a
+    container scope below it. A component that carries the uid in any other form is refused."""
+    comps = [c for c in path.split("/") if c]
+    lead = 0
+    while lead < len(comps) and comps[lead] == "..":
+        lead += 1
+    rest = comps[lead:]
+    if any(c in (".", "..") for c in rest):
         raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: path has a dot component")
-    comps = [c for c in comps if c]
-    normalised = posixpath.normpath("/" + "/".join(comps)) if comps else "/"
-    if ".." in normalised.split("/"):
-        raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: path escapes the cgroup root")
-    forms = (pod_uid, pod_uid.replace("-", "_"))
-    uid_at = next((i for i, c in enumerate(comps) if any(f in c for f in forms)), None)
-    kube_at = next((i for i, c in enumerate(comps) if c in ("kubepods", "kubepods.slice")), None)
-    if uid_at is None:
-        raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: path does not contain the pod uid")
-    if kube_at is None or kube_at >= uid_at:
-        raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: path is not below a kubepods component")
-    return comps[: uid_at + 1]
+    dash, under = pod_uid, pod_uid.replace("-", "_")
+    names = (f"pod{dash}", f"kubepods-pod{under}.slice", f"kubepods-burstable-pod{under}.slice",
+             f"kubepods-besteffort-pod{under}.slice")
+    for c in rest:
+        if c in names:
+            return c
+    if any(dash in c or under in c for c in rest):
+        raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: a path component carries the pod uid in an unknown form")
+    raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: path does not contain the pod uid")
+
+
+# where a pod directory can be, relative to the cgroup root (depth at most 3 including the name)
+_PLACES = (("kubepods",), ("kubepods", "burstable"), ("kubepods", "besteffort"), ("kubepods.slice",),
+           ("kubepods.slice", "kubepods-burstable.slice"), ("kubepods.slice", "kubepods-besteffort.slice"))
+
+
+def _kind(path: str) -> Optional[str]:
+    """`dir`, `link` or `other` for what lstat finds at `path` (never follows a symlink); None when absent."""
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError:
+        return None
+    if stat.S_ISLNK(mode):
+        return "link"
+    return "dir" if stat.S_ISDIR(mode) else "other"
+
+
+def find_pod_dir(real_root: str, name: str) -> str:
+    """The one directory called exactly `name` at the six places above, or raises _Refuse. A symlink with that
+    name is refused, an intermediate symlink is not walked."""
+    matches = []
+    for prefix in _PLACES:
+        here, walkable = real_root, True
+        for part in prefix:
+            here = os.path.join(here, part)
+            if _kind(here) != "dir":
+                walkable = False
+                break
+        if not walkable:
+            continue
+        candidate = os.path.join(here, name)
+        kind = _kind(candidate)
+        if kind == "link":
+            raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: the pod directory name is a symlink")
+        if kind == "dir":
+            matches.append(candidate)
+    if not matches:
+        raise _Refuse(STATUS_REFUSED, "cgroup_dir_missing: no directory of that name at the known places under the root")
+    if len(matches) > 1:
+        raise _Refuse(STATUS_REFUSED, f"cgroup_path_ambiguous: {len(matches)} directories carry that name")
+    return matches[0]
+
+
+def require_container_dir(directory: str, container_ids) -> None:
+    """The found pod directory must hold a container directory (never a symlink) of a container the pod's own
+    processes were seen in: cgroupfs names it `<container id>`, systemd `<runtime>-<container id>.scope`. The pod
+    uid picks the directory, this ties it to the container ids read from /proc, so a directory that merely carries
+    the right name but has none of the pod's containers in it is refused (`cgroup_container_missing`)."""
+    prefixes = {c[:12] for c in container_ids if len(c) >= 12}
+    try:
+        with os.scandir(directory) as it:
+            for entry in it:
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                ident = entry.name[:-len(".scope")] if entry.name.endswith(".scope") else entry.name
+                ident = ident.rsplit("-", 1)[-1]
+                if ident[:12] in prefixes:
+                    return
+    except OSError:
+        pass
+    raise _Refuse(STATUS_REFUSED, "cgroup_container_missing: the pod directory holds none of the pod's container ids")
 
 
 def resolve_pod_cgroup(pod_index: PodIndex, namespace: str, pod: str, pod_uid: str,
                        proc_root: str, cgroup_root: str) -> Tuple[str, str]:
-    """(absolute directory, path relative to the cgroup root) of the pod's cgroup, from /proc.
-    Raises _Refuse with status refused or failed."""
-    pids = [pid for pid, rec in scan_pids(pod_index, proc_root).items()
-            if rec.get("uid") == pod_uid and rec.get("namespace") == namespace and rec.get("pod") == pod]
+    """(absolute directory, path relative to the cgroup root) of the pod's cgroup. The pod's pids prove which pod
+    directory NAME to look for (from their /proc cgroup path); the directory itself is found under the cgroup
+    root by `find_pod_dir`. Raises _Refuse with status refused or failed."""
+    recs = {pid: rec for pid, rec in scan_pids(pod_index, proc_root).items()
+            if rec.get("uid") == pod_uid and rec.get("namespace") == namespace and rec.get("pod") == pod}
+    pids = list(recs)
     if not pids:
         raise _Refuse(STATUS_FAILED, "pod_pids_not_found: no process of the pod is visible on this node")
-    pod_dirs, saw_v1, v2_seen = set(), False, False
+    container_ids = {str(rec.get("container_id") or "") for rec in recs.values()} - {""}
+    names, saw_v1, v2_seen = set(), False, False
     for pid in sorted(pids):
         for line in _read_cgroup_lines(proc_root, pid):
             hierarchy, _, rest = line.partition(":")
@@ -253,48 +359,48 @@ def resolve_pod_cgroup(pod_index: PodIndex, namespace: str, pod: str, pod_uid: s
             if hierarchy == "0" and controllers == "":
                 v2_seen = True
                 try:
-                    pod_dirs.add(tuple(pod_cgroup_components(path, pod_uid)))
+                    names.add(pod_dir_name(path, pod_uid))
                 except _Refuse as e:
                     if e.reason.startswith("cgroup_path_mismatch: path does not contain"):
                         continue              # a process outside the pod's directory tree (pid reuse): ignore
                     raise
             elif hierarchy.isdigit() and hierarchy != "0":
                 saw_v1 = True
-    if not pod_dirs:
+    if not names:
         if saw_v1 and not v2_seen:
             raise _Refuse(STATUS_FAILED, "cgroup_v1_not_supported")
         if saw_v1:
             raise _Refuse(STATUS_FAILED, "cgroup_v1_not_supported: hybrid hierarchy, the pod is not on cgroup v2")
         raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: no cgroup v2 path of the pod carries its uid")
-    if len(pod_dirs) > 1:
+    if len(names) > 1:
         raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: the pod's processes report different pod cgroups")
-    comps = list(next(iter(pod_dirs)))
+    name = next(iter(names))
     real_root = os.path.realpath(cgroup_root)
-    directory = os.path.realpath(os.path.join(real_root, *comps))
+    candidate = find_pod_dir(real_root, name)
+    directory = os.path.realpath(candidate)
+    if directory != candidate or os.path.basename(directory) != name:
+        raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: the pod directory is not the directory that was found")
     if directory == real_root or os.path.commonpath([real_root, directory]) != real_root:
         raise _Refuse(STATUS_REFUSED, "cgroup_path_mismatch: directory is outside the cgroup root")
-    if not os.path.isdir(directory):
-        raise _Refuse(STATUS_FAILED, "cgroup_dir_missing: the pod cgroup directory does not exist under the root")
-    return directory, "/".join(comps)
+    require_container_dir(directory, container_ids)
+    return directory, "/".join(PurePath(directory).relative_to(real_root).parts)
 
 
 def refuse_own_pod(directory: str, pod_uid: str, proc_root: str, cgroup_root: str) -> None:
-    """Never freeze the agent's own pod or an ancestor of it. `directory` is the resolved target. The agent's own
-    cgroup comes from <proc_root>/self/cgroup; the target is refused (`self_pod`) when it equals or contains
-    the agent's directory, when the agent's path carries the target pod's UID, and, failing closed, when the
-    agent's own cgroup cannot be read or placed. (With a private cgroup namespace the agent sees itself as `/`;
-    the UID check then still catches the common case where it can see its own path.)"""
-    lines = _read_cgroup_lines(proc_root, "self")
-    own = [ln.partition(":")[2].partition(":")[2] for ln in lines if ln.startswith("0::")]
-    if not own:
-        raise _Refuse(STATUS_REFUSED, "self_pod: the agent's own cgroup v2 path could not be read")
+    """Extra own-pod check from <proc_root>/self/cgroup (`self_pod`). It only applies when that path is a normal
+    absolute path that carries a pod UID (no `..`); with a private cgroup namespace the agent sees itself as `/`
+    and this check does nothing, the env POD_UID check in `validate` is the primary protection. When it applies
+    it refuses a target that carries the agent's uid, equals the agent's directory or is an ancestor of it."""
     real_root = os.path.realpath(cgroup_root)
-    for path in own:
+    for line in _read_cgroup_lines(proc_root, "self"):
+        if not line.startswith("0::"):
+            continue
+        path = line.partition(":")[2].partition(":")[2]
+        comps = [c for c in path.split("/") if c and c != "."]
+        if ".." in comps or not _UID_IN_NAME.search(path):
+            continue
         if pod_uid in path or pod_uid.replace("-", "_") in path:
             raise _Refuse(STATUS_REFUSED, "self_pod: the target is the agent's own pod")
-        comps = [c for c in path.split("/") if c and c != "."]
-        if ".." in comps:
-            raise _Refuse(STATUS_REFUSED, "self_pod: the agent's own cgroup path cannot be placed")
         own_dir = os.path.realpath(os.path.join(real_root, *comps))
         if os.path.commonpath([directory, own_dir]) == directory:     # equal to, or an ancestor of, the agent
             raise _Refuse(STATUS_REFUSED, "self_pod: the target is or contains the agent's own cgroup")
@@ -412,6 +518,12 @@ class ContainmentHandler:
             return STATUS_REFUSED, "pod_node_unknown"
         if info.node != self.cfg.node:
             return STATUS_REFUSED, "wrong_node: the pod runs on another node"
+        if action == "freeze":
+            if not self.cfg.own_pod_uid:
+                return STATUS_REFUSED, "self_pod_unknown: POD_UID is not set, so no freeze can be safe"
+            if pod_uid == self.cfg.own_pod_uid or (self.cfg.own_pod_name and pod == self.cfg.own_pod_name
+                                                  and namespace == self.cfg.own_namespace):
+                return STATUS_REFUSED, "self_pod: the target is the Security Agent's own pod"
         return None
 
     def _resolve(self, f: Dict[str, str], check_self: bool) -> Tuple[str, str]:

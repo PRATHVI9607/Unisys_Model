@@ -22,6 +22,20 @@ _V1 = re.compile(r"/kubepods(?:/[^/]+)?/pod([a-f0-9-]+)/([a-f0-9]+)")
 _V2 = re.compile(r"kubepods[^/]*/[^/]*pod([a-f0-9_-]+)\.slice/[^/]*?([a-f0-9]{12,})\.scope")
 
 
+# Relative paths. With a private cgroup namespace (observed on k3d, cgroup v2) /proc/<pid>/cgroup of ANOTHER pod is
+# relative to the reader's own cgroup, for example `0::/../../pod<uid>/<ctr>` (Guaranteed) or
+# `0::/../../../burstable/pod<uid>/<ctr>` (Burstable): no `kubepods` word. These forms are ANCHORED: the path must
+# start with a run of `..`, then only the QoS directory (or slice) the kubelet uses, then the pod directory and the
+# container directory. A strict uuid and the anchors keep other paths (`/system.slice/pod<uid>/<ctr>`, a node
+# process) from being mapped to a pod.
+_UUID = r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"
+_HEAD = r"^(?:\d+:[^:]*:)?(?:/\.\.)+"
+_V1_REL = re.compile(rf"{_HEAD}(?:/(?:burstable|besteffort))?/pod({_UUID})/([a-f0-9]{{12,}})(?:/|$)")
+_V2_REL = re.compile(rf"{_HEAD}(?:/kubepods-(?:burstable|besteffort)\.slice)?"
+                     r"/kubepods(?:-(?:burstable|besteffort))?-pod([a-f0-9]{8}(?:_[a-f0-9]{4}){3}_[a-f0-9]{12})\.slice/"
+                     r"[^/]*?([a-f0-9]{12,})\.scope(?:/|$)")
+
+
 def parse_cgroup_line(line: str) -> Optional[Tuple[str, str]]:
     """Parse one cgroup line -> (pod_uid, container_id[:12]) or None."""
     line = line.strip()
@@ -29,6 +43,12 @@ def parse_cgroup_line(line: str) -> Optional[Tuple[str, str]]:
     if m:
         return m.group(1), m.group(2)[:12]
     m = _V2.search(line)
+    if m:
+        return m.group(1).replace("_", "-"), m.group(2)[:12]
+    m = _V1_REL.search(line)
+    if m:
+        return m.group(1), m.group(2)[:12]
+    m = _V2_REL.search(line)
     if m:
         return m.group(1).replace("_", "-"), m.group(2)[:12]
     return None
