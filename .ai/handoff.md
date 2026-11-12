@@ -6,6 +6,7 @@
 - **Cluster lock:** held through the revision 13 upgrade and readbacks, then released. Before any later Helm upgrade or enforce window, recreate `docs/kubeheal/CLUSTER_LOCK.md`, commit it, and remove it afterward. Mode remains `test` outside logged windows.
 - **Suites:** merged work 2,155 passed, 11 skipped in 58.77s; demo 2,155 passed, 11 skipped in 78.43s.
 - **Cluster:** demo rebuilt all 11 images from demo with tag `b20261112215116`; Helm revision 13 deployed at 21:53:13 IST. Mode is `test`, KubeHeal workloads are Ready, all use the fresh tag, and the HMAC Secret exists. Exact record is in `PROGRESS.md`.
+- **F4:** live mode-test smoke passed; signed freeze request returned dry_run, unsigned/tampered requests were refused, all result HMACs valid, cleanup verified. Evidence is in `demo-evidence/F4/`. Future smoke runs need an exclusive committed lock due a possible concurrent mode-change race.
 - **Next:** sync this deployment record to demo, release the committed cluster lock, then continue F4-F13, U6 twice, post-cutoff rehearsal, final docs/secret scan/PUSH_PLAN, and final suite runs. Do not touch the cluster without taking a new committed lock.
 - **Remaining:** F4-F13 live checks, U6 twice, measured P11 evidence, post-cutoff rehearsal, final README/AGENTS, secret scan, and `PUSH_PLAN.md`.
 - **Safety:** only `--context k3d-kubeheal`; never push or set `ALLOW_PUSH`; no model training or `PROJECT_SPEC.md` edits. No destructive reset or clean.
