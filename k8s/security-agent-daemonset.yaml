@@ -41,6 +41,11 @@ spec:
               value: /proc
             - name: REDIS_URL
               value: redis://redis-master:6379
+            - name: CONTAIN_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kubeheal-redis
+                  key: password
             - name: NODE_NAME      # V5-S5: the freeze consumer reads only its own node's stream
               valueFrom:
                 fieldRef:
