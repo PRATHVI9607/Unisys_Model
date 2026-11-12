@@ -384,8 +384,9 @@ def _ns_label(ns):
 # set KUBEHEAL_LIVE_KILLSWITCH_TEST=1 on purpose, as a scripted step.
 @pytest.mark.skipif(os.environ.get("KUBEHEAL_LIVE_KILLSWITCH_TEST") != "1",
                     reason="live test that flips the cluster mode; opt in with KUBEHEAL_LIVE_KILLSWITCH_TEST=1")
-@pytest.mark.skipif(not _cluster_ok(), reason="k3d-kubeheal cluster not reachable")
 def test_live_watch_follows_configmap_without_polling():
+    if not _cluster_ok():
+        pytest.skip("k3d-kubeheal cluster not reachable")
     from kubernetes_asyncio import client, config
 
     async def go():

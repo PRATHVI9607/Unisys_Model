@@ -21,12 +21,19 @@ It works as a five-stage pipeline: **Sense -> Score -> Decide -> Act -> Record**
 
 - Sense: Health Agent (Watch API diff vs golden baseline + Prometheus window) and Security Agent
   (DaemonSet: Falco syscalls, cgroup process->pod mapping, write entropy).
-- Score: Health Model (GATv2 + BiLSTM), Security Model (Transformer + Conv1D-SE), each a FastAPI
-  inference service with split-conformal intervals.
-- Decide: Fusion Agent with the DCM (correlation of the two embeddings) and a pure, unit-tested
-  decision policy (`agents/fusion_agent/decision_policy.py`).
-- Act: Remediation Executor (`agents/executor/`), the only component with write permissions.
+- Score: shipped LightGBM Health and Security bundles behind the inference service, with split-conformal
+  prediction sets and TreeSHAP factors. Every serving request passes through `ModelBundle.restrict()`.
+- Decide: Fusion Agent uses deterministic correlation (`compound_score`); LightGBM does not provide the
+  embeddings required by the legacy DCM. The pure, unit-tested policy (`agents/fusion_agent/decision_policy.py`)
+  requires an exactly one-label conformal set for automatic actions (M2).
+- Act: Remediation Executor (`agents/executor/`), the only component with remediation write permissions. The dashboard has a separate narrow permission to update the kill-switch ConfigMap with admin authentication.
 - Record: append-only audit ledger in MinIO, Prometheus counters, Grafana.
+
+The neural model servers and DCM are legacy components and are disabled by default. Shipped security bundle
+validation figures use synthetic classes and do not establish live model quality. Retraining is not approved.
+On 2026-11-12, cgroup freeze and operator thaw were read back on a k3d scratch pod. That direct helper check
+did not exercise the stream-driven containment pipeline and does not establish real-node support. See
+`docs/kubeheal/results/live_freeze_check_2026-11-12.md`.
 
 ## Branch plan
 
@@ -85,6 +92,9 @@ Rules:
 - Keep `decision_policy.py` pure (no I/O) and keep its tests passing.
 - After P2: no Kubernetes write call outside `agents/executor/` (`tests/test_no_writes_outside_executor.py`).
   After P3: every write goes through `actions._write` and its kill-switch gate.
+- Live integration tests that can contact k3d, Redis, or MinIO must require an explicit `KUBEHEAL_LIVE_*_TEST=1`
+  opt-in and skip by default. A connectivity probe itself counts as live access; do not put it in a decorator
+  evaluated while pytest imports a test module. Keep `tests/test_live_test_safety.py` inventory current.
 - Output style for reports and docs: plain, direct, no em dashes.
 - Tests: `PYTHONPATH=. .venv\Scripts\python.exe -m pytest tests/ -q` (Windows venv, Python 3.11).
 

@@ -63,6 +63,41 @@ def test_freeze_prefix_matches_the_executor():
     assert SnapshotFreeze.key("prod", "data") == key("prod", "data")
 
 
+def test_incident_page_shows_owned_snapshot_freeze_and_release_controls(client, harness):
+    seed_incident(harness)
+    held_key = key("prod", "customer-data")
+    Freezes(harness, {held_key: INC})
+
+    page = client.get(f"/incidents/{INC}").text
+
+    assert "SnapshotFreeze" in page
+    assert "prod/customer-data" in page
+    assert 'data-action="snapshot-freeze-release"' in page
+    assert f'data-incident="{INC}"' in page
+    assert 'id="snapshot-freeze-reason"' in page
+    assert 'id="snapshot-freeze-force"' in page
+    assert held_key not in page
+
+
+def test_incident_page_reports_no_owned_snapshot_freeze(client, harness):
+    seed_incident(harness)
+    Freezes(harness, {key("prod", "other"): "another-incident"})
+
+    page = client.get(f"/incidents/{INC}").text
+
+    assert "No rolling-snapshot freeze is held by this incident." in page
+    assert 'data-action="snapshot-freeze-release"' not in page
+
+
+def test_release_button_posts_reason_force_and_encoded_incident():
+    from pathlib import Path
+    script = Path("dashboard/static/admin.js").read_text(encoding="utf-8")
+    assert 'action === "snapshot-freeze-release"' in script
+    assert '"/release-snapshot-freeze"' in script
+    assert 'reason: reason ? reason.value : ""' in script
+    assert 'force: !!(force && force.checked)' in script
+
+
 def test_requires_admin_and_is_guarded_like_every_mutating_route(client, enforce):
     closed_incident(enforce)
     Freezes(enforce, {key("prod", "data"): INC})

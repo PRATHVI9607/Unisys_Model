@@ -84,13 +84,14 @@ import re
 import socket
 import stat
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import Callable, Dict, List, Optional, Tuple
 
 from redis.exceptions import ResponseError
 
 from agents.common.killswitch import ENFORCE, TEST, ModeWatcher, normalize
+from agents.common.containment_auth import sign_fields, verify_fields
 from agents.executor.guard import check_target
 from agents.security_agent.proc_scanner import PodIndex, scan_pids
 
@@ -152,6 +153,7 @@ class ContainmentConfig:
     own_pod_uid: str = ""            # env POD_UID (downward API metadata.uid); empty or malformed: freezes refused
     own_pod_name: str = ""           # env POD_NAME
     own_namespace: str = "kubeheal"  # env NAMESPACE
+    hmac_key: str = field(default="", repr=False)
 
     @property
     def stream(self) -> str:
@@ -166,6 +168,10 @@ class ContainmentConfig:
             logger.warning("containment consumer not started: NODE_NAME is not set "
                            "(set it from the downward API, spec.nodeName)")
             return None
+        hmac_key = (env.get("CONTAIN_HMAC_KEY") or "").strip()
+        if not hmac_key:
+            logger.warning("containment consumer not started: CONTAIN_HMAC_KEY is not set")
+            return None
         if len(node) > 253 or not _DNS_SUBDOMAIN.fullmatch(node):
             logger.warning("containment consumer not started: NODE_NAME is not a valid node name")
             return None
@@ -179,6 +185,7 @@ class ContainmentConfig:
             own_pod_uid=own_uid,
             own_pod_name=(env.get("POD_NAME") or "").strip(),
             own_namespace=(env.get("NAMESPACE") or "kubeheal").strip(),
+            hmac_key=hmac_key,
             request_ttl_s=_positive(env.get("CONTAIN_REQUEST_TTL_S"), DEFAULT_REQUEST_TTL_S),
             verify_s=_positive(env.get("CONTAIN_FREEZE_VERIFY_S"), DEFAULT_VERIFY_S),
             proc_root=env.get("PROC_ROOT") or "/proc",
@@ -447,13 +454,13 @@ class ContainmentHandler:
     def _result(self, f: Dict[str, str], status: str, reason: str = "", frozen: str = "0",
                 mode_seen: str = "", cgroup: str = "") -> Dict[str, str]:
         namespace = _s(f.get("namespace"))
-        return {
+        return sign_fields({
             "status": status, "reason": reason, "request_id": _s(f.get("request_id")),
             "incident_id": _s(f.get("incident_id")), "namespace": namespace, "pod": _s(f.get("pod")),
             "pod_uid": _s(f.get("pod_uid")), "node": self.cfg.node, "action": _s(f.get("action")),
             "frozen": frozen, "mode_seen": mode_seen or self._mode(namespace), "cgroup": cgroup,
             "ts_ms": str(self._now_ms()),
-        }
+        }, self.cfg.hmac_key)
 
     def _expired(self, f: Dict[str, str]) -> Optional[str]:
         try:
@@ -540,6 +547,8 @@ class ContainmentHandler:
         pod frozen before the panic button was pressed can still be released. It must come from an operator and
         passes every other check (namespace guard, pod UID, node, TTL, path safety). It records `mode_seen`."""
         action, namespace = _s(f.get("action")), _s(f.get("namespace"))
+        if not verify_fields(f, self.cfg.hmac_key):
+            return self._result(f, STATUS_REFUSED, "invalid_hmac")
         bad = self.validate(f)
         if bad:
             if bad[1] == "expired" and action == "freeze" and self.validate(f, check_ttl=False) is None:

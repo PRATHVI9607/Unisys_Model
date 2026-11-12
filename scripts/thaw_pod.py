@@ -10,8 +10,11 @@ request age). The script writes ONLY to Redis. It reads nothing from Kubernetes:
 `kubectl --context k3d-kubeheal -n <ns> get pod <pod> -o jsonpath='{.metadata.uid} {.spec.nodeName}'`.
 
 Usage:
-  REDIS_URL=redis://:<password>@127.0.0.1:6379 python scripts/thaw_pod.py \\
+  REDIS_URL=redis://:<password>@127.0.0.1:6379 CONTAIN_HMAC_KEY=<secret-value> python scripts/thaw_pod.py \\
       --namespace prod --pod web-abc-1 --pod-uid <uid> --node <node> --incident-id <incident>
+
+`CONTAIN_HMAC_KEY` is read from the same Kubernetes Secret key as the Redis password; do not put it in a command
+history or commit it. The script rejects missing or invalid result signatures.
 
 Exit codes: 0 only when the answer says status `thawed` with frozen 0; 1 when it does not (refused, failed, no
 answer in time; the reason is printed); 2 when REDIS_URL is not set; 3 when Redis cannot be reached.
@@ -24,22 +27,28 @@ import os
 import sys
 import time
 import uuid
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from agents.common.containment_auth import sign_fields, verify_fields
 
 STREAM_PREFIX = "kubeheal.contain.req"      # keep in step with agents/executor/freeze.py
 RESULT_PREFIX = "kubeheal:contain:result"
 
 
-def build_request(namespace, pod, pod_uid, node, incident_id, now_ms=None, request_id=None):
-    return {
+def build_request(namespace, pod, pod_uid, node, incident_id, now_ms=None, request_id=None, hmac_key=None):
+    key = os.environ.get("CONTAIN_HMAC_KEY", "") if hmac_key is None else hmac_key
+    return sign_fields({
         "request_id": request_id or uuid.uuid4().hex, "incident_id": incident_id, "namespace": namespace,
         "pod": pod, "pod_uid": pod_uid, "node": node, "action": "thaw", "label": "",
         "requested_by": "operator", "timestamp_ms": str(int(now_ms if now_ms is not None else time.time() * 1000)),
-    }
+    }, key)
 
 
 def thaw(redis, request, wait_s=15.0, poll_s=0.5, sleep=time.sleep, clock=time.monotonic):
     """Publish the request and wait for the answer. Returns (ok, message, result dict)."""
     redis.xadd(f"{STREAM_PREFIX}:{request['node']}", request)
+    hmac_key = os.environ.get("CONTAIN_HMAC_KEY", "")
     key = f"{RESULT_PREFIX}:{request['request_id']}"
     deadline = clock() + wait_s
     while True:
@@ -47,8 +56,11 @@ def thaw(redis, request, wait_s=15.0, poll_s=0.5, sleep=time.sleep, clock=time.m
         result = {(k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
                   for k, v in raw.items()}
         if result:
-            ok = result.get("status") == "thawed" and result.get("frozen") == "0"
+            authenticated = verify_fields(result, hmac_key)
+            ok = authenticated and result.get("status") == "thawed" and result.get("frozen") == "0"
             why = result.get("reason", "")
+            if not authenticated:
+                why = "invalid_hmac"
             hint = ""
             if why.startswith(("expired", "bad_timestamp")):
                 hint = " (the clocks of this machine and the node probably differ by more than the request window)"
@@ -71,6 +83,9 @@ def main(argv=None):
     url = os.environ.get("REDIS_URL")
     if not url:
         print("REDIS_URL is not set", file=sys.stderr)
+        return 2
+    if not os.environ.get("CONTAIN_HMAC_KEY"):
+        print("CONTAIN_HMAC_KEY is not set", file=sys.stderr)
         return 2
     import redis as redis_lib
     client = redis_lib.from_url(url, decode_responses=True)
