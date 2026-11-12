@@ -42,15 +42,15 @@ kubectl --context k3d-kubeheal -n kubeheal port-forward service/kubeheal-dashboa
 
 ## F4. HMAC on Redis containment messages
 
-**Time:** reserve 2 minutes; smoke runner timeout is 60 seconds. **Show:** the dedicated Secret name without its contents, then the three signed-result checks. Never reveal Secret data or expose a Redis URL/password.
+**Time:** reserve 2 minutes; smoke runner timeout is 60 seconds. **Show:** the configured Secret name and key reference without reading their value, then the three signed-result checks. Never reveal Secret data or expose a Redis URL/password.
 
 ```powershell
-kubectl --context k3d-kubeheal -n kubeheal get secret kubeheal-containment-hmac -o name
+kubectl --context k3d-kubeheal -n kubeheal get secret kubeheal-redis -o name
 kubectl --context k3d-kubeheal -n kubeheal get configmap kubeheal-mode -o jsonpath='{.data.mode}'
 .\.venv\Scripts\python.exe scripts\containment_hmac_smoke.py --timeout-s 60
 ```
 
-Run the smoke command only after the smoke runner is integrated into the candidate and only while mode is already `test`. Its exact expected lines are a target pod with `mode=test`, `signed: status=dry_run ... result_hmac=valid`, `unsigned: status=refused reason=invalid_hmac ... result_hmac=valid`, and `tampered: status=refused reason=invalid_hmac ... result_hmac=valid`, followed by `Cleanup verified: run-owned Redis messages/results removed; mode remains test`. This exercises three mode-test stream requests and cleans only run-owned keys. **NOT VERIFIED live:** the smoke runner has fake-transport tests but has not been run against k3d. Never run in a different mode or during another acceptance window. Safe fallback: `.\.venv\Scripts\python.exe -m pytest tests/test_containment_hmac_smoke.py -q`; capture actual output and a redacted Secret-name screenshot under `docs/kubeheal/demo-evidence/F4/`. A unit result is not live HMAC evidence.
+In the current k3d values, `.Values.redis.auth.existingSecret` is `kubeheal-redis` and `.Values.redis.auth.key` is `password`; that key is injected as `CONTAIN_HMAC_KEY`. The command above prints only the Secret's name and reads no values. Run the smoke command only after the smoke runner is integrated into the candidate and only while mode is already `test`. Its exact expected lines are a target pod with `mode=test`, `signed: status=dry_run ... result_hmac=valid`, `unsigned: status=refused reason=invalid_hmac ... result_hmac=valid`, and `tampered: status=refused reason=invalid_hmac ... result_hmac=valid`, followed by `Cleanup verified: run-owned Redis messages/results removed; mode remains test`. This exercises three mode-test stream requests and cleans only run-owned keys. **NOT VERIFIED live:** the smoke runner has fake-transport tests but has not been run against k3d. Never run in a different mode or during another acceptance window. Safe fallback: `.\.venv\Scripts\python.exe -m pytest tests/test_containment_hmac_smoke.py -q`; capture actual output and a redacted Secret-name screenshot under `docs/kubeheal/demo-evidence/F4/`. A unit result is not live HMAC evidence.
 
 ## F5. Baseline promotion
 
