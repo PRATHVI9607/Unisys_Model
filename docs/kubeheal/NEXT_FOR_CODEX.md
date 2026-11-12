@@ -9,7 +9,7 @@ chart changes and merges, provided it runs the full suite after each merge and k
 
 ## Handoff state (2026-11-12, Codex)
 
-Codex paused for handoff. No push is permitted. Get current `work` and `demo` tips with `git log -1` in each worktree. Active task is V5-S2, committed WIP, unreviewed and unmerged. Owner stop points are credentials/passwords, model training, deleting user data, or changing `PROJECT_SPEC.md`.
+Claude Code resumed the build on 2026-11-12 (owner instruction: continue without asking, except training, `PROJECT_SPEC.md`, deleting data or irreversible decisions). Done since Codex paused: V5-S2 reviewed, fixed and merged; D4 review fixes, Task 3 chart cleanup and the namespace tier map merged (details in PROGRESS.md, section 'Claude session 2026-11-12'). No push is permitted. Get current `work` and `demo` tips with `git log -1` in each worktree.
 
 Owner decisions (all in `V5_INTEGRATION_PLAN.md` section 11): M1 option (b), M2, M3, D1, D2, D3, D5, D6, D7, plus the two latest answers Q1 and Q2.
 In short: LightGBM health and security bundles (split-conformal sets, TreeSHAP) run inside OUR architecture; an automatic action needs a prediction set of exactly one label (M2);
@@ -23,10 +23,11 @@ the eBPF sensor is optional and last (D6).
 
 | Branch | Worktree | Tip | State | What it needs |
 |---|---|---|---|---|
-| `work` | `../Unisys_Model-wt-metric-query` | `git log -1` | D4 merged; last suite 1363 passed, 3 skipped, 34 deselected. | Continue with S2 only after its full suite and review. |
-| `demo` | main checkout `C:/My_projects_1/cLOUD/Unisys_Model` | `git log -1` | D4 merged; last demo suite 1368 passed, 2 skipped, 34 deselected. Includes demo-only I2 scripts. | Sync reviewed work changes after each task. |
-| `wave/V5-D4` | `../Unisys_Model-wt-V5-D4` | `ad464f3` | Reviewed and merged into `work`; branch suite 1363 passed, 3 skipped, 34 deselected. Worktree clean. | Complete; keep branch. |
-| `wave/V5-S2` | `../Unisys_Model-wt-V5-S2` | `c221832` | Codex WIP commit. Focused review-fix tests 49 passed; full suite not completed after fixes. Not reviewed or merged. | Rerun full suite, review all changes, resolve findings, then merge only if green. |
+| `work` | `../Unisys_Model-wt-metric-query` | `git log -1` | D4, T1 and S2 merged; last suite 1471 passed, 7 skipped, 34 deselected (2026-11-12, helm on PATH). | Continue with Task 5 onward. |
+| `demo` | main checkout `C:/My_projects_1/cLOUD/Unisys_Model` | `git log -1` | D4, T1 and S2 merged; last demo suite 1476 passed, 6 skipped, 34 deselected. Includes demo-only files. | Sync reviewed work changes after each task. |
+| `wave/V5-D4` | none | `f81a380` | Ancestor of work (review fixes merged through `wave/V5-T1`). | No action. |
+| `wave/V5-S2` | none | `4457538` | Reviewed, fixed and merged into work and demo. | No action. |
+| `wave/V5-T1` | none | `560c395` | Namespace tier map, D9 notice epoch, D4 review fixes. Merged into work and demo. | No action. |
 | `wave/P11` | none | `2240ec6` | Ancestor of work; P11 harness implementation merged and reviewed. | Run remaining P11 tasks below. |
 | `wave/P5` | none | `8f1d8b6` | Ancestor of work; phase changes merged. | No branch action; follow open checklist items. |
 | `wave/P6` | none | `7f95f6c` | Ancestor of work; phase changes merged. | No branch action; follow open checklist items. |
@@ -43,13 +44,11 @@ the eBPF sensor is optional and last (D6).
 | `wave/docs-p6d2` | none | `e611844` | Ancestor of work; merged. | No action. |
 | `wip/docs-p6d2` | none | `b229491` | Ancestor of work; P6-D2 merged. | No action; cluster verification remains open in PROGRESS. |
 
-Only four worktrees exist (listed above). All are clean at this handoff. Keep S2 and D4 worktrees for now; branches are retained.
-
-The D4 worktree and S2 worktree are clean; S2 is WIP. Branches D4/S2 were cut from `work` at `96b1d08`; expect checklist/handoff conflicts and preserve current status when merging.
+Two checkouts exist: the `work` worktree and the main checkout on `demo`. Both are clean. Merged task branches are kept, their worktrees removed. New tasks use `../Unisys_Model-wt-<id>` on `wave/<id>`.
 
 ### Cluster and Helm state (k3d-kubeheal, checked by Claude on 2026-11-11, read-only)
 
-**Handoff update 2026-11-12:** `kubectl --context k3d-kubeheal` and `helm --kube-context k3d-kubeheal` could not reach the recorded API endpoint `https://127.0.0.1:32201` (connection refused). The last known mode remains `test`, last known Helm release was revision 4 `deployed`; current mode, release revision/status and pod states are unknown. No upgrade, injection, or manifest application was run during this handoff. Once the cluster is reachable, first verify/set `kubeheal-mode=test`, then inspect release, pods and in-progress demo state before any changes.
+**Update 2026-11-12 (Claude):** the API is reachable again (the k3d containers had been restarted). Read-only checks: `kubeheal-mode` is `test`, Helm release `kubeheal` is still revision 4 `deployed`, no pod is failing (three Completed jobs only). Docker image pulls work again (`redis:7-alpine` pulled). The cluster still runs the old neural stack; the LightGBM stack is not installed.
 
 - Context `k3d-kubeheal` only. Never `hybrid-demo`. `kubeheal-mode` ConfigMap value: `test`. Keep it `test` unless a step says otherwise.
 - Helm release `kubeheal` in namespace `kubeheal`: revision 4, status `deployed`, chart `kubeheal-0.1.0`. History: rev 2 superseded, rev 3 FAILED (server-side-apply conflict with the field manager `kubectl-set` on the `health-agent` image because the live image had been changed with `kubectl set image`), rev 4 deployed.
@@ -96,7 +95,7 @@ Last known results: `work` 1304 passed, 3 skipped, 34 deselected; `demo` 1309 pa
 
 ## Remaining tasks, in order
 
-**Resume order:** (1) finish/review `wave/V5-S2`; (2) chart/agent contract cleanup; (3) cluster install and readiness if registry/network is available; (4) V5-S1 Falco rules and D-5 replay; (5) V5-D5 baseline promotion; (6) V5-D6/D9 Executor validation; (7) V5-S5 containment; (8) V5-I3 dashboard; (9) P10 acceptance and remaining P7/P11 measurements; (10) P13 and V5-DOC; (11) Later tasks V5-F1, V5-P1, V5-P3, V5-E1, V5-S4, V5-M3. Keep phase tasks in PROGRESS order and run the full non-cluster suite after each task/merge. No cluster task may start until its state is reachable and mode is verified.
+**Resume order (S2, D4 fixes and the chart cleanup are DONE, 2026-11-12):** (3) cluster install and readiness (Docker pulls work again; install only after the agent changes are on `work`); (4) V5-S1 Falco rules and D-5 replay; (5) V5-D5 baseline promotion; (6) V5-D6/D9 Executor validation; (7) V5-S5 containment; (8) V5-I3 dashboard; (9) P10 acceptance and remaining P7/P11 measurements; (10) P13 and V5-DOC; (11) Later tasks V5-F1, V5-P1, V5-P3, V5-E1, V5-S4, V5-M3. Keep phase tasks in PROGRESS order and run the full non-cluster suite after each task/merge. No cluster task may start until its state is reachable and mode is verified.
 
 For each task use its listed implementation/tests and full-suite command. Files not listed for that task are out of scope; never touch `PROJECT_SPEC.md` without the owner, never train, and keep `decision_policy.py`, Executor write paths and RBAC within the explicitly assigned D3/D6/S5 tasks. For k3d verification use only the context-qualified commands below. Use `helm lint` and `helm template` for chart changes; use `PYTHONPATH=. .venv\Scripts\python.exe -m pytest tests/ -q` (with Helm on PATH and live cluster tests deselected for local suites).
 
