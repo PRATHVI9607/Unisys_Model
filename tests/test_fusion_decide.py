@@ -37,6 +37,14 @@ def test_scored_event_in_an_open_unprotected_namespace_is_contained_automaticall
     assert req["action"] == "contain" and req["dry_run"] == "false" and req["pod"] == "payments-abc-1"
 
 
+def test_replay_security_event_stays_dry_run_even_when_global_mode_is_enforce():
+    a = make_agent(enforce=True)
+    decide(a, sec=sec_event(syscall_source="replay", dry_run="true"))
+    assert decisions(a) == ["auto_contain"]
+    req = exec_requests(a)[0]
+    assert req["dry_run"] == "true" and req["action"] == "contain"
+
+
 @pytest.mark.parametrize("fields", [
     {"model_scored": "false", "sec_uncertain": "true"},     # P5: heuristic only or no syscall window
     {"model_scored": "false"},

@@ -419,13 +419,49 @@ def test_redis_aof_pvc_and_auth(env, fixture_file):
         assert sec == {"name": "kubeheal-redis", "key": "password"}
         if name in {"security-agent", "executor"}:
             hmac = next(e for e in envs if e["name"] == "CONTAIN_HMAC_KEY")["valueFrom"]["secretKeyRef"]
-            assert hmac == sec
+            assert hmac == {"name": "kubeheal-containment-hmac", "key": "key"}
 
 
 def test_redis_secret_created_only_when_password_given(fixture_file):
-    assert not by_kind(render("k3d-demo", fixture_file), "Secret")
+    secrets = by_kind(render("k3d-demo", fixture_file), "Secret")
+    assert [s["metadata"]["name"] for s in secrets] == ["kubeheal-containment-hmac"]
     docs = render("k3d-demo", fixture_file, "redis.auth.password=testonly")
     assert get(docs, "Secret", "kubeheal-redis")["stringData"] == {"password": "testonly"}
+
+
+def test_containment_hmac_secret_is_dedicated_and_upgrade_stable(fixture_file):
+    docs = render("k3d-demo", fixture_file)
+    secret = get(docs, "Secret", "kubeheal-containment-hmac")
+    assert secret["type"] == "Opaque" and secret["data"]["key"]
+    assert get(docs, "DaemonSet", "security-agent")["spec"]["template"]["spec"]["containers"][0]["env"]
+    source = (CHART / "templates" / "containment-hmac-secret.yaml").read_text(encoding="utf-8")
+    assert 'lookup "v1" "Secret"' in source and "randAlphaNum 64" in source
+    assert "redis.auth" not in source and "fail (printf" in source
+    exposed = []
+    for workload, container in containers(docs):
+        if any(e["name"] == "CONTAIN_HMAC_KEY" for e in container.get("env", [])):
+            exposed.append(workload["metadata"]["name"])
+    assert sorted(exposed) == ["executor", "security-agent"]
+
+
+def test_falco_replay_config_mounts_a_trace_and_can_be_confined_to_one_node(fixture_file):
+    docs = render("k3d-demo", fixture_file, "securityAgent.falcoMode=replay",
+                  "securityAgent.falcoReplay.configMapName=d5-trace",
+                  "securityAgent.falcoReplay.node=k3d-kubeheal-agent-0")
+    ds = get(docs, "DaemonSet", "security-agent")
+    spec = ds["spec"]["template"]["spec"]
+    envs = {e["name"]: e for e in spec["containers"][0]["env"]}
+    assert envs["FALCO_MODE"]["value"] == "replay"
+    assert envs["FALCO_REPLAY_PATH"]["value"] == "/var/run/kubeheal-replay/trace.jsonl"
+    assert envs["FALCO_REPLAY_NODE"]["value"] == "k3d-kubeheal-agent-0"
+    assert {v["name"]: v for v in spec["volumes"]}["falco-replay"]["configMap"]["name"] == "d5-trace"
+    mount = next(m for m in spec["containers"][0]["volumeMounts"] if m["name"] == "falco-replay")
+    assert mount["mountPath"] == "/var/run/kubeheal-replay" and mount["readOnly"] is True
+
+
+def test_falco_replay_configmap_requires_explicit_replay_mode(fixture_file):
+    with pytest.raises(AssertionError):
+        render("k3d-demo", fixture_file, "securityAgent.falcoReplay.configMapName=d5-trace")
 
 
 # ---- Dashboard -----------------------------------------------------------------------------------
@@ -473,7 +509,7 @@ def test_dashboard_admin_identity_and_secret_override(fixture_file):
 
 def test_chart_never_creates_the_admin_token_secret(fixture_file):
     for d in by_kind(render("k3d-demo", fixture_file, "redis.auth.password=x"), "Secret"):
-        assert d["metadata"]["name"] == "kubeheal-redis"
+        assert d["metadata"]["name"] in {"kubeheal-redis", "kubeheal-containment-hmac"}
 
 
 # ---- NetworkPolicy -----------------------------------------------------------------------------
@@ -810,6 +846,15 @@ def test_inference_network_policy(env, fixture_file):
     assert any(f.get("namespaceSelector", {}).get("matchLabels", {}).get("kubernetes.io/metadata.name")
                == "monitoring" for f in frm)
     assert pol["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 8000}]
+    p11 = get(docs, "NetworkPolicy", "allow-inference-from-p11-k6")["spec"]
+    assert p11["podSelector"]["matchLabels"] == {"app": INFERENCE}
+    assert p11["policyTypes"] == ["Ingress"]
+    assert p11["ingress"] == [{
+        "from": [{"podSelector": {"matchLabels": {"app": "kubeheal-p11-k6"}}}],
+        "ports": [{"protocol": "TCP", "port": 8000}],
+    }]
+    # A podSelector alone is same-namespace scoped; this P11-only allowance has no egress or
+    # namespace-wide exception and opens only the inference service's TCP port.
     # the legacy ingress policy is gone while the legacy servers are off
     names = {d["metadata"]["name"] for d in by_kind(docs, "NetworkPolicy")}
     assert "allow-model-servers-from-agents-dashboard-prometheus" not in names
@@ -820,6 +865,13 @@ def test_inference_network_policy(env, fixture_file):
     legacy_minio = get(render(env, fixture_file, LEGACY), "NetworkPolicy", "allow-minio-from-ledger-writers")
     allowed = legacy_minio["spec"]["ingress"][0]["from"][0]["podSelector"]["matchExpressions"][0]["values"]
     assert set(MODEL_SERVERS) <= set(allowed)
+
+
+def test_inference_network_policies_follow_custom_service_port(fixture_file):
+    docs = render("k3d-demo", fixture_file, "inference.port=8123")
+    for name in ("allow-inference-from-agents-and-prometheus", "allow-inference-from-p11-k6"):
+        policy = get(docs, "NetworkPolicy", name)["spec"]
+        assert policy["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 8123}]
 
 
 def test_inference_hpa_modes_follow_the_global_mode(fixture_file):

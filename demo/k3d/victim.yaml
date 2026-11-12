@@ -1,0 +1,187 @@
+# Demo victim workloads (demo branch only). up.ps1 replaces __IMAGE__ with the registry image of the build.
+# prod: a Deployment with a PVC that holds real (sample) files, on the CSI hostpath StorageClass so that
+#       VolumeSnapshots work. It is pinned to the node that runs the CSI hostpath driver (the driver is a
+#       single pod, its volumes only exist on that node): label kubeheal-demo/storage=true, set by up.ps1.
+# dev:  the same app without a volume.
+# The Health Agent reads http_requests_total and http_request_duration_seconds from /metrics.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: victim-seed
+  namespace: prod
+data:
+  seed.py: |
+    # Writes sample files once. They are the data the ransomware demo encrypts and the restore must bring back.
+    import os
+    d = "/data"
+    marker = os.path.join(d, ".seeded")
+    if not os.path.exists(marker):
+        for i in range(20):
+            with open(os.path.join(d, f"record_{i:03d}.txt"), "w") as f:
+                f.write(("customer %03d: plain text sample record, nothing secret here\n" % i) * 40)
+        open(marker, "w").write("seeded\n")
+        print("seeded 20 files")
+    else:
+        print("already seeded")
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: victim-data
+  namespace: prod
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: csi-hostpath-sc
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victim-app
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: victim-app
+    kubeheal.io/watch: "true"   # the Health Agent only watches labelled Deployments
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: victim-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: victim-app
+        kubeheal.io/scrape: "true"
+    spec:
+      nodeSelector:
+        kubeheal-demo/storage: "true"
+      securityContext:
+        fsGroup: 10001
+      initContainers:
+        - name: seed
+          image: __IMAGE__
+          command: ["python", "/seed/seed.py"]
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: seed, mountPath: /seed}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+      containers:
+        - name: victim-app
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: http, containerPort: 8000, protocol: TCP}
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: victim-data}
+        - name: seed
+          configMap: {name: victim-seed}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victim-app
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: victim-app
+    kubeheal.io/scrape: "true"
+spec:
+  selector:
+    app.kubernetes.io/name: victim-app
+  ports:
+    - {name: http, port: 8000, targetPort: http, protocol: TCP}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victim-app
+  namespace: dev
+  labels:
+    app.kubernetes.io/name: victim-app
+    kubeheal.io/watch: "true"   # the Health Agent only watches labelled Deployments
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: victim-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: victim-app
+        kubeheal.io/scrape: "true"
+    spec:
+      containers:
+        - name: victim-app
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: http, containerPort: 8000, protocol: TCP}
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victim-app
+  namespace: dev
+  labels:
+    app.kubernetes.io/name: victim-app
+    kubeheal.io/scrape: "true"
+spec:
+  selector:
+    app.kubernetes.io/name: victim-app
+  ports:
+    - {name: http, port: 8000, targetPort: http, protocol: TCP}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kubeheal-victim-app
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: victim-app
+      kubeheal.io/scrape: "true"
+  namespaceSelector:
+    matchNames: [prod, dev]
+  endpoints:
+    - {port: http, path: /metrics, interval: 5s, scheme: http}

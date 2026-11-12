@@ -1,5 +1,6 @@
 """Run a read-only scan of restored PVCs before the Executor lifts quarantine."""
 
+import ast
 import asyncio
 import json
 import logging
@@ -119,13 +120,24 @@ async def _scan_result(core_api, namespace: str, name: str):
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", errors="replace")
     for line in reversed(str(raw).splitlines()):
-        try:
-            result = json.loads(line)
-        except ValueError:
-            continue
-        if result.get("verdict") in {"clean", "high_entropy", "unknown"}:
+        result = _parse_result_line(line)
+        if result is not None and result.get("verdict") in {"clean", "high_entropy", "unknown"}:
             return result
     return None
+
+
+def _parse_result_line(line: str) -> Optional[Dict]:
+    """The scanner prints one JSON object. The Kubernetes client may hand a one-line JSON log back already parsed
+    and re-rendered as a Python repr (single quotes), which json.loads rejects: seen live 2026-11-12, it made
+    every restore end `entropy result unknown`. Fall back to `ast.literal_eval`, which only evaluates literals."""
+    try:
+        result = json.loads(line)
+    except ValueError:
+        try:
+            result = ast.literal_eval(line.strip())
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            return None
+    return result if isinstance(result, dict) else None
 
 
 async def check_restored_pvcs(core_api, batch_api, gate, namespace: str, incident_id: str,

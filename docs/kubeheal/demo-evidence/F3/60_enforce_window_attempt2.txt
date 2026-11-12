@@ -1,0 +1,32 @@
+[2026-11-12T14:06:28Z] === ENFORCE WINDOW START 2026-11-12T14:06:28Z ===
+[2026-11-12T14:06:28Z] kubeheal-mode patched to enforce; read back: enforce
+[2026-11-12T14:06:29Z] mode switch seen in executor-85fc8b7484-8lvjf
+[2026-11-12T14:06:29Z] mode switch seen in fusion-agent-64bc7fbb9d-jv24d
+[2026-11-12T14:06:29Z] mode switch seen in fusion-agent-64bc7fbb9d-rsgzm
+[2026-11-12T14:06:29Z] mode switch seen in security-agent-55p9m
+[2026-11-12T14:06:31Z] T0 (attack onset) 1794492391977: writing high-entropy .locked files into /data of f3-scratch-b-7558b97ff7-jg47q
+[2026-11-12T14:06:32Z] total 280
+-rw-r--r-- 1 10001 10001    25 Nov 12 14:06 README_RANSOM.txt
+-rw-r--r-- 1 10001 10001    13 Nov 12 14:06 clean_1.txt
+-rw-r--r-- 1 10001 10001    13 Nov 12 14:06 clean_2.txt
+-rw-r--r-- 1 10001 10001    13 Nov 12 14:06 clean_3.txt
+-rw-r--r-- 1 10001 10001    13 Nov 12 14:06 clean_4.txt
+-rw-r--r-- 1 10001 10001    13 Nov 12 14:06 clean_5.txt
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:06 doc_1.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:06 doc_2.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:06 doc_3.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:06 doc_4.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:06 doc_5.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:06 doc_6.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:06 doc_7.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:06 doc_8.locked
+[2026-11-12T14:06:32Z] publishing scripted alert sec-f3-1794492392547-f3-scratch-b for staging/f3-scratch-b-7558b97ff7-jg47q (T0 1794492391977, risk 0.9500, set ["ransomware"], source model security-5.0.0-c6fa12d8)
+[2026-11-12T14:06:32Z] XADD id 1794492392728-0
+[2026-11-12T14:06:32Z] action stream: auto_contain incident=inc-20261112-140632-c8ed65b8 outcome=queued_for_executor dry_run=false
+[2026-11-12T14:06:37Z] action stream: executed_contain incident=inc-20261112-140632-c8ed65b8 outcome=contained dry_run=
+[2026-11-12T14:06:37Z] action stream: restore_requested incident=inc-20261112-140632-c8ed65b8 outcome=queued_for_executor dry_run=false
+[2026-11-12T14:06:59Z] action stream: executed_restore incident=inc-20261112-140632-c8ed65b8 outcome=restored_kept_isolated:entropy result unknown (no check configured or the check failed); quarantine kept; escalated to HUMAN dry_run=
+[2026-11-12T14:06:59Z] chain wait ended: executed_restore: restored_kept_isolated:entropy result unknown (no check configured or the check failed); quarantine kept; escalated to H
+[2026-11-12T14:07:04Z] kubeheal-mode patched to test; read back: test
+[2026-11-12T14:07:04Z] === ENFORCE WINDOW END 2026-11-12T14:07:04Z; mode now test ===
+[2026-11-12T14:07:04Z] WINDOW 2026-11-12T14:06:28Z -> 2026-11-12T14:07:04Z

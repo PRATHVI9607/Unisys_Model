@@ -1,0 +1,15 @@
+# pre-change state 2026-11-12T13:51:28Z
+9       	Thu Nov 12 18:29:11 2026	deployed  	kubeheal-0.1.0	v4         	Upgrade complete                                                                                                                                                                                                                              
+mode=test
+NAME                 IMAGE
+executor             kubeheal-registry:5000/kubeheal/executor:b20261112081307
+fusion-agent         kubeheal-registry:5000/kubeheal/fusion-agent:b20261112182628
+health-agent         kubeheal-registry:5000/kubeheal/health-agent:b20261112075817
+kubeheal-dashboard   kubeheal-registry:5000/kubeheal/dashboard:b20261112075817
+kubeheal-inference   kubeheal-registry:5000/kubeheal/inference-server:b20261112075817
+minio                docker.io/pgsty/silo:RELEASE.2026-11-09T00-00-00Z
+security-agent       kubeheal-registry:5000/kubeheal/security-agent:b20261112182628
+# helm revision 11 (executor image b20261112193403 added) 2026-11-12T14:05:28Z
+9       	Thu Nov 12 18:29:11 2026	superseded	kubeheal-0.1.0	v4         	Upgrade complete  
+10      	Thu Nov 12 19:21:29 2026	superseded	kubeheal-0.1.0	v4         	Upgrade complete  
+11      	Thu Nov 12 19:35:08 2026	deployed  	kubeheal-0.1.0	v4         	Upgrade complete  

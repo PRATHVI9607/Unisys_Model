@@ -1,0 +1,31 @@
+# pre-window state 2026-11-12T13:57:41Z
+mode=test
+--volumesnapshots (all ns)
+prod kubeheal-roll-victim-data-1794370544 true
+prod kubeheal-roll-victim-data-1794370844 true
+staging kubeheal-roll-f3-scratch-data-1794491835 true
+--pvc
+kubeheal data-redis-0 Bound
+kubeheal minio-data Bound
+prod victim-data Bound
+staging f3-scratch-data Bound
+--deploy images prod/staging/dev
+dev           victim-app                            kubeheal-registry:5000/kubeheal/victim-app:b20261111113631         1
+prod          victim-app                            kubeheal-registry:5000/kubeheal/victim-app:b20261111113631         1
+staging       f3-scratch                            kubeheal-registry:5000/kubeheal/victim-app:b20261111113631         1
+--netpol
+kubeheal allow-agent-metrics-from-prometheus
+kubeheal allow-dashboard-from-ingress-and-prometheus
+kubeheal allow-inference-from-agents-and-prometheus
+kubeheal allow-inference-from-p11-k6
+kubeheal allow-minio-from-ledger-writers
+kubeheal allow-redis-from-kubeheal-components
+kubeheal default-deny-ingress
+--stream lengths
+kubeheal.actions 38
+kubeheal.exec 5
+kubeheal.escalations 2
+kubeheal.security.events 5
+kubeheal.health.events 40
+--last action id
+[["1794491847290-0",["incident_id","inc-

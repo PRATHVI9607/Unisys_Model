@@ -1,0 +1,19 @@
+3a4
+> staging kubeheal-forensic-f3-scratch-c-data-inc-20261112-141554-1d76b1ed true
+4a6,7
+> kubeheal data-redis-0 Bound
+> kubeheal minio-data Bound
+7,9c10,18
+< dev           victim-app                            kubeheal-registry:5000/kubeheal/victim-app:b20261111113631         1
+< prod          victim-app                            kubeheal-registry:5000/kubeheal/victim-app:b20261111113631         1
+< staging       f3-scratch-c                          kubeheal-registry:5000/kubeheal/victim-app:b20261111113631         1
+---
+> staging f3-scratch-c-data-restore-inc-20261112-141554-1d76b1ed Bound
+> dev           victim-app                            kubeheal-registry:5000/kubeheal/victim-app:b20261111113631                                                           1
+> prod          victim-app                            kubeheal-registry:5000/kubeheal/victim-app:b20261111113631                                                           1
+> staging       f3-scratch-c                          kubeheal-registry:5000/kubeheal/victim-app@sha256:529d9680cecafa635aa75d8d1b6a88cc30e9594eff99a37b5a94766d64d5d700   1
+> kubeheal.actions 52
+> kubeheal.exec 12
+> kubeheal.escalations 4
+> kubeheal.security.events 10
+> kubeheal.health.events 40

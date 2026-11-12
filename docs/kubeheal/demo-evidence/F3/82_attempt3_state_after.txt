@@ -1,0 +1,25 @@
+# state right after window 3 2026-11-12T14:16:50Z
+NAME                           READY   UP-TO-DATE   AVAILABLE   AGE   CONTAINERS   IMAGES                                                                                                               SELECTOR           LABELS
+deployment.apps/f3-scratch-c   1/1     1            1           88s   app          kubeheal-registry:5000/kubeheal/victim-app@sha256:529d9680cecafa635aa75d8d1b6a88cc30e9594eff99a37b5a94766d64d5d700   app=f3-scratch-c   app=f3-scratch-c
+
+NAME                                READY   STATUS        RESTARTS   AGE   IP            NODE                   NOMINATED NODE   READINESS GATES   LABELS
+pod/f3-scratch-c-59fb684744-66fwd   1/1     Running       0          26s   10.42.0.119   k3d-kubeheal-agent-0   <none>           <none>            app=f3-scratch-c,pod-template-hash=59fb684744
+pod/f3-scratch-c-8449c4d97d-kpcq7   1/1     Terminating   0          48s   10.42.0.117   k3d-kubeheal-agent-0   <none>           <none>            app=f3-scratch-c,kubeheal/incident=inc-20261112-141554-1d76b1ed,kubeheal/quarantine=true,pod-template-hash=8449c4d97d
+
+NAME                                                                           STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS      VOLUMEATTRIBUTESCLASS   AGE   VOLUMEMODE   LABELS
+persistentvolumeclaim/f3-scratch-c-data                                        Bound    pvc-1d0b3b09-39c6-4138-a655-38eb7cb340ae   64Mi       RWO            csi-hostpath-sc   <unset>                 90s   Filesystem   app=f3-scratch-c
+persistentvolumeclaim/f3-scratch-c-data-restore-inc-20261112-141554-1d76b1ed   Bound    pvc-a8233b3f-de37-4d16-8dc5-aa885740b69d   64Mi       RWO            csi-hostpath-sc   <unset>                 49s   Filesystem   kubeheal/incident=inc-20261112-141554-1d76b1ed
+
+NAME                                                                                                      READYTOUSE   SOURCEPVC           SOURCESNAPSHOTCONTENT   RESTORESIZE   SNAPSHOTCLASS            SNAPSHOTCONTENT                                    CREATIONTIME   AGE   LABELS
+volumesnapshot.snapshot.storage.k8s.io/kubeheal-forensic-f3-scratch-c-data-inc-20261112-141554-1d76b1ed   true         f3-scratch-c-data                           64Mi          csi-hostpath-snapclass   snapcontent-9375f868-bf92-4983-876b-3df99ae37ebc   54s            54s   app.ku
+volumesnapshot.snapshot.storage.k8s.io/kubeheal-roll-f3-scratch-c-data-1794492929                         true         f3-scratch-c-data                           64Mi          csi-hostpath-snapclass   snapcontent-ba2368e5-9dff-4a78-8c1f-b7df25a72f9b   80s            80s   app.ku
+mode=test
+# restored pod /data:
+claim=f3-scratch-c-data-restore-inc-20261112-141554-1d76b1ed image=kubeheal-registry:5000/kubeheal/victim-app@sha256:529d9680cecafa635aa75d8d1b6a88cc30e9594eff99a37b5a94766d64d5d700
+# restored pod pod/f3-scratch-c-59fb684744-66fwd /data (after window 3)
+total 20
+-rw-rw-r-- 1 10001 10001 13 Nov 12 14:15 clean_1.txt
+-rw-rw-r-- 1 10001 10001 13 Nov 12 14:15 clean_2.txt
+-rw-rw-r-- 1 10001 10001 13 Nov 12 14:15 clean_3.txt
+-rw-rw-r-- 1 10001 10001 13 Nov 12 14:15 clean_4.txt
+-rw-rw-r-- 1 10001 10001 13 Nov 12 14:15 clean_5.txt

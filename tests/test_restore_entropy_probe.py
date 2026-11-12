@@ -2,6 +2,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent / "fixtures"))
 
 from agents.executor.entropy_probe import scan_roots
@@ -176,3 +178,39 @@ def test_list_pods_read_access_already_exists_for_the_executor_and_no_write_verb
     read = next(d for d in docs if d and d.get("metadata", {}).get("name") == "kubeheal-executor-read")
     rule = next(r for r in read["rules"] if "pods" in r["resources"])
     assert "list" in rule["verbs"] and not {"create", "update", "patch", "delete"} & set(rule["verbs"])
+
+
+# ---- F3: the Kubernetes client hands a one-line JSON log back as a Python repr ----------------------------------
+# Seen live on 2026-11-12: read_namespaced_pod_log returned
+#   "{'errors': [], 'files_scanned': 5, 'high_entropy_files': 0, 'unreadable': 0, 'verdict': 'clean'}"
+# (single quotes), json.loads failed, and every restore ended `entropy result unknown`.
+
+def _verdict_for_log(log, state=None):
+    import asyncio
+    import remediation_fakes as fk
+    from agents.executor.restore_entropy import check_restored_pvcs
+
+    class Core(_Core):
+        async def read_namespaced_pod_log(self, name, namespace, container=None):
+            return log
+
+    return asyncio.run(check_restored_pvcs(Core(), _Batch(), fk.Gate(), "prod", "inc-1", ["data-restore-inc-1"],
+                                           "kubeheal/executor:v4", 30, 1, sleep=fk.Clock().sleep))
+
+
+def test_a_scan_result_in_python_repr_form_is_read():
+    verdict = _verdict_for_log(
+        "{'errors': [], 'files_scanned': 5, 'high_entropy_files': 0, 'unreadable': 0, 'verdict': 'clean'}")
+    assert verdict["clean"] is True and verdict["files_scanned"] == 5
+
+
+def test_a_high_entropy_result_in_python_repr_form_is_not_clean():
+    verdict = _verdict_for_log(
+        "{'errors': [], 'files_scanned': 8, 'high_entropy_files': 8, 'unreadable': 0, 'verdict': 'high_entropy'}")
+    assert verdict["clean"] is False
+
+
+@pytest.mark.parametrize("log", ["", "not a result", "{'verdict': 'surprising'}", "[1, 2]",
+                                 "{'verdict': __import__('os').getcwd()}"])
+def test_an_unreadable_or_unexpected_log_stays_unknown(log):
+    assert _verdict_for_log(log)["clean"] is None

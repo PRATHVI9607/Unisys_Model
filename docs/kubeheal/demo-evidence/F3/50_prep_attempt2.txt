@@ -1,0 +1,15 @@
+[2026-11-12T14:05:56Z] persistentvolumeclaim/f3-scratch-b-data created
+[2026-11-12T14:05:56Z] deployment.apps/f3-scratch-b created
+[2026-11-12T14:06:05Z] scratch pod f3-scratch-b-7558b97ff7-jg47q uid fa713e37-90a6-45c6-a0fe-8e617f5923b1
+[2026-11-12T14:06:05Z] volumesnapshot.snapshot.storage.k8s.io/kubeheal-roll-f3-scratch-b-data-1794492365 created
+[2026-11-12T14:06:08Z] snapshot kubeheal-roll-f3-scratch-b-data-1794492365 readyToUse; creationTime 2026-11-12T14:06:05Z
+[2026-11-12T14:06:08Z] NAME                           READY   UP-TO-DATE   AVAILABLE   AGE   CONTAINERS   IMAGES                                                       SELECTOR
+deployment.apps/f3-scratch-b   1/1     1            1           12s   app          kubeheal-registry:5000/kubeheal/victim-app:b20261111113631   app=f3-scratch-b
+
+NAME                                READY   STATUS    RESTARTS   AGE   IP            NODE                   NOMINATED NODE   READINESS GATES
+pod/f3-scratch-b-7558b97ff7-jg47q   1/1     Running   0          12s   10.42.0.112   k3d-kubeheal-agent-0   <none>           <none>
+
+NAME                                      STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS      VOLUMEATTRIBUTESCLASS   AGE   VOLUMEMODE
+persistentvolumeclaim/f3-scratch-b-data   Bound    pvc-647e3a73-9301-4d77-a157-3882307f5a06   64Mi       RWO            csi-hostpath-sc   <unset>                 12s   Filesystem
+
+NAME                                        

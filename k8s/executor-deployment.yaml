@@ -28,8 +28,8 @@ spec:
             - name: CONTAIN_HMAC_KEY
               valueFrom:
                 secretKeyRef:
-                  name: kubeheal-redis
-                  key: password
+                  name: kubeheal-containment-hmac
+                  key: key
             - {name: EXEC_NAMESPACES, value: "prod,staging,dev"}
             - {name: RESTORE_ENTROPY_IMAGE, value: "kubeheal/executor:v4"}
             - {name: RESTORE_ENTROPY_IMAGE_PULL_SECRETS, value: ""}

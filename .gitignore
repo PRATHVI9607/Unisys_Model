@@ -17,3 +17,6 @@ data/*.jsonl
 
 # pytest temp data (basetemp is set in pytest.ini)
 .pytest-tmp*/
+demo/k3d/.generated-values.yaml
+demo/k3d/.image-tags.json
+demo/k3d/.admin-token

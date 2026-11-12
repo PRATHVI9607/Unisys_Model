@@ -1,0 +1,56 @@
+# kube-prometheus-stack values for the k3d demo (release name `monitoring`, namespace `monitoring`).
+# The Executor and the chart expect Prometheus at prometheus-operated.monitoring.svc.cluster.local:9090.
+# Demo choices, not measured. Alertmanager and node-exporter are off (node-exporter needs host mounts that
+# Docker Desktop does not provide); kube-state-metrics, cAdvisor (kubelet) and Grafana stay on.
+alertmanager:
+  enabled: false
+nodeExporter:
+  enabled: false
+grafana:
+  adminPassword: kubeheal-demo        # demo only
+  defaultDashboardsEnabled: false
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: monitoring
+kubeControllerManager: {enabled: false}
+kubeScheduler: {enabled: false}
+kubeProxy: {enabled: false}
+kubeEtcd: {enabled: false}
+prometheus:
+  prometheusSpec:
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    retention: 6h
+    scrapeInterval: 5s                 # 5 s so the Health Agent's 5 s query step has data
+    evaluationInterval: 30s
+    resources:
+      requests: {cpu: 200m, memory: 512Mi}
+    additionalScrapeConfigs:
+      # Same job as ConfigMap kubeheal-prometheus-scrape-snippet in the chart (templates/monitoring.yaml).
+      - job_name: kubeheal-pods
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [kubeheal]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: app

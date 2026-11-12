@@ -1,0 +1,22 @@
+# Security Agent (node k3d-kubeheal-agent-0) log lines 14:15-14:17Z
+WARNING:agents.common.killswitch:KILL SWITCH mode enforce -> test (configmap)
+WARNING:agents.common.killswitch:KILL SWITCH mode test -> enforce (configmap)
+INFO:agents.security_agent.containment:containment freeze staging/f3-scratch-c-5767955845-jzvhm -> frozen
+WARNING:agents.common.killswitch:KILL SWITCH mode enforce -> test (configmap)
+# Executor
+INFO:__main__:Executor started (consumer=executor-6788fd856b-srfxd)
+WARNING:agents.common.killswitch:KILL SWITCH mode None -> test (configmap)
+WARNING:__main__:executor mode None -> test (configmap)
+WARNING:agents.common.killswitch:KILL SWITCH mode test -> enforce (configmap)
+WARNING:__main__:executor mode test -> enforce (configmap)
+WARNING:agents.common.killswitch:KILL SWITCH mode enforce -> test (configmap)
+WARNING:__main__:executor mode enforce -> test (configmap)
+# Fusion
+WARNING:agents.common.killswitch:KILL SWITCH mode enforce -> test (configmap)
+WARNING:agents.common.killswitch:KILL SWITCH mode test -> enforce (configmap)
+WARNING:agents.common.killswitch:KILL SWITCH mode enforce -> test (configmap)
+WARNING:agents.common.killswitch:KILL SWITCH mode enforce -> test (configmap)
+INFO:__main__:DECISION auto_contain staging/f3-scratch-c score=0.95 :: Security incident. sec_risk=0.95, label=ransomware. AUTO-CONTAIN.
+WARNING:agents.common.killswitch:KILL SWITCH mode test -> enforce (configmap)
+INFO:__main__:DECISION auto_contain staging/f3-scratch-c score=0.95 :: Security incident. sec_risk=0.95, label=ransomware. AUTO-CONTAIN.
+WARNING:agents.common.killswitch:KILL SWITCH mode enforce -> test (configmap)

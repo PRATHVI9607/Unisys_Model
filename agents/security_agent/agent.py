@@ -44,6 +44,7 @@ def namespace_tier(namespace: str) -> str:
 SCORE_KEY_PREFIX = "kubeheal:security:score"          # + ":<namespace>:<workload>"; Fusion reads it (SECURITY_SCORE_PREFIX)
 DEFAULT_SCORE_TTL_S = 60.0                              # chosen, not measured (env SECURITY_SCORE_TTL_S)
 HEURISTIC_LABEL = "suspicious"                          # label of a heuristic-only event: never an auto-contain label
+CONTROLLER_KINDS = ("Deployment", "StatefulSet")        # owners a containment request may name (Executor accepts these)
 MAX_TRACKED_WORKLOADS = 1024                            # chosen, not measured: bound on the per-workload state maps
 MAX_TRACKED_PIDS = 4096                                 # chosen, not measured: bound on PID-scoped state
 
@@ -569,6 +570,28 @@ class SecurityAgent:
         info["workload"] = info.get("workload") or pod or "unknown"
         return info
 
+    async def _resolve_workload(self, pid_info: Dict) -> Dict:
+        """`_with_workload`, then, when the pod's Deployment or StatefulSet is still unknown (the index did not know
+        the pod at publish time, or knows only a bare pod or an orphan ReplicaSet), one live read of
+        pod -> ReplicaSet -> Deployment through ownerReferences. If no owner is found the record is left as a bare
+        pod: `_publish_security_event` then publishes an empty `deployment`, never the pod name."""
+        info = self._with_workload(pid_info)
+        if info.get("workload_kind") in CONTROLLER_KINDS:
+            return info
+        namespace, pod = info.get("namespace", "default"), info.get("pod")
+        if not pod or self.core_api is None or self.apps_api is None:
+            return info
+        found = await self.pod_index.resolve_live(self.core_api, self.apps_api, namespace, pod,
+                                                  info.get("pod_uid", "") or "")
+        if found is None:
+            logger.warning("owner of pod %s/%s could not be resolved (no Deployment or StatefulSet owner, UID "
+                           "mismatch or API error); the event carries no deployment, so no containment is queued",
+                           namespace, pod)
+            return info
+        info.update(workload=found.workload, workload_kind=found.workload_kind,
+                    container=info.get("container") or found.container, pod_uid=found.uid)
+        return info
+
     def _pod_pids(self, pid: int, pid_info: Dict) -> List[int]:
         namespace, pod = pid_info.get("namespace", "default"), pid_info.get("pod")
         pids = {pid}
@@ -627,7 +650,7 @@ class SecurityAgent:
             "high_entropy":      entropy_known and entropy_avg > self.entropy_threshold,
             "mmap_detected":     mmap_detected,
         }
-        pid_info = self._with_workload(pid_info)
+        pid_info = await self._resolve_workload(pid_info)
         namespace, workload = pid_info.get("namespace", "default"), pid_info["workload"]
 
         # The Security Model needs a real syscall window. For eventless assessments, the periodic quiet path
@@ -730,13 +753,18 @@ class SecurityAgent:
         pred = pred or {}
 
         sec_label = label or pred.get("label") or HEURISTIC_LABEL
+        kind = pid_info.get("workload_kind", "Pod")
+        owner_resolved = kind in CONTROLLER_KINDS and bool(pid_info.get("workload")) and pid_info.get("workload") != pod
 
         payload = {
             "event_id": event_id,
             "namespace": namespace,
             "pod_name": pod,
-            "deployment": pid_info.get("workload") or pod,
-            "workload_kind": pid_info.get("workload_kind", "Pod"),
+            # Fail closed: the pod name is never published as the deployment. Without a resolved Deployment or
+            # StatefulSet owner the field is empty and Fusion refuses to queue a containment for the event.
+            "deployment": (pid_info.get("workload") or "") if owner_resolved else "",
+            "workload_kind": kind,
+            "owner_resolved": "true" if owner_resolved else "false",
             "namespace_tier": namespace_tier(namespace),
             "pod_uid": pid_info.get("pod_uid", "") or "",
             "sec_risk": f"{risk_score:.4f}",
@@ -759,6 +787,10 @@ class SecurityAgent:
             "timestamp_ms": str(int(self._wall() * 1000)),
         }
         payload.update(extra or {})
+        if payload.get("syscall_source") == "replay":
+            # Replay is a verification path only. Fusion enforces this marker as test mode too, so a mode change
+            # cannot turn synthetic replay data into an automatic Kubernetes action.
+            payload["dry_run"] = "true"
         await self.redis.xadd("kubeheal.security.events", payload)
         hkey = f"kubeheal:security:{event_id}"
         await self.redis.hset(hkey, mapping=dict(payload))

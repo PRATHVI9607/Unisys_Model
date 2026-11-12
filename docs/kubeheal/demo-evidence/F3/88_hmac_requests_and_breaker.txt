@@ -1,0 +1,10 @@
+# Executor -> Security Agent freeze requests on kubeheal.contain.req:k3d-kubeheal-agent-0 (signature truncated; the key never appears in a message)
+# 14:01 (window 1, old Executor image): NO hmac_sha256 field. 14:06 and 14:15 (new image): hmac_sha256 present, 64 hex chars.
+1794492093874-0 UNSIGNED sig=absent {"request_id": "ed65c7fe38c74b5aafc3462114acf492", "incident_id": "inc-20261112-140132-fe13751f", "namespace": "staging", "pod": "f3-scratch-7d65d9769-wb2rs", "pod_uid": "b376b2a6-ed92-4d0d-86a1-22655e5847c4", "node": "k3d-kubeheal-agent-0", "action": "freeze", "label": "ransomware", "requested_by": "executor", "timestamp_ms": "1794492093868"}
+1794492392780-0 signed sig=8eb248d3344e... (64 hex chars) {"request_id": "6e461df56b054413a994285d3d6194d9", "incident_id": "inc-20261112-140632-c8ed65b8", "namespace": "staging", "pod": "f3-scratch-b-7558b97ff7-jg47q", "pod_uid": "fa713e37-90a6-45c6-a0fe-8e617f5923b1", "node": "k3d-kubeheal-agent-0", "action": "freeze", "label": "ransomware", "requested_by": "executor", "timestamp_ms": "1794492392774"}
+1794492955156-0 signed sig=88605c3bd143... (64 hex chars) {"request_id": "1f69bc5c49044021996fa53543c50a71", "incident_id": "inc-20261112-141554-1d76b1ed", "namespace": "staging", "pod": "f3-scratch-c-5767955845-jzvhm", "pod_uid": "806d422c-b1a4-40d7-b70c-0282dfd4c239", "node": "k3d-kubeheal-agent-0", "action": "freeze", "label": "ransomware", "requested_by": "executor", "timestamp_ms": "1794492955150"}
+
+# containment circuit breaker kubeheal:cbw:contain:staging (limit 3 per 3600 s, S-POL-6), read 2026-11-12T14:24:50Z
+inc-20261112-140132-fe13751f 14:01:33Z
+inc-20261112-140632-c8ed65b8 14:06:32Z
+inc-20261112-141554-1d76b1ed 14:15:55Z

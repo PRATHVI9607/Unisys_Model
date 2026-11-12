@@ -1,0 +1,16 @@
+[2026-11-12T14:09:40Z] pod/f3-scratch-b-57f8f59996-hntqb
+deployment.apps/f3-scratch-b
+replicaset.apps/f3-scratch-b-57f8f59996
+replicaset.apps/f3-scratch-b-7558b97ff7
+persistentvolumeclaim/f3-scratch-b-data
+persistentvolumeclaim/f3-scratch-b-data-restore-inc-20261112-140632-c8ed65b8
+volumesnapshot.snapshot.storage.k8s.io/kubeheal-forensic-f3-scratch-b-data-inc-20261112-140632-c8ed65b8
+volumesnapshot.snapshot.storage.k8s.io/kubeheal-roll-f3-scratch-b-data-1794492365
+networkpolicy.networking.k8s.io/kubeheal-quarantine-inc-20261112-140632-c8ed65b8
+[2026-11-12T14:09:40Z] 
+[2026-11-12T14:09:40Z] networkpolicy.networking.k8s.io "kubeheal-quarantine-inc-20261112-140632-c8ed65b8" deleted from staging namespace
+[2026-11-12T14:09:42Z] persistentvolumeclaim "f3-scratch-b-data" deleted from staging namespace
+[2026-11-12T14:14:12Z] persistentvolumeclaim "f3-scratch-b-data-restore-inc-20261112-140632-c8ed65b8" deleted from staging namespace
+[2026-11-12T14:14:13Z] volumesnapshot.snapshot.storage.k8s.io "kubeheal-forensic-f3-scratch-b-data-inc-20261112-140632-c8ed65b8" deleted from staging namespace
+[2026-11-12T14:14:13Z] volumesnapshot.snapshot.storage.k8s.io "kubeheal-roll-f3-scratch-b-data-1794492365" deleted from staging namespace
+[2026-11-12T14:14:14Z] after cleanup: 

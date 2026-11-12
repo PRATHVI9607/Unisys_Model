@@ -93,6 +93,16 @@ def workload_of(fields: Dict) -> str:
     return fields.get("deployment") or fields.get("pod_name") or "unknown"
 
 
+def owner_unresolved(sec: Dict, ctx_kind: str = "") -> bool:
+    """True when a security event does not name a Deployment or StatefulSet owner for its pod: it says so
+    (`owner_resolved` false) or carries another workload_kind (Pod, ReplicaSet, ...). An event with neither field
+    comes from an older Security Agent and is left to the Executor's own ownerReferences check."""
+    if sec and str(sec.get("owner_resolved", "")).strip().lower() == "false":
+        return True
+    kind = (sec.get("workload_kind") if sec else "") or ctx_kind
+    return bool(kind) and kind not in RESTORE_KINDS
+
+
 def _truthy(v) -> bool:
     return str(v).strip().lower() == "true"
 
@@ -435,6 +445,12 @@ class FusionAgentV4:
                 "methods": {"top_factors": "top_factors_json as published by the model services"}}
         models_ok = not issues
 
+        # Replay traces are synthetic verification inputs. Keep them dry even if the global kill switch changes
+        # to enforce while the temporary replay is running.
+        decision_mode = self.mode.mode_for(namespace)
+        if sec.get("syscall_source") == "replay":
+            decision_mode = "test"
+
         health_set = em.prediction_set(health, "health_prediction_set")
         sec_set = em.prediction_set(sec, "sec_prediction_set")
         inp = DecisionInput(
@@ -460,7 +476,7 @@ class FusionAgentV4:
             has_baseline=_truthy(health.get("has_baseline")),
             changed_fields=em.string_list(health.get("changed_fields_json")),
             security_fresh=security_fresh,
-            mode=self.mode.mode_for(namespace),
+            mode=decision_mode,
         )
         out = make_decision(inp)
         METRICS.record_decision(getattr(out.decision, "value", str(out.decision)))
@@ -504,6 +520,7 @@ class FusionAgentV4:
         if t0_ms:
             decision_payload["t0_ms"] = t0_ms        # absent means unknown, never a guess
         workload_kind = sec.get("workload_kind") or ctx.get("workload_kind", "")
+        unresolved_owner = owner_unresolved(sec, ctx.get("workload_kind", ""))
 
         if not is_update:
             detection = {
@@ -596,12 +613,13 @@ class FusionAgentV4:
                     raise RetryLater(f"incident lock for {key} was lost before {out.decision.value} was queued")
                 else:
                     outcome = await self._execute(namespace, workload, pod, out, inp, causal_chain, incident_id,
-                                                  t0_ms=t0_ms, health_event_id=health.get("event_id"))
+                                                  t0_ms=t0_ms, health_event_id=health.get("event_id"),
+                                                  owner_unresolved=unresolved_owner)
                     if outcome in ("queued_for_executor", "already_queued"):
                         await self.redis.hset(self._ctx_key(incident_id), mapping={"action_state": "queued"})
         else:
             await self._execute(namespace, workload, pod, out, inp, causal_chain, incident_id, t0_ms=t0_ms,
-                                health_event_id=health.get("event_id"))
+                                health_event_id=health.get("event_id"), owner_unresolved=unresolved_owner)
 
         if is_update and t0_ms:
             # T0 may only have become known now (the complete event): a finished containment can restore now
@@ -615,7 +633,7 @@ class FusionAgentV4:
         await asyncio.to_thread(self.ledger.append, incident_id, step, payload)
 
     async def _execute(self, namespace, workload, pod, out, inp, causal_chain, incident_id=None, t0_ms=None,
-                       health_event_id=None):
+                       health_event_id=None, owner_unresolved=False):
         logger.info(f"DECISION {out.decision.value} {namespace}/{workload} "
                     f"score={out.adjusted_score:.2f} :: {out.rationale}")
         outcome = "logged"
@@ -625,7 +643,15 @@ class FusionAgentV4:
         # Circuit breakers count real automatic actions only: record after the request is queued, keyed by the
         # incident id (a failed enqueue or a redelivery does not double count) and never for dry runs,
         # otherwise test mode would use up the budget before the switch to enforce.
-        if out.decision == Decision.AUTO_CONTAIN and not pod:
+        if out.decision == Decision.AUTO_CONTAIN and owner_unresolved:
+            # Fail closed: the security event names no Deployment or StatefulSet owner for the pod, so there is no
+            # workload to put in the request (the pod name is never one). A human is told; nothing is queued.
+            logger.error(f"AUTO_CONTAIN for {namespace}/{pod or workload} not queued: owner of the pod unresolved")
+            await self._escalate(incident_id, namespace, workload,
+                                 f"contain_not_requested: the security event names no Deployment or StatefulSet "
+                                 f"owner for pod {pod or 'unknown'}; no containment request queued")
+            outcome = "not_queued_owner_unresolved"
+        elif out.decision == Decision.AUTO_CONTAIN and not pod:
             logger.error(f"AUTO_CONTAIN for {namespace}/{workload} without a pod from a security event; "
                          "not queued")
             outcome = "not_queued_no_pod"

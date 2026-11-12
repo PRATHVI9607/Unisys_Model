@@ -1,0 +1,30 @@
+[2026-11-12T14:01:28Z] === ENFORCE WINDOW START 2026-11-12T14:01:28Z ===
+[2026-11-12T14:01:28Z] kubeheal-mode patched to enforce; read back: enforce
+[2026-11-12T14:01:29Z] mode switch seen in executor-5b44d584b6-dgttz
+[2026-11-12T14:01:29Z] mode switch seen in fusion-agent-64bc7fbb9d-jv24d
+[2026-11-12T14:01:30Z] mode switch seen in fusion-agent-64bc7fbb9d-rsgzm
+[2026-11-12T14:01:30Z] mode switch seen in security-agent-55p9m
+[2026-11-12T14:01:32Z] T0 (attack onset) 1794492092307: writing high-entropy .locked files into /data of f3-scratch-7d65d9769-wb2rs
+[2026-11-12T14:01:32Z] total 280
+-rw-r--r-- 1 10001 10001    25 Nov 12 14:01 README_RANSOM.txt
+-rw-r--r-- 1 10001 10001    13 Nov 12 13:57 clean_1.txt
+-rw-r--r-- 1 10001 10001    13 Nov 12 13:57 clean_2.txt
+-rw-r--r-- 1 10001 10001    13 Nov 12 13:57 clean_3.txt
+-rw-r--r-- 1 10001 10001    13 Nov 12 13:57 clean_4.txt
+-rw-r--r-- 1 10001 10001    13 Nov 12 13:57 clean_5.txt
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:01 doc_1.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:01 doc_2.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:01 doc_3.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:01 doc_4.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:01 doc_5.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:01 doc_6.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:01 doc_7.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 12 14:01 doc_8.locked
+[2026-11-12T14:01:32Z] publishing scripted alert sec-f3-1794492092904-f3-scratch for staging/f3-scratch-7d65d9769-wb2rs (T0 1794492092307, risk 0.9500, set ["ransomware"], source model security-5.0.0-c6fa12d8)
+[2026-11-12T14:01:33Z] XADD id 1794492093822-0
+[2026-11-12T14:01:33Z] action stream: auto_contain incident=inc-20261112-140132-fe13751f outcome=queued_for_executor dry_run=false
+[2026-11-12T14:01:37Z] action stream: executed_contain incident=inc-20261112-140132-fe13751f outcome=contained_with_gaps:freeze_unconfirmed:status_refused: invalid_hmac dry_run=
+[2026-11-12T14:01:37Z] chain wait ended: executed_contain ended with contained_with_gaps:freeze_unconfirmed:status_refused: invalid_hmac
+[2026-11-12T14:01:42Z] kubeheal-mode patched to test; read back: test
+[2026-11-12T14:01:43Z] === ENFORCE WINDOW END 2026-11-12T14:01:42Z; mode now test ===
+[2026-11-12T14:01:43Z] WINDOW 2026-11-12T14:01:28Z -> 2026-11-12T14:01:42Z
