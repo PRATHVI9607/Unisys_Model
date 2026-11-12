@@ -35,13 +35,36 @@ _READ_REDIS = (
 )
 
 
-def _kubectl(*args: str, input_text: Optional[str] = None) -> str:
+def _kubectl(*args: str, input_text: Optional[str] = None, timeout_s: float = 30.0) -> str:
     """Run a context-pinned kubectl command and return stdout."""
     proc = subprocess.run(["kubectl", "--context", CONTEXT, *args], input=input_text, text=True,
-                          capture_output=True, check=False, timeout=180)
+                          capture_output=True, check=False, timeout=max(0.1, timeout_s))
     if proc.returncode:
         raise RuntimeError(f"kubectl {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}")
     return proc.stdout
+
+
+class BoundedKubectl:
+    """Every subprocess shares one deadline; tests can inject the transport and monotonic clock."""
+
+    def __init__(self, kubectl: Callable, clock: Callable[[], float], deadline: float):
+        self.kubectl, self.clock, self.deadline = kubectl, clock, deadline
+
+    def remaining(self) -> float:
+        remaining = self.deadline - self.clock()
+        if remaining <= 0:
+            raise TimeoutError("D-5 replay deadline reached")
+        return remaining
+
+    def __call__(self, *args: str, input_text: Optional[str] = None) -> str:
+        return self.kubectl(*args, input_text=input_text, timeout_s=self.remaining())
+
+
+def _rollout(call: BoundedKubectl) -> None:
+    remaining = call.remaining()
+    rollout_s = max(1, int(remaining) - 1)
+    call("-n", NAMESPACE, "rollout", "status", "daemonset/" + DAEMONSET,
+         "--timeout=" + str(rollout_s) + "s")
 
 
 def adapt_trace(raw: str, namespace: str, pod: str, pod_uid: str, node: str,
@@ -114,12 +137,19 @@ def _targets_action(row: Dict, namespace: str, pod: str) -> bool:
 def run(kubectl: Callable = _kubectl, sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic, timeout_s: int = 120,
         fixture: Path = FIXTURE) -> Dict:
-    """Run one replay and return its Security event and Fusion action; always restore the DaemonSet and ConfigMap."""
-    mode = _json(kubectl, "-n", NAMESPACE, "get", "configmap", "kubeheal-mode", "-o", "json")
+    """Run one replay under a total deadline, reserving time for guaranteed cleanup attempts."""
+    if timeout_s < 12:
+        raise ValueError("--timeout-s must be at least 12 seconds (includes cleanup reserve)")
+    start = clock()
+    deadline = start + timeout_s
+    cleanup_reserve = min(30.0, max(5.0, timeout_s * 0.25))
+    call = BoundedKubectl(kubectl, clock, deadline - cleanup_reserve)
+
+    mode = _json(call, "-n", NAMESPACE, "get", "configmap", "kubeheal-mode", "-o", "json")
     if (mode.get("data") or {}).get("mode") != "test":
         raise RuntimeError("refusing D-5 replay unless kubeheal-mode is already test")
 
-    target_list = _json(kubectl, "-n", "prod", "get", "pods", "-l", "app.kubernetes.io/name=victim-app", "-o", "json")
+    target_list = _json(call, "-n", "prod", "get", "pods", "-l", "app.kubernetes.io/name=victim-app", "-o", "json")
     candidates = [p for p in target_list.get("items", []) if (p.get("status") or {}).get("phase") == "Running"]
     if len(candidates) != 1:
         raise RuntimeError(f"expected one Running prod victim-app pod, found {len(candidates)}")
@@ -131,7 +161,7 @@ def run(kubectl: Callable = _kubectl, sleep: Callable[[float], None] = time.slee
     statuses = target.get("status", {}).get("containerStatuses") or []
     container_id = (statuses[0].get("containerID", "").split("//", 1)[-1] if statuses else "")
 
-    ds = _json(kubectl, "-n", NAMESPACE, "get", "daemonset", DAEMONSET, "-o", "json")
+    ds = _json(call, "-n", NAMESPACE, "get", "daemonset", DAEMONSET, "-o", "json")
     original_env = _env_map(ds)
     if original_env.get("FALCO_MODE", {}).get("value") != "auto":
         raise RuntimeError("refusing replay unless the Security Agent FALCO_MODE is auto")
@@ -142,37 +172,50 @@ def run(kubectl: Callable = _kubectl, sleep: Callable[[float], None] = time.slee
     if VOLUME in names or VOLUME in mounts:
         raise RuntimeError(f"temporary replay volume name already exists: {VOLUME}")
 
-    configmap = f"kubeheal-d5-replay-{uuid.uuid4().hex[:8]}"
+    run_id = uuid.uuid4().hex
+    configmap = f"kubeheal-d5-replay-{run_id}"
     temp_path = None
-    configmap_attempted = False
+    configmap_created = False
+    configmap_create_attempted = False
     patch_attempted = False
     started_ms = int(time.time() * 1000)
     result = None
     cleanup_errors = []
+    restore_ok = False
     try:
         raw_fixture = fixture.read_text(encoding="utf-8")
         adapted = adapt_trace(raw_fixture, namespace, pod, pod_uid, node, container_id)
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".jsonl", delete=False) as f:
             f.write(adapted)
             temp_path = f.name
-        yaml = kubectl("-n", NAMESPACE, "create", "configmap", configmap,
-                       "--from-file=trace.jsonl=" + temp_path, "--dry-run=client", "-o", "yaml")
-        configmap_attempted = True
-        kubectl("-n", NAMESPACE, "apply", "-f", "-", input_text=yaml)
-        patch_attempted = True
-        kubectl("-n", NAMESPACE, "patch", "daemonset", DAEMONSET, "--type=strategic",
-                "-p", json.dumps(_replay_patch(configmap, node), separators=(",", ":")))
-        kubectl("-n", NAMESPACE, "rollout", "status", "daemonset/" + DAEMONSET, "--timeout=180s")
+        generated = json.loads(call("-n", NAMESPACE, "create", "configmap", configmap,
+                                    "--from-file=trace.jsonl=" + temp_path, "--dry-run=client", "-o", "json"))
+        generated.setdefault("metadata", {}).setdefault("labels", {}).update({
+            "app.kubernetes.io/managed-by": "kubeheal-d5-replay", "kubeheal.io/d5-replay-id": run_id,
+        })
+        configmap_create_attempted = True
+        call("-n", NAMESPACE, "create", "-f", "-", input_text=json.dumps(generated, separators=(",", ":")))
+        configmap_created = True
 
-        deadline = clock() + timeout_s
-        while clock() < deadline:
-            pods = _json(kubectl, "-n", NAMESPACE, "get", "pods", "-l", "app=security-agent", "-o", "json")
+        # Re-read immediately before enabling replay. The first read is only an early refusal; this one closes
+        # the time gap while the unique ConfigMap was created.
+        mode = _json(call, "-n", NAMESPACE, "get", "configmap", "kubeheal-mode", "-o", "json")
+        if (mode.get("data") or {}).get("mode") != "test":
+            raise RuntimeError("refusing to enable replay because kubeheal-mode is no longer test")
+
+        patch_attempted = True
+        call("-n", NAMESPACE, "patch", "daemonset", DAEMONSET, "--type=strategic",
+             "-p", json.dumps(_replay_patch(configmap, node), separators=(",", ":")))
+        _rollout(call)
+
+        while clock() < call.deadline:
+            pods = _json(call, "-n", NAMESPACE, "get", "pods", "-l", "app=security-agent", "-o", "json")
             agent_pod = next((p for p in pods.get("items", [])
                               if (p.get("spec") or {}).get("nodeName") == node
                               and (p.get("status") or {}).get("phase") == "Running"), None)
             if agent_pod:
-                read = kubectl("-n", NAMESPACE, "exec", agent_pod["metadata"]["name"], "-c", CONTAINER,
-                               "--", "python", "-c", _READ_REDIS)
+                read = call("-n", NAMESPACE, "exec", agent_pod["metadata"]["name"], "-c", CONTAINER,
+                            "--", "python", "-c", _READ_REDIS)
                 security, actions = _event_rows(read)
                 security = [r for r in security if r.get("namespace") == namespace and r.get("pod_name") == pod
                             and r.get("syscall_source") == "replay" and int(r.get("timestamp_ms", "0") or 0) >= started_ms]
@@ -186,31 +229,61 @@ def run(kubectl: Callable = _kubectl, sleep: Callable[[float], None] = time.slee
                     result = {"target": {"namespace": namespace, "pod": pod, "pod_uid": pod_uid, "node": node},
                               "security_event": event, "fusion_action": action}
                     break
-            sleep(2)
+            sleep(min(2.0, max(0.0, call.deadline - clock())))
         if result is None:
             raise TimeoutError("timed out waiting for a replay Security event and matching Fusion action")
     finally:
+        call.deadline = deadline
         if patch_attempted:
             try:
-                kubectl("-n", NAMESPACE, "patch", "daemonset", DAEMONSET, "--type=strategic",
-                        "-p", json.dumps(_restore_patch(original_env), separators=(",", ":")))
-                kubectl("-n", NAMESPACE, "rollout", "status", "daemonset/" + DAEMONSET, "--timeout=180s")
+                call("-n", NAMESPACE, "patch", "daemonset", DAEMONSET, "--type=strategic",
+                     "-p", json.dumps(_restore_patch(original_env), separators=(",", ":")))
+                _rollout(call)
+                restored_ds = _json(call, "-n", NAMESPACE, "get", "daemonset", DAEMONSET, "-o", "json")
+                restored_env = _env_map(restored_ds)
+                restored_spec = restored_ds["spec"]["template"]["spec"]
+                restored_agent = next(c for c in restored_spec["containers"] if c.get("name") == CONTAINER)
+                if any(restored_env.get(name) != original_env.get(name)
+                       for name in ("FALCO_MODE", "FALCO_REPLAY_PATH", "FALCO_REPLAY_NODE")) \
+                        or VOLUME in {v.get("name") for v in restored_spec.get("volumes", [])} \
+                        or VOLUME in {v.get("name") for v in restored_agent.get("volumeMounts", [])}:
+                    raise RuntimeError("DaemonSet configuration does not match the captured original")
+                restore_ok = True
             except Exception as e:
                 cleanup_errors.append(f"restore DaemonSet: {e}")
-        if configmap_attempted:
+        if configmap_create_attempted and not configmap_created:
+            # A client-side timeout can happen after the API server accepted create. Recover only an object
+            # carrying this invocation's random ownership label; never delete a same-name collision.
             try:
-                kubectl("-n", NAMESPACE, "delete", "configmap", configmap, "--ignore-not-found=true")
+                raw_cm = call("-n", NAMESPACE, "get", "configmap", configmap,
+                              "--ignore-not-found=true", "-o", "json")
+                if raw_cm.strip():
+                    existing_cm = json.loads(raw_cm)
+                    labels = (existing_cm.get("metadata") or {}).get("labels") or {}
+                    configmap_created = labels.get("kubeheal.io/d5-replay-id") == run_id
+            except Exception as e:
+                cleanup_errors.append(f"check ownership of possibly created ConfigMap: {e}")
+        if configmap_created and (not patch_attempted or restore_ok):
+            try:
+                call("-n", NAMESPACE, "delete", "configmap", configmap)
             except Exception as e:
                 cleanup_errors.append(f"delete temporary ConfigMap: {e}")
+        elif configmap_created and patch_attempted and not restore_ok:
+            cleanup_errors.append(f"preserved mounted ConfigMap {configmap} because DaemonSet restore did not complete")
         if temp_path and os.path.exists(temp_path):
             os.unlink(temp_path)
         if cleanup_errors:
-            raise RuntimeError("D-5 cleanup failed: " + "; ".join(cleanup_errors))
+            restore_json = json.dumps(_restore_patch(original_env), separators=(",", ":"))
+            recovery = (f"Manual recovery for context {CONTEXT}: restore `FALCO_MODE=auto`, remove replay env/volume "
+                        f"from daemonset/{DAEMONSET} with this strategic patch: {restore_json}; then wait for "
+                        f"`kubectl --context {CONTEXT} -n {NAMESPACE} rollout status daemonset/{DAEMONSET}`. "
+                        f"Only after restoration succeeds, delete ConfigMap {configmap}.")
+            raise RuntimeError("D-5 cleanup failed: " + "; ".join(cleanup_errors) + ". " + recovery)
 
-    final_mode = _json(kubectl, "-n", NAMESPACE, "get", "configmap", "kubeheal-mode", "-o", "json")
+    final_mode = _json(call, "-n", NAMESPACE, "get", "configmap", "kubeheal-mode", "-o", "json")
     if (final_mode.get("data") or {}).get("mode") != "test":
         raise RuntimeError("kubeheal-mode changed during replay; expected test")
-    final_ds = _json(kubectl, "-n", NAMESPACE, "get", "daemonset", DAEMONSET, "-o", "json")
+    final_ds = _json(call, "-n", NAMESPACE, "get", "daemonset", DAEMONSET, "-o", "json")
     final_env = _env_map(final_ds)
     if final_env.get("FALCO_MODE", {}).get("value") != "auto" or any(
             final_env.get(name) != original_env.get(name)
@@ -221,7 +294,7 @@ def run(kubectl: Callable = _kubectl, sleep: Callable[[float], None] = time.slee
     if VOLUME in {v.get("name") for v in final_spec.get("volumes", [])} \
             or VOLUME in {v.get("name") for v in final_agent.get("volumeMounts", [])}:
         raise RuntimeError("temporary replay volume was not removed")
-    leftover = kubectl("-n", NAMESPACE, "get", "configmap", configmap, "--ignore-not-found=true", "-o", "name")
+    leftover = call("-n", NAMESPACE, "get", "configmap", configmap, "--ignore-not-found=true", "-o", "name")
     if leftover.strip():
         raise RuntimeError("temporary replay ConfigMap was not deleted")
     if result is None:

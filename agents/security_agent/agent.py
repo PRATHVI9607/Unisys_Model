@@ -759,6 +759,10 @@ class SecurityAgent:
             "timestamp_ms": str(int(self._wall() * 1000)),
         }
         payload.update(extra or {})
+        if payload.get("syscall_source") == "replay":
+            # Replay is a verification path only. Fusion enforces this marker as test mode too, so a mode change
+            # cannot turn synthetic replay data into an automatic Kubernetes action.
+            payload["dry_run"] = "true"
         await self.redis.xadd("kubeheal.security.events", payload)
         hkey = f"kubeheal:security:{event_id}"
         await self.redis.hset(hkey, mapping=dict(payload))

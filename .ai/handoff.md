@@ -1,8 +1,8 @@
 # Handoff
 
 - **Agent:** Codex containment_security; **Date:** 2026-11-12.
-- **Goal:** Prepare a safe D-5 replay on k3d, without running it yet.
-- **What changed and why:** On isolated `wave/Codex-D5-Replay` from work `62426c0`, added optional chart replay ConfigMap mounting, single-node replay gating, and a context-pinned runner that adapts current prod victim identity, requires mode test and FALCO_MODE auto, checks Security/Fusion Redis evidence, and restores all temporary wiring in `finally`. Fake-transport and chart/pipeline tests: 168 passed.
-- **Files touched:** Security Agent Falco config, Helm values/template, `scripts/d5_replay_runner.py`, focused tests, `docs/kubeheal/D5_REPLAY.md`, PROGRESS.
-- **Open issues:** Runner not merged, deployed, or executed against k3d. The fixture is hand-written, with synthetic PID/times; live Falco and its rules remain unverified. Read-only target metadata was current at run preparation, not a persistent identity.
-- **Next step:** Review/merge only after full-suite green, build the updated Security Agent image, then coordinate a single mode-test replay window. Never push, train, or change PROJECT_SPEC.
+- **Goal:** Prepare D-5 replay and containment HMAC hardening on isolated branch `wave/Codex-D5-Replay`; no live replay or deployment.
+- **What changed and why:** Replay-origin events remain dry-run through Security Agent, Fusion, and Executor even if global mode becomes enforce. Non-target Security Agents fall back to live Falco auto-detection. Runner has a second mode check, UUID-owned collision-safe ConfigMap creation, a shared bounded deadline, ownership-checked cleanup after ambiguous create, and preserves the mounted ConfigMap with recovery steps if restoration fails. HMAC uses dedicated `kubeheal-containment-hmac`; Helm preserves its key across upgrades and fails if the existing key is missing.
+- **Files touched:** `agents/fusion_agent/agent.py`, `agents/security_agent/agent.py`, `agents/security_agent/falco_client.py`, chart values/templates, plain Executor/Security Agent manifests, `scripts/d5_replay_runner.py`, focused tests, `docs/kubeheal/D5_REPLAY.md`, `docs/kubeheal/CONTAINMENT_HMAC.md`, `docs/kubeheal/PROGRESS.md`.
+- **Open issues:** Focused suite passed 253 tests using fakes/templates. Not merged, built, deployed, or run on k3d. D-5 fixture is hand-written, not live Falco evidence. No cluster writes were made.
+- **Next step:** Review diff and commit; root to conduct independent review before any coordinated live replay. Never push, train, change `PROJECT_SPEC.md`, or run cluster commands without coordination.

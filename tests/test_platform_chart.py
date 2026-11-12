@@ -419,13 +419,29 @@ def test_redis_aof_pvc_and_auth(env, fixture_file):
         assert sec == {"name": "kubeheal-redis", "key": "password"}
         if name in {"security-agent", "executor"}:
             hmac = next(e for e in envs if e["name"] == "CONTAIN_HMAC_KEY")["valueFrom"]["secretKeyRef"]
-            assert hmac == sec
+            assert hmac == {"name": "kubeheal-containment-hmac", "key": "key"}
 
 
 def test_redis_secret_created_only_when_password_given(fixture_file):
-    assert not by_kind(render("k3d-demo", fixture_file), "Secret")
+    secrets = by_kind(render("k3d-demo", fixture_file), "Secret")
+    assert [s["metadata"]["name"] for s in secrets] == ["kubeheal-containment-hmac"]
     docs = render("k3d-demo", fixture_file, "redis.auth.password=testonly")
     assert get(docs, "Secret", "kubeheal-redis")["stringData"] == {"password": "testonly"}
+
+
+def test_containment_hmac_secret_is_dedicated_and_upgrade_stable(fixture_file):
+    docs = render("k3d-demo", fixture_file)
+    secret = get(docs, "Secret", "kubeheal-containment-hmac")
+    assert secret["type"] == "Opaque" and secret["data"]["key"]
+    assert get(docs, "DaemonSet", "security-agent")["spec"]["template"]["spec"]["containers"][0]["env"]
+    source = (CHART / "templates" / "containment-hmac-secret.yaml").read_text(encoding="utf-8")
+    assert 'lookup "v1" "Secret"' in source and "randAlphaNum 64" in source
+    assert "redis.auth" not in source and "fail (printf" in source
+    exposed = []
+    for workload, container in containers(docs):
+        if any(e["name"] == "CONTAIN_HMAC_KEY" for e in container.get("env", [])):
+            exposed.append(workload["metadata"]["name"])
+    assert sorted(exposed) == ["executor", "security-agent"]
 
 
 def test_falco_replay_config_mounts_a_trace_and_can_be_confined_to_one_node(fixture_file):
@@ -493,7 +509,7 @@ def test_dashboard_admin_identity_and_secret_override(fixture_file):
 
 def test_chart_never_creates_the_admin_token_secret(fixture_file):
     for d in by_kind(render("k3d-demo", fixture_file, "redis.auth.password=x"), "Secret"):
-        assert d["metadata"]["name"] == "kubeheal-redis"
+        assert d["metadata"]["name"] in {"kubeheal-redis", "kubeheal-containment-hmac"}
 
 
 # ---- NetworkPolicy -----------------------------------------------------------------------------

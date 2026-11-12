@@ -44,8 +44,8 @@ spec:
             - name: CONTAIN_HMAC_KEY
               valueFrom:
                 secretKeyRef:
-                  name: kubeheal-redis
-                  key: password
+                  name: kubeheal-containment-hmac
+                  key: key
             - name: NODE_NAME      # V5-S5: the freeze consumer reads only its own node's stream
               valueFrom:
                 fieldRef:

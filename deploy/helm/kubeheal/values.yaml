@@ -63,6 +63,13 @@ rbac:
 killSwitch:
   mode: test        # fresh installs start in dry run; flip to enforce deliberately
 
+# Dedicated HMAC key for the node-local containment protocol. The chart creates this Secret on first install
+# and looks it up on later upgrades so the key remains stable. Only Executor and Security Agent pods receive it.
+containment:
+  hmacSecret:
+    name: kubeheal-containment-hmac
+    key: key
+
 # ---- Redis: AOF on a PVC plus password auth (P9-H6) --------------------------------
 # NOTE: the Executor trusts every message on the `kubeheal.exec` stream, so only Fusion and the
 # dashboard should be able to write to Redis. What this chart enforces: one shared password

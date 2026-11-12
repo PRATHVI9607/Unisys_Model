@@ -309,13 +309,16 @@ def resolve_falco_mode(env=None, exists: Callable[[str], bool] = os.path.exists)
     if mode in ("off", "live"):
         return mode, f"FALCO_MODE/FALCO_ENABLED = {mode}"
     if mode == "replay":
-        if replay_path:
-            replay_node = (env.get("FALCO_REPLAY_NODE") or "").strip()
-            own_node = (env.get("NODE_NAME") or "").strip()
-            if replay_node and replay_node != own_node:
-                return "off", "FALCO_REPLAY_NODE does not match NODE_NAME"
+        if not replay_path:
+            return "off", "FALCO_MODE=replay but FALCO_REPLAY_PATH is not set"
+        replay_node = (env.get("FALCO_REPLAY_NODE") or "").strip()
+        own_node = (env.get("NODE_NAME") or "").strip()
+        if replay_node and replay_node != own_node:
+            # The DaemonSet setting is cluster-wide, but only the target node should consume the
+            # mounted trace. Other nodes retain their normal live Falco input when available.
+            mode = "auto"
+        else:
             return "replay", "FALCO_MODE=replay"
-        return "off", "FALCO_MODE=replay but FALCO_REPLAY_PATH is not set"
     if mode != "auto":
         return "off", f"unknown FALCO_MODE {mode!r}"
     if grpc_addr.startswith("unix://"):
