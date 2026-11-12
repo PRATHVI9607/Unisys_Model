@@ -23,3 +23,9 @@ button { font: inherit; padding: 6px 14px; border: 1px solid var(--accent); back
 button.danger { background: var(--warn); border-color: var(--warn); }
 input[type=password] { font: inherit; padding: 6px 8px; width: 100%; max-width: 360px; }
 @media (max-width: 600px) { .row { grid-template-columns: 6em 1fr 4.5em; } }
+.bar i.neg { background: var(--warn); }
+.pset { font-weight: 600; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--line); }
+.pset-certain { color: var(--accent); }
+.pset-uncertain { color: var(--warn); }
+input[type=text] { font: inherit; padding: 6px 8px; width: 100%; max-width: 480px; margin: 4px 0 8px; }
+td ul { margin: 0; padding-left: 1.1em; }

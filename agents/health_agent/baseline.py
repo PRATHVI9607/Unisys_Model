@@ -116,9 +116,9 @@ _NAME_RE = re.compile(rf"^{_DNS_LABEL}(\.{_DNS_LABEL})*$")
 
 def validate_workload(namespace: str, deployment: str) -> None:
     """DNS-1123 names only: a colon in a namespace could alias another workload's `ns:name` key."""
-    if not isinstance(namespace, str) or len(namespace) > 63 or not _NAMESPACE_RE.match(namespace):
+    if not isinstance(namespace, str) or len(namespace) > 63 or not _NAMESPACE_RE.fullmatch(namespace):
         raise ValueError("namespace must be a DNS-1123 label")
-    if not isinstance(deployment, str) or len(deployment) > 253 or not _NAME_RE.match(deployment):
+    if not isinstance(deployment, str) or len(deployment) > 253 or not _NAME_RE.fullmatch(deployment):
         raise ValueError("deployment must be a DNS-1123 subdomain name")
 
 
@@ -430,7 +430,7 @@ async def promote_baseline(redis, ledger, namespace: str, deployment: str, *, ne
 async def record_dry_run(ledger, namespace: str, deployment: str, *, new_spec: Dict, spec_hash: str,
                          golden_raw: str, kind: str, actor: str, tier: str = "", evidence: Optional[Dict] = None,
                          changed_fields: Optional[List[str]] = None, mode: str = "test",
-                         candidate_id: Optional[str] = None) -> Dict:
+                         candidate_id: Optional[str] = None, reason: str = "") -> Dict:
     """Mode test (or unknown): write ONLY the ledger entry for what a promotion would have done. Returns
     {"status": "dry_run", "ledger_key": ...}, {"status": "no_ledger"} or {"status": "ledger_failed"}."""
     validate_workload(namespace, deployment)
@@ -440,7 +440,7 @@ async def record_dry_run(ledger, namespace: str, deployment: str, *, new_spec: D
     record = make_record(new_spec)
     payload = {
         "namespace": namespace, "deployment": deployment, "tier": tier, "kind": kind, "approver": actor,
-        "candidate_id": candidate_id, "mode": mode, "applied": False,
+        "candidate_id": candidate_id, "mode": mode, "applied": False, "reason": reason,
         "dry_run": f"DRY RUN: would have promoted the golden baseline of {namespace}/{deployment}",
         "previous_text_sha256": raw_digest(golden_raw) if golden_raw else None,
         "previous_spec_digest": record_digest(previous) if previous else None,
@@ -468,12 +468,22 @@ async def get_candidate(redis, namespace: str, deployment: str) -> Optional[Dict
 
 
 async def list_candidates(redis) -> List[Dict]:
-    """All pending candidates (uses SCAN: the dashboard side lists them)."""
+    """All pending candidates (uses SCAN: the dashboard side lists them). An unreadable or non-object record is
+    logged and skipped."""
     out = []
     async for key in redis.scan_iter(match=f"{CANDIDATE_PREFIX}:*"):
         raw = _text(await redis.get(key))
-        if raw:
-            out.append(json.loads(raw))
+        if not raw:
+            continue
+        try:
+            candidate = json.loads(raw)
+        except ValueError:
+            candidate = None
+        if not isinstance(candidate, dict):
+            # One unreadable record must not hide the others (the dashboard lists them).
+            logger.error(f"baseline candidate key {_text(key)} is unreadable or not an object: skipped")
+            continue
+        out.append(candidate)
     return sorted(out, key=lambda c: (c.get("namespace", ""), c.get("deployment", "")))
 
 
@@ -575,7 +585,7 @@ async def approve_promotion(redis, namespace: str, deployment: str, approver: st
             ledger, namespace, deployment, new_spec=candidate["spec"], spec_hash=candidate["spec_hash"],
             golden_raw=golden_raw, kind="approved", actor=approver.strip(), tier=candidate.get("tier", ""),
             evidence=candidate.get("assessment") or {}, changed_fields=candidate.get("changed_fields") or [],
-            mode=killswitch.normalize(current_mode), candidate_id=candidate.get("candidate_id"))
+            mode=killswitch.normalize(current_mode), candidate_id=candidate.get("candidate_id"), reason=reason)
     result = await promote_baseline(
         redis, ledger, namespace, deployment, new_spec=candidate["spec"], spec_hash=candidate["spec_hash"],
         golden_raw=golden_raw, kind="approved", actor=approver.strip(), tier=candidate.get("tier", ""),

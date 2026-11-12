@@ -26,8 +26,9 @@
       return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
     }).then(function (res) {
       if (res.ok) {
-        say("Done: " + (res.body.status || "ok"));
-        setTimeout(function () { window.location.reload(); }, 600);
+        say(typeof res.body.message === "string" ? res.body.message : "Done: " + (res.body.status || "ok"));
+        // A dry run changed nothing: keep the message on screen instead of reloading.
+        if (res.body.status !== "dry_run") { setTimeout(function () { window.location.reload(); }, 600); }
       } else {
         say("Failed (" + res.status + "): " + (typeof res.body.detail === "string" ? res.body.detail : "see server log"));
       }
@@ -40,6 +41,11 @@
     var action = b.getAttribute("data-action");
     if (action === "mode") {
       call("/api/kill-switch", { mode: b.getAttribute("data-mode") });
+    } else if (action === "baseline-approve" || action === "baseline-reject") {
+      var reason = document.getElementById("baseline-reason");
+      call("/api/baseline-candidates/" + encodeURIComponent(b.getAttribute("data-namespace")) + "/" +
+           encodeURIComponent(b.getAttribute("data-deployment")) + "/" + action.replace("baseline-", ""),
+           { candidate_id: b.getAttribute("data-candidate"), reason: reason ? reason.value : "" });
     } else if (action === "approve" || action === "reject") {
       call("/api/approvals/" + encodeURIComponent(b.getAttribute("data-incident")) + "/" + action, {});
     }
