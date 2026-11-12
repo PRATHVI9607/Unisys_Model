@@ -326,10 +326,7 @@ def require_container_dir(directory: str, container_ids) -> None:
     try:
         with os.scandir(directory) as it:
             for entry in it:
-                try:
-                    if not entry.is_dir(follow_symlinks=False):
-                        continue
-                except OSError:
+                if _kind(os.path.join(directory, entry.name)) != "dir":     # lstat: a symlink or a file never counts
                     continue
                 ident = entry.name[:-len(".scope")] if entry.name.endswith(".scope") else entry.name
                 ident = ident.rsplit("-", 1)[-1]
