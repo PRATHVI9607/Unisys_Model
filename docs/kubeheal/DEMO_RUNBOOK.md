@@ -128,16 +128,15 @@ kubectl --context k3d-kubeheal -n kubeheal logs deployment/kubeheal-executor --s
 
 ## F11. Queue-depth HPA and Grafana
 
-**Time:** 15 minutes. **Show:** queue depth rising during k6 traffic, HPA desired replicas increasing, then returning toward baseline after load stops; show the Grafana dashboard panels for queue depth and replicas.
+**Time:** 8 minutes for the single measured run (7 minutes 14 seconds elapsed). **Show:** the queue metric rising during k6 traffic, HPA replicas increasing from 2 to 7, then returning to 2 after load stops; show the Grafana dashboard panels for queue depth and replicas.
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass -Force
-.\demo\scripts\hpa_load.ps1 -Vus 32 -DurationSeconds 90
+pwsh -ExecutionPolicy Bypass -File .\demo\scripts\hpa_load.ps1 -Vus 32 -DurationSeconds 90 -SampleSeconds 10 -ScaleDownWaitSeconds 330
 kubectl --context k3d-kubeheal -n kubeheal get hpa kubeheal-inference -o wide
 kubectl --context k3d-kubeheal -n monitoring port-forward svc/monitoring-grafana 3000:80
 ```
 
-Open Grafana at `http://127.0.0.1:3000` and select the KubeHeal overview dashboard. The script checks mode `test`, waits for the HPA baseline, creates a bounded k6 job and scoped policy, prints the HPA values and k6 summary, and removes its temporary resources in `finally`. **Expected:** HPA metrics are numeric and replicas change under load; do not state a scale latency or throughput unless measured in the run. The 2026-11-12 attempt failed because `Out-String -NoNewline` flattened the JS file and k6 reported no exported functions. The cleanup removed the temporary Job, ConfigMap, and NetworkPolicy. The file-staging fix is committed as `6f97f88`; this attempt is a failed diagnostic, not F11 evidence. Re-run after the fix and save new output. Fallback: prior failure output plus new k6 output, HPA snapshots, and Grafana screenshots in `docs/kubeheal/demo-evidence/F11/`.
+Open Grafana at `http://127.0.0.1:3000` and select the KubeHeal overview dashboard. The script checks mode `test`, waits for the HPA baseline, creates a bounded k6 job and scoped policy, prints the HPA values and k6 summary, and removes its temporary resources in `finally`. **Measured once on 2026-11-12:** 32 VUs for 90 seconds, 121,088 of 121,088 checks passed, median 22.86 ms, p95 38.45 ms, HPA 2 -> 7 -> 2; elapsed 7m14s. See [the recorded result](docs/kubeheal/demo-evidence/F11/hpa-run-2026-11-12.md). This single synthetic scoring-load run is not a performance guarantee. The earlier attempt failed because `Out-String -NoNewline` flattened the JS file; its temporary resources were cleaned up. The fix is committed as `6f97f88`. The successful run did not save full terminal screenshots; capture those during the final rehearsal. Fallback: recorded k6 output and HPA samples plus fresh Grafana screenshots in `docs/kubeheal/demo-evidence/F11/`.
 
 ## Evidence checklist
 

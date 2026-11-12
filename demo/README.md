@@ -8,6 +8,8 @@ On 2026-11-12, Helm revision 8 was deployed and the global mode was `test`. The 
 
 Earlier checks on 2026-11-11 observed all 15 Health Agent Prometheus queries with generated victim traffic and restored a CSI snapshot to a temporary PVC, reading the seeded records. These do not establish drift remediation or full ransomware recovery. Details and exact limits are recorded in [PROGRESS](../docs/kubeheal/PROGRESS.md).
 
+On 2026-11-12, one queue-depth HPA scoring-load run passed on `k3d-kubeheal` in mode `test`: 32 VUs for 90 seconds, 121,088/121,088 HTTP checks passed, median 22.86 ms, p95 38.45 ms, and HPA replicas went 2 -> 7 -> 2. This single synthetic run is not a performance guarantee and does not measure the full incident pipeline. The raw summary and selected HPA samples are in [the F11 result](../docs/kubeheal/demo-evidence/F11/hpa-run-2026-11-12.md); full transcript/screenshots remain for the final rehearsal.
+
 ## Not yet verified end to end
 
 - D-5 replay from the cluster to Fusion incident decision.
@@ -15,7 +17,7 @@ Earlier checks on 2026-11-11 observed all 15 Health Agent Prometheus queries wit
 - HMAC rejection for unsigned or modified containment messages.
 - Baseline promotion and prod dashboard approval on the live cluster.
 - Drift canary and bad-p99 rollback on the live cluster.
-- Queue-depth HPA scale-out under k6 load and Grafana panels.
+- Full Grafana screenshots and runbook rehearsal for F11; one successful synthetic load run is recorded, but no performance guarantee is claimed.
 - Two complete clean-baseline acceptance runs.
 - P11 baseline and scenario measurements.
 
