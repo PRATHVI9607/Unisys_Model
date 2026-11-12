@@ -152,14 +152,71 @@ def test_pod_chaos_waits_for_old_uid_to_disappear_and_ready_count_to_recover(mon
         [{"metadata": {"name": "inference-new", "uid": "new-uid"}}],
     ])
     monkeypatch.setattr(p11_run, "_ready_pods", lambda namespace, deployment: next(pod_states))
-    calls = []
-    monkeypatch.setattr(p11_run.harness, "kubectl", lambda context, args, **kwargs: calls.append(args) or "pod/inference-old deleted")
+    deleted = []
+    monkeypatch.setattr(p11_run, "_delete_pod_with_uid",
+                        lambda namespace, pod_name, pod_uid: deleted.append((namespace, pod_name, pod_uid)) or "accepted")
 
     result = p11_run.run_pod_chaos("kubeheal", "kubeheal-inference", "delete-one-pod")
 
     assert result["status"] == "measured"
-    assert calls == [["delete", "pod", "inference-old", "-n", "kubeheal", "--wait=false"]]
+    assert deleted == [("kubeheal", "inference-old", "old-uid")]
     assert (tmp_path / "p11-chaos-owned-run.csv").is_file()
+
+
+def test_uid_delete_uses_context_pinned_proxy_and_uid_precondition(monkeypatch):
+    processes = []
+    requests = []
+
+    class Process:
+        def __init__(self, command, **kwargs):
+            self.command, self.terminated = command, False
+            processes.append(self)
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout):
+            assert timeout == 5
+
+        def kill(self):
+            raise AssertionError("proxy should terminate without a kill")
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"accepted"
+
+    def fake_urlopen(request, timeout):
+        requests.append((request, timeout))
+        if isinstance(request, str):
+            assert request == "http://127.0.0.1:12345/version"
+            assert timeout == 1
+            return Response()
+        assert request.method == "DELETE"
+        assert request.full_url == "http://127.0.0.1:12345/api/v1/namespaces/kubeheal/pods/inference-old"
+        assert json.loads(request.data) == {
+            "apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": "uid-123"}}
+        assert timeout == 10
+        return Response()
+
+    monkeypatch.setattr(p11_run, "_free_local_port", lambda: 12345)
+    monkeypatch.setattr(p11_run.subprocess, "Popen", Process)
+    monkeypatch.setattr(p11_run, "urlopen", fake_urlopen)
+    assert p11_run._delete_pod_with_uid("kubeheal", "inference-old", "uid-123") == "accepted"
+    assert processes[0].command[:3] == ["kubectl", "--context", "k3d-kubeheal"]
+    assert processes[0].command[3] == "proxy"
+    assert processes[0].terminated is True
+    assert len(requests) == 2
 
 
 def test_ready_pods_use_deployment_selector_and_verify_replicaset_owner_chain(monkeypatch):

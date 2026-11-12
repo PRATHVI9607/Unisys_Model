@@ -42,7 +42,8 @@ Real usage is measured later and recorded under `docs/kubeheal/results/`.
 | P8 Dashboard | done, merged (218029c) |
 | P9 Platform | done, merged (see merge commit); helm lint and template pass with lab example overlay; nothing run on a cluster yet |
 | P10 | in progress (U4, D6, D8, V1-V3 verified; the LightGBM stack is installed on k3d since 2026-11-12, Helm revision 6; the D-5 replay with the new trace, the freeze check and U6 full acceptance remain) |
-| P11, P13 | not started (the P11 harness is merged; no run has produced data; P13 documentation waits for the code to be verified) |
+| P11 | in progress (bounded E1/E2 runner implemented and reviewed; no P11 live run has produced data yet; E3-E6 and V5-E1 are explicitly not measured in `docs/kubeheal/results/p11/P11_COVERAGE.md`) |
+| P13 | not started (documentation waits for the code and live workflows to be verified) |
 | P12 Model hardening | NOT started; P12-H (retraining on live cluster data) is not approved |
 
 ## Task checklist
@@ -178,14 +179,15 @@ Ransomware:
 - `wave/P11` and `wip/docs-p6d2` were reviewed, fixed and merged on 2026-11-11 (see the review section below).
 
 ### P11 Evaluation harness (touches `eval/`, `docs/kubeheal/results/`; cluster owner runs)
-- [ ] P11-H size: S. Harness `eval/p11_harness.py` (offline builders, k3d-kubeheal and namespace allow-lists, injectable runner, no silent overwrite): reviewed, fixed and merged 2026-11-11 (`a1590d1`). Nothing in it has been run against a cluster; every result file it writes says "not measured" until a run produces data.
-- [ ] P11-E1 size: M. k6 load test 10 to 200 simulated pods, p50 and p95 vs replicas. Also tune the queue-depth HPA target (a CHOSEN DEFAULT in the chart values, not a measurement) from the measured replicas-versus-load data.
-- [ ] P11-E2 size: M. Chaos runs (Chaos Mesh or kubectl): detection continuity, fail-closed rate.
+- [x] P11-H size: S. Offline harness `eval/p11_harness.py` (`a1590d1`) remains context/namespace allow-listed, injectable, and non-overwriting. Added `eval/p11_run.py` for bounded E1 scoring load and E2 inference-pod recovery; safety review fixes include 30 s kubectl call timeouts, create-only Job/ConfigMap setup, full UUID resource names, owner-label-checked best-effort cleanup, fixed inference target, and a context-pinned kubectl proxy issuing a UID-preconditioned Pod DELETE. Focused tests: 39 passed on 2026-11-12. No P11 live run has been performed yet.
+- [ ] P11-E1 size: M. k6 scoring load 10 to 200 VUs, p50 and p95 against HPA samples. Runner ready; results not measured pending the authorized cluster run. Tune the queue-depth HPA target only from measured replicas-versus-load data.
+- [ ] P11-E2 size: M. Inference pod recovery under mode test; deletion is pinned to the Deployment selector and owner chain, with a UID precondition. Results not measured pending the authorized cluster run.
 - [ ] P11-E3 size: M. RPO and RTO runs against a database volume. Needs: P7.
 - [ ] P11-E4 size: M. End-to-end time-to-action per stage.
 - [ ] P11-E5 size: M. Baselines (Falco rules only, fixed entropy threshold, diff-only drift, single replica, pod delete only).
 - [ ] P11-E6 size: S. FP32 vs FP16 latency and memory.
 - [ ] P11-E7 size: S. Each results file states machine, cluster and date. Verify: scripts produce CSV plus markdown.
+- P11 coverage table: `docs/kubeheal/results/p11/P11_COVERAGE.md` lists E1-E7 and V5-E1. E3 RPO/RTO, E4 stage timing, E5 comparative baselines, E6 FP32/FP16, and V5-E1 remain `not measured` with reasons. Do not run E3 or V5-E1 against existing volumes or before the full containment flow is verified.
 
 ## P0 log
 

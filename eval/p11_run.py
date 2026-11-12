@@ -1,8 +1,8 @@
 """Bounded P11 k3d scenarios with test-mode gates and exact-resource cleanup.
 
 The load runner creates only one uniquely named ConfigMap and Job in `kubeheal`.
-The chaos runner may delete/restart one explicitly named Deployment pod, with its
-PVC left intact. All kubectl calls are pinned by p11_harness to k3d-kubeheal.
+The chaos runner may delete one explicitly selected Deployment pod, with its PVC
+left intact. All kubectl calls are pinned by p11_harness to k3d-kubeheal.
 """
 from __future__ import annotations
 
@@ -11,10 +11,13 @@ import concurrent.futures
 import csv
 import json
 import re
+import socket
+import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 from eval import p11_harness as harness
 
@@ -245,6 +248,51 @@ def _ready_pods(namespace: str, deployment: str) -> list[dict]:
     return ready
 
 
+def _free_local_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _delete_pod_with_uid(namespace: str, pod_name: str, pod_uid: str) -> str:
+    """Delete exactly the captured Pod UID through a context-pinned, bounded kubectl proxy."""
+    port = _free_local_port()
+    base = f"http://127.0.0.1:{port}"
+    process = subprocess.Popen(
+        ["kubectl", "--context", CONTEXT, "proxy", "--address=127.0.0.1", f"--port={port}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError("kubectl proxy exited before becoming ready")
+            try:
+                with urlopen(base + "/version", timeout=1) as response:
+                    if response.status == 200:
+                        break
+            except Exception:
+                time.sleep(0.2)
+        else:
+            raise TimeoutError("kubectl proxy did not become ready within 10 seconds")
+        path = f"{base}/api/v1/namespaces/{namespace}/pods/{pod_name}"
+        body = json.dumps({"apiVersion": "v1", "kind": "DeleteOptions",
+                           "preconditions": {"uid": pod_uid}}).encode("utf-8")
+        request = Request(path, data=body, headers={"Content-Type": "application/json"}, method="DELETE")
+        with urlopen(request, timeout=10) as response:
+            if response.status not in {200, 202}:
+                raise RuntimeError(f"Pod delete API returned HTTP {response.status}")
+            return response.read().decode("utf-8")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
 def run_load(vus: int, duration: str, target_url: str) -> dict:
     if not 10 <= vus <= 200:
         raise ValueError("vus must be between 10 and 200")
@@ -332,7 +380,7 @@ def run_pod_chaos(namespace: str, deployment: str, action: str) -> dict:
     start_utc = _now()
     start = time.monotonic()
     harness.assert_test_mode(CONTEXT)
-    result = harness.kubectl(CONTEXT, ["delete", "pod", target_name, "-n", namespace, "--wait=false"])
+    result = _delete_pod_with_uid(namespace, target_name, target_uid)
     deadline = time.monotonic() + 180
     recovered = False
     samples = []
