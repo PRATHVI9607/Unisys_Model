@@ -2,6 +2,7 @@
 and a live Watch-API check on the k3d cluster (skipped when the cluster is unreachable)."""
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import time
@@ -377,6 +378,12 @@ def _ns_label(ns):
     return json.loads(r.stdout)["metadata"].get("labels", {}).get("kubeheal/mode")
 
 
+# This test WRITES to the live cluster: it flips the real `kubeheal-mode` ConfigMap to `enforce` for a few seconds
+# and labels namespace `prod`, then restores both. A plain `pytest tests/` must never do that while the agents run
+# (found 2026-11-12: three full-suite runs each opened a short enforce window on the cluster). It is opt-in:
+# set KUBEHEAL_LIVE_KILLSWITCH_TEST=1 on purpose, as a scripted step.
+@pytest.mark.skipif(os.environ.get("KUBEHEAL_LIVE_KILLSWITCH_TEST") != "1",
+                    reason="live test that flips the cluster mode; opt in with KUBEHEAL_LIVE_KILLSWITCH_TEST=1")
 @pytest.mark.skipif(not _cluster_ok(), reason="k3d-kubeheal cluster not reachable")
 def test_live_watch_follows_configmap_without_polling():
     from kubernetes_asyncio import client, config
