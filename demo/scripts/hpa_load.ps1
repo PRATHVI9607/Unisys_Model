@@ -36,17 +36,10 @@ $policyPath = Join-Path $env:TEMP 'kubeheal-k6-networkpolicy.yaml'
 $jobPath = Join-Path $env:TEMP 'kubeheal-k6-job.yaml'
 $duration = "${DurationSeconds}s"
 
-$cm = @"
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: kubeheal-k6-health-load
-  namespace: kubeheal
-data:
-  health.js: |
-$(Get-Content -LiteralPath $scriptPath | ForEach-Object { "    $_" } | Out-String -NoNewline)
-"@
-Set-Content -LiteralPath $cmPath -Value $cm -Encoding utf8
+# Let kubectl encode the file as ConfigMap data. Out-String -NoNewline flattened every JS line,
+# causing the first // comment to consume the exports and k6 to report "no exported functions".
+K create configmap kubeheal-k6-health-load -n kubeheal "--from-file=health.js=$scriptPath" `
+    --dry-run=client -o yaml | Set-Content -LiteralPath $cmPath -Encoding utf8
 
 $policy = @'
 apiVersion: networking.k8s.io/v1
