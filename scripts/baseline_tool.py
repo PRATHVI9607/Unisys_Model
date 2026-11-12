@@ -12,7 +12,7 @@ the new configuration should become the golden baseline, or to put back a baseli
     python scripts/baseline_tool.py show       <namespace> <deployment>
     python scripts/baseline_tool.py reset      <namespace> <deployment>
     python scripts/baseline_tool.py candidates
-    python scripts/baseline_tool.py restore    <namespace> <deployment> <ledger-entry.json>
+    python scripts/baseline_tool.py restore    <namespace> <deployment> <ledger-entry.json> [--force]
 
 `reset` deletes the key. The agent records the live spec as the new golden baseline the next time it sees an
 event for that Deployment (touch the Deployment, for example by adding an annotation).
@@ -21,7 +21,13 @@ event for that Deployment (touch the Deployment, for example by adding an annota
 
 `restore` writes back the PREVIOUS golden record kept in a promotion's ledger entry: download the object
 `incidents/baseline.<namespace>.<deployment>/NNNNNN-baseline_promoted.json` from the ledger bucket and pass the
-file. The entry must belong to the same workload. A candidate assessed against the replaced baseline becomes
+file. The entry must belong to the same workload. `restore` prints the digest of the current golden record and
+REFUSES unless --force when any of these holds: the current golden record's `promotion.ledger_key` is not the
+entry being restored from (the entry's key is incidents/<incident_id>/<sequence>-<step>.json), so the restore
+would not be a clean undo of the latest promotion; the current golden's `promotion.previous_text_sha256` differs
+from the entry's (the chain does not match); the entry's `previous` record does not hash to its own
+`previous_text_sha256` (the file was altered); or there is no current golden record (after `reset`).
+A candidate assessed against the replaced baseline becomes
 stale on its own (approving it reports `stale` and ledgers the supersession). Like `reset`, the tool is an
 operator action and does not write a ledger entry itself.
 
@@ -30,6 +36,7 @@ Redis URL comes from REDIS_URL (default redis://localhost:6379). In the cluster,
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -53,6 +60,8 @@ def main(argv=None) -> int:
     rp.add_argument("namespace")
     rp.add_argument("deployment")
     rp.add_argument("ledger_entry", help="a baseline_promoted ledger entry (JSON file)")
+    rp.add_argument("--force", action="store_true",
+                    help="restore even when the entry is not the latest promotion of the current golden record")
     args = ap.parse_args(argv)
 
     r = redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"),
@@ -78,8 +87,29 @@ def main(argv=None) -> int:
                 or payload.get("namespace") != args.namespace or payload.get("deployment") != args.deployment):
             print("not a baseline_promoted ledger entry of this workload with a previous record", file=sys.stderr)
             return 1
+        current_raw = r.get(key)
+        current = json.loads(current_raw) if current_raw else None
+        print("current golden digest: " + (hashlib.sha256(current_raw.encode()).hexdigest() if current_raw
+                                           else "none (no golden record)"))
+        entry_key = f"incidents/{entry.get('incident_id')}/{int(entry.get('sequence') or 0):06d}-{entry.get('step')}.json"
+        promo = (current or {}).get("promotion") or {}
+        problems = []
+        if current is None:
+            problems.append("there is no current golden record")
+        elif promo.get("ledger_key") != entry_key:
+            problems.append(f"the current golden record was written by {promo.get('ledger_key')!r}, not by {entry_key!r}")
+        elif promo.get("previous_text_sha256") != payload.get("previous_text_sha256"):
+            problems.append("the promotion chain does not match (previous_text_sha256 differs)")
+        if hashlib.sha256(json.dumps(previous, sort_keys=True).encode()).hexdigest() != payload.get("previous_text_sha256"):
+            problems.append("the entry's previous record does not match its own previous_text_sha256")
+        if problems and not args.force:
+            for problem in problems:
+                print("refused: " + problem, file=sys.stderr)
+            print("use --force to restore anyway", file=sys.stderr)
+            return 1
         r.set(key, json.dumps(previous, sort_keys=True))
-        print(f"restored the previous baseline of {args.namespace}/{args.deployment}")
+        print(f"restored the previous baseline of {args.namespace}/{args.deployment}"
+              + (" (forced)" if problems else ""))
         return 0
     if args.cmd == "show":
         raw = r.get(key)

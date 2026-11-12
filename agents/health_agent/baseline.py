@@ -23,6 +23,20 @@ decision was based on, so two promoters (or the tool) can never both win.
 The drift diff is always live spec versus golden baseline. The Executor (P2 onwards) reads the same key to
 restore a drifted Deployment.
 
+Ledger payloads of `baseline_promoted` and `baseline_promotion_aborted` carry `applied: false`: the entry is written
+BEFORE the overwrite and never updated. To know whether a promotion was applied, read the golden record: its
+`promotion.ledger_key` names the `baseline_promoted` entry that produced it. An entry that no golden record points
+to (and that is followed by a `baseline_promotion_aborted` entry naming it) was not applied.
+
+Coordination (V5-D5 review): before an automatic promotion, a candidate, and an approval the code refuses while
+the workload has a pending Executor rollback record (`kubeheal:rollback:<ns>:<name>` with state "pending"), a held
+incident lock (`kubeheal:incident-lock:<ns>:<name>`), a Fusion incident whose `action_state` is queued or
+human_pending (hash `kubeheal:fusion:incident:<id>` with namespace and deployment; Fusion never clears that
+state, so it blocks until the hash expires, INCIDENT_CONTEXT_TTL_S, a conservative choice), a cool-off marker
+(`kubeheal:baseline-cooloff:<ns>:<name>`, set by the Health Agent after any event that was not benign and certain)
+or a veto of the spec (`kubeheal:baseline-veto:<ns>:<name>` holds the spec hash of a non-benign or uncertain
+verdict). A Redis error while reading any of them also refuses (fail closed).
+
 Candidate key (JSON string), written by the Health Agent, read and removed by the dashboard side:
   `kubeheal:baseline-candidate:<namespace>:<deployment>`
     schema 1, candidate_id, namespace, deployment, tier, spec_hash (hash of the candidate drift view),
@@ -38,6 +52,8 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
+import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -50,6 +66,19 @@ CANDIDATE_SCHEMA = 1
 
 AUTO_TIERS = ("dev", "staging")          # promoted automatically; every other tier (prod, unknown) needs approval
 AUTO_ACTOR = "health-agent"
+
+ROLLBACK_PREFIX = "kubeheal:rollback"            # agents/executor/drift.py ROLLBACK_PREFIX (copied: no Executor import)
+LOCK_PREFIX = "kubeheal:incident-lock"           # agents/fusion_agent/incident_lock.py LOCK_PREFIX
+FUSION_INCIDENT_PREFIX = "kubeheal:fusion:incident"   # agents/fusion_agent/agent.py INCIDENT_PREFIX
+OPEN_INCIDENT_STATES = ("queued", "human_pending")    # Fusion's action_state values
+COOLOFF_PREFIX = "kubeheal:baseline-cooloff"
+VETO_PREFIX = "kubeheal:baseline-veto"
+VETO_TTL_S = 86400                                # chosen, not measured
+SECURITY_SCORE_PREFIX = "kubeheal:security:score"      # written by the Security Agent (sec_risk, ts_ms, model_scored)
+# agents/fusion_agent/decision_policy.py RAW_SEC_RISK_PATCH_CEILING (copied so the Health image needs no policy module)
+RAW_SEC_RISK_CEILING = 0.4
+MAX_APPROVER_LEN = 128                            # chosen
+MAX_REASON_LEN = 512                              # chosen
 
 STEP_PROMOTED = "baseline_promoted"
 STEP_ABORTED = "baseline_promotion_aborted"
@@ -70,6 +99,19 @@ return 0
 _OFF_VALUES = {"off", "false", "0", "no", "disabled", "disable"}
 
 
+_DNS_LABEL = r"[a-z0-9]([-a-z0-9]*[a-z0-9])?"
+_NAMESPACE_RE = re.compile(rf"^{_DNS_LABEL}$")
+_NAME_RE = re.compile(rf"^{_DNS_LABEL}(\.{_DNS_LABEL})*$")
+
+
+def validate_workload(namespace: str, deployment: str) -> None:
+    """DNS-1123 names only: a colon in a namespace could alias another workload's `ns:name` key."""
+    if not isinstance(namespace, str) or len(namespace) > 63 or not _NAMESPACE_RE.match(namespace):
+        raise ValueError("namespace must be a DNS-1123 label")
+    if not isinstance(deployment, str) or len(deployment) > 253 or not _NAME_RE.match(deployment):
+        raise ValueError("deployment must be a DNS-1123 subdomain name")
+
+
 def baseline_key(namespace: str, deployment: str) -> str:
     return f"{BASELINE_PREFIX}:{namespace}:{deployment}"
 
@@ -80,6 +122,14 @@ def candidate_key(namespace: str, deployment: str) -> str:
 
 def rejected_key(namespace: str, deployment: str) -> str:
     return f"{REJECTED_PREFIX}:{namespace}:{deployment}"
+
+
+def cooloff_key(namespace: str, deployment: str) -> str:
+    return f"{COOLOFF_PREFIX}:{namespace}:{deployment}"
+
+
+def veto_key(namespace: str, deployment: str) -> str:
+    return f"{VETO_PREFIX}:{namespace}:{deployment}"
 
 
 def ledger_incident_id(namespace: str, deployment: str) -> str:
@@ -179,6 +229,64 @@ def promotion_route(tier: str, auto_enabled: bool, ledger_available: bool) -> Tu
     return "auto", f"tier {tier} promotes automatically"
 
 
+# ── coordination and security gates ──────────────────────────────────────────
+async def coordination_blocker(redis, namespace: str, deployment: str, spec_hash: Optional[str] = None
+                               ) -> Optional[str]:
+    """None when nothing else is acting on the workload, otherwise why a promotion (or candidate, or approval)
+    must wait. A Redis error is a blocker (fail closed)."""
+    try:
+        raw = _text(await redis.get(f"{ROLLBACK_PREFIX}:{namespace}:{deployment}"))
+        if raw:
+            try:
+                state = (json.loads(raw) or {}).get("state")
+            except (ValueError, AttributeError):
+                return "the Executor rollback record is unreadable"
+            if state == "pending":
+                return "an Executor rollback is pending"
+        if await redis.get(f"{LOCK_PREFIX}:{namespace}:{deployment}"):
+            return "the incident lock is held"
+        if await redis.get(cooloff_key(namespace, deployment)):
+            return "cool-off after a non-benign or uncertain event"
+        if spec_hash and _text(await redis.get(veto_key(namespace, deployment))) == spec_hash:
+            return "this spec was vetoed by an earlier non-benign or uncertain verdict"
+        async for key in redis.scan_iter(match=f"{FUSION_INCIDENT_PREFIX}:*"):
+            fields = await redis.hgetall(key)
+            if (fields.get("namespace") == namespace and fields.get("deployment") == deployment
+                    and fields.get("action_state") in OPEN_INCIDENT_STATES):
+                return f"a Fusion incident is open ({fields.get('action_state')})"
+    except Exception as e:
+        return f"coordination state is unreadable ({e!r})"
+    return None
+
+
+async def security_blocker(redis, namespace: str, deployment: str, *, now_ms: float, fresh_s: float,
+                           require: bool, ceiling: float = RAW_SEC_RISK_CEILING) -> Optional[str]:
+    """Refuse while a fresh Security Agent score says the workload is under attack (sec_risk at or above the
+    ceiling, or not model scored). A missing or stale hash blocks only when `require` is set (default off)."""
+    try:
+        h = await redis.hgetall(f"{SECURITY_SCORE_PREFIX}:{namespace}:{deployment}")
+    except Exception as e:
+        return f"the security score is unreadable ({e!r})"
+    fresh = False
+    if h:
+        try:
+            ts_ms = float(h["ts_ms"])
+            fresh = math.isfinite(ts_ms) and abs(now_ms - ts_ms) <= fresh_s * 1000.0
+        except (KeyError, TypeError, ValueError):
+            return "the security score hash is malformed"
+    if h and fresh:
+        if str(h.get("model_scored", "")).strip().lower() != "true":
+            return "the fresh security score was not model scored"
+        try:
+            risk = float(h["sec_risk"])
+        except (KeyError, TypeError, ValueError):
+            return "the security score hash is malformed"
+        if not math.isfinite(risk) or risk >= ceiling:
+            return f"raw security risk {risk} is at or above {ceiling}"
+        return None
+    return "no fresh security score (HEALTH_PROMOTION_REQUIRE_SECURITY is on)" if require else None
+
+
 # ── ledger helpers ───────────────────────────────────────────────────────────
 async def _ledger(ledger, namespace: str, deployment: str, step: str, payload: Dict):
     """Append one entry (blocking store call off the event loop). Raises on failure."""
@@ -210,6 +318,7 @@ async def promote_baseline(redis, ledger, namespace: str, deployment: str, *, ne
                    appended and the baseline is untouched
       conflict     the golden text changed since `golden_raw` was read (another promotion or the tool): untouched
     """
+    validate_workload(namespace, deployment)
     if ledger is None:
         return {"status": "no_ledger"}
     previous = json.loads(golden_raw) if golden_raw else None
@@ -219,6 +328,7 @@ async def promote_baseline(redis, ledger, namespace: str, deployment: str, *, ne
     payload = {
         "namespace": namespace, "deployment": deployment, "tier": tier, "kind": kind, "approver": actor,
         "reason": reason, "candidate_id": candidate_id,
+        "applied": False,       # always false: written before the overwrite; see the module docstring
         "previous": previous, "previous_spec_digest": record_digest(previous),
         "previous_text_sha256": raw_digest(golden_raw), "previous_promotion": previous.get("promotion"),
         "new": record, "new_spec_hash": spec_hash, "new_spec_digest": record_digest(record),
@@ -253,9 +363,12 @@ async def promote_baseline(redis, ledger, namespace: str, deployment: str, *, ne
     else:
         status = "aborted"
     logger.warning(f"baseline promotion of {namespace}/{deployment} not applied: {abort_reason}")
-    await _ledger_best_effort(ledger, namespace, deployment, STEP_ABORTED,
-                              {"namespace": namespace, "deployment": deployment, "promotion_ledger_key": entry.key,
-                               "reason": abort_reason})
+    if await _ledger_best_effort(ledger, namespace, deployment, STEP_ABORTED,
+                                 {"namespace": namespace, "deployment": deployment,
+                                  "promotion_ledger_key": entry.key, "reason": abort_reason,
+                                  "applied": False}) is None:
+        logger.error(f"the abort entry for the promotion ledgered at {entry.key} could not be written: that entry "
+                     "was NOT applied (the golden record does not point to it)")
     return {"status": status, "reason": abort_reason, "ledger_key": entry.key}
 
 
@@ -285,6 +398,7 @@ async def store_candidate(redis, ledger, namespace: str, deployment: str, *, new
     """Write the promotion candidate for prod and an unknown tier. No ledger is needed to store it (the ledger
     entry `baseline_candidate_created` is best effort). Idempotent per candidate id. A different older candidate
     is superseded (ledger entry first, best effort). Returns {"status": "stored" | "unchanged" | "rejected_before"}."""
+    validate_workload(namespace, deployment)
     if _text(await redis.get(rejected_key(namespace, deployment))) == spec_hash:
         return {"status": "rejected_before"}
     cid = candidate_id_for(namespace, deployment, spec_hash, golden_raw)
@@ -324,22 +438,33 @@ async def drop_candidate(redis, ledger, namespace: str, deployment: str, reason:
     return True
 
 
-def _check_approver(approver: str) -> None:
+def _check_actor(approver: str, reason: str) -> None:
     if not isinstance(approver, str) or not approver.strip():
         raise ValueError("approver must be a non-empty string")
+    if len(approver.strip()) > MAX_APPROVER_LEN:
+        raise ValueError(f"approver is longer than {MAX_APPROVER_LEN} characters")
+    if approver.strip().lower() == AUTO_ACTOR:
+        raise ValueError(f"{AUTO_ACTOR!r} is reserved for automatic promotions")
+    if not isinstance(reason, str) or len(reason) > MAX_REASON_LEN:
+        raise ValueError(f"reason must be a string of at most {MAX_REASON_LEN} characters")
 
 
 async def approve_promotion(redis, namespace: str, deployment: str, approver: str, ledger,
-                            candidate_id: Optional[str] = None, reason: str = "") -> Dict:
-    """Approve the pending candidate (called by the dashboard). `candidate_id`, when given, must match the
-    candidate the approver looked at. Statuses: promoted, not_found, id_mismatch, no_ledger, no_baseline,
-    stale (the golden baseline moved since the candidate was assessed: the candidate is superseded),
-    ledger_failed, aborted, conflict (see `promote_baseline`)."""
-    _check_approver(approver)
+                            candidate_id: str, reason: str = "") -> Dict:
+    """Approve the pending candidate (called by the dashboard). `candidate_id` is REQUIRED and must match the
+    candidate the approver looked at. ValueError for an invalid workload name, approver (empty, over 128
+    characters, or the reserved automatic actor) or reason (over 512 characters). Statuses: promoted, not_found,
+    id_mismatch, no_ledger, no_baseline, blocked (another actor is on the workload, see `coordination_blocker`;
+    the candidate stays pending), stale (the golden baseline moved since the candidate was assessed: the
+    candidate is superseded), ledger_failed, aborted, conflict (see `promote_baseline`)."""
+    validate_workload(namespace, deployment)
+    _check_actor(approver, reason)
+    if not candidate_id or not isinstance(candidate_id, str):
+        raise ValueError("candidate_id is required")
     candidate = await get_candidate(redis, namespace, deployment)
     if candidate is None:
         return {"status": "not_found"}
-    if candidate_id is not None and candidate.get("candidate_id") != candidate_id:
+    if candidate.get("candidate_id") != candidate_id:
         return {"status": "id_mismatch", "candidate_id": candidate.get("candidate_id")}
     if ledger is None:
         return {"status": "no_ledger"}        # approval needs the ledger; the candidate stays pending
@@ -351,6 +476,10 @@ async def approve_promotion(redis, namespace: str, deployment: str, approver: st
         await drop_candidate(redis, ledger, namespace, deployment,
                              "the golden baseline changed since the candidate was assessed")
         return {"status": "stale"}
+    blocker = await coordination_blocker(redis, namespace, deployment, candidate.get("spec_hash"))
+    if blocker:
+        logger.warning(f"approval of the baseline candidate of {namespace}/{deployment} refused: {blocker}")
+        return {"status": "blocked", "reason": blocker}
     result = await promote_baseline(
         redis, ledger, namespace, deployment, new_spec=candidate["spec"], spec_hash=candidate["spec_hash"],
         golden_raw=golden_raw, kind="approved", actor=approver.strip(), tier=candidate.get("tier", ""),
@@ -364,15 +493,18 @@ async def approve_promotion(redis, namespace: str, deployment: str, approver: st
 
 
 async def reject_promotion(redis, namespace: str, deployment: str, approver: str, ledger,
-                           candidate_id: Optional[str] = None, reason: str = "") -> Dict:
-    """Reject the pending candidate. Ledger entry first; if it fails the candidate stays pending. The spec hash
+                           candidate_id: str, reason: str = "") -> Dict:
+    """Reject the pending candidate (`candidate_id` is REQUIRED; same validation as `approve_promotion`). Ledger entry first; if it fails the candidate stays pending. The spec hash
     is remembered so the agent does not propose the same spec again (cleared when the live spec changes).
     Statuses: rejected, not_found, id_mismatch, no_ledger, ledger_failed."""
-    _check_approver(approver)
+    validate_workload(namespace, deployment)
+    _check_actor(approver, reason)
+    if not candidate_id or not isinstance(candidate_id, str):
+        raise ValueError("candidate_id is required")
     candidate = await get_candidate(redis, namespace, deployment)
     if candidate is None:
         return {"status": "not_found"}
-    if candidate_id is not None and candidate.get("candidate_id") != candidate_id:
+    if candidate.get("candidate_id") != candidate_id:
         return {"status": "id_mismatch", "candidate_id": candidate.get("candidate_id")}
     if ledger is None:
         return {"status": "no_ledger"}

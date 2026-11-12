@@ -87,7 +87,7 @@ class PromoRedis(FakeRedis):
 
     async def scan_iter(self, match=None):
         prefix = (match or "").rstrip("*")
-        for k in list(self.store):
+        for k in list(self.store) + list(self.hashes):
             if k.startswith(prefix):
                 yield k
 
