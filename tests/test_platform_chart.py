@@ -940,3 +940,13 @@ def test_the_dashboard_image_copies_the_baseline_module_the_promotion_approvals_
         set(re.findall(r"^import (agents\.[\w.]+)", baseline, re.M))
     assert imported <= {"agents.common"}, f"baseline.py now imports {imported}: copy those into the dashboard image"
 
+
+
+def test_the_plain_security_agent_manifest_passes_the_downward_api_pod_identity():
+    import yaml
+    from pathlib import Path
+    docs = [d for d in yaml.safe_load_all(Path("k8s/security-agent-daemonset.yaml").read_text(encoding="utf-8")) if d]
+    ds = next(d for d in docs if d.get("kind") == "DaemonSet")
+    env = {e["name"]: e for c in ds["spec"]["template"]["spec"]["containers"] for e in c.get("env", [])}
+    assert env["POD_UID"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.uid"
+    assert env["POD_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.name"
