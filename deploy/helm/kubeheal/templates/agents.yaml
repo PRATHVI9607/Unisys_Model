@@ -41,6 +41,11 @@ spec:
             - {containerPort: {{ $ha.port }}, name: http}
           env:
             {{- include "kubeheal.redisEnv" . | nindent 12 }}
+            # The baseline promotion ledger (V5-D5): every promotion is a ledger entry written before the overwrite.
+            - {name: LEDGER_BACKEND, value: minio}
+            - {name: MINIO_ENDPOINT, value: {{ .Values.minio.endpoint | quote }}}
+            - {name: MINIO_BUCKET, value: {{ .Values.minio.bucket | quote }}}
+            {{- include "kubeheal.minioClientEnv" (dict "root" .) | nindent 12 }}
             {{- if .Values.inference.enabled }}
             - {name: INFERENCE_URL, value: "http://{{ .Values.inference.name }}:{{ .Values.inference.port }}"}
             {{- end }}
