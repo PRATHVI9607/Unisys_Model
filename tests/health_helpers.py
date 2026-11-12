@@ -152,10 +152,25 @@ class FakeAutoscaling:
                                for ns, name in self.targets if ns == namespace]})
 
 
+def make_mode(value="enforce", readable=True, ns_labels=None):
+    """A real ModeWatcher fed the way the Watch API would feed it: the kubeheal-mode ConfigMap, optional
+    namespace labels. value=None or readable=False is an unreadable mode (the effective mode is test)."""
+    from types import SimpleNamespace
+    from agents.common.killswitch import ModeWatcher
+    w = ModeWatcher()
+    if value is not None and readable:
+        w.apply_configmap(SimpleNamespace(data={"mode": value}))
+    w.ns_readable = True
+    w.ns_labels = dict(ns_labels or {})
+    return w
+
+
 class Env:
-    """An agent wired to the fakes, plus the recorded calls."""
+    """An agent wired to the fakes, plus the recorded calls. The kill-switch mode is `enforce` unless a test
+    passes its own `mode=`."""
 
     def __init__(self, **kw):
+        kw.setdefault("mode", make_mode("enforce"))
         self.clock = Clock()
         self.agent = HealthAgent(redis_url="redis://unused", observe_base_s=60, delay_s=60,
                                  clock=self.clock.mono, wall=self.clock.wall, **kw)

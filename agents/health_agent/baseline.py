@@ -28,6 +28,13 @@ BEFORE the overwrite and never updated. To know whether a promotion was applied,
 `promotion.ledger_key` names the `baseline_promoted` entry that produced it. An entry that no golden record points
 to (and that is followed by a `baseline_promotion_aborted` entry naming it) was not applied.
 
+Kill switch: the golden record is a Redis write the kill switch does not gate by itself, so a promotion honours the
+mode like every other writer. In mode `test`, or when the mode is unknown or unreadable (fail safe to test), an
+AUTOMATIC promotion does not overwrite the record: it appends one ledger entry `baseline_promotion_dry_run` (what it
+would have promoted: previous and candidate digests, changed fields, evidence, the mode) and nothing else.
+`approve_promotion` takes the caller's mode view and is a dry run in the same cases (ledger entry, candidate stays
+pending, status `dry_run`). A prod candidate is only a proposal, so it is stored in any mode.
+
 Coordination (V5-D5 review): before an automatic promotion, a candidate, and an approval the code refuses while
 the workload has a pending Executor rollback record (`kubeheal:rollback:<ns>:<name>` with state "pending"), a held
 incident lock (`kubeheal:incident-lock:<ns>:<name>`), a Fusion incident whose `action_state` is queued or
@@ -57,6 +64,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from agents.common import killswitch
+
 logger = logging.getLogger(__name__)
 
 BASELINE_PREFIX = "kubeheal:baseline"
@@ -82,6 +91,7 @@ MAX_REASON_LEN = 512                              # chosen
 
 STEP_PROMOTED = "baseline_promoted"
 STEP_ABORTED = "baseline_promotion_aborted"
+STEP_DRY_RUN = "baseline_promotion_dry_run"
 STEP_CANDIDATE = "baseline_candidate_created"
 STEP_REJECTED = "baseline_candidate_rejected"
 STEP_SUPERSEDED = "baseline_candidate_superseded"
@@ -372,6 +382,35 @@ async def promote_baseline(redis, ledger, namespace: str, deployment: str, *, ne
     return {"status": status, "reason": abort_reason, "ledger_key": entry.key}
 
 
+async def record_dry_run(ledger, namespace: str, deployment: str, *, new_spec: Dict, spec_hash: str,
+                         golden_raw: str, kind: str, actor: str, tier: str = "", evidence: Optional[Dict] = None,
+                         changed_fields: Optional[List[str]] = None, mode: str = "test",
+                         candidate_id: Optional[str] = None) -> Dict:
+    """Mode test (or unknown): write ONLY the ledger entry for what a promotion would have done. Returns
+    {"status": "dry_run", "ledger_key": ...}, {"status": "no_ledger"} or {"status": "ledger_failed"}."""
+    validate_workload(namespace, deployment)
+    if ledger is None:
+        return {"status": "no_ledger"}
+    previous = json.loads(golden_raw) if golden_raw else None
+    record = make_record(new_spec)
+    payload = {
+        "namespace": namespace, "deployment": deployment, "tier": tier, "kind": kind, "approver": actor,
+        "candidate_id": candidate_id, "mode": mode, "applied": False,
+        "dry_run": f"DRY RUN: would have promoted the golden baseline of {namespace}/{deployment}",
+        "previous_text_sha256": raw_digest(golden_raw) if golden_raw else None,
+        "previous_spec_digest": record_digest(previous) if previous else None,
+        "candidate_spec_digest": record_digest(record), "new_spec_hash": spec_hash,
+        "changed_fields": list(changed_fields or []), "evidence": evidence or {},
+    }
+    try:
+        entry = await _ledger(ledger, namespace, deployment, STEP_DRY_RUN, payload)
+    except Exception as e:
+        logger.error(f"dry-run entry for the baseline promotion of {namespace}/{deployment} not written ({e!r})")
+        return {"status": "ledger_failed", "error": repr(e)}
+    logger.warning(f"DRY RUN: baseline promotion of {namespace}/{deployment} ({kind}) not applied, mode {mode}")
+    return {"status": "dry_run", "ledger_key": entry.key}
+
+
 # ── candidates (prod and unknown tier) ───────────────────────────────────────
 def candidate_id_for(namespace: str, deployment: str, spec_hash: str, golden_raw: str) -> str:
     material = f"{namespace}\0{deployment}\0{spec_hash}\0{raw_digest(golden_raw)}".encode()
@@ -450,13 +489,16 @@ def _check_actor(approver: str, reason: str) -> None:
 
 
 async def approve_promotion(redis, namespace: str, deployment: str, approver: str, ledger,
-                            candidate_id: str, reason: str = "") -> Dict:
+                            candidate_id: str, reason: str = "", *, mode: Optional[str] = None) -> Dict:
     """Approve the pending candidate (called by the dashboard). `candidate_id` is REQUIRED and must match the
     candidate the approver looked at. ValueError for an invalid workload name, approver (empty, over 128
     characters, or the reserved automatic actor) or reason (over 512 characters). Statuses: promoted, not_found,
     id_mismatch, no_ledger, no_baseline, blocked (another actor is on the workload, see `coordination_blocker`;
     the candidate stays pending), stale (the golden baseline moved since the candidate was assessed: the
-    candidate is superseded), ledger_failed, aborted, conflict (see `promote_baseline`)."""
+    candidate is superseded), dry_run (`mode` is not exactly "enforce", or unknown: a ledger entry
+    `baseline_promotion_dry_run` is written, nothing is overwritten, the candidate stays pending), ledger_failed,
+    aborted, conflict (see `promote_baseline`). `mode` is the caller's effective kill-switch mode for the
+    namespace ("enforce" or "test"); the default None means unknown and is a dry run (fail safe)."""
     validate_workload(namespace, deployment)
     _check_actor(approver, reason)
     if not candidate_id or not isinstance(candidate_id, str):
@@ -480,6 +522,12 @@ async def approve_promotion(redis, namespace: str, deployment: str, approver: st
     if blocker:
         logger.warning(f"approval of the baseline candidate of {namespace}/{deployment} refused: {blocker}")
         return {"status": "blocked", "reason": blocker}
+    if killswitch.is_dry_run(mode):
+        return await record_dry_run(
+            ledger, namespace, deployment, new_spec=candidate["spec"], spec_hash=candidate["spec_hash"],
+            golden_raw=golden_raw, kind="approved", actor=approver.strip(), tier=candidate.get("tier", ""),
+            evidence=candidate.get("assessment") or {}, changed_fields=candidate.get("changed_fields") or [],
+            mode=killswitch.normalize(mode), candidate_id=candidate.get("candidate_id"))
     result = await promote_baseline(
         redis, ledger, namespace, deployment, new_spec=candidate["spec"], spec_hash=candidate["spec_hash"],
         golden_raw=golden_raw, kind="approved", actor=approver.strip(), tier=candidate.get("tier", ""),

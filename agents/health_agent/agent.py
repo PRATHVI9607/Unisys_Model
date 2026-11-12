@@ -43,6 +43,9 @@ Flow
              chosen), HEALTH_PROMOTION_MIN_SOAK_S (default 0 = off, chosen), HEALTH_PROMOTION_REQUIRE_SECURITY
              (default off: a missing or stale Security score does not block; on: it blocks), SECURITY_FRESH_S
              (default 30, same as Fusion).
+             Kill switch: the golden record is overwritten only in mode enforce. In mode test, or when the mode is
+             unknown (the default: no ModeWatcher is started unless HEALTH_MODE_WATCH=on) an automatic promotion
+             writes a baseline_promotion_dry_run ledger entry only; a prod candidate is still stored.
 
 The golden baseline (agents/health_agent/baseline.py) is written once with SET NX on first sight and is
 overwritten only by a promotion (auto in dev and staging, approved in prod) and by scripts/baseline_tool.py. The
@@ -71,6 +74,7 @@ from kubernetes_asyncio.client.exceptions import ApiException
 from kubernetes_asyncio.config import load_incluster_config
 from prometheus_client import Counter
 
+from agents.common.killswitch import ModeWatcher
 from agents.common.ledger import Ledger, ledger_from_env
 from agents.common.metrics import KubeHealMetrics
 from agents.common.tiers import namespace_tier as _namespace_tier
@@ -235,6 +239,7 @@ class HealthAgent:
         min_soak_s: Optional[float] = None,
         require_security: Optional[bool] = None,
         security_fresh_s: Optional[float] = None,
+        mode: Any = None,
         clock=time.monotonic,
         wall=time.time,
     ):
@@ -276,6 +281,13 @@ class HealthAgent:
                                  in ("1", "true", "on", "yes"))
         self.security_fresh_s = security_fresh_s if security_fresh_s is not None else _positive_env(
             "SECURITY_FRESH_S", DEFAULT_SECURITY_FRESH_S)
+        # Kill-switch view (anything with mode_for(namespace) / dry_run_for(namespace), the ModeWatcher interface).
+        # The default is a ModeWatcher that is never started: its mode is unknown, which is `test`, so an automatic
+        # promotion only writes a dry-run ledger entry. HEALTH_MODE_WATCH=on starts it in start() (it needs the
+        # kubeheal-mode ConfigMap read rule for the health-agent ServiceAccount); a test injects its own.
+        self.mode = mode if mode is not None else ModeWatcher()
+        self._mode_started = False
+        self._dry_run_noted: Dict[Key, Tuple[str, str]] = {}   # (spec hash, golden digest) already written as dry run
         self._vetoed: Dict[Key, set] = {}           # spec hashes with a non-benign or uncertain verdict published
         self._cooloff_until: Dict[Key, float] = {}  # clock() time until which a promotion waits (Redis backs it up)
         # a promotion refused only because the soak time has not passed: key -> (hash, verdict, retry not before)
@@ -336,6 +348,12 @@ class HealthAgent:
                            "(HEALTH_BASELINE_PROMOTION is off); prod promotion candidates are still stored")
         else:
             logger.info("baseline promotion: automatic in dev and staging, candidates in prod and unknown tiers")
+            logger.info("baseline promotion: the golden record is overwritten only in kill-switch mode enforce; in "
+                        "mode test or when the mode is unreadable an automatic promotion writes a dry-run ledger "
+                        "entry only")
+            if os.environ.get("HEALTH_MODE_WATCH", "").strip().lower() not in ("1", "true", "on", "yes"):
+                logger.warning("baseline promotion: HEALTH_MODE_WATCH is off, so the kill-switch mode is unknown and "
+                               "treated as test: automatic promotion stays a dry run")
             if os.environ.get("LEDGER_BACKEND", "").strip().lower() == "memory":
                 logger.warning("baseline promotion: the ledger is in memory (LEDGER_BACKEND=memory): promotion "
                                "history is lost on restart")
@@ -367,6 +385,13 @@ class HealthAgent:
         self.autoscaling_api = client.AutoscalingV2Api(self._serializer)
         self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
         self.session = aiohttp.ClientSession()
+        if os.environ.get("HEALTH_MODE_WATCH", "").strip().lower() in ("1", "true", "on", "yes") \
+                and hasattr(self.mode, "start"):
+            try:
+                await self.mode.start(self.core_api)       # read-only: kubeheal-mode ConfigMap and namespace labels
+                self._mode_started = True
+            except Exception as e:
+                logger.warning(f"kill switch watcher not started ({e}); mode stays 'test'")
 
         scopes = watch_namespaces_from_env()
         logger.info(f"Health Agent watching {[s or '*' for s in scopes]} "
@@ -407,6 +432,12 @@ class HealthAgent:
         if self.tasks:
             await asyncio.gather(*list(self.tasks), return_exceptions=True)
 
+        if self._mode_started:
+            self._mode_started = False
+            try:
+                await self.mode.stop()
+            except Exception as e:
+                logger.debug(f"mode watcher stop failed: {e}")
         if self.session is not None:
             session, self.session = self.session, None
             await session.close()
@@ -492,7 +523,7 @@ class HealthAgent:
 
     def _forget(self, key: Key) -> None:
         for d in (self.pending, self.tracking, self.latest_dep, self.seen_hash, self._drifted, self._first_sight_retry,
-                  self._vetoed, self._promote_retry):
+                  self._vetoed, self._promote_retry, self._dry_run_noted):
             d.pop(key, None)
 
     def _still_current(self, key: Key, h: str) -> bool:
@@ -1107,6 +1138,18 @@ class HealthAgent:
                     return "superseded"
                 logger.info(f"baseline promotion candidate stored for {ns}/{name} ({tier}); waiting for approval")
             return "candidate_" + res["status"]
+        if self.mode.dry_run_for(ns):
+            # Mode test, or the mode is unknown or unreadable (fail safe to test): the golden record is NOT touched.
+            mark = (h, baseline.raw_digest(golden_raw))
+            if self._dry_run_noted.get(key) == mark:
+                return "dry_run"
+            res = await baseline.record_dry_run(
+                self.ledger, ns, name, new_spec=view, spec_hash=h, golden_raw=golden_raw, kind="auto",
+                actor=baseline.AUTO_ACTOR, tier=tier, evidence=evidence, changed_fields=verdict["changed_fields"],
+                mode=self.mode.mode_for(ns))
+            if res["status"] == "dry_run":
+                self._dry_run_noted[key] = mark
+            return "dry_run" if res["status"] == "dry_run" else "dry_run_" + res["status"]
         res = await baseline.promote_baseline(
             self.redis, self.ledger, ns, name, new_spec=view, spec_hash=h, golden_raw=golden_raw, kind="auto",
             actor=baseline.AUTO_ACTOR, tier=tier, evidence=evidence, changed_fields=verdict["changed_fields"],

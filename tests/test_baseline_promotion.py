@@ -27,6 +27,12 @@ def run(coro):
     return asyncio.run(coro)
 
 
+async def approve(*args, **kw):
+    """bl.approve_promotion in kill-switch mode enforce unless a test says otherwise."""
+    kw.setdefault("mode", "enforce")
+    return await bl.approve_promotion(*args, **kw)
+
+
 def key_of(ns):
     return (ns, "victim-app")
 
@@ -344,7 +350,7 @@ def test_without_a_ledger_automatic_promotion_is_disabled_and_candidates_are_sti
         cand = await bl.get_candidate(env.redis, "prod", "victim-app")
         assert cand["status"] == "pending"
         # approval needs the ledger
-        res = await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", None, cand["candidate_id"])
+        res = await approve(env.redis, "prod", "victim-app", "alice", None, cand["candidate_id"])
         assert res["status"] == "no_ledger"
         assert await golden_image(env, "prod") == "img:1"
         assert await bl.get_candidate(env.redis, "prod", "victim-app") is not None
@@ -390,7 +396,7 @@ def test_approving_a_candidate_promotes_it_through_the_ledger():
     async def go(env):
         cand = await prod_candidate(env)
         old_text = await golden_text(env, "prod")
-        res = await bl.approve_promotion(env.redis, "prod", "victim-app", " alice ", env.agent.ledger,
+        res = await approve(env.redis, "prod", "victim-app", " alice ", env.agent.ledger,
                                          candidate_id=cand["candidate_id"], reason="reviewed")
         assert res["status"] == "promoted"
         assert await golden_image(env, "prod") == "img:2"
@@ -407,8 +413,8 @@ def test_approval_checks_the_candidate_id_and_the_approver():
     async def go(env):
         cand = await prod_candidate(env)
         cid, led = cand["candidate_id"], env.agent.ledger
-        assert (await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", led, "not-it"))["status"] == "id_mismatch"
-        assert (await bl.approve_promotion(env.redis, "prod", "other", "alice", led, cid))["status"] == "not_found"
+        assert (await approve(env.redis, "prod", "victim-app", "alice", led, "not-it"))["status"] == "id_mismatch"
+        assert (await approve(env.redis, "prod", "other", "alice", led, cid))["status"] == "not_found"
         for bad in ({"approver": "  "}, {"approver": "Health-Agent"}, {"approver": "x" * 129},
                     {"reason": "r" * 513}, {"candidate_id": ""}, {"candidate_id": None}, {"namespace": "a:b"},
                     {"namespace": "Prod"}, {"deployment": "victim-app:x"}, {"deployment": "-bad"}):
@@ -420,10 +426,10 @@ def test_approval_checks_the_candidate_id_and_the_approver():
                     await fn(env.redis, args["namespace"], args["deployment"], args["approver"], led,
                              args["candidate_id"], args["reason"])
         with pytest.raises(TypeError):                              # candidate_id has no default
-            await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", led)
+            await approve(env.redis, "prod", "victim-app", "alice", led)
         with pytest.raises(TypeError):
             await bl.reject_promotion(env.redis, "prod", "victim-app", "alice", led)
-        assert (await bl.approve_promotion(env.redis, "prod", "victim-app", "a" * 128, led, "not-it"))["status"] == "id_mismatch"
+        assert (await approve(env.redis, "prod", "victim-app", "a" * 128, led, "not-it"))["status"] == "id_mismatch"
         assert await golden_image(env, "prod") == "img:1" and await bl.get_candidate(env.redis, "prod", "victim-app")
     run_env(go, ledger=Ledger())
 
@@ -432,7 +438,7 @@ def test_approval_with_a_failing_ledger_changes_nothing():
     async def go(env):
         cand = await prod_candidate(env)
         before = await golden_text(env, "prod")
-        res = await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", Ledger(FailingStore()),
+        res = await approve(env.redis, "prod", "victim-app", "alice", Ledger(FailingStore()),
                                          cand["candidate_id"])
         assert res["status"] == "ledger_failed"
         assert await golden_text(env, "prod") == before
@@ -444,7 +450,7 @@ def test_a_candidate_is_stale_when_the_golden_baseline_moved():
     async def go(env):
         cand = await prod_candidate(env)
         env.redis.store[bl.baseline_key("prod", "victim-app")] = json.dumps(bl.make_record(dep(image="img:7")["spec"]))
-        res = await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", env.agent.ledger,
+        res = await approve(env.redis, "prod", "victim-app", "alice", env.agent.ledger,
                                          cand["candidate_id"])
         assert res["status"] == "stale"
         assert await golden_image(env, "prod") == "img:7"
@@ -598,7 +604,7 @@ def test_baseline_tool_restore_candidates_and_reset(tmp_path, monkeypatch, capsy
     async def go(env):
         cand = await prod_candidate(env)
         old_text = await golden_text(env, "prod")
-        await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", env.agent.ledger, cand["candidate_id"])
+        await approve(env.redis, "prod", "victim-app", "alice", env.agent.ledger, cand["candidate_id"])
         [promo] = entries(env.agent.ledger, "baseline_promoted", "prod")
         entry_file = tmp_path / "entry.json"
         entry_file.write_text(json.dumps(promo))
@@ -839,16 +845,16 @@ def test_approval_is_blocked_while_something_else_acts_on_the_workload():
     async def go(env):
         cand = await prod_candidate(env)
         block_lock(env, "prod")
-        res = await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", env.agent.ledger,
+        res = await approve(env.redis, "prod", "victim-app", "alice", env.agent.ledger,
                                          cand["candidate_id"])
         assert res["status"] == "blocked" and "lock" in res["reason"]
         assert await golden_image(env, "prod") == "img:1" and await bl.get_candidate(env.redis, "prod", "victim-app")
         env.redis.store.pop("kubeheal:incident-lock:prod:victim-app")
         block_rollback(env, "prod")
-        assert (await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", env.agent.ledger,
+        assert (await approve(env.redis, "prod", "victim-app", "alice", env.agent.ledger,
                                            cand["candidate_id"]))["status"] == "blocked"
         env.redis.store.pop("kubeheal:rollback:prod:victim-app")
-        assert (await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", env.agent.ledger,
+        assert (await approve(env.redis, "prod", "victim-app", "alice", env.agent.ledger,
                                            cand["candidate_id"]))["status"] == "promoted"
     run_env(go, ledger=Ledger())
 
@@ -1070,7 +1076,7 @@ def test_baseline_tool_restore_refuses_a_stale_or_altered_entry_unless_forced(tm
     async def go(env):
         cand = await prod_candidate(env)
         old_text = await golden_text(env, "prod")
-        await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", env.agent.ledger, cand["candidate_id"])
+        await approve(env.redis, "prod", "victim-app", "alice", env.agent.ledger, cand["candidate_id"])
         [promo] = entries(env.agent.ledger, "baseline_promoted", "prod")
         good = tmp_path / "good.json"
         good.write_text(json.dumps(promo))
@@ -1105,3 +1111,131 @@ def test_baseline_tool_restore_refuses_a_stale_or_altered_entry_unless_forced(tm
         assert baseline_tool.main(["restore", "prod", "victim-app", str(good)]) == 0
         assert json.loads(store[key]) == json.loads(old_text)
     run_env(go, ledger=Ledger())
+
+
+# =====================================================================================================================
+# Kill switch: an automatic promotion and an approval are dry runs in mode test or when the mode is unreadable
+# =====================================================================================================================
+from health_helpers import make_mode                         # noqa: E402
+
+
+@pytest.mark.parametrize("mode", [
+    pytest.param(make_mode("test"), id="test"),
+    pytest.param(make_mode(None), id="never-read"),
+    pytest.param(make_mode("enforce", readable=False), id="unreadable"),
+    pytest.param(make_mode("enforce", ns_labels={"dev": "test"}), id="namespace-label-stricter"),
+    pytest.param(make_mode("garbage"), id="not-exactly-enforce"),
+])
+def test_automatic_promotion_is_a_dry_run_unless_the_mode_is_enforce(mode):
+    async def go(env):
+        env.result = prediction(**BENIGN)
+        await drift(env, "dev", image="img:2")
+        assert await golden_image(env, "dev") == "img:1"                    # the golden record is untouched
+        assert entries(env.agent.ledger, "baseline_promoted") == []
+        [dry] = entries(env.agent.ledger, "baseline_promotion_dry_run")
+        p = dry["payload"]
+        assert p["kind"] == "auto" and p["applied"] is False and p["mode"] == "test"
+        assert p["previous_text_sha256"] == bl.raw_digest(await golden_text(env, "dev"))
+        assert p["candidate_spec_digest"] != p["previous_spec_digest"]
+        assert p["changed_fields"] == ["template.spec.containers[0].image"] and "DRY RUN" in p["dry_run"]
+        # the same spec scored again does not write a second dry-run entry
+        env.apps.live[DEV] = dep(ns="dev", image="img:2")
+        await env.agent.observe_sample(DEV)
+        assert len(entries(env.agent.ledger, "baseline_promotion_dry_run")) == 1
+    run_env(go, ledger=Ledger(), mode=mode)
+
+
+def test_the_default_mode_provider_fails_safe_to_test():
+    async def go(env):
+        from agents.common.killswitch import ModeWatcher
+        assert isinstance(HealthAgent(redis_url="redis://unused", ledger=Ledger()).mode, ModeWatcher)
+        assert HealthAgent(redis_url="redis://unused", ledger=Ledger()).mode.dry_run_for("dev") is True
+        env.result = prediction(**BENIGN)
+        await drift(env, "dev", image="img:2")
+        assert await golden_image(env, "dev") == "img:1" and len(entries(env.agent.ledger, "baseline_promotion_dry_run")) == 1
+    run_env(go, ledger=Ledger(), mode=make_mode(None))
+
+
+def test_enforce_mode_promotes():
+    async def go(env):
+        env.result = prediction(**BENIGN)
+        await drift(env, "dev", image="img:2")
+        assert await golden_image(env, "dev") == "img:2"
+        assert entries(env.agent.ledger, "baseline_promotion_dry_run") == []
+    run_env(go, ledger=Ledger(), mode=make_mode("enforce"))
+
+
+def test_a_prod_candidate_is_stored_in_test_mode_but_approval_is_a_dry_run():
+    async def go(env):
+        env.result = prediction(**BENIGN)
+        await drift(env, "prod", image="img:2")
+        cand = await bl.get_candidate(env.redis, "prod", "victim-app")
+        assert cand is not None                                              # a proposal, stored in any mode
+        before = await golden_text(env, "prod")
+        for mode in ("test", None, "TEST", "bogus"):
+            res = await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", env.agent.ledger,
+                                             cand["candidate_id"], mode=mode)
+            assert res["status"] == "dry_run" and res["ledger_key"] in env.agent.ledger.store.objects
+            assert await golden_text(env, "prod") == before
+            assert await bl.get_candidate(env.redis, "prod", "victim-app") is not None      # still pending
+        res = await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", env.agent.ledger,
+                                         cand["candidate_id"])                 # no mode given: unknown, so test
+        assert res["status"] == "dry_run"
+        dry = entries(env.agent.ledger, "baseline_promotion_dry_run", "prod")[0]["payload"]
+        assert dry["kind"] == "approved" and dry["approver"] == "alice" and dry["candidate_id"] == cand["candidate_id"]
+        assert entries(env.agent.ledger, "baseline_promoted", "prod") == []
+        assert (await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", env.agent.ledger,
+                                           cand["candidate_id"], mode="enforce"))["status"] == "promoted"
+        assert await golden_image(env, "prod") == "img:2"
+    run_env(go, ledger=Ledger(), mode=make_mode("test"))
+
+
+def test_a_dry_run_approval_needs_the_ledger_too():
+    async def go(env):
+        env.result = prediction(**BENIGN)
+        await drift(env, "prod", image="img:2")
+        cid = (await bl.get_candidate(env.redis, "prod", "victim-app"))["candidate_id"]
+        assert (await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", None, cid,
+                                           mode="test"))["status"] == "no_ledger"
+        assert (await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", Ledger(FailingStore()), cid,
+                                           mode="test"))["status"] == "ledger_failed"
+    run_env(go, ledger=Ledger(), mode=make_mode("test"))
+
+
+def test_the_mode_watcher_is_started_only_when_asked(monkeypatch):
+    monkeypatch.delenv("HEALTH_MODE_WATCH", raising=False)
+    started = []
+
+    class Spy:
+        def dry_run_for(self, ns):
+            return True
+
+        def mode_for(self, ns):
+            return "test"
+
+        async def start(self, core_api):
+            started.append(core_api)
+
+        async def stop(self):
+            started.append("stopped")
+
+    async def go(flag):
+        import kubernetes_asyncio
+        from agents.health_agent import agent as ha
+
+        async def noop(*a, **k):
+            return None
+
+        monkeypatch.setattr(ha, "load_incluster_config", lambda: None)
+        monkeypatch.setattr(HealthAgent, "refresh_hpas", noop)
+        monkeypatch.setattr(HealthAgent, "watch_loop", noop)
+        monkeypatch.setattr(HealthAgent, "hpa_loop", noop)
+        if flag:
+            monkeypatch.setenv("HEALTH_MODE_WATCH", "on")
+        agent = HealthAgent(redis_url="redis://localhost:1", ledger=Ledger(), mode=Spy())
+        await agent.start()
+        await agent.stop()
+    run(go(False))
+    assert started == []
+    run(go(True))
+    assert len(started) == 2 and started[1] == "stopped"
