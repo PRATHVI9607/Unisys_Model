@@ -23,7 +23,7 @@ Owner stop points: model training (P12 is NOT approved), `PROJECT_SPEC.md`, dele
   2026-11-12 and `work` into `demo`. Their worktrees `../Unisys_Model-wt-V5-S5c` and `../Unisys_Model-wt-V5-CH4` can be removed
   (`git worktree prune` plus deleting the empty folders; never `branch -D`).
 - Cluster `k3d-kubeheal` (only this context, never `hybrid-demo`): `kubeheal-mode` is `test`. Helm release `kubeheal` is
-  revision 7, `deployed`. Images in use: security-agent `b20261112143524` (with V5-S5c and CH4); executor `b20261112081307`;
+  revision 8, `deployed`. Images in use: security-agent `b20261112150442` (with V5-S5c, its review fixes and CH4); executor `b20261112081307`;
   health-agent, fusion-agent, dashboard and inference-server `b20261112075817`. The neural model servers and the DCM are not
   deployed (`modelServers.legacy.enabled=false`). Docker Desktop must be running first (it was stopped at the start of the
   2026-11-12 resume; the cluster restarted by itself).

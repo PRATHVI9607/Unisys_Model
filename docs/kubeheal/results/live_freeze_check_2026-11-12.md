@@ -17,8 +17,10 @@ starting up; the real flips are 09:08:02Z and 09:08:08Z.
 
 ## What ran
 
-- Security Agent image `b20261112143524` (built from `demo` after the merge of V5-S5c and V5-CH4), Helm release `kubeheal`
-  revision 7 `deployed`. The agent logs `containment consumer started on kubeheal.contain.req:<node>`; `POD_UID` and
+- Security Agent image `b20261112143524` (built from `demo` after the merge of V5-S5c and V5-CH4, at commit `96393fc`
+  of the S5c branch), Helm release `kubeheal` revision 7 `deployed`. Later the same day the image was rebuilt as
+  `b20261112150442` (revision 8) after a test follow-up and an lstat change in the container check; the freeze below ran on
+  `b20261112143524`. The agent logs `containment consumer started on kubeheal.contain.req:<node>`; `POD_UID` and
   `POD_NAME` are set from the downward API.
 - Scratch pod `dev/freeze-scratch` (uid `3392ad99-92e1-4504-bbc0-53446bd64dd8`, node `k3d-kubeheal-agent-0`, QoS
   Burstable, container id `c1c8c6779a8d...`), running a sleep loop. Nothing else was touched.
