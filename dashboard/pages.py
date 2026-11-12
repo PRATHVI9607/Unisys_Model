@@ -20,6 +20,13 @@ from dashboard.incident_view import NOT_AVAILABLE
 _LAYOUT = os.path.join(os.path.dirname(__file__), "templates", "admin_layout.html")
 
 
+MAX_TIMELINE_PAYLOAD = 4000       # chosen: longest ledger payload dump shown per timeline row
+BASELINE_MODE_NOTE = (
+    "The dashboard reads only the global kubeheal-mode ConfigMap; a per-namespace kubeheal/mode label is not "
+    "checked here, so an approval in global enforce mode overwrites the baseline even if the namespace is "
+    "labelled test. The previous baseline stays in the ledger.")
+
+
 def esc(value: Any) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
@@ -207,6 +214,14 @@ def _legacy_attribution(att: Dict[str, Any]) -> str:
     return out
 
 
+def _bounded_dump(payload: Any) -> str:
+    """The ledger payload as JSON text, cut at MAX_TIMELINE_PAYLOAD characters with a visible marker."""
+    text = json.dumps(payload, sort_keys=True, default=str)
+    if len(text) <= MAX_TIMELINE_PAYLOAD:
+        return text
+    return text[:MAX_TIMELINE_PAYLOAD] + f" ... [truncated, {len(text) - MAX_TIMELINE_PAYLOAD} more characters]"
+
+
 def _json_block(value: Any) -> str:
     if value in (None, {}, []):
         return f'<p class="na">{NOT_AVAILABLE}</p>'
@@ -255,7 +270,7 @@ def incident_page(inc: Dict[str, Any]) -> str:
     steps = "".join(f"<li>{esc(s)}</li>" for s in chain["steps"]) or f'<li class="na">{NOT_AVAILABLE}</li>'
     timeline = "".join(
         f"<tr><td>{esc(r['sequence'])}</td><td>{_ts(r['timestamp'])}</td><td>{esc(r['step'])}</td>"
-        f"<td><pre>{esc(json.dumps(r['payload'], sort_keys=True, default=str))}</pre></td></tr>"
+        f"<td><pre>{esc(_bounded_dump(r['payload']))}</pre></td></tr>"
         for r in inc["timeline"]
     )
     body = (
@@ -319,7 +334,7 @@ def baseline_candidates_page(candidates: List[Dict[str, Any]], kill_switch: Dict
         '<p class="hint">In prod the Health Agent only proposes a new golden baseline (the live spec was judged '
         'benign and certain, the rollout is complete). Nothing replaces the baseline until it is approved here, and '
         'every decision is a ledger entry that keeps the previous baseline.</p>'
-        + _token_box() + f'<section class="card"><h2>Mode</h2>{note}</section>'
+        + _token_box() + f'<section class="card"><h2>Mode</h2>{note}<p class="hint" id="mode-note">{esc(BASELINE_MODE_NOTE)}</p></section>'
         '<section class="card"><h2>Pending candidates</h2>'
         '<label for="baseline-reason">Reason (optional, at most 512 characters)</label> '
         '<input type="text" id="baseline-reason" maxlength="512" autocomplete="off">'

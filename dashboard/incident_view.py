@@ -32,7 +32,7 @@ def num(value: Any) -> Optional[float]:
     """float or None. Strings from Redis hashes are accepted; NaN and infinity are not numbers here."""
     try:
         f = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return f if math.isfinite(f) else None
 
@@ -86,11 +86,15 @@ def prediction_set_view(raw_set: Any, uncertain_flag: Any = None) -> Dict[str, A
     if not isinstance(value, list):
         return {"published": False, "labels": [], "size": None, "certain": False, "marked_uncertain": flagged,
                 "summary": "not certain: no prediction set was published"}
-    labels = [_text(x) for x in value if isinstance(x, (str, int, float))][:MAX_LIST_ITEMS]
-    certain = len(value) == 1 and len(labels) == 1 and not flagged
+    usable = [x for x in value if isinstance(x, str) and x.strip()]
+    labels = [_text(x) for x in usable][:MAX_LIST_ITEMS]
+    malformed = len(usable) != len(value)          # an element that is not a non-empty string
+    certain = len(value) == 1 and not malformed and not flagged
     shown = "{" + ", ".join(labels) + "}"
     if certain:
         summary = f"certain: {shown}"
+    elif malformed:
+        summary = "not certain: the prediction set is malformed (an element is not a non-empty string)"
     elif not labels:
         summary = "not certain: the prediction set is empty"
     elif len(value) == 1:
@@ -98,7 +102,7 @@ def prediction_set_view(raw_set: Any, uncertain_flag: Any = None) -> Dict[str, A
     else:
         summary = f"not certain: {shown} holds {len(value)} labels"
     return {"published": True, "labels": labels, "size": len(value), "certain": certain,
-            "marked_uncertain": flagged, "summary": summary}
+            "malformed": malformed, "marked_uncertain": flagged, "summary": summary}
 
 
 def top_factors_view(raw: Any) -> Dict[str, Any]:
@@ -180,14 +184,18 @@ def _event_scores(event: Optional[Dict[str, Any]], ledger: Dict[str, Any], kind:
         legacy["top"] = _text(src[top_k])      # health: the first changed field, not a model attribution
     return {
         "risk": num(src.get(risk_k)),
-        "label": src.get(label_k),
+        "label": None if src.get(label_k) in (None, "") else _text(src.get(label_k)),
         "prediction_set": prediction_set_view(pset, uncertain),
         "top_factors": factors["factors"],
         "top_factors_total": factors["total"],
         "model_scored": flag(src.get("model_scored")),
-        "model_version": src.get("model_version") or None,
+        "model_version": _text(src["model_version"]) if src.get("model_version") else None,
         "legacy": legacy,
     }
+
+
+def _dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def _containment(decision: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -242,8 +250,8 @@ def build_incident(
             "models_ok": flag(decision.get("models_ok")),
         } if decision else None,
         "scores": {
-            "health": _event_scores(health_event, scores.get("health") or {}, "health", decision),
-            "security": _event_scores(security_event, scores.get("security") or {}, "security", decision),
+            "health": _event_scores(health_event, _dict(scores.get("health")), "health", decision),
+            "security": _event_scores(security_event, _dict(scores.get("security")), "security", decision),
             "correlation_score": num(scores.get("correlation_score")),
             "compound": scores.get("compound"),
         },

@@ -33,7 +33,8 @@ def test_prediction_set_certain_only_for_exactly_one_label(raw, flag, certain):
 def test_prediction_set_view_reports_published_and_labels():
     view = iv.prediction_set_view('["a", "b"]', "false")
     assert view == {"published": True, "labels": ["a", "b"], "size": 2, "certain": False,
-                    "marked_uncertain": False, "summary": "not certain: {a, b} holds 2 labels"}
+                    "malformed": False, "marked_uncertain": False,
+                    "summary": "not certain: {a, b} holds 2 labels"}
     assert iv.prediction_set_view(None)["published"] is False
     assert iv.prediction_set_view("[]")["published"] is True and iv.prediction_set_view("[]")["labels"] == []
 
@@ -225,3 +226,74 @@ def test_decision_record_is_the_fallback_for_sets_and_factors(client, harness):
             harness.ledger.store.objects[rec] = json.dumps(data).encode()
     h = client.get(f"/api/incidents/{INC}").json()["scores"]["health"]
     assert h["prediction_set"]["labels"] == ["degradation"] and len(h["top_factors"]) == iv.MAX_TOP_FACTORS
+
+
+# ------------------------------------------------------------------ review fixes (D-A3 to D-A6)
+
+@pytest.mark.parametrize("raw", ["[1]", "[5]", "[null]", '[""]', '["  "]', '[["a"]]', '[{"a": 1}]', "[true]",
+                                 '["a", 1]', '["a", ""]'])
+def test_a_set_with_an_element_that_is_not_a_non_empty_string_is_malformed(raw):
+    view = iv.prediction_set_view(raw, "false")
+    assert view["certain"] is False and view["malformed"] is True
+    assert "malformed" in view["summary"] and "is empty" not in view["summary"]
+
+
+def test_empty_set_is_empty_not_malformed():
+    view = iv.prediction_set_view("[]")
+    assert view["malformed"] is False and "empty" in view["summary"]
+    assert iv.prediction_set_view('["benign"]')["certain"] is True
+
+
+def test_num_survives_a_huge_integer():
+    assert iv.num(10 ** 400) is None
+    assert iv.num("1e999") is None
+    assert iv.num(str(10 ** 400)) is None
+
+
+def test_huge_numbers_in_scores_do_not_crash_the_incident(client, harness):
+    seed_v5_incident(harness)
+    for k in list(harness.ledger.store.objects):
+        if k.endswith("-scores.json"):
+            data = json.loads(harness.ledger.store.objects[k])
+            data["payload"]["health"]["health_risk"] = "1e999"
+            data["payload"]["health"]["top_factors_json"] = '[{"feature": "a", "contribution": 1e999}]'
+            data["payload"]["correlation_score"] = 10 ** 400
+            harness.ledger.store.objects[k] = json.dumps(data).encode()
+    r = client.get(f"/api/incidents/{INC}")
+    assert r.status_code == 200 and r.json()["scores"]["health"]["risk"] is None
+    assert r.json()["scores"]["correlation_score"] is None
+    assert client.get(f"/incidents/{INC}").status_code == 200
+
+
+@pytest.mark.parametrize("junk", ["text", 5, ["a"], None, True])
+def test_non_dict_scores_health_or_security_is_treated_as_empty(client, harness, junk):
+    harness.ledger.append(INC, "detection", {"namespace": "staging", "deployment": "web"})
+    harness.ledger.append(INC, "scores", {"health": junk, "security": junk, "correlation_score": 0.1})
+    harness.ledger.append(INC, "decision", {"decision": "observe"})
+    r = client.get(f"/api/incidents/{INC}")
+    assert r.status_code == 200
+    assert r.json()["scores"]["health"] is None and r.json()["scores"]["security"] is None
+    assert client.get(f"/incidents/{INC}").status_code == 200
+
+
+def test_long_label_and_model_version_are_bounded(client, harness):
+    seed_v5_incident(harness)
+    for key in ("health_label", "model_version"):
+        harness.events[("health", HEALTH_EVENT)][key] = "x" * 5000
+    for k in list(harness.ledger.store.objects):          # the ledger record wins over the event: drop its copies
+        if k.endswith("-scores.json"):
+            data = json.loads(harness.ledger.store.objects[k])
+            data["payload"]["health"].pop("health_label")
+            data["payload"]["health"].pop("model_version")
+            harness.ledger.store.objects[k] = json.dumps(data).encode()
+    h = client.get(f"/api/incidents/{INC}").json()["scores"]["health"]
+    assert len(h["label"]) == iv.MAX_TEXT and len(h["model_version"]) == iv.MAX_TEXT
+
+
+def test_the_timeline_payload_dump_is_truncated_with_a_marker(client, harness):
+    seed_v5_incident(harness)
+    harness.ledger.append(INC, "executor_result", {"blob": "y" * 20000})
+    page = client.get(f"/incidents/{INC}").text
+    assert "[truncated, " in page and "y" * 5000 not in page and "y" * 3000 in page
+    seed_v5_incident(harness, "inc-small")
+    assert "[truncated" not in client.get("/incidents/inc-small").text

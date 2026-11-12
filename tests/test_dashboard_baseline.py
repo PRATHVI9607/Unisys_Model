@@ -386,11 +386,65 @@ def test_value_error_and_redis_error_are_reported_not_raised(client, enforce, mo
     assert r.status_code == 502 and "redis down" not in r.text
 
 
-def test_a_corrupt_candidate_does_not_crash_the_list(client, harness):
-    put_candidate(harness)
-    harness.redis_inner.store[bl.candidate_key("prod", "broken")] = "{not json"
+@pytest.mark.parametrize("junk", ["{not json", "[1, 2]", '"text"', "7", "null"])
+def test_a_corrupt_candidate_is_skipped_and_the_good_ones_are_listed(client, harness, junk):
+    cid = put_candidate(harness)
+    harness.redis_inner.store[bl.candidate_key("prod", "broken")] = junk
     r = client.get("/api/baseline-candidates")
-    assert r.status_code == 502 and "Traceback" not in r.text
+    assert r.status_code == 200 and r.json()["count"] == 1 and r.json()["candidates"][0]["candidate_id"] == cid
+    page = client.get("/baseline-candidates")
+    assert page.status_code == 200 and cid in page.text
+
+
+@pytest.mark.parametrize("junk", ["{not json", "[1, 2]"])
+def test_the_corrupt_candidate_itself_answers_a_clear_422_everywhere(client, enforce, junk):
+    enforce.redis_inner.store[bl.candidate_key("prod", "broken")] = junk
+    for r in (client.get("/api/baseline-candidates/prod/broken"),
+              post(client, "approve", {"candidate_id": "x"}, dep="broken"),
+              post(client, "reject", {"candidate_id": "x"}, dep="broken")):
+        assert r.status_code in (409, 422) and "unreadable" in r.json()["detail"], (r.status_code, r.text)
+        assert "Traceback" not in r.text and "Expecting" not in r.text
+
+
+def test_workload_names_with_a_trailing_newline_are_rejected(client, enforce):
+    for bad in ("web%0A", "web%0a"):
+        assert client.get(f"/api/baseline-candidates/prod/{bad}").status_code == 404
+        assert client.post(f"/api/baseline-candidates/prod/{bad}/approve", headers=AUTH,
+                           json={"candidate_id": "x"}).status_code == 404
+    assert client.get("/api/baseline-candidates/prod%0A/web").status_code == 404
+    for args in (("prod\n", "web"), ("prod", "web\n"), ("prod", "a.b\n")):
+        with pytest.raises(ValueError):
+            bl.validate_workload(*args)
+    bl.validate_workload("prod", "web")
+    bl.validate_workload("prod", "a.b-c")
+
+
+def test_the_namespace_label_limit_is_visible_everywhere(client, enforce):
+    from dashboard.pages import BASELINE_MODE_NOTE
+    assert "per-namespace kubeheal/mode label is not checked here" in BASELINE_MODE_NOTE
+    assert "The previous baseline stays in the ledger." in BASELINE_MODE_NOTE
+    cid = put_candidate(enforce)
+    assert client.get(BASE).json()["mode_note"] == BASELINE_MODE_NOTE
+    page = client.get("/baseline-candidates").text
+    assert 'id="mode-note"' in page and "per-namespace kubeheal/mode label is not checked here" in page
+    body = post(client, "approve", {"candidate_id": cid}).json()
+    assert body["mode_note"] == BASELINE_MODE_NOTE and body["message"].endswith(BASELINE_MODE_NOTE)
+
+
+def test_the_dry_run_message_carries_the_note_and_the_reason_is_ledgered(client, harness):
+    from dashboard.pages import BASELINE_MODE_NOTE
+    cid = put_candidate(harness)
+    body = post(client, "approve", {"candidate_id": cid, "reason": "dry run please"}).json()
+    assert body["status"] == "dry_run" and BASELINE_MODE_NOTE in body["message"]
+    (entry,) = baseline_records(harness, "baseline_promotion_dry_run")
+    assert entry["reason"] == "dry run please"
+    assert post(client, "approve", {"candidate_id": cid}).json()["status"] == "dry_run"
+    assert baseline_records(harness, "baseline_promotion_dry_run")[-1]["reason"] == ""
+
+
+def test_a_rejection_does_not_claim_an_overwrite(client, harness):
+    cid = put_candidate(harness)
+    assert "mode_note" not in post(client, "reject", {"candidate_id": cid}).json()
 
 
 def test_baseline_module_missing_in_the_image_is_503(client, harness, monkeypatch):

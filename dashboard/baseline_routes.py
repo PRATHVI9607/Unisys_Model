@@ -28,6 +28,7 @@ The baseline module is imported lazily: the dashboard image copies only `agents/
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -140,16 +141,32 @@ async def _history(svc: DashboardServices, bl, namespace: str, deployment: str) 
     return out
 
 
+UNREADABLE = ("the stored baseline candidate record is unreadable (not a JSON object); it needs an operator")
+
+
+async def _read_candidate(bl, redis, namespace: str, deployment: str) -> Optional[Dict[str, Any]]:
+    """The pending candidate, None when there is none. A stored record that is not valid JSON or not an object
+    is a 422 with a clear message (never a crash); a Redis error is a 502."""
+    try:
+        candidate = await bl.get_candidate(redis, namespace, deployment)
+    except ValueError as exc:                     # includes json.JSONDecodeError
+        logger.error("baseline candidate of %s/%s is unreadable: %s", namespace, deployment, type(exc).__name__)
+        raise HTTPException(status_code=422, detail=UNREADABLE)
+    except Exception as exc:
+        logger.error("baseline candidate read failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=502, detail="could not read the baseline candidate from Redis")
+    if candidate is not None and not isinstance(candidate, dict):
+        logger.error("baseline candidate of %s/%s is not a JSON object", namespace, deployment)
+        raise HTTPException(status_code=422, detail=UNREADABLE)
+    return candidate
+
+
 @router.get("/api/baseline-candidates/{namespace}/{deployment}")
 async def baseline_candidate_detail(namespace: str, deployment: str, svc: DashboardServices = Depends(get_services)):
     bl = _baseline()
     _check_workload(bl, namespace, deployment)
     redis = _redis(svc)
-    try:
-        candidate = await bl.get_candidate(redis, namespace, deployment)
-    except Exception as exc:
-        logger.error("baseline candidate read failed: %s", type(exc).__name__)
-        raise HTTPException(status_code=502, detail="could not read the baseline candidate from Redis")
+    candidate = await _read_candidate(bl, redis, namespace, deployment)
     if candidate is None:
         raise HTTPException(status_code=404, detail="baseline candidate not found")
     out = candidate_summary(candidate)
@@ -166,6 +183,7 @@ async def baseline_candidate_detail(namespace: str, deployment: str, svc: Dashbo
     mode = await current_mode(svc)
     out["mode"] = {"mode": mode["mode"], "readable": mode["readable"],
                    "approval_is_dry_run": mode["dry_run"]}
+    out["mode_note"] = pages.BASELINE_MODE_NOTE
     out["history"] = await _history(svc, bl, namespace, deployment)
     return out
 
@@ -218,6 +236,7 @@ async def _decide(kind: str, namespace: str, deployment: str, request: Request, 
     _check_workload(bl, namespace, deployment)
     redis = _redis(svc)
     reason = (body.reason or "").strip()
+    await _read_candidate(bl, redis, namespace, deployment)       # a corrupt record is a clear 422 first
     mode = await current_mode(svc)
     try:
         if kind == "approve":
@@ -226,6 +245,10 @@ async def _decide(kind: str, namespace: str, deployment: str, request: Request, 
         else:
             result = await bl.reject_promotion(redis, namespace, deployment, admin.actor, svc.ledger,
                                                body.candidate_id, reason)
+    except json.JSONDecodeError:
+        logger.error("baseline %s of %s/%s: the stored candidate is not valid JSON", kind, namespace, deployment)
+        raise HTTPException(status_code=422, detail="the stored baseline candidate record is unreadable "
+                                                    "(not valid JSON); it needs an operator")
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except HTTPException:
@@ -238,7 +261,7 @@ async def _decide(kind: str, namespace: str, deployment: str, request: Request, 
     logger.info("baseline %s %s/%s by %s: %s", kind, namespace, deployment, admin.actor, status)
     if status == "ledger_failed":
         logger.error("baseline %s of %s/%s: ledger write failed: %s", kind, namespace, deployment, result.get("error"))
-    extra: Dict[str, Any] = {"namespace": namespace, "deployment": deployment, "candidate_id": body.candidate_id,
+    extra: Dict[str, Any] = {"mode_note": pages.BASELINE_MODE_NOTE, "namespace": namespace, "deployment": deployment, "candidate_id": body.candidate_id,
                              "actor": admin.actor, "mode": mode["mode"], "mode_readable": mode["readable"],
                              "applied": status == "promoted"}
     for key in ("ledger_key", "reason"):
@@ -248,8 +271,15 @@ async def _decide(kind: str, namespace: str, deployment: str, request: Request, 
         extra["current_candidate_id"] = result.get("candidate_id")
     if status == "dry_run":
         extra["candidate_unchanged"] = True
-        return _answer(status, _APPROVE_HTTP, extra, _dry_run_message(mode["mode"], mode["readable"]))
-    return _answer(status, _APPROVE_HTTP if kind == "approve" else _REJECT_HTTP, extra)
+        return _answer(status, _APPROVE_HTTP, extra,
+                       _dry_run_message(mode["mode"], mode["readable"]) + " " + pages.BASELINE_MODE_NOTE)
+    if kind == "approve":
+        message = _MESSAGES.get(status)
+        if status == "promoted" and message:
+            message = message + " " + pages.BASELINE_MODE_NOTE
+        return _answer(status, _APPROVE_HTTP, extra, message)
+    extra.pop("mode_note")                      # a rejection overwrites nothing
+    return _answer(status, _REJECT_HTTP, extra)
 
 
 @router.post("/api/baseline-candidates/{namespace}/{deployment}/approve")
