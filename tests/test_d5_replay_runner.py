@@ -99,7 +99,9 @@ def test_runner_emits_fusion_evidence_and_restores_daemonset_without_changing_mo
         "name": "FALCO_REPLAY_NODE", "value": "k3d-kubeheal-agent-0"}
     restore = patches[-1]["spec"]["template"]["spec"]
     assert restore["volumes"] == [{"name": runner.VOLUME, "$patch": "delete"}]
-    assert restore["containers"][0]["volumeMounts"] == [{"name": runner.VOLUME, "$patch": "delete"}]
+    assert restore["containers"][0]["volumeMounts"] == [{"name": runner.VOLUME,
+                                                            "mountPath": runner.MOUNT_PATH,
+                                                            "$patch": "delete"}]
     restored_env = restore["containers"][0]["env"]
     assert restored_env[0] == {"name": "FALCO_MODE", "value": "auto"}
     assert any("$patch" in item for item in restored_env)

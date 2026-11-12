@@ -106,7 +106,10 @@ def _restore_patch(original_env: Dict[str, Dict]) -> Dict:
     return {"spec": {"template": {"spec": {
         "volumes": [{"name": VOLUME, "$patch": "delete"}],
         "containers": [{"name": CONTAINER, "env": env,
-                        "volumeMounts": [{"name": VOLUME, "$patch": "delete"}]}],
+                        # Strategic-merge deletion of volumeMounts requires its Kubernetes merge key,
+                        # mountPath. Omitting it makes cleanup fail and leaves the DaemonSet mounted.
+                        "volumeMounts": [{"name": VOLUME, "mountPath": MOUNT_PATH,
+                                          "$patch": "delete"}]}],
     }}}}
 
 
