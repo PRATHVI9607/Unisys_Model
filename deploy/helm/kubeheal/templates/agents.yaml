@@ -68,6 +68,10 @@ spec:
       nodeSelector:
 {{ toYaml $g.nodeSelector | indent 8 }}
 {{- $sa := .Values.securityAgent }}
+{{- $replay := default dict $sa.falcoReplay }}
+{{- if and $replay.configMapName (ne $sa.falcoMode "replay") }}
+{{- fail "securityAgent.falcoReplay.configMapName requires securityAgent.falcoMode=replay" }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -131,6 +135,12 @@ spec:
             # auto | live | off | replay. Replay is an explicit opt-in only (agents/security_agent/falco_client.py).
             - {name: FALCO_MODE, value: {{ $sa.falcoMode | quote }}}
             - {name: FALCO_EVENTS_PATH, value: {{ $sa.falcoEventsPath | quote }}}
+            {{- if $replay.configMapName }}
+            - {name: FALCO_REPLAY_PATH, value: {{ printf "%s/%s" (trimSuffix "/" $replay.mountPath) $replay.fileName | quote }}}
+            {{- if $replay.node }}
+            - {name: FALCO_REPLAY_NODE, value: {{ $replay.node | quote }}}
+            {{- end }}
+            {{- end }}
             - {name: NAMESPACE, value: {{ $ns | quote }}}
             - {name: LOG_LEVEL, value: {{ $sa.logLevel | quote }}}
             {{- include "kubeheal.extraEnv" $sa.extraEnv | nindent 12 }}
@@ -144,6 +154,9 @@ spec:
           volumeMounts:
             - {name: sys, mountPath: /sys, readOnly: true}
             - {name: falco-events, mountPath: /var/run/falco, readOnly: true}
+            {{- if $replay.configMapName }}
+            - {name: falco-replay, mountPath: {{ $replay.mountPath | quote }}, readOnly: true}
+            {{- end }}
             - {name: tmp, mountPath: /tmp}
             {{- if $sa.cgroupFreeze.enabled }}
             # READ-WRITE host cgroup tree, separate from the read-only /sys above. Used only by write_cgroup_freeze.
@@ -158,6 +171,10 @@ spec:
         {{- end }}
         - name: falco-events
           hostPath: {path: /var/run/falco, type: DirectoryOrCreate}
+        {{- if $replay.configMapName }}
+        - name: falco-replay
+          configMap: {name: {{ $replay.configMapName | quote }}}
+        {{- end }}
         - name: tmp
           emptyDir: {}
       nodeSelector:

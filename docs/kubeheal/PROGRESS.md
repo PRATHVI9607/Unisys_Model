@@ -452,23 +452,13 @@ Review method: the `kubeheal-reviewer` agent type was not registered in this ses
 - The merged S5c and CH4 worktrees were clean and explicitly identified as merged; removed them and pruned worktree metadata. Verified `dev/freeze-scratch` is NotFound. The unrelated metric-query worktree remains because it holds `work`.
 - Fresh HPA run on 2026-11-12 failed: `demo/scripts/hpa_load.ps1` flattened the JavaScript ConfigMap body via `Out-String -NoNewline`, so k6 reported no exported functions. Its `finally` deleted the temporary Job, NetworkPolicy, and ConfigMap; a follow-up list found none. The fix and runbook changes are in isolated branches for review and integration.
 - Current cluster state observed during the session: `k3d-kubeheal` components Running, kill switch mode `test`, inference HPA present at 2/2 idle. No live containment, replay, drift, or mode-toggle demo ran in this session.
-- U6 reset constraint: `demo/k3d/down.ps1` destroys the cluster and PVCs holding MinIO/Redis data. Do not run it. Use a non-destructive clean workload baseline with volumes preserved; a fresh-cluster baseline remains not measured.
-- Next: complete the safe P11 runner outputs and U6 run, rerun HPA with the hardened script, then coordinate replay/containment/F9/F10. Rehearse the runbook from the available clean workload baseline, run final full suites on work/demo, and update exact evidence. Never push or set ALLOW_PUSH.
+## Resume status, 2026-11-12
 
-### HPA demo cleanup hardening (Codex, 2026-11-12)
-
-- Commit `ce5a183` adds UUIDs to temporary Job, ConfigMap, NetworkPolicy, and local staging names. Cluster cleanup checks the run-id label, uses create rather than apply, catches failures independently, and attempts local temp-file removal. The script now checks that HPA returns to its 2-replica baseline.
-- Focused HPA staging and cleanup tests: 4 passed. PowerShell 7 parser and `git diff --check` passed. No live HPA rerun yet.
-
-
-### Candidate integration verification (2026-11-12)
-
-- Candidate branch `wave/codex-demo-candidate` combines the verified F1/F3 work changes with the demo runbook and HPA cleanup branch for pre-rehearsal testing. This is not yet the official `demo` merge.
-- Full suite on the candidate passed: 2073 passed, 11 skipped in 60.34 s. Live cluster tests were opt-in and not run. HPA focused staging/cleanup tests: 4 passed. Live HPA rerun remains pending.
-- P11 output coverage is being expanded to E1-E7 and V5-E1; only bounded E1/E2 scenarios will be run live, with all other fields explicitly `not measured` and a reason.
-
-### F11 live HPA acceptance (2026-11-12)
-
-- On `k3d-kubeheal`, mode `test`, machine `LAPTOP-74N9LTFA`, the corrected `demo/scripts/hpa_load.ps1` passed with 32 VUs for 90 s and a 330 s scale-down wait. Run `8c10202427fa45e7aa63c1d4a22b5bda` ran from 16:08:27 to 16:15:41 IST (7m14s).
-- Measured: 121,088 HTTP checks passed (100%), 121,088 requests, request rate 1,269.57/s, `http_req_duration` median 22.86 ms, p95 38.45 ms, average 25.12 ms, maximum 1.76 s. HPA current/desired moved 2/2 -> 2/4 -> 4/7 -> 7/7; after load the metric returned to 0 and HPA returned to 2/2. The owned Job, NetworkPolicy, and ConfigMap were deleted.
-- Detailed run summary: `docs/kubeheal/demo-evidence/F11/hpa-run-2026-11-12.md`. No full terminal transcript or screenshots were captured in this run; capture them in final rehearsal. This single synthetic load run is not a performance guarantee.
+- U6 reset constraint: `demo/k3d/down.ps1` deletes PVCs holding MinIO/Redis data. Do not run it. Use a clean workload baseline with volumes preserved; fresh-cluster baseline is not measured.
+- Candidate branch `wave/codex-demo-candidate` combines current `work`, HPA cleanup, and F11 measured run. D5/F4 and P11/NetworkPolicy are being integrated for combined verification; this is staging, not the official `demo` merge.
+- F11 measured on `k3d-kubeheal`, mode `test`, machine `LAPTOP-74N9LTFA`: 32 VUs/90 s; 121,088/121,088 checks; request rate 1,269.57/s; median 22.86 ms; p95 38.45 ms; average 25.12 ms; max 1.76 s; HPA 2 -> 7 -> 2; elapsed 7m14s. The temporary Job, NetworkPolicy, and ConfigMap were removed. Evidence summary: `docs/kubeheal/demo-evidence/F11/hpa-run-2026-11-12.md`; transcript/screenshots remain to capture.
+- P11/NetworkPolicy branch full suite: 2101 passed, 11 skipped. D5/F4 branch full suite: 2101 passed, 12 skipped. The combined candidate suite is pending.
+- P11 E1 first attempt: 297 requests, 0/297 checks passed, 297/297 failed. HPA stayed 2/2 and temporary Job/ConfigMap were deleted. The request path was blocked because default-deny ingress excluded the k6 Job. This is a failed run, with p50/p95 `not measured`; artifacts are under `docs/kubeheal/results/p11/`. A narrow same-namespace k6-to-inference TCP port rule is implemented in the P11 branch but not deployed. E2 remains paused.
+- D5/F4 hardening is on `wave/Codex-D5-Replay` commit `b516a0d`, focused 253 passed and full suite 2101 passed, 12 skipped. It adds replay dry-run enforcement, non-target Falco auto fallback, bounded cleanup, and the dedicated upgrade-stable HMAC Secret. It has not been deployed or run against k3d.
+- Runbook updates are on `wave/demo-runbook` through `c3f6dcb`; live flows without safe triggers remain marked `NOT VERIFIED`. F2-F11 evidence and screenshots are still incomplete.
+- Next: finish candidate merges, run its full suite, deploy only the combined candidate chart on `k3d-kubeheal`, then retry bounded P11 E1 and E2. Do not change mode except in a scripted, logged enforce window. Complete remaining live features, U6 twice, rehearsal, final work/demo suites, README/AGENTS/PUSH_PLAN, secret scan, and commit. Never push or set `ALLOW_PUSH`.

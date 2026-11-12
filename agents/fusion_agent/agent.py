@@ -435,6 +435,12 @@ class FusionAgentV4:
                 "methods": {"top_factors": "top_factors_json as published by the model services"}}
         models_ok = not issues
 
+        # Replay traces are synthetic verification inputs. Keep them dry even if the global kill switch changes
+        # to enforce while the temporary replay is running.
+        decision_mode = self.mode.mode_for(namespace)
+        if sec.get("syscall_source") == "replay":
+            decision_mode = "test"
+
         health_set = em.prediction_set(health, "health_prediction_set")
         sec_set = em.prediction_set(sec, "sec_prediction_set")
         inp = DecisionInput(
@@ -460,7 +466,7 @@ class FusionAgentV4:
             has_baseline=_truthy(health.get("has_baseline")),
             changed_fields=em.string_list(health.get("changed_fields_json")),
             security_fresh=security_fresh,
-            mode=self.mode.mode_for(namespace),
+            mode=decision_mode,
         )
         out = make_decision(inp)
         METRICS.record_decision(getattr(out.decision, "value", str(out.decision)))

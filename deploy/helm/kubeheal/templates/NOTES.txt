@@ -7,6 +7,7 @@ Install with: helm install kubeheal deploy/helm/kubeheal -n {{ include "kubeheal
 
 Before it works end to end:
   * Secrets created outside the chart: {{ .Values.redis.auth.existingSecret }} (key {{ .Values.redis.auth.key }}, unless redis.auth.password was passed), {{ .Values.minio.rootSecret }} and {{ .Values.minio.clientSecret }} (scripts/minio_secret.ps1), and {{ .Values.dashboard.adminTokenSecret.name }} (key {{ .Values.dashboard.adminTokenSecret.key }}, the dashboard admin token; the dashboard pod does not start without it).
+  * The chart creates and preserves {{ .Values.containment.hmacSecret.name }} (key {{ .Values.containment.hmacSecret.key }}) for Executor/Security Agent message signing. Keep it during upgrades. Plain manifests require you to create it first. See docs/kubeheal/CONTAINMENT_HMAC.md.
   * Images {{ .Values.global.imageRegistry }}kubeheal/*:{{ .Values.global.imageTag }} must exist on the nodes (k3d: k3d image import).
 {{- if .Values.inference.enabled }}
   * Image {{ .Values.global.imageRegistry }}{{ .Values.inference.image.repository }}:{{ .Values.inference.image.tag | default .Values.global.imageTag }} (dockerfiles/Dockerfile.inference) must exist on the nodes. Check readiness with: kubectl -n {{ include "kubeheal.namespace" . }} get deploy {{ .Values.inference.name }} (the pod is Ready only when both LightGBM bundles loaded).

@@ -54,13 +54,13 @@ so no agent code changes: Kubernetes expands $(REDIS_PASSWORD) because it is dec
   value: "redis://:$(REDIS_PASSWORD)@{{ .Values.redis.serviceName }}:6379"
 {{- end -}}
 
-{{/* Containment protocol HMAC key. Reuse the required Redis credential Secret value as key material. */}}
+{{/* Dedicated containment HMAC key, separate from the Redis credential. */}}
 {{- define "kubeheal.containmentHmacEnv" -}}
 - name: CONTAIN_HMAC_KEY
   valueFrom:
     secretKeyRef:
-      name: {{ .Values.redis.auth.existingSecret }}
-      key: {{ .Values.redis.auth.key }}
+      name: {{ .Values.containment.hmacSecret.name }}
+      key: {{ .Values.containment.hmacSecret.key }}
 {{- end -}}
 
 {{/* MinIO client credentials env (ledger writers). Arg: optional flag "optional" => secret refs optional. */}}
