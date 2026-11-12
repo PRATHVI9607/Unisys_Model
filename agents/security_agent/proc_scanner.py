@@ -47,6 +47,22 @@ def pod_uid_for_pid(pid: int, proc_root: Optional[str] = None) -> Optional[Tuple
     return None
 
 
+def process_start_time(pid: int, proc_root: Optional[str] = None) -> Optional[int]:
+    """Linux /proc/<pid>/stat starttime (field 22), stable across PID reuse."""
+    root = proc_root or PROC_ROOT
+    try:
+        with open(f"{root}/{pid}/stat", encoding="utf-8") as f:
+            line = f.read()
+        # comm is parenthesized and may contain spaces or ')' characters.
+        close = line.rfind(")")
+        if close < 0:
+            return None
+        fields = line[close + 1:].split()  # starts at field 3 (state)
+        return int(fields[19])             # field 22: starttime
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 @dataclass
 class PodInfo:
     namespace: str

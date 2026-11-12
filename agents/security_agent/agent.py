@@ -4,7 +4,7 @@ import logging
 import math
 import os
 import time
-from collections import deque
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Deque, Dict, List, Optional, Any, Tuple
 from enum import Enum
@@ -16,7 +16,7 @@ from agents.common.metrics import KubeHealMetrics
 from agents.common.sampling import sampling_factor, scaled_interval
 from agents.security_agent.counters import CounterSamples, read_pod_counters
 from agents.security_agent.inference import InferenceClient
-from agents.security_agent.proc_scanner import PodIndex, scan_pids
+from agents.security_agent.proc_scanner import PodIndex, process_start_time, scan_pids
 from agents.security_agent.v5_window import top_syscall, window_from_normalised
 from agents.security_agent.entropy_sampler import EntropySampler, EntropyResult, shannon_entropy
 from agents.security_agent.falco_client import (
@@ -26,7 +26,7 @@ from agents.security_agent.syscall_window import (
     FalcoWindowTracker, build_model_input, DEFAULT_BURST_THRESHOLD, DEFAULT_COOLDOWN_S,
 )
 from kubeheal.contracts import SECURITY_PUBLISH_RISK
-from kubeheal.features.security import MAX_WINDOW_EVENTS, security_features
+from kubeheal.features.security import MAX_WINDOW_EVENTS, WINDOW_S, security_features
 from pydantic import BaseModel, ConfigDict, Field
 
 logging.basicConfig(level=logging.INFO)
@@ -52,6 +52,20 @@ SCORE_KEY_PREFIX = "kubeheal:security:score"          # + ":<namespace>:<workloa
 DEFAULT_SCORE_TTL_S = 60.0                              # chosen, not measured (env SECURITY_SCORE_TTL_S)
 HEURISTIC_LABEL = "suspicious"                          # label of a heuristic-only event: never an auto-contain label
 MAX_TRACKED_WORKLOADS = 1024                            # chosen, not measured: bound on the per-workload state maps
+MAX_TRACKED_PIDS = 4096                                 # chosen, not measured: bound on PID-scoped state
+
+RECORD_SECURITY_SCORE_LUA = """
+-- kubeheal:record_security_score
+local risk = ARGV[2]
+if ARGV[1] == 'true' and redis.call('HGET', KEYS[1], 'model_scored') == 'true' and redis.call('TTL', KEYS[1]) > 0 then
+  local old = tonumber(redis.call('HGET', KEYS[1], 'sec_risk'))
+  local incoming = tonumber(risk)
+  if old and incoming and old > incoming then risk = tostring(old) end
+end
+redis.call('HSET', KEYS[1], 'sec_risk', risk, 'model_scored', ARGV[1], 'ts_ms', ARGV[3])
+redis.call('EXPIRE', KEYS[1], ARGV[4])
+return risk
+"""
 
 
 def _positive_float(raw, default: float) -> float:
@@ -195,16 +209,16 @@ class SecurityAgent:
         # Real write-entropy sampler (30 samples, 2 s apart, bounded reads); injectable for tests.
         self.sampler = sampler or EntropySampler()
         self.falco_mode = "off"
-        self._checks: Dict[int, "asyncio.Task"] = {}   # pid -> running entropy check
+        self._checks: Dict[Tuple[int, Optional[int]], "asyncio.Task"] = {}   # (pid, /proc starttime) -> check
 
-        self.write_counters: Dict[int, int] = {}
+        self.write_counters: Dict[Tuple[int, int], int] = {}
         # earliest Falco timestamp seen per PID (kept outside the capped syscall window) for T0
-        self._falco_first_ts: Dict[int, str] = {}
+        self._falco_first_ts: "OrderedDict[int, str]" = OrderedDict()
+        self._falco_tracker: Optional[FalcoWindowTracker] = None
         # checks that did not produce an event, by reason (logged as well; no Prometheus counter here)
         self.dropped_checks: Dict[str, int] = {}
         self._pid_map: Dict[int, Dict] = {}                         # last PID scan: pid -> pod record
         self._counters: Dict[Tuple[str, str], CounterSamples] = {}  # (namespace, pod) -> write/net samples
-        self._recent_risk: Dict[Tuple[str, str], Deque] = {}        # (namespace, workload) -> (wall s, risk)
         self.score_write_errors = 0
         self._wall = time.time                                      # tests replace it
         self._mono = time.monotonic
@@ -240,6 +254,7 @@ class SecurityAgent:
         asyncio.create_task(self._scan_pids_periodic())
         asyncio.create_task(self._handle_falco_events())
         asyncio.create_task(self._process_write_events())
+        asyncio.create_task(self._score_quiet_workloads_periodic())
 
     async def stop(self) -> None:
         """Stop the Security Agent."""
@@ -275,6 +290,52 @@ class SecurityAgent:
                 logger.debug(f"PID scan error: {e}")
                 await asyncio.sleep(5)
 
+    async def _score_quiet_workloads_periodic(self) -> None:
+        """Refresh a real, possibly eventless model window before the Fusion score TTL expires."""
+        interval = max(1.0, self.score_ttl_s / 2.0)  # chosen cadence derived from the configured score TTL
+        while self.running:
+            try:
+                await asyncio.sleep(interval)
+                await self._score_quiet_workloads_once()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("quiet workload scoring failed: %s", e)
+
+    async def _score_quiet_workloads_once(self) -> None:
+        """Score one fresh feature window per indexed pod; no heuristic is written as a model answer."""
+        groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for pid, rec in self._pid_map.items():
+            info = self._with_workload(rec)
+            namespace, pod = info.get("namespace", "default"), info.get("pod") or ""
+            if not pod:
+                continue
+            group = groups.setdefault((namespace, pod), {"info": info, "pids": set()})
+            group["pids"].add(pid)
+        for (namespace, pod), group in groups.items():
+            pids = sorted(group["pids"])
+            if any(key[0] in group["pids"] and not task.done() for key, task in self._checks.items()):
+                continue
+            pid = pids[0]
+            info = self._with_workload(group["info"])
+            events = []
+            if self._falco_tracker is not None:
+                for event_pid in pids:
+                    events.extend(self._falco_tracker.window(event_pid))
+            v5_events, _start, _end, window_s = window_from_normalised(events)
+            # An eventless period is still a real 60 s observation window: the rates come from actual /proc counters.
+            window_s = window_s or WINDOW_S
+            try:
+                samples = await self._sample_counters(pid, info)
+                features = security_features(v5_events, [], window_s,
+                                             samples.total(2, window_s), samples.total(1, window_s))
+                pred = await self._predict(features)
+            except Exception as e:
+                pred = None
+                logger.warning("quiet security scoring failed for %s/%s: %s", namespace, pod, e)
+            # The hash is fresh only for a validated inference answer. A failure clears a stale true value.
+            await self._record_score(namespace, info["workload"], pred)
+
     async def _handle_falco_events(self) -> None:
         """Consume Falco syscall events and keep a rolling syscall window per PID. The source is chosen
         by falco_client.resolve_falco_mode: live Falco (gRPC Outputs API or JSON tail) when it is
@@ -290,6 +351,7 @@ class SecurityAgent:
             burst_threshold=int(os.environ.get("FALCO_BURST_THRESHOLD", str(DEFAULT_BURST_THRESHOLD))),
             cooldown_s=float(os.environ.get("FALCO_TRIGGER_COOLDOWN_S", str(DEFAULT_COOLDOWN_S))),
         )
+        self._falco_tracker = tracker
         if mode == "replay":
             path = os.environ["FALCO_REPLAY_PATH"]
             delay = float(os.environ.get("FALCO_REPLAY_DELAY_S", "0"))
@@ -320,6 +382,10 @@ class SecurityAgent:
         """One normalised Falco event (live or replayed): record PID to pod from Falco's k8s fields, update
         the window, and start an entropy check on a burst or a Falco ransomware rule."""
         pid = evt.get("pid")
+        if pid:
+            start_time = process_start_time(int(pid), self.proc_root)
+            if start_time is not None:
+                evt["proc_starttime"] = start_time
         if pid and evt.get("pod"):
             # Carry the workload the PID scan would have stored. The scan writes the same key, and a record
             # without `workload` made the event, and the score hash, be keyed by the POD name (never Fusion's join key).
@@ -333,18 +399,27 @@ class SecurityAgent:
         if trigger:
             if trigger.first_ts:
                 self._falco_first_ts[trigger.pid] = trigger.first_ts
+                self._falco_first_ts.move_to_end(trigger.pid)
+                while len(self._falco_first_ts) > MAX_TRACKED_PIDS:
+                    self._falco_first_ts.popitem(last=False)
             self.inotify_watcher.recent_events = trigger.events
-            await self._trigger_entropy_check(trigger.pid, trigger.events, source)
+            await self._trigger_entropy_check(
+                trigger.pid, trigger.events, source,
+                window_provider=lambda pid=trigger.pid, tracker=tracker: tracker.window(pid),
+            )
 
-    def _sample_write_bytes(self) -> Dict[int, int]:
+    def _sample_write_bytes(self) -> Dict[Tuple[int, int], int]:
         """Cumulative write_bytes per kubepods PID from /proc/<pid>/io."""
-        proc = os.environ.get("PROC_ROOT", "/proc")
-        out: Dict[int, int] = {}
+        proc = self.proc_root
+        out: Dict[Tuple[int, int], int] = {}
         try:
             for d in os.listdir(proc):
                 if not d.isdigit():
                     continue
                 pid = int(d)
+                start_time = process_start_time(pid, proc)
+                if start_time is None:
+                    continue
                 try:
                     with open(f"{proc}/{pid}/cgroup") as f:
                         if "kubepods" not in f.read():
@@ -352,7 +427,7 @@ class SecurityAgent:
                     with open(f"{proc}/{pid}/io") as f:
                         for line in f:
                             if line.startswith("write_bytes:"):
-                                out[pid] = int(line.split()[1])
+                                out[(pid, start_time)] = int(line.split()[1])
                                 break
                 except (FileNotFoundError, PermissionError, ProcessLookupError):
                     continue
@@ -366,18 +441,18 @@ class SecurityAgent:
         detection (write_counters is populated here from real deltas)."""
         logger.info("Processing write events (/proc io tracker)...")
         WRITE_BYTES_THRESHOLD = int(os.environ.get("WRITE_BYTES_THRESHOLD", str(10 * 1024 * 1024)))
-        prev: Dict[int, int] = {}
+        prev: Dict[Tuple[int, int], int] = {}
         while self.running:
             try:
                 await asyncio.sleep(2)
                 current = self._sample_write_bytes()
                 self.write_counters = {
-                    pid: cum - prev[pid]
-                    for pid, cum in current.items()
-                    if pid in prev and cum >= prev[pid]
+                    identity: cum - prev[identity]
+                    for identity, cum in current.items()
+                    if identity in prev and cum >= prev[identity]
                 }
                 prev = current
-                for pid, delta in self.write_counters.items():
+                for (pid, _start_time), delta in self.write_counters.items():
                     if delta > WRITE_BYTES_THRESHOLD:
                         await self._trigger_entropy_check(pid)
             except asyncio.CancelledError:
@@ -386,30 +461,49 @@ class SecurityAgent:
                 logger.debug(f"Write event error: {e}")
 
     async def _trigger_entropy_check(self, pid: int, syscall_events: Optional[List[Dict]] = None,
-                                     syscall_source: str = "none") -> None:
+                                     syscall_source: str = "none",
+                                     window_provider=None) -> None:
         """Start an entropy check for `pid` in the background (one at a time per PID: a full run takes
         samples x interval, 60 s with the defaults, and must not block the detectors that call this).
 
         `syscall_events` is the real syscall window (from Falco live or replay) when there is one;
         `syscall_source` says where it came from ("falco", "replay") or "none"."""
-        running = self._checks.get(pid)
+        start_time = process_start_time(pid, self.proc_root)
+        check_key = (pid, start_time)
+        for old_key, old_task in list(self._checks.items()):
+            if old_key[0] == pid and old_key != check_key and not old_task.done():
+                old_task.cancel()
+        running = self._checks.get(check_key)
         if running is not None and not running.done():
             return
-        task = asyncio.create_task(self._run_entropy_check(pid, list(syscall_events or []), syscall_source))
+        task = asyncio.create_task(self._run_entropy_check(
+            pid, list(syscall_events or []), syscall_source,
+            window_provider=window_provider, expected_start_time=start_time,
+        ))
 
-        def _done(t, pid=pid):
-            if self._checks.get(pid) is t:
-                self._checks.pop(pid, None)
+        def _done(t, check_key=check_key, pid=pid):
+            if self._checks.get(check_key) is t:
+                self._checks.pop(check_key, None)
+            if not any(key[0] == pid for key in self._checks):
+                self._falco_first_ts.pop(pid, None)
             if not t.cancelled() and t.exception():
                 self._drop("check_failed", pid, str(t.exception()))
         task.add_done_callback(_done)
-        self._checks[pid] = task
+        if len(self._checks) >= MAX_TRACKED_PIDS:
+            oldest = next(iter(self._checks))
+            self._checks[oldest].cancel()
+            self._checks.pop(oldest, None)
+        self._checks[check_key] = task
 
-    async def _run_entropy_check(self, pid: int, events: List[Dict], source: str) -> None:
+    async def _run_entropy_check(self, pid: int, events: List[Dict], source: str,
+                                  window_provider=None, expected_start_time: Optional[int] = None) -> None:
         """Sample the entropy of what `pid` writes, assess, publish. An initial assessment is published after
         the first sample (so detection does not wait for the whole window), a final one when the series is
         complete. Both carry entropy_phase and entropy_valid_samples."""
         logger.info(f"Entropy check for PID {pid} (syscalls from: {source})")
+        if expected_start_time is not None and process_start_time(pid, self.proc_root) != expected_start_time:
+            self._drop("pid_reused", pid, "starttime changed before sampling")
+            return
         pid_info = await self._get_pid_info(pid)
         if not pid_info:
             # the PID cache entry (300 s) expired or never existed: no pod to report against
@@ -421,7 +515,8 @@ class SecurityAgent:
 
         async def first_sample(result: EntropyResult, i: int) -> None:
             if i == 0 and self.sampler.config.samples > 1:
-                await self._assess_and_publish(pid, pid_info, result, events, source,
+                current_events = window_provider() if window_provider else events
+                await self._assess_and_publish(pid, pid_info, result, current_events, source,
                                                mmap_detected, "initial")
 
         async def next_sample_interval() -> float:
@@ -429,9 +524,12 @@ class SecurityAgent:
                                            pod=pid_info.get("pod"))
             return scaled_interval(self.sampler.config.interval_s, factor)
 
-        result = await self.sampler.collect(pid, on_sample=first_sample,
-                                            interval_provider=next_sample_interval)
-        await self._assess_and_publish(pid, pid_info, result, events, source, mmap_detected, "complete")
+        collect_kwargs = {"on_sample": first_sample, "interval_provider": next_sample_interval}
+        if expected_start_time is not None:
+            collect_kwargs["expected_start_time"] = expected_start_time
+        result = await self.sampler.collect(pid, **collect_kwargs)
+        current_events = window_provider() if window_provider else events
+        await self._assess_and_publish(pid, pid_info, result, current_events, source, mmap_detected, "complete")
 
     # ---- workload, counters, score hash ------------------------------------------------------------------
     def _with_workload(self, pid_info: Dict) -> Dict:
@@ -478,24 +576,13 @@ class SecurityAgent:
         service answered, sec_risk is the highest model risk of this workload within the TTL: another process
         of the same workload that scored low a second later must not hide a high one."""
         now = self._wall()
-        key = (namespace, workload)
-        hist = self._recent_risk.get(key)
-        if hist is None:
-            if len(self._recent_risk) >= MAX_TRACKED_WORKLOADS:
-                self._recent_risk.pop(next(iter(self._recent_risk)))
-            hist = self._recent_risk[key] = deque()
-        while hist and now - hist[0][0] > self.score_ttl_s:
-            hist.popleft()
-        if pred is not None:
-            hist.append((now, pred["risk"]))
-            fields = {"sec_risk": f"{max(r for _, r in hist):.4f}", "model_scored": "true"}
-        else:
-            fields = {"sec_risk": "", "model_scored": "false"}
-        fields["ts_ms"] = str(int(now * 1000))
+        model_scored = "true" if pred is not None else "false"
+        risk = f"{pred['risk']:.4f}" if pred is not None else ""
         hkey = f"{SCORE_KEY_PREFIX}:{namespace}:{workload}"
         try:
-            await self.redis.hset(hkey, mapping=fields)
-            await self.redis.expire(hkey, max(1, int(math.ceil(self.score_ttl_s))))
+            await self.redis.eval(RECORD_SECURITY_SCORE_LUA, 1, hkey,
+                                  model_scored, risk, str(int(now * 1000)),
+                                  str(max(1, int(math.ceil(self.score_ttl_s)))))
         except Exception as e:           # a Redis error must not end the check; Fusion treats a missing hash as stale
             self.score_write_errors += 1
             logger.warning("score hash %s not written (%s); %d write error(s) so far", hkey, e,
@@ -521,9 +608,8 @@ class SecurityAgent:
         pid_info = self._with_workload(pid_info)
         namespace, workload = pid_info.get("namespace", "default"), pid_info["workload"]
 
-        # The Security Model needs a real syscall window. Without one (no Falco, no replay, or only events v5 does
-        # not count) the service is not called and nothing is fabricated: the event is scored from the entropy and
-        # /proc heuristics only and says so (model_scored=false).
+        # The Security Model needs a real syscall window. For eventless assessments, the periodic quiet path
+        # supplies a near-empty window with live /proc counters. A window this path cannot score is written false.
         pred: Optional[Dict[str, Any]] = None
         issue = ""
         window: Tuple[List[Dict], int, int, float] = ([], 0, 0, 0.0)
@@ -531,17 +617,23 @@ class SecurityAgent:
             window = window_from_normalised(events)
             v5_events, _start, _end, window_s = window
             if v5_events:
-                samples = await self._sample_counters(pid, pid_info)
-                features = security_features(v5_events, result.file_entropies(), window_s,
-                                             samples.total(2, window_s), samples.total(1, window_s))
-                pred = await self._predict(features)
-                issue = "" if pred else f"inference_{self.inference.last_issue or 'unreachable'}"
-                await self._record_score(namespace, workload, pred)
+                try:
+                    samples = await self._sample_counters(pid, pid_info)
+                    features = security_features(v5_events, result.file_entropies(), window_s,
+                                                 samples.total(2, window_s), samples.total(1, window_s))
+                    pred = await self._predict(features)
+                    issue = "" if pred else f"inference_{self.inference.last_issue or 'unreachable'}"
+                except Exception as e:
+                    issue = f"feature_or_inference_error:{type(e).__name__}"
+                    logger.warning("security feature/model assessment failed for %s/%s: %s", namespace, workload, e)
             else:
                 issue = "no_scorable_events"
+        else:
+            issue = "no_scorable_events"
 
-        # Heuristic baseline: used ONLY when the service gave no score. A scored event carries the model's own
-        # risk, label and prediction set; mixing a heuristic into them would break that contract.
+        # The heuristic is an independent detector. It never turns a model answer into a certain model verdict:
+        # if it catches high entropy that the model calls low risk, publish a human-only heuristic event and clear
+        # model_scored in the score hash so Fusion cannot treat the low model result as Q1 confirmation.
         heuristic_risk = 0.0
         if mmap_detected:
             heuristic_risk = 0.85
@@ -552,7 +644,11 @@ class SecurityAgent:
         if early_signals["high_entropy"] and early_signals["rename_burst"]:
             heuristic_risk = max(heuristic_risk, 0.95)
 
-        risk_score = pred["risk"] if pred else heuristic_risk
+        heuristic_conflict = pred is not None and heuristic_risk >= SECURITY_PUBLISH_RISK \
+            and pred["risk"] < SECURITY_PUBLISH_RISK
+        model_for_event = None if heuristic_conflict else pred
+        await self._record_score(namespace, workload, None if heuristic_conflict else pred)
+        risk_score = heuristic_risk if heuristic_conflict or pred is None else pred["risk"]
         logger.info(f"PID {pid} [{phase}] entropy="
                     f"{'n/a' if not entropy_known else format(entropy_avg, '.2f')} "
                     f"valid_samples={result.valid_samples} risk={risk_score:.3f} "
@@ -570,7 +666,7 @@ class SecurityAgent:
                 "entropy_valid_samples": str(result.valid_samples),
                 "entropy_files_json": json.dumps(result.files),
                 "syscall_source": source if events else "none",
-                "model_scored": "true" if pred else "false",
+                "model_scored": "true" if model_for_event else "false",
                 "top_syscall": top_syscall(events),
             }
             if window[0]:
@@ -578,10 +674,14 @@ class SecurityAgent:
                 extra["n_events"] = str(len(window[0]))
             if t0_ms is not None:
                 extra["t0_ms"] = str(t0_ms)
-            if issue:
+            if heuristic_conflict:
+                extra["model_risk"] = f"{pred['risk']:.4f}"
+                extra["model_issue"] = "heuristic_model_conflict"
+            elif issue:
                 extra["model_issue"] = issue
             await self._publish_security_event(
-                pid_info, risk_score, early_signals, entropy_avg, pred, extra=extra,
+                pid_info, risk_score, early_signals, entropy_avg, model_for_event,
+                label=HEURISTIC_LABEL if heuristic_conflict else None, extra=extra,
             )
 
     async def _publish_security_event(

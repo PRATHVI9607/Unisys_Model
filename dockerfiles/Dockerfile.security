@@ -5,6 +5,7 @@ WORKDIR /app
 RUN uv pip install --system \
     kubernetes-asyncio==29.0.1 redis==5.0.0 pydantic==2.6.0 aiohttp==3.9.0 "numpy<2" "prometheus-client>=0.20.0"
 COPY agents/ /app/agents/
+COPY kubeheal/ /app/kubeheal/
 ENV REDIS_URL=redis://redis-master:6379
 ENV SECURITY_MODEL_URL=http://kubeheal-security-model:8002
 ENV FALCO_MODE=auto

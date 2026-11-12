@@ -18,6 +18,7 @@ from fusion_helpers import make_agent, security_score_key, stream as stream_of  
 
 from agents.security_agent import agent as sa                       # noqa: E402
 from agents.security_agent import counters as ct                    # noqa: E402
+from agents.security_agent import entropy_sampler as entropy_mod     # noqa: E402
 from agents.security_agent import falco_client as fc               # noqa: E402
 from agents.security_agent import v5_window as vw                  # noqa: E402
 from agents.security_agent.entropy_sampler import EntropyResult, EntropySampler, ProcFdReader  # noqa: E402
@@ -205,6 +206,58 @@ def test_the_tracker_keeps_what_the_mapping_needs_and_counts_open_w_towards_the_
     assert kept["flags"] == "O_WRONLY|O_CREAT" and kept["seen_ms"] == 7000 and "fs_target" in kept
 
 
+def test_tracker_prunes_old_events_bounds_lru_and_resets_on_pid_reuse(monkeypatch):
+    monkeypatch.setattr("agents.security_agent.syscall_window.MAX_TRACKED_PIDS", 2)
+    tracker = FalcoWindowTracker(burst_threshold=999, cooldown_s=0, wall=lambda: 1.0)
+
+    def event(pid, start, seen):
+        return {"syscall": "write", "pid": pid, "proc_starttime": start, "seen_ms": seen, "ts": ""}
+
+    tracker.add(event(1, 10, 1_000))
+    tracker.add(event(2, 20, 1_000))
+    tracker.add(event(1, 10, 2_000))  # touch PID 1 so PID 2 is least recently used
+    tracker.add(event(3, 30, 2_000))
+    assert tracker.window(1) and tracker.window(2) == [] and tracker.window(3)
+
+    # A changed /proc starttime is a different process even when Linux reused the numeric PID.
+    tracker.add(event(1, 11, 3_000))
+    assert len(tracker.window(1)) == 1 and tracker.window(1)[0]["proc_starttime"] == 11
+
+    # Entries older than the event-time window are discarded before a new event is retained.
+    tracker.add(event(1, 11, 3_001 + sa.WINDOW_S * 1_000))
+    assert len(tracker.window(1)) == 1
+
+
+def test_entropy_assessments_use_a_fresh_tracker_window_for_initial_and_complete_phases():
+    ag = make_agent_sec()
+    current = [norm("write", "/data/a")]
+    observed = []
+
+    class DynamicSampler:
+        config = type("Config", (), {"samples": 2, "interval_s": 0.0})()
+
+        async def collect(self, pid, on_sample=None, **kwargs):
+            await on_sample(EntropyResult(pid, [None]), 0)
+            current.append(norm("write", "/data/b"))
+            return EntropyResult(pid, [None, None])
+
+    async def get_pid_info(pid):
+        return {"pid": pid, "pod": "victim-app-7d9f8b6c5-x2k4q", "namespace": "demo"}
+
+    async def counters(pid, info):
+        return ct.CounterSamples()
+
+    async def assess(pid, info, result, events, source, mmap, phase):
+        observed.append((phase, len(events)))
+
+    ag.sampler = DynamicSampler()
+    ag._get_pid_info = get_pid_info
+    ag._sample_counters = counters
+    ag._assess_and_publish = assess
+    run(ag._run_entropy_check(4242, list(current), "replay", window_provider=lambda: list(current)))
+    assert observed == [("initial", 1), ("complete", 2)]
+
+
 def test_normalise_carries_flags_and_path_fields_and_new_syscalls_are_tracked():
     evt = fc._normalise({"rule": "KubeHeal Data File Activity", "priority": "Notice", "time": "2026-11-10T09:30:00Z",
                          "output_fields": {"evt.type": "renameat2", "proc.pid": 9, "fd.name": "<NA>",
@@ -291,10 +344,10 @@ def test_the_hash_is_written_in_both_entropy_phases_and_expires():
     writes = []
 
     class Counting(AgentRedis):
-        async def hset(self, key, field=None, value=None, mapping=None):
-            if key.startswith(sa.SCORE_KEY_PREFIX):
-                writes.append(dict(mapping))
-            return await super().hset(key, field, value, mapping)
+        async def eval(self, script, n, key, model_scored, risk, ts_ms, ttl):
+            if "kubeheal:record_security_score" in script:
+                writes.append({"model_scored": model_scored, "sec_risk": risk, "ts_ms": ts_ms})
+            return await super().eval(script, n, key, model_scored, risk, ts_ms, ttl)
 
     ag = make_agent_sec(redis=Counting())
     check(ag, burst_window())
@@ -329,6 +382,73 @@ def test_a_down_service_writes_model_scored_false_and_overwrites_an_earlier_true
     assert h["ts_ms"] == str(int(NOW_S * 1000))
 
 
+def test_an_unscorable_assessment_without_a_falco_window_clears_stale_score():
+    ag = make_agent_sec(FakeService((200, body(risk=0.15, label="benign"))))
+    check(ag, burst_window())
+    assert score_hash(ag)["model_scored"] == "true"
+    run(ag._assess_and_publish(4242, {"pid": 4242, "pod": "victim-app-7d9f8b6c5-x2k4q", "namespace": "demo"},
+                               EntropyResult(4242, []), [], "none", False, "quiet"))
+    assert score_hash(ag)["model_scored"] == "false" and score_hash(ag)["sec_risk"] == ""
+
+
+def test_high_heuristic_conflict_is_human_only_and_clears_the_low_model_hash():
+    ag = make_agent_sec(FakeService((200, body(risk=0.15, label="benign"))))
+    run(ag._assess_and_publish(4242, {"pid": 4242, "pod": "victim-app-7d9f8b6c5-x2k4q", "namespace": "demo"},
+                               EntropyResult(4242, [7.9]), burst_window(RANSOM_CURRENT), "replay", False, "complete"))
+    event = published(ag)[0]
+    assert event["model_scored"] == "false" and event["sec_label"] == "suspicious"
+    assert event["sec_prediction_set"] == "[]" and event["sec_uncertain"] == "true"
+    assert float(event["sec_risk"]) >= SECURITY_PUBLISH_RISK and event["model_risk"] == "0.1500"
+    assert score_hash(ag)["model_scored"] == "false" and score_hash(ag)["sec_risk"] == ""
+
+
+def test_score_hash_maximum_is_atomic_across_agent_instances_with_shared_redis():
+    shared = AgentRedis()
+    one = make_agent_sec(FakeService((200, body(risk=0.91))), redis=shared)
+    two = make_agent_sec(FakeService((200, body(risk=0.12, label="benign"))), redis=shared)
+    check(one, burst_window())
+    check(two, burst_window())
+    assert score_hash(one)["sec_risk"] == "0.9100"
+    assert shared.expiry["kubeheal:security:score:demo:victim-app-7d9f8b6c5-x2k4q"] == shared.now + 60
+
+
+def test_quiet_pod_scoring_uses_real_counters_and_writes_only_an_inference_answer(monkeypatch):
+    ag = make_agent_sec(FakeService((200, body(risk=0.12, label="benign"))))
+    ag._pid_map = {4242: {"pid": 4242, "pod": "victim-app-7d9f8b6c5-x2k4q", "namespace": "demo"}}
+    samples = ct.CounterSamples()
+    samples.add(1.0, 10.0, 20.0)
+    samples.add(3.0, 30.0, 80.0, force=True)
+
+    async def counters(_pid, _info):
+        return samples
+    monkeypatch.setattr(ag, "_sample_counters", counters)
+    run(ag._score_quiet_workloads_once())
+    assert ag.service.requests
+    features = ag.service.requests[0][1]["features"]
+    # The shipped model schema omits n_events; these rates prove the quiet score used live counters.
+    assert features["write_bytes_per_s"] == pytest.approx(30.0)
+    assert features["net_out_bytes_per_s"] == pytest.approx(10.0)
+    assert score_hash(ag)["model_scored"] == "true"
+    assert score_hash(ag)["sec_risk"] == "0.1200"
+
+
+def test_quiet_scoring_failure_clears_a_stale_model_score(monkeypatch):
+    ag = make_agent_sec(FakeService((503, None)))
+    ag._pid_map = {4242: {"pid": 4242, "pod": "victim-app-7d9f8b6c5-x2k4q", "namespace": "demo"}}
+    key = f"{sa.SCORE_KEY_PREFIX}:demo:victim-app-7d9f8b6c5-x2k4q"
+    ag.redis.hashes[key] = {"model_scored": "true", "sec_risk": "0.9900", "ts_ms": "1"}
+
+    async def counters(_pid, _info):
+        samples = ct.CounterSamples()
+        samples.add(1.0, 1.0, 1.0)
+        samples.add(3.0, 3.0, 3.0, force=True)
+        return samples
+    monkeypatch.setattr(ag, "_sample_counters", counters)
+    run(ag._score_quiet_workloads_once())
+    assert ag.service.requests and score_hash(ag)["model_scored"] == "false"
+    assert score_hash(ag)["sec_risk"] == ""
+
+
 def test_the_hash_holds_the_highest_model_risk_of_the_workload_within_the_ttl():
     svc = FakeService((200, body(risk=0.9)), (200, body(risk=0.1, label="benign")))
     ag = make_agent_sec(svc)
@@ -338,6 +458,7 @@ def test_the_hash_holds_the_highest_model_risk_of_the_workload_within_the_ttl():
     now = [NOW_S]
     ag._wall = lambda: now[0]
     now[0] = NOW_S + 61                                                  # the 0.9 window is older than the TTL
+    ag.redis.advance(61)                                                  # expire the fake Redis key as real Redis would
     ag.service.answers = [(200, body(risk=0.1, label="benign"))]
     ag.service.requests.clear()
     check(ag, burst_window())
@@ -347,18 +468,19 @@ def test_the_hash_holds_the_highest_model_risk_of_the_workload_within_the_ttl():
 def test_no_hash_and_no_service_call_without_a_syscall_window():
     ag = make_agent_sec()
     check(ag, [], source="none")
-    assert ag.service.requests == [] and not [k for k in ag.redis.hashes if k.startswith(sa.SCORE_KEY_PREFIX)]
+    assert ag.service.requests == []
+    assert score_hash(ag)["model_scored"] == "false"
     # events the v5 features do not count (mmap only) are not scored either
     check(ag, [norm("mmap", "/x"), norm("msync", "/x")])
-    assert ag.service.requests == [] and not [k for k in ag.redis.hashes if k.startswith(sa.SCORE_KEY_PREFIX)]
+    assert ag.service.requests == [] and score_hash(ag)["model_scored"] == "false"
 
 
 def test_a_redis_error_on_the_hash_does_not_stop_the_check_or_the_event():
     class Broken(AgentRedis):
-        async def hset(self, key, field=None, value=None, mapping=None):
+        async def eval(self, script, n, key, *args):
             if key.startswith(sa.SCORE_KEY_PREFIX):
                 raise ConnectionError("redis down")
-            return await super().hset(key, field, value, mapping)
+            return await super().eval(script, n, key, *args)
     ag = make_agent_sec(redis=Broken())
     check(ag, burst_window())
     assert ag.score_write_errors >= 1 and len(published(ag)) == 1
@@ -436,7 +558,7 @@ def test_cooldown_one_trigger_per_burst_and_one_check_per_pid():
     tracker = FalcoWindowTracker(cooldown_s=5, max_events=512, clock=lambda: t["now"], wall=lambda: NOW_S)
     calls = []
 
-    async def spy(pid, events, source="none"):
+    async def spy(pid, events, source="none", **kwargs):
         calls.append((pid, len(events)))
     ag._trigger_entropy_check = spy
 
@@ -669,6 +791,35 @@ def test_the_agent_feeds_the_counter_rates_into_the_features(monkeypatch):
     run(go())
     assert seen[0]["write_bytes_per_s"] == pytest.approx(10_000.0 / 5.0)       # window_s is 5 (floor)
     assert seen[0]["net_out_bytes_per_s"] == pytest.approx(2000.0 / 5.0)
+
+
+def test_write_byte_samples_are_keyed_by_pid_and_proc_starttime(tmp_path):
+    proc = tmp_path / "4242"
+    proc.mkdir()
+    (proc / "stat").write_text("4242 (worker) " + " ".join(["S"] + ["0"] * 18 + ["123"]) + "\n")
+    (proc / "cgroup").write_text("0::/kubepods/burstable/pod123/container\n")
+    (proc / "io").write_text("write_bytes: 2048\n")
+    ag = make_agent_sec()
+    ag.proc_root = str(tmp_path)
+    assert ag._sample_write_bytes() == {(4242, 123): 2048}
+
+    # Reusing the numeric PID starts a new counter identity; a prior instance's delta cannot carry over.
+    (proc / "stat").write_text("4242 (worker) " + " ".join(["S"] + ["0"] * 18 + ["456"]) + "\n")
+    assert ag._sample_write_bytes() == {(4242, 456): 2048}
+
+
+def test_entropy_sampling_stops_when_the_pid_starttime_changes(monkeypatch):
+    class EmptyReader:
+        proc_root = "/proc/fake"
+        def written_files(self, pid):
+            return []
+
+    observed = iter([123, 456])
+    monkeypatch.setattr(entropy_mod, "process_start_time", lambda pid, root: next(observed))
+    sampler = EntropySampler(EmptyReader(), config=entropy_mod.SamplerConfig(samples=3, interval_s=0.0),
+                             sleep=lambda _: asyncio.sleep(0))
+    result = run(sampler.collect(4242, expected_start_time=123))
+    assert result.ended_early and result.series == [None]
 
 
 def test_without_counters_the_features_are_none_not_zero():

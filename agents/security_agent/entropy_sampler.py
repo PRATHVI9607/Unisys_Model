@@ -53,6 +53,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
+from agents.security_agent.proc_scanner import process_start_time
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +290,8 @@ class ProcFdReader:
         out: List[WrittenFile] = []
         seen = set()
         for name in sorted((n for n in self._listdir(fd_dir) if n.isdigit()), key=int):
+            if len(out) >= self.config.max_files:
+                break
             try:
                 target = self._readlink(f"{fd_dir}/{name}")
             except OSError:
@@ -398,7 +401,7 @@ class EntropySampler:
     def sample_once(self, pid: int, seen_files: Optional[List[str]] = None) -> Optional[float]:
         """Mean entropy over the files `pid` is writing right now; None if there is no readable data."""
         entropies = []
-        for wf in self.reader.written_files(pid)[: self.config.max_files]:
+        for wf in self.reader.written_files(pid):
             if seen_files is not None and wf.target not in seen_files:
                 seen_files.append(wf.target)
             value = self._entropy_of(wf)
@@ -419,6 +422,7 @@ class EntropySampler:
     async def collect(self, pid: int,
                       on_sample: Optional[Callable[["EntropyResult", int], Awaitable[None]]] = None,
                       interval_provider: Optional[Callable[[], Awaitable[float]]] = None,
+                      expected_start_time: Optional[int] = None,
                       ) -> EntropyResult:
         """`samples` samples, `interval_s` apart (the sleep is shortened by the time a sample took).
         `on_sample(result, index)` is awaited after each sample (the agent uses it for an early report).
@@ -429,6 +433,10 @@ class EntropySampler:
         cfg = self.config
         result = EntropyResult(pid=pid, series=[])
         for i in range(cfg.samples):
+            reader_root = getattr(self.reader, "proc_root", "/proc")
+            if expected_start_time is not None and process_start_time(pid, reader_root) != expected_start_time:
+                result.ended_early = True
+                break
             t0 = self._clock()
             try:
                 result.series.append(await asyncio.to_thread(self.sample_once, pid, result.files))

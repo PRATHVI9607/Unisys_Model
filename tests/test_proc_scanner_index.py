@@ -69,3 +69,11 @@ def test_security_agent_cannot_act_on_its_own():
     for forbidden in ("_direct_kill", "os.kill", "create_namespaced_network_policy",
                       "_apply_network_isolation"):
         assert forbidden not in src
+
+
+def test_process_start_time_parses_stat_when_comm_contains_spaces_and_parentheses(tmp_path):
+    proc = tmp_path / "4242"
+    proc.mkdir()
+    fields = ["S"] + ["0"] * 18 + ["987654"]
+    (proc / "stat").write_text(f"4242 (worker ) with spaces) {' '.join(fields)}\n")
+    assert ps.process_start_time(4242, str(tmp_path)) == 987654

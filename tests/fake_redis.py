@@ -69,6 +69,17 @@ class FakeRedis:
         return False
 
     async def eval(self, script, n, key, token, *extra):
+        if "kubeheal:record_security_score" in script:
+            model_scored, risk, ts_ms, ttl = token, extra[0], extra[1], int(extra[2])
+            previous = self.hashes.get(key, {})
+            if (model_scored == "true" and previous.get("model_scored") == "true"
+                    and self.expiry.get(key, 0) > self.now):
+                old = previous.get("sec_risk", "")
+                if old and risk and float(old) > float(risk):
+                    risk = old
+            self.hashes[key] = {"sec_risk": risk, "model_scored": model_scored, "ts_ms": ts_ms}
+            self.expiry[key] = self.now + ttl
+            return risk
         if await self.get(key) != token:
             return 0
         if "expire" in script:

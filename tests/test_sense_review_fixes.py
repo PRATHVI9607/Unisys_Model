@@ -84,6 +84,12 @@ class _Redis:
     async def expire(self, *a):
         pass
 
+    async def eval(self, script, numkeys, key, model_scored, risk, ts_ms, ttl):
+        if "kubeheal:record_security_score" in script:
+            self.hashes[key] = {"model_scored": model_scored, "sec_risk": risk, "ts_ms": ts_ms}
+            return risk
+        raise AssertionError("unexpected Lua script")
+
     async def setex(self, k, ttl, v):
         self.kv[k] = v
 
@@ -278,7 +284,7 @@ def test_published_t0_is_the_first_seen_time_of_a_long_attack(monkeypatch):
     tracker = FalcoWindowTracker(burst_threshold=3, cooldown_s=0, max_events=5, clock=_ticking_clock())
     captured = []
 
-    async def capture(pid, events, source="none"):
+    async def capture(pid, events, source="none", **kwargs):
         captured.append((pid, events, source))
     monkeypatch.setattr(ag, "_trigger_entropy_check", capture)
 
@@ -360,7 +366,7 @@ def test_an_expired_pid_cache_is_counted_and_logged_not_silent(monkeypatch, capl
 def test_a_failing_check_task_is_counted(monkeypatch):
     ag = _security_agent(monkeypatch, None)
 
-    async def boom(pid, events, source):
+    async def boom(pid, events, source, **kwargs):
         raise RuntimeError("boom")
     monkeypatch.setattr(ag, "_run_entropy_check", boom)
 
@@ -370,3 +376,4 @@ def test_a_failing_check_task_is_counted(monkeypatch):
         await asyncio.sleep(0)
     run(go())
     assert ag.dropped_checks.get("check_failed") == 1
+

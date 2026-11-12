@@ -155,6 +155,20 @@ def test_the_cache_is_bounded_and_evicts_the_least_recently_used():
     assert c.get(("none",)) == (True, None) and len(c) == 3
 
 
+def test_written_files_stops_reading_descriptors_after_the_configured_cap(proc, monkeypatch):
+    for fd in range(3, 13):
+        path = f"/data/{fd}.bin"
+        proc.file(path, RANDOM_BLOCK)
+        proc.add_fd(fd, path, O_WRONLY_LARGEFILE, len(RANDOM_BLOCK))
+    reader = proc.reader(SamplerConfig(max_files=3))
+    targets = []
+    original = reader._readlink
+    monkeypatch.setattr(reader, "_readlink", lambda path: (targets.append(path), original(path))[1])
+    found = reader.written_files(PID)
+    assert len(found) == 3
+    assert len(targets) == 3
+
+
 def test_the_bound_is_configurable_from_the_environment(monkeypatch):
     monkeypatch.setenv("ENTROPY_CACHE_MAX", "7")
     assert SamplerConfig.from_env().cache_max == 7
