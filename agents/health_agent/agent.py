@@ -27,8 +27,29 @@ Flow
              sample does a LIVE GET of the Deployment, so it scores the current spec, never the object that
              arrived with an old watch event.
 
-The golden baseline (agents/health_agent/baseline.py) is written once with SET NX on first sight and is only
-read here.
+  promote    (V5-D5, owner decision D3) once a spec is judged benign AND certain (prediction set exactly
+             {benign}), its rollout is complete, no failure reason and no posture violation exists and it
+             differs from the golden baseline, it replaces the golden baseline: AUTOMATICALLY in dev and
+             staging (needs a ledger; HEALTH_BASELINE_PROMOTION=off disables it), as a stored CANDIDATE that
+             waits for approval in prod and in an unknown tier. The ledger entry that keeps the previous
+             baseline is written BEFORE the overwrite; a failed ledger write means no promotion (fail
+             closed). Never while the spec is superseded or a newer assessment is in flight; a candidate is
+             dropped when the live spec changes again. Also refused (no promotion, no candidate): any metric
+             series missing, failure evidence that could not be read, a golden baseline that moved since the
+             assessment, a veto (an earlier non-benign or uncertain verdict for the same spec), a cool-off after
+             such an event, a pending Executor rollback, a held incident lock, an open Fusion incident, a fresh
+             Security score at or above 0.4, and (optional) a spec younger than HEALTH_PROMOTION_MIN_SOAK_S.
+             Environment: HEALTH_BASELINE_PROMOTION (on|off, default on), HEALTH_PROMOTION_COOLOFF_S (default 300,
+             chosen), HEALTH_PROMOTION_MIN_SOAK_S (default 0 = off, chosen), HEALTH_PROMOTION_REQUIRE_SECURITY
+             (default off: a missing or stale Security score does not block; on: it blocks), SECURITY_FRESH_S
+             (default 30, same as Fusion).
+             Kill switch: the golden record is overwritten only in mode enforce. In mode test, or when the mode is
+             unknown (the default: no ModeWatcher is started unless HEALTH_MODE_WATCH=on) an automatic promotion
+             writes a baseline_promotion_dry_run ledger entry only; a prod candidate is still stored.
+
+The golden baseline (agents/health_agent/baseline.py) is written once with SET NX on first sight and is
+overwritten only by a promotion (auto in dev and staging, approved in prod) and by scripts/baseline_tool.py. The
+agent never writes to Kubernetes.
 """
 
 from __future__ import annotations
@@ -53,6 +74,8 @@ from kubernetes_asyncio.client.exceptions import ApiException
 from kubernetes_asyncio.config import load_incluster_config
 from prometheus_client import Counter
 
+from agents.common.killswitch import ModeWatcher
+from agents.common.ledger import Ledger, ledger_from_env
 from agents.common.metrics import KubeHealMetrics
 from agents.common.tiers import namespace_tier as _namespace_tier
 from agents.common.sampling import sampling_factor, scaled_interval
@@ -77,6 +100,8 @@ logger = logging.getLogger(__name__)
 METRICS = KubeHealMetrics()
 ASSESSMENTS = Counter("kubeheal_health_assessments_total", "Health assessments by outcome", ["outcome"],
                       registry=METRICS.registry)
+PROMOTIONS = Counter("kubeheal_health_baseline_promotions_total", "Baseline promotion attempts by outcome",
+                     ["outcome"], registry=METRICS.registry)
 WATCH_ERRORS = Counter("kubeheal_health_watch_errors_total", "Deployment watch errors",
                        registry=METRICS.registry)
 
@@ -112,8 +137,11 @@ HPA_POLL_S = 30                   # re-list HorizontalPodAutoscalers this often
 # FOLLOWUP_WINDOW_S overrides the whole window.
 DEFAULT_PROGRESS_DEADLINE_S = 600
 FOLLOWUP_MARGIN_S = 60
+DEFAULT_PROMOTION_COOLOFF_S = 300.0   # HEALTH_PROMOTION_COOLOFF_S: chosen, not measured
+DEFAULT_SECURITY_FRESH_S = 30.0       # SECURITY_FRESH_S: same default as the Fusion Agent
 
 Key = Tuple[str, str]   # (namespace, deployment)
+_LEDGER_FROM_ENV = object()   # constructor default: build the ledger from LEDGER_BACKEND when that is set
 
 
 def _positive_env(name: str, default: float) -> float:
@@ -126,6 +154,19 @@ def _positive_env(name: str, default: float) -> float:
         raise ValueError(f"{name} must be a positive number") from exc
     if value <= 0 or not math.isfinite(value):
         raise ValueError(f"{name} must be a positive finite number")
+    return value
+
+
+def _nonneg_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a non-negative number") from exc
+    if value < 0 or not math.isfinite(value):
+        raise ValueError(f"{name} must be a non-negative finite number")
     return value
 
 
@@ -176,6 +217,7 @@ class Tracked:
     reported: set
     seen: set = field(default_factory=set)
     polling: bool = False
+    verdict: Optional[Dict] = None     # the assessment, kept so a promotion can follow once the rollout completes
 
 
 class HealthAgent:
@@ -191,6 +233,13 @@ class HealthAgent:
         delay_s: Optional[float] = None,
         max_concurrent: Optional[int] = None,
         followup_window_s: Optional[float] = None,
+        ledger: Any = _LEDGER_FROM_ENV,
+        auto_promotion: Optional[bool] = None,
+        cooloff_s: Optional[float] = None,
+        min_soak_s: Optional[float] = None,
+        require_security: Optional[bool] = None,
+        security_fresh_s: Optional[float] = None,
+        mode: Any = None,
         clock=time.monotonic,
         wall=time.time,
     ):
@@ -218,6 +267,31 @@ class HealthAgent:
         if followup_window_s is None and os.environ.get("FOLLOWUP_WINDOW_S"):
             followup_window_s = _positive_env("FOLLOWUP_WINDOW_S", 0.0)
         self.followup_window_s = followup_window_s     # None: the Deployment's progress deadline plus a margin
+        # Baseline promotion (V5-D5). The ledger is injected (tests: in-memory) or built from the environment only when
+        # LEDGER_BACKEND is set; without a ledger automatic promotion is off and prod candidates are still stored.
+        self.ledger: Optional[Ledger] = self._ledger_from_env() if ledger is _LEDGER_FROM_ENV else ledger
+        self.auto_promotion = (baseline.promotion_enabled_from_env() if auto_promotion is None
+                               else bool(auto_promotion))
+        self._promoting: set = set()                # workloads with a promotion in progress
+        self.cooloff_s = cooloff_s if cooloff_s is not None else _positive_env(
+            "HEALTH_PROMOTION_COOLOFF_S", DEFAULT_PROMOTION_COOLOFF_S)
+        self.min_soak_s = min_soak_s if min_soak_s is not None else _nonneg_env("HEALTH_PROMOTION_MIN_SOAK_S", 0.0)
+        self.require_security = (require_security if require_security is not None else
+                                 os.environ.get("HEALTH_PROMOTION_REQUIRE_SECURITY", "").strip().lower()
+                                 in ("1", "true", "on", "yes"))
+        self.security_fresh_s = security_fresh_s if security_fresh_s is not None else _positive_env(
+            "SECURITY_FRESH_S", DEFAULT_SECURITY_FRESH_S)
+        # Kill-switch view (anything with mode_for(namespace) / dry_run_for(namespace), the ModeWatcher interface).
+        # The default is a ModeWatcher that is never started: its mode is unknown, which is `test`, so an automatic
+        # promotion only writes a dry-run ledger entry. HEALTH_MODE_WATCH=on starts it in start() (it needs the
+        # kubeheal-mode ConfigMap read rule for the health-agent ServiceAccount); a test injects its own.
+        self.mode = mode if mode is not None else ModeWatcher()
+        self._mode_started = False
+        self._dry_run_noted: Dict[Key, Tuple[str, str]] = {}   # (spec hash, golden digest) already written as dry run
+        self._vetoed: Dict[Key, set] = {}           # spec hashes with a non-benign or uncertain verdict published
+        self._cooloff_until: Dict[Key, float] = {}  # clock() time until which a promotion waits (Redis backs it up)
+        # a promotion refused only because the soak time has not passed: key -> (hash, verdict, retry not before)
+        self._promote_retry: Dict[Key, Tuple[str, Dict, float]] = {}
         self.clock = clock          # deadlines (monotonic)
         self.wall = wall            # epoch seconds: metric windows, pod creation times, event timestamps
 
@@ -249,12 +323,48 @@ class HealthAgent:
 
         self.baseline_configmap = "kubeheal-baselines"
 
+    @staticmethod
+    def _ledger_from_env() -> Optional[Ledger]:
+        if not os.environ.get("LEDGER_BACKEND"):
+            return None
+        try:
+            return ledger_from_env()
+        except Exception as e:
+            logger.error(f"ledger configuration is invalid ({e}); baseline promotion has no ledger")
+            return None
+
+    def log_promotion_config(self) -> None:
+        if self.ledger is None and os.environ.get("LEDGER_BACKEND"):
+            logger.error("baseline promotion: automatic promotion in dev and staging is DISABLED, LEDGER_BACKEND is "
+                         "set but the ledger could not be built (see the earlier error: MinIO credentials, or the "
+                         "minio package missing from the image); prod candidates are still stored")
+        elif self.ledger is None:
+            logger.warning("baseline promotion: automatic promotion in dev and staging is DISABLED, no ledger is "
+                           "configured (set LEDGER_BACKEND, MINIO_ENDPOINT, MINIO_BUCKET and the MinIO "
+                           "credentials); prod promotion candidates are still stored, but approving one needs "
+                           "the ledger")
+        elif not self.auto_promotion:
+            logger.warning("baseline promotion: automatic promotion in dev and staging is DISABLED "
+                           "(HEALTH_BASELINE_PROMOTION is off); prod promotion candidates are still stored")
+        else:
+            logger.info("baseline promotion: automatic in dev and staging, candidates in prod and unknown tiers")
+            logger.info("baseline promotion: the golden record is overwritten only in kill-switch mode enforce; in "
+                        "mode test or when the mode is unreadable an automatic promotion writes a dry-run ledger "
+                        "entry only")
+            if os.environ.get("HEALTH_MODE_WATCH", "").strip().lower() not in ("1", "true", "on", "yes"):
+                logger.warning("baseline promotion: HEALTH_MODE_WATCH is off, so the kill-switch mode is unknown and "
+                               "treated as test: automatic promotion stays a dry run")
+            if os.environ.get("LEDGER_BACKEND", "").strip().lower() == "memory":
+                logger.warning("baseline promotion: the ledger is in memory (LEDGER_BACKEND=memory): promotion "
+                               "history is lost on restart")
+
     # ── lifecycle ────────────────────────────────────────────────────────────
     async def start(self) -> None:
         logger.info("Starting Health Agent (V5-D4)...")
         logger.info(f"Redis URL: {self.redis_url}")
         logger.info(f"Inference URL: {self.inference_url}")
         logger.info(f"Prometheus URL: {self.prometheus_url}")
+        self.log_promotion_config()
 
         try:
             load_incluster_config()
@@ -275,6 +385,13 @@ class HealthAgent:
         self.autoscaling_api = client.AutoscalingV2Api(self._serializer)
         self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
         self.session = aiohttp.ClientSession()
+        if os.environ.get("HEALTH_MODE_WATCH", "").strip().lower() in ("1", "true", "on", "yes") \
+                and hasattr(self.mode, "start"):
+            try:
+                await self.mode.start(self.core_api)       # read-only: kubeheal-mode ConfigMap and namespace labels
+                self._mode_started = True
+            except Exception as e:
+                logger.warning(f"kill switch watcher not started ({e}); mode stays 'test'")
 
         scopes = watch_namespaces_from_env()
         logger.info(f"Health Agent watching {[s or '*' for s in scopes]} "
@@ -315,6 +432,12 @@ class HealthAgent:
         if self.tasks:
             await asyncio.gather(*list(self.tasks), return_exceptions=True)
 
+        if self._mode_started:
+            self._mode_started = False
+            try:
+                await self.mode.stop()
+            except Exception as e:
+                logger.debug(f"mode watcher stop failed: {e}")
         if self.session is not None:
             session, self.session = self.session, None
             await session.close()
@@ -376,6 +499,7 @@ class HealthAgent:
             key = (namespace, name)
             if event_type == "DELETED":
                 self._forget(key)
+                self._spawn(self._drop_workload_candidate(key))
                 try:
                     await self.redis.delete(self._assessed_key(key))
                 except Exception as e:
@@ -398,7 +522,8 @@ class HealthAgent:
             logger.error(f"Error handling deployment event: {e}", exc_info=True)
 
     def _forget(self, key: Key) -> None:
-        for d in (self.pending, self.tracking, self.latest_dep, self.seen_hash, self._drifted, self._first_sight_retry):
+        for d in (self.pending, self.tracking, self.latest_dep, self.seen_hash, self._drifted, self._first_sight_retry,
+                  self._vetoed, self._promote_retry, self._dry_run_noted):
             d.pop(key, None)
 
     def _still_current(self, key: Key, h: str) -> bool:
@@ -408,6 +533,8 @@ class HealthAgent:
     def _set_seen(self, key: Key, h: str) -> None:
         if self.seen_hash.get(key) != h:
             self._spec_epoch[key] = self._spec_epoch.get(key, 0) + 1
+            if self.redis is not None:
+                self._spawn(self._housekeep_candidate(key))
         self.seen_hash[key] = h
 
     @staticmethod
@@ -486,6 +613,10 @@ class HealthAgent:
                 continue
             self._set_seen(key, h)
             self._spawn(self._first_sight(key, dep, spec, h))     # not inline: a slow Redis must not stall the tick
+        for key, (h, verdict, due) in list(self._promote_retry.items()):
+            if now >= due:
+                self._promote_retry.pop(key, None)
+                self._spawn(self._maybe_promote(key, h, verdict))
         for key, p in list(self.pending.items()):
             if now >= p.deadline:
                 self._fire(key)
@@ -580,10 +711,12 @@ class HealthAgent:
         """Score one spec against the golden baseline and publish. Returns the outcome label."""
         ns, name = key
         h = self._hash(spec)
-        golden = await baseline.load_baseline(self.redis, ns, name)
-        if golden is None:
+        held = await baseline.load_baseline_raw(self.redis, ns, name)
+        if held is None:
             logger.error(f"Golden baseline missing for {ns}/{name}; refusing to use the live spec as baseline")
             return await self._failed(p, ns, name, "golden baseline missing; assessment refused")
+        golden = held[1]
+        golden_sha = baseline.raw_digest(held[0])
         view = baseline.drift_view(spec)
         if not baseline.is_drifted(golden, view):
             self._drifted.pop(key, None)
@@ -595,6 +728,13 @@ class HealthAgent:
             self._drifted[key] = {"hash": h, "t0_wall": since_wall, "last_assessed": self.clock()}
         else:
             st["last_assessed"] = self.clock()
+
+        # A new assessment of this spec replaces the earlier verdict: until it publishes a new one, a tracker or a
+        # soak retry must not promote on the old one (an OBSERVE sample that fails or scores worse).
+        tracker = self.tracking.get(key)
+        if tracker is not None and tracker.hash == h:
+            tracker.verdict = None
+        self._promote_retry.pop(key, None)
 
         if not await self._validate_baseline(ns, name, self._get_baseline_sha(dep)):
             logger.warning(f"Baseline stale or invalid for {ns}/{name}")
@@ -652,7 +792,13 @@ class HealthAgent:
 
         await self._publish_event(payload)
         await self._mark_assessed(key, h)
-        self._start_tracking(key, h, since_wall, payload, set(reasons))
+        verdict = None if pred is None else self._verdict(pred, payload, reasons, changed, since_wall, missing,
+                                                          golden_sha)
+        if verdict is None or not self._clean(verdict):
+            await self._note_harmful(key, h)          # veto of this spec and a cool-off, before any promotion check
+        self._start_tracking(key, h, since_wall, payload, set(reasons), verdict)
+        if verdict is not None:
+            await self._maybe_promote(key, h, verdict)
         if pred is None:
             logger.error(f"inference unavailable for {ns}/{name}; published rule evidence only: {reasons}")
             # Do not emit a second event after model recovery: Fusion may already have
@@ -777,20 +923,23 @@ class HealthAgent:
         try:
             if await self._publish_event(payload):
                 logger.error(f"Published {payload['event_id']}: no health score for {namespace}/{name}")
+                await self._note_cooloff((namespace, name))
             return True
         except Exception as e:
             logger.error(f"Could not publish the model_unavailable event for {namespace}/{name}: {e}")
             return False
 
     # ── follow-up events ─────────────────────────────────────────────────────
-    def _start_tracking(self, key: Key, h: str, t0_wall: float, payload: Dict, reported: set) -> None:
+    def _start_tracking(self, key: Key, h: str, t0_wall: float, payload: Dict, reported: set,
+                        verdict: Optional[Dict] = None) -> None:
         """After the first event the rollout can still fail (never Ready, ProgressDeadlineExceeded): follow up
         until it completes, the spec is superseded or deleted, or the window ends."""
         dep = self.latest_dep.get(key)
         if dep is None or self.seen_hash.get(key) != h:
             return
         if key in self.tracking and self.tracking[key].hash == h:
-            return                                # an OBSERVE sample of the same spec keeps the running follow-up
+            self.tracking[key].verdict = verdict  # an OBSERVE sample of the same spec keeps the running follow-up,
+            return                                # but its verdict replaces the earlier one (None clears it)
         if rollout_complete(dep) and not progress_deadline_exceeded(dep):
             return
         window = self.followup_window_s
@@ -799,7 +948,7 @@ class HealthAgent:
                 + FOLLOWUP_MARGIN_S
         now = self.clock()
         self.tracking[key] = Tracked(hash=h, t0_wall=t0_wall, end=now + window, next_poll=now + POLL_S,
-                                     payload=dict(payload), reported=set(reported))
+                                     payload=dict(payload), reported=set(reported), verdict=verdict)
 
     async def _follow_up(self, key: Key, t: Tracked) -> None:
         """One follow-up poll: publish one more event when new failure reasons are confirmed on two consecutive
@@ -811,6 +960,8 @@ class HealthAgent:
                 return
             if rollout_complete(dep) and not progress_deadline_exceeded(dep):
                 self.tracking.pop(key, None)
+                if t.verdict is not None and not t.reported - set(t.verdict["reasons"]):
+                    await self._maybe_promote(key, t.hash, t.verdict)    # the rollout finished after the verdict
                 return
             async with self.sem:
                 now_reasons = set(await self._failure_reasons(key, dep, t.t0_wall))
@@ -831,6 +982,7 @@ class HealthAgent:
                 logger.warning(f"follow-up for {key[0]}/{key[1]} not published: {e}; retrying")
                 return
             t.reported |= new
+            await self._note_harmful(key, t.hash)
             logger.info(f"follow-up for {key[0]}/{key[1]}: {follow['failure_reasons_json']}")
         except Exception as e:
             logger.warning(f"follow-up poll for {key[0]}/{key[1]} failed: {e}")
@@ -838,13 +990,221 @@ class HealthAgent:
             t.polling = False
             t.next_poll = self.clock() + POLL_S
 
+    # ── baseline promotion (V5-D5) ───────────────────────────────────────────
+    @staticmethod
+    def _verdict(pred: Prediction, payload: Dict[str, str], reasons: List[str], changed: List[str],
+                 since_wall: float, missing: Optional[List[str]] = None, golden_sha: str = "") -> Dict:
+        """What a promotion needs from one assessment. The set and the uncertainty are the PUBLISHED ones: a window
+        with no metrics or an undersized window publishes an empty set, which is never certain."""
+        return {"label": pred.label, "prediction_set": json.loads(payload["health_prediction_set"]),
+                "uncertain": payload["health_uncertain"] == "true", "risk": pred.risk,
+                "model_version": pred.model_version, "event_id": payload["event_id"],
+                "reasons": list(reasons), "changed_fields": list(changed), "since_wall": since_wall,
+                "missing_metrics": list(missing or []), "golden_sha256": golden_sha}
+
+    @staticmethod
+    def _clean(verdict: Dict) -> bool:
+        """A benign, certain verdict with no failure reasons: the only kind that does not veto its spec."""
+        return (verdict["label"] == "benign" and verdict["prediction_set"] == ["benign"]
+                and not verdict["uncertain"] and not verdict["reasons"])
+
+    async def _note_cooloff(self, key: Key) -> None:
+        """A decision-relevant event was published for this workload: promotions wait for the cool-off. The marker
+        is in Redis (the dashboard side reads it too) and in memory (if Redis refuses the write)."""
+        self._cooloff_until[key] = self.clock() + self.cooloff_s
+        try:
+            await self.redis.set(baseline.cooloff_key(*key), "1", ex=max(1, int(math.ceil(self.cooloff_s))))
+        except Exception as e:
+            logger.warning(f"could not store the promotion cool-off of {key[0]}/{key[1]}: {e!r}; kept in memory")
+
+    async def _note_harmful(self, key: Key, h: str) -> None:
+        """A non-benign or uncertain verdict (or rule evidence) was published for spec `h`: veto its promotion and
+        start the cool-off. Later re-scoring of the same spec can never lift the veto."""
+        self._vetoed.setdefault(key, set()).add(h)
+        try:
+            await baseline.add_veto(self.redis, key[0], key[1], h)
+        except Exception as e:
+            logger.warning(f"could not store the promotion veto of {key[0]}/{key[1]}: {e!r}; kept in memory")
+        await self._note_cooloff(key)
+
+    def _promotable_now(self, key: Key, h: str) -> bool:
+        """The spec is still the newest known, and no assessment of a different spec is in flight."""
+        newer = self.pending.get(key)
+        return (self._still_current(key, h) and self.assessing.get(key) in (None, h)
+                and (newer is None or newer.hash == h))
+
+    def _final_check(self, key: Key, h: str) -> bool:
+        """Synchronous, in-memory, right before the overwrite (after the ledger write): the spec is still the
+        newest, the kill switch still says enforce, and no veto or cool-off appeared meanwhile."""
+        until = self._cooloff_until.get(key)
+        return (self._promotable_now(key, h) and not self.mode.dry_run_for(key[0])
+                and h not in self._vetoed.get(key, ()) and not (until is not None and self.clock() < until))
+
+    async def _maybe_promote(self, key: Key, h: str, verdict: Dict) -> str:
+        """Promote (dev, staging) or store a candidate (prod, unknown) when the assessment of spec hash `h` allows
+        it. Never raises: a failure is logged and the golden baseline stays as it is."""
+        ns, name = key
+        if key in self._promoting:
+            return "busy"
+        self._promoting.add(key)
+        try:
+            outcome = await self._promote_checked(key, h, verdict)
+        except Exception as e:
+            logger.exception(f"baseline promotion of {ns}/{name} failed ({e!r}); the golden baseline is unchanged")
+            outcome = "error"
+        finally:
+            self._promoting.discard(key)
+        PROMOTIONS.labels(outcome).inc()
+        return outcome
+
+    async def _promote_checked(self, key: Key, h: str, verdict: Dict) -> str:
+        ns, name = key
+        blocker = baseline.verdict_blocker(verdict["label"], verdict["prediction_set"], verdict["uncertain"],
+                                           verdict["reasons"], rollout_done=True)
+        if blocker:
+            return "not_eligible"
+        if verdict.get("missing_metrics"):
+            logger.info(f"no baseline promotion or candidate for {ns}/{name}: metric series missing "
+                        f"{verdict['missing_metrics']}")
+            return "metrics_missing"
+        if not self._promotable_now(key, h):
+            logger.info(f"no baseline promotion for {ns}/{name}: the spec was superseded or another assessment "
+                        "is in flight")
+            return "superseded"
+        dep = self.latest_dep.get(key) or {}
+        if not rollout_complete(dep) or progress_deadline_exceeded(dep):
+            return "rollout_incomplete"           # a follow-up promotes it when the rollout completes
+        spec = dep.get("spec") or {}
+        if self._hash(spec) != h:
+            return "superseded"
+        held = await baseline.load_baseline_raw(self.redis, ns, name)
+        if held is None:
+            return "no_baseline"
+        golden_raw, golden = held
+        if baseline.raw_digest(golden_raw) != verdict.get("golden_sha256"):
+            logger.info(f"no baseline promotion for {ns}/{name}: the golden baseline moved since the assessment")
+            return "golden_moved"
+        view = baseline.drift_view(spec)
+        if not baseline.is_drifted(golden, view):
+            return "nothing_to_promote"
+        if h in self._vetoed.get(key, ()):
+            logger.info(f"no baseline promotion or candidate for {ns}/{name}: the spec is vetoed")
+            return "vetoed"
+        until = self._cooloff_until.get(key)
+        if until is not None and self.clock() < until:
+            logger.info(f"no baseline promotion or candidate for {ns}/{name}: cool-off")
+            return "coordination_blocked"
+        soak_left = self.min_soak_s - (self.wall() - verdict["since_wall"])
+        if soak_left > 0:
+            logger.info(f"no baseline promotion for {ns}/{name} yet: {soak_left:.0f}s of soak time left")
+            self._promote_retry[key] = (h, verdict, self.clock() + soak_left)
+            return "soak"
+        # Fresh evidence just before the decision: failure reasons and posture of exactly this spec. Failure
+        # evidence that cannot be read is not "no failure": nothing is promoted and no candidate is made.
+        try:
+            violations = policy_violations(golden["spec"], view)
+        except PostureError as e:
+            logger.warning(f"no baseline promotion for {ns}/{name}: posture unreadable ({e})")
+            return "posture_unreadable"
+        found = await self._failure_reasons(key, dep, verdict["since_wall"], strict=True)
+        if found is None:
+            logger.warning(f"no baseline promotion or candidate for {ns}/{name}: failure evidence unavailable")
+            return "evidence_unavailable"
+        reasons = sorted(set(found) | set(violations))
+        if reasons:
+            logger.info(f"no baseline promotion for {ns}/{name}: failure reasons {reasons}")
+            return "failure_reasons"
+        blocked = await baseline.coordination_blocker(self.redis, ns, name, h)
+        if blocked:
+            logger.info(f"no baseline promotion or candidate for {ns}/{name}: {blocked}")
+            return "vetoed" if "vetoed" in blocked else "coordination_blocked"
+        blocked = await baseline.security_blocker(self.redis, ns, name, now_ms=self.wall() * 1000.0,
+                                                  fresh_s=self.security_fresh_s, require=self.require_security)
+        if blocked:
+            logger.info(f"no baseline promotion or candidate for {ns}/{name}: {blocked}")
+            return "security_blocked"
+        if not self._promotable_now(key, h):
+            return "superseded"
+        tier = namespace_tier(ns)
+        route, why = baseline.promotion_route(tier, self.auto_promotion, self.ledger is not None)
+        if route == "none":
+            logger.warning(f"baseline promotion of {ns}/{name} skipped: {why}")
+            return "disabled"
+        evidence = {"label": verdict["label"], "risk": verdict["risk"],
+                    "prediction_set": verdict["prediction_set"], "model_version": verdict["model_version"],
+                    "event_id": verdict["event_id"], "rollout_complete": True, "failure_reasons": []}
+        if route == "candidate":
+            res = await baseline.store_candidate(self.redis, self.ledger, ns, name, new_spec=view, spec_hash=h,
+                                                 golden_raw=golden_raw, tier=tier,
+                                                 changed_fields=verdict["changed_fields"], assessment=evidence)
+            if res["status"] == "stored":
+                if not self._promotable_now(key, h):
+                    # a newer spec arrived while the candidate was being written: its housekeeping may already
+                    # have run, so do not leave a candidate for a spec that is no longer live
+                    await baseline.drop_candidate(self.redis, self.ledger, ns, name, "superseded during store")
+                    return "superseded"
+                logger.info(f"baseline promotion candidate stored for {ns}/{name} ({tier}); waiting for approval")
+            return "candidate_" + res["status"]
+        if self.mode.dry_run_for(ns):
+            # Mode test, or the mode is unknown or unreadable (fail safe to test): the golden record is NOT touched.
+            mark = (h, baseline.raw_digest(golden_raw))
+            if self._dry_run_noted.get(key) == mark:
+                return "dry_run"
+            res = await baseline.record_dry_run(
+                self.ledger, ns, name, new_spec=view, spec_hash=h, golden_raw=golden_raw, kind="auto",
+                actor=baseline.AUTO_ACTOR, tier=tier, evidence=evidence, changed_fields=verdict["changed_fields"],
+                mode=self.mode.mode_for(ns))
+            if res["status"] == "dry_run":
+                self._dry_run_noted[key] = mark
+            return "dry_run" if res["status"] == "dry_run" else "dry_run_" + res["status"]
+        res = await baseline.promote_baseline(
+            self.redis, self.ledger, ns, name, new_spec=view, spec_hash=h, golden_raw=golden_raw, kind="auto",
+            actor=baseline.AUTO_ACTOR, tier=tier, evidence=evidence, changed_fields=verdict["changed_fields"],
+            proceed=lambda: self._final_check(key, h))
+        if res["status"] == "promoted":
+            self._drifted.pop(key, None)          # the live spec is the golden baseline now: OBSERVE stops
+            self.tracking.pop(key, None)
+            logger.info(f"{ns}/{name}: golden baseline promoted to spec {h[:12]} (benign, certain, rollout complete)")
+        return res["status"]
+
+    async def _housekeep_candidate(self, key: Key) -> None:
+        """The live spec of a workload changed: a candidate for another spec no longer applies, and a remembered
+        rejection of another spec is forgotten."""
+        ns, name = key
+        try:
+            current = self.seen_hash.get(key)
+            if current is None:
+                return
+            cand = await baseline.get_candidate(self.redis, ns, name)
+            if cand is not None and cand.get("spec_hash") != current and self.seen_hash.get(key) == current:
+                await baseline.drop_candidate(self.redis, self.ledger, ns, name, "the live spec changed again")
+            await baseline.clear_rejected_if_changed(self.redis, ns, name, current)
+        except Exception as e:
+            logger.warning(f"candidate housekeeping for {ns}/{name} failed: {e!r}")
+
+    async def _drop_workload_candidate(self, key: Key) -> None:
+        ns, name = key
+        try:
+            await baseline.drop_candidate(self.redis, self.ledger, ns, name, "the workload was deleted")
+            await self.redis.delete(baseline.rejected_key(ns, name))
+        except Exception as e:
+            logger.warning(f"candidate cleanup for deleted {ns}/{name} failed: {e!r}")
+
     # ── Kubernetes reads ─────────────────────────────────────────────────────
-    async def _failure_reasons(self, key: Key, dep: Dict, since_wall: float) -> List[str]:
+    async def _failure_reasons(self, key: Key, dep: Dict, since_wall: float,
+                               strict: bool = False) -> Optional[List[str]]:
         """Authoritative failed-rollout evidence for the new spec. Pods are listed in the Deployment's own
-        namespace; an error (a 403 included) only loses the pod evidence, it is never a failure reason."""
+        namespace; an error (a 403 included) only loses the pod evidence, it is never a failure reason.
+
+        strict=True (the promotion check) does not accept a lost listing as "no failure": it returns None when
+        the Kubernetes client is missing, the selector has no matchLabels (matchExpressions only, or none), or the
+        pod listing fails for any reason."""
         match = ((dep.get("spec") or {}).get("selector") or {}).get("matchLabels") or {}
         pods: List[Dict] = []
-        if self.core_api is not None and match:
+        if self.core_api is None or not match:
+            if strict:
+                return None
+        else:
             try:
                 resp = await self.core_api.list_namespaced_pod(
                     key[0], label_selector=",".join(f"{k}={v}" for k, v in match.items()),
@@ -853,6 +1213,13 @@ class HealthAgent:
             except (ApiException, aiohttp.ClientError, TimeoutError, ValueError, KeyError) as e:
                 logger.warning(f"pod listing for {key[0]}/{key[1]} failed ({getattr(e, 'status', e)}); "
                                "no pod failure evidence")
+                if strict:
+                    return None
+            except Exception as e:
+                if not strict:
+                    raise
+                logger.warning(f"pod listing for {key[0]}/{key[1]} failed ({e!r}); no pod failure evidence")
+                return None
         return failure_reasons(dep, pods, since_wall, now=self.wall())
 
     async def _read_deployment(self, namespace: str, name: str) -> Dict:
