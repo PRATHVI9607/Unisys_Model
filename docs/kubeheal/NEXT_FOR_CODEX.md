@@ -7,9 +7,9 @@ Read `AGENTS.md`, `docs/kubeheal/PROGRESS.md` (checklist, section "V5 integratio
 Codex may do EVERY task in this file, including `agents/fusion_agent/decision_policy.py`, the Executor write paths, RBAC (`k8s/rbac/`, the chart RBAC template),
 chart changes and merges, provided it runs the full suite after each merge and keeps the safety rules below. Claude Code is unavailable; Codex will perform and record a self-review for each merge. A Claude review is not a prerequisite.
 
-## Active run state (2026-11-11, Codex)
+## Handoff state (2026-11-12, Codex)
 
-Codex is the active orchestrator and owns the ordered run below. No push is permitted. Owner stop points are credentials/passwords, model training, deleting user data, or changing `PROJECT_SPEC.md`. D4 is merged into both `work` and `demo`; its full suite passed on both. Current branch tips: `work` (see `git log -1 work`), `demo` `338fd34`, `wave/V5-D4` `ad464f3`, `wave/V5-S2` `f6ecfa9`. Active task: V5-S2.
+Codex paused for handoff. No push is permitted. Current branch tips: `work` `0dc8e68`, `demo` `3ddf862`, `wave/V5-D4` `ad464f3`, `wave/V5-S2` `c221832`. Active task is V5-S2, committed WIP, unreviewed and unmerged. Owner stop points are credentials/passwords, model training, deleting user data, or changing `PROJECT_SPEC.md`.
 
 Owner decisions (all in `V5_INTEGRATION_PLAN.md` section 11): M1 option (b), M2, M3, D1, D2, D3, D5, D6, D7, plus the two latest answers Q1 and Q2.
 In short: LightGBM health and security bundles (split-conformal sets, TreeSHAP) run inside OUR architecture; an automatic action needs a prediction set of exactly one label (M2);
@@ -23,15 +23,23 @@ the eBPF sensor is optional and last (D6).
 
 | Branch | Worktree | Tip | State | What it needs |
 |---|---|---|---|---|
-| `work` | `../Unisys_Model-wt-metric-query` | see `git log -1 work` | D4 merged; full suite after merge: 1363 passed, 3 skipped, 34 deselected. | Fix/review and merge S2, then continue in order. |
-| `demo` | main checkout `C:/My_projects_1/cLOUD/Unisys_Model` | `338fd34` | D4 from `work` merged; full suite: 1368 passed, 2 skipped, 34 deselected. Includes demo-only I2 scripts. | Merge updated `work` after each subsequent task. |
+| `work` | `../Unisys_Model-wt-metric-query` | `0dc8e68` | D4 merged; last suite 1363 passed, 3 skipped, 34 deselected. | Continue with S2 only after its full suite and review. |
+| `demo` | main checkout `C:/My_projects_1/cLOUD/Unisys_Model` | `3ddf862` | D4 merged; last demo suite 1368 passed, 2 skipped, 34 deselected. Includes demo-only I2 scripts. | Sync reviewed work changes after each task. |
 | `wave/V5-D4` | `../Unisys_Model-wt-V5-D4` | `ad464f3` | Reviewed and merged into `work`; branch suite 1363 passed, 3 skipped, 34 deselected. Worktree clean. | Complete; keep branch. |
-| `wave/V5-S2` | `../Unisys_Model-wt-V5-S2` | `f6ecfa9` | Security Agent port built, 1376 passed in its worktree, reviewed once (verdict: do not merge as is); Codex is fixing all findings now. Not merged. | Active: Task 2. |
-| merged and safe to delete later (keep the branches, remove only worktrees you no longer need) | | | `wave/V5-M1`, `V5-D1`, `V5-D2`, `V5-D4a`, `V5-I2`, `V5-I2-demo`, `V5-D3`, `wave/P11`, `wip/docs-p6d2` | none |
+| `wave/V5-S2` | `../Unisys_Model-wt-V5-S2` | `c221832` | Codex WIP commit. Focused review-fix tests 49 passed; full suite not completed after fixes. Not reviewed or merged. | Rerun full suite, review all changes, resolve findings, then merge only if green. |
+| `wave/P11` | none | `2240ec6` | Merged into work; reviewed, but P11 execution tasks remain. | No branch merge needed; run P11 tasks below. |
+| `wave/P5`, `wave/P6`, `wave/P7`, `wave/P8`, `wave/P9` | none | see `git branch -v` | Historical phase branches; implementation status is in PROGRESS. | No action unless checklist says otherwise. |
+| `wave/V5-M1`, `wave/V5-D1`, `wave/V5-D2`, `wave/V5-D3`, `wave/V5-D4a`, `wave/V5-I2`, `wave/V5-I2-demo` | none | see `git branch -v` | Previously reviewed/merged; I2-demo is demo-only. | No action unless checklist says otherwise. |
+| `wave/docs-p6d2` | none | `e611844` | Historical docs/settings branch; inspect ancestry before any merge. | No pending merge recorded. |
+| `wip/docs-p6d2` | none | `b229491` | P6-D2 merged into work. | No action. |
 
-Both unmerged worktrees are clean (everything committed). Each branch was cut from `work` at `96b1d08`, so a merge is expected to conflict only in `docs/kubeheal/PROGRESS.md` and `.ai/handoff.md`: keep both sides' checklist facts and re-write `.ai/handoff.md` yourself.
+Only four worktrees exist (listed above). All are clean at this handoff. Keep S2 and D4 worktrees for now; branches are retained.
+
+The D4 worktree and S2 worktree are clean; S2 is WIP. Branches D4/S2 were cut from `work` at `96b1d08`; expect checklist/handoff conflicts and preserve current status when merging.
 
 ### Cluster and Helm state (k3d-kubeheal, checked by Claude on 2026-11-11, read-only)
+
+**Handoff update 2026-11-12:** `kubectl --context k3d-kubeheal` and `helm --kube-context k3d-kubeheal` could not reach the recorded API endpoint `https://127.0.0.1:32201` (connection refused). The last known mode remains `test`, last known Helm release was revision 4 `deployed`; current mode, release revision/status and pod states are unknown. No upgrade, injection, or manifest application was run during this handoff. Once the cluster is reachable, first verify/set `kubeheal-mode=test`, then inspect release, pods and in-progress demo state before any changes.
 
 - Context `k3d-kubeheal` only. Never `hybrid-demo`. `kubeheal-mode` ConfigMap value: `test`. Keep it `test` unless a step says otherwise.
 - Helm release `kubeheal` in namespace `kubeheal`: revision 4, status `deployed`, chart `kubeheal-0.1.0`. History: rev 2 superseded, rev 3 FAILED (server-side-apply conflict with the field manager `kubectl-set` on the `health-agent` image because the live image had been changed with `kubectl set image`), rev 4 deployed.
@@ -77,6 +85,10 @@ Last known results: `work` 1304 passed, 3 skipped, 34 deselected; `demo` 1309 pa
 - Fusion treats a security `model_scored` of false or a missing prediction set as "not certain": until the Health Agent (D4) and Security Agent (S2) are merged and deployed, NO automatic action can happen (fail closed). That is expected, not a bug.
 
 ## Remaining tasks, in order
+
+**Resume order:** (1) finish/review `wave/V5-S2`; (2) chart/agent contract cleanup; (3) cluster install and readiness if registry/network is available; (4) V5-S1 Falco rules and D-5 replay; (5) V5-D5 baseline promotion; (6) V5-D6/D9 Executor validation; (7) V5-S5 containment; (8) V5-I3 dashboard; (9) P10 acceptance and remaining P7/P11 measurements; (10) P13 and V5-DOC; (11) Later tasks V5-F1, V5-P1, V5-P3, V5-E1, V5-S4, V5-M3. Keep phase tasks in PROGRESS order and run the full non-cluster suite after each task/merge. No cluster task may start until its state is reachable and mode is verified.
+
+For each task use its listed implementation/tests and full-suite command. Files not listed for that task are out of scope; never touch `PROJECT_SPEC.md` without the owner, never train, and keep `decision_policy.py`, Executor write paths and RBAC within the explicitly assigned D3/D6/S5 tasks. For k3d verification use only the context-qualified commands below. Use `helm lint` and `helm template` for chart changes; use `PYTHONPATH=. .venv\Scripts\python.exe -m pytest tests/ -q` (with Helm on PATH and live cluster tests deselected for local suites).
 
 ### Task 0. Orient
 
