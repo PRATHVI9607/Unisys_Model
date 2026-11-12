@@ -345,6 +345,14 @@ def test_replay_is_only_reachable_with_explicit_mode():
     assert fc.resolve_falco_mode({**env, "FALCO_MODE": "replay"})[0] == "replay"
 
 
+def test_replay_node_gate_only_runs_on_the_named_security_agent_node():
+    assert fc.resolve_falco_mode({"FALCO_MODE": "replay", "FALCO_REPLAY_PATH": "/trace",
+                                  "FALCO_REPLAY_NODE": "node-a", "NODE_NAME": "node-a"})[0] == "replay"
+    mode, reason = fc.resolve_falco_mode({"FALCO_MODE": "replay", "FALCO_REPLAY_PATH": "/trace",
+                                          "FALCO_REPLAY_NODE": "node-a", "NODE_NAME": "node-b"})
+    assert mode == "off" and "does not match" in reason
+
+
 # ---- gRPC priority mapping ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("value,expected", [

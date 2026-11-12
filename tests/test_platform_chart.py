@@ -428,6 +428,26 @@ def test_redis_secret_created_only_when_password_given(fixture_file):
     assert get(docs, "Secret", "kubeheal-redis")["stringData"] == {"password": "testonly"}
 
 
+def test_falco_replay_config_mounts_a_trace_and_can_be_confined_to_one_node(fixture_file):
+    docs = render("k3d-demo", fixture_file, "securityAgent.falcoMode=replay",
+                  "securityAgent.falcoReplay.configMapName=d5-trace",
+                  "securityAgent.falcoReplay.node=k3d-kubeheal-agent-0")
+    ds = get(docs, "DaemonSet", "security-agent")
+    spec = ds["spec"]["template"]["spec"]
+    envs = {e["name"]: e for e in spec["containers"][0]["env"]}
+    assert envs["FALCO_MODE"]["value"] == "replay"
+    assert envs["FALCO_REPLAY_PATH"]["value"] == "/var/run/kubeheal-replay/trace.jsonl"
+    assert envs["FALCO_REPLAY_NODE"]["value"] == "k3d-kubeheal-agent-0"
+    assert {v["name"]: v for v in spec["volumes"]}["falco-replay"]["configMap"]["name"] == "d5-trace"
+    mount = next(m for m in spec["containers"][0]["volumeMounts"] if m["name"] == "falco-replay")
+    assert mount["mountPath"] == "/var/run/kubeheal-replay" and mount["readOnly"] is True
+
+
+def test_falco_replay_configmap_requires_explicit_replay_mode(fixture_file):
+    with pytest.raises(AssertionError):
+        render("k3d-demo", fixture_file, "securityAgent.falcoReplay.configMapName=d5-trace")
+
+
 # ---- Dashboard -----------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("env", ENVS)

@@ -1,9 +1,8 @@
-﻿# Handoff
+# Handoff
 
-- **Agent:** Codex; **Date:** 2026-11-12. Nothing pushed; no model training.
-- **Goal:** Complete KubeHeal k3d demo readiness. Current official branches: `work` includes verified F1/F3 code at `e1e6685`; `demo` remains `9986b73`.
-- **What changed and why:** Merged opt-in live test safeguards and containment protocol HMAC into work. Freeze requests, Security Agent results, and operator thaw messages are signed and verified; key uses the Redis password Secret, so Redis credential holders can also sign.
-- **Files touched:** README/AGENTS, live test safety, containment auth, Executor/Security Agent, Helm/plain manifests, thaw script, related tests and PROGRESS.
-- **Checks:** Combined full suite on integration branch before merge: 2064 passed, 12 skipped, 61.93 s. F1 focused: 34 passed, 2 skipped; containment focused: 299 passed, 3 skipped. Cluster `k3d-kubeheal` was healthy; mode test; `dev/freeze-scratch` absent. Removed clean merged S5c/CH4 worktrees.
-- **Open issues:** HPA live run failed because PowerShell flattened the k6 JS; the cleanup removed its temporary resources. Fix commit `6f97f88` and demo runbook `840a9be` are on unreviewed demo branch. Need HPA rerun, D-5 replay, full stream-driven containment, F9/F10 live acceptance, U6 twice, P11 measured runs, runbook rehearsal, final docs/evidence, final full suites and PUSH_PLAN.
-- **Next step:** Review the HPA cleanup fix, finish P11/U6 wrapper and demo evidence, then coordinate live acceptance with mode restored to test after each scripted window. Never push, train, or change PROJECT_SPEC.
+- **Agent:** Codex containment_security; **Date:** 2026-11-12.
+- **Goal:** Prepare a safe D-5 replay on k3d, without running it yet.
+- **What changed and why:** On isolated `wave/Codex-D5-Replay` from work `62426c0`, added optional chart replay ConfigMap mounting, single-node replay gating, and a context-pinned runner that adapts current prod victim identity, requires mode test and FALCO_MODE auto, checks Security/Fusion Redis evidence, and restores all temporary wiring in `finally`. Fake-transport and chart/pipeline tests: 168 passed.
+- **Files touched:** Security Agent Falco config, Helm values/template, `scripts/d5_replay_runner.py`, focused tests, `docs/kubeheal/D5_REPLAY.md`, PROGRESS.
+- **Open issues:** Runner not merged, deployed, or executed against k3d. The fixture is hand-written, with synthetic PID/times; live Falco and its rules remain unverified. Read-only target metadata was current at run preparation, not a persistent identity.
+- **Next step:** Review/merge only after full-suite green, build the updated Security Agent image, then coordinate a single mode-test replay window. Never push, train, or change PROJECT_SPEC.

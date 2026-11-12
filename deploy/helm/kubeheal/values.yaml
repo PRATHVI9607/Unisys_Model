@@ -127,6 +127,13 @@ securityAgent:
   metricsPort: 9100
   falcoMode: auto             # auto | live | off | replay (see agents/security_agent/falco_client.py)
   falcoEventsPath: /var/run/falco/events.jsonl
+  # Optional explicit replay input. Create this ConfigMap in the release namespace; empty disables the mount.
+  # Set falcoMode: replay to consume it. replayNode confines a one-off run to the Security Agent on that node.
+  falcoReplay:
+    configMapName: ""
+    mountPath: /var/run/kubeheal-replay
+    fileName: trace.jsonl
+    node: ""
   logLevel: INFO
   resources: {}
   extraEnv: {}

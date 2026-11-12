@@ -310,6 +310,10 @@ def resolve_falco_mode(env=None, exists: Callable[[str], bool] = os.path.exists)
         return mode, f"FALCO_MODE/FALCO_ENABLED = {mode}"
     if mode == "replay":
         if replay_path:
+            replay_node = (env.get("FALCO_REPLAY_NODE") or "").strip()
+            own_node = (env.get("NODE_NAME") or "").strip()
+            if replay_node and replay_node != own_node:
+                return "off", "FALCO_REPLAY_NODE does not match NODE_NAME"
             return "replay", "FALCO_MODE=replay"
         return "off", "FALCO_MODE=replay but FALCO_REPLAY_PATH is not set"
     if mode != "auto":
