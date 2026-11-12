@@ -445,6 +445,20 @@ def test_dashboard_env(env, fixture_file):
     assert envs["REDIS_URL"]["value"] == "redis://:$(REDIS_PASSWORD)@redis-master:6379"
 
 
+@pytest.mark.parametrize("env", ENVS)
+def test_the_health_agent_can_write_the_baseline_promotion_ledger(env, fixture_file):
+    docs = render(env, fixture_file)
+    envs = {e["name"]: e for e in get(docs, "Deployment", "health-agent")["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert envs["LEDGER_BACKEND"]["value"] == "minio" and envs["MINIO_ENDPOINT"]["value"] == "minio:9000"
+    for k, key in (("MINIO_ACCESS_KEY", "access-key"), ("MINIO_SECRET_KEY", "secret-key")):
+        assert envs[k]["valueFrom"]["secretKeyRef"] == {"name": "kubeheal-minio-client", "key": key}
+    ingress = get(docs, "NetworkPolicy", "allow-minio-from-ledger-writers")["spec"]["ingress"][0]["from"][0]
+    assert "health-agent" in ingress["podSelector"]["matchExpressions"][0]["values"]
+    docs = render(env, fixture_file, "networkPolicy.egress.enabled=true", "networkPolicy.egress.apiServerCIDR=192.0.2.1/32")
+    egress = get(docs, "NetworkPolicy", "allow-minio-egress")["spec"]["podSelector"]["matchExpressions"][0]
+    assert "health-agent" in egress["values"]
+
+
 def test_dashboard_admin_identity_and_secret_override(fixture_file):
     docs = render("k3d-demo", fixture_file, "dashboard.adminIdentity=ops-team",
                   "dashboard.adminTokenSecret.name=other", "dashboard.adminTokenSecret.key=k")
@@ -703,7 +717,7 @@ def test_executor_env_matches_config_defaults():
 def test_images_that_write_the_ledger_install_the_minio_client():
     """ledger_from_env imports `minio` when LEDGER_BACKEND=minio. A cluster run (P10) found the Executor and Fusion
     images without it: both crash-looped at start. Every image whose component writes the ledger must install it."""
-    for name in ("Dockerfile.executor", "Dockerfile.fusion", "Dockerfile.dashboard"):
+    for name in ("Dockerfile.executor", "Dockerfile.fusion", "Dockerfile.dashboard", "Dockerfile.health"):
         text = (ROOT / "dockerfiles" / name).read_text(encoding="utf-8")
         assert "minio" in text, name
 
