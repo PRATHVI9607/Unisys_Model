@@ -12,7 +12,7 @@ Before it works end to end:
   * Image {{ .Values.global.imageRegistry }}{{ .Values.inference.image.repository }}:{{ .Values.inference.image.tag | default .Values.global.imageTag }} (dockerfiles/Dockerfile.inference) must exist on the nodes. Check readiness with: kubectl -n {{ include "kubeheal.namespace" . }} get deploy {{ .Values.inference.name }} (the pod is Ready only when both LightGBM bundles loaded).
 {{- end }}
 {{- if not .Values.modelServers.legacy.enabled }}
-  * The neural model servers (health, security, DCM) are not rendered (modelServers.legacy.enabled=false). Agents that still read HEALTH_MODEL_URL or SECURITY_MODEL_URL get no score until they use INFERENCE_URL.
+  * The neural model servers (health, security, DCM) are not rendered (modelServers.legacy.enabled=false). The Health and Security agents score through INFERENCE_URL only, so the legacy servers serve nothing in the default path.
 {{- end }}
   * The Executor escalates every patch and restore until its five env values are non-empty (executor.env).
 {{- if eq .Values.hpa.mode "queue" }}

@@ -298,6 +298,37 @@ async def test_a_quiet_drifted_workload_is_retried_by_the_scheduler_after_a_redi
 
 
 @scenario
+async def test_a_retry_entry_of_a_workload_deleted_while_the_watch_was_down_is_dropped_by_relist(env):
+    await env.send("ADDED", dep())
+    another = Env()
+    another.redis.store.update(env.redis.store)
+    another.redis.fail["get"] = ha.aioredis.RedisError("temporary Redis error")
+    try:
+        await another.send("ADDED", dep(image="img:2"))
+        assert KEY in another.agent._first_sight_retry
+        another.redis.fail.clear()
+        another.apps.items = []                                   # the Deployment is gone from the live list
+        await another.agent.relist("prod")
+        assert KEY not in another.agent._first_sight_retry and KEY not in another.agent.latest_dep
+        await another.tick(ha.FIRST_SIGHT_RETRY_S + 1)
+        await another.agent.drain()
+        assert KEY not in another.agent.pending and another.events == []
+    finally:
+        await another.agent.stop()
+
+
+@scenario
+async def test_a_stale_first_sight_does_not_overwrite_a_newer_spec(env):
+    await env.send("ADDED", dep())
+    agent = env.agent
+    key_dep = agent.latest_dep[KEY]
+    agent._set_seen(KEY, "newer-hash")                           # a newer event already owns the state
+    assert agent._still_current(KEY, "newer-hash") and not agent._still_current(KEY, "older-hash")
+    await agent._first_sight(KEY, key_dep, {"template": {}}, "older-hash")
+    assert KEY not in agent.pending and agent.seen_hash[KEY] == "newer-hash"
+
+
+@scenario
 async def test_missing_metrics_are_null_features_never_zeros(env):
     win = full_window()
     win["latency_p99_s"] = None

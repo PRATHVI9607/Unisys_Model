@@ -82,9 +82,10 @@ that must exist in the cluster (P10 creates `csi-hostpath-snapclass` on k3d).
   bundles are loaded); a missing or invalid bundle answers 503, never a fallback model.
 - The HPA uses the same `hpa.mode` and targets as the model servers below (queue-depth gauge
   `kubeheal_model_inflight_requests`, so the prometheus-adapter rule is unchanged), bounds from `inference.hpa`.
-- The health and security agents get `INFERENCE_URL`. The agent code still reads `HEALTH_MODEL_URL` and
-  `SECURITY_MODEL_URL` until V5-D4 and V5-S2 land, so with the legacy servers off those two agents get no score and
-  fail closed (model unavailable notice).
+- The health and security agents get `INFERENCE_URL` and score only through the inference service (V5-D4, V5-S2);
+  they no longer read `HEALTH_MODEL_URL` or `SECURITY_MODEL_URL`, and the chart no longer sets those or `DCM_URL`
+  (a set `DCM_URL` would switch Fusion onto the legacy DCM path). With the inference service down they fail closed
+  (model unavailable notice).
 - Hardening is on by default for this pod (uid 10001, read-only root filesystem, emptyDir on `/tmp`). Not verified
   on a cluster yet. `inference.modelDir` sets `KUBEHEAL_MODEL_DIR` (empty: the shipped bundles).
 - NetworkPolicy: only the health and security agents and Prometheus reach it.

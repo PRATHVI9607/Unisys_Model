@@ -401,6 +401,10 @@ class HealthAgent:
         for d in (self.pending, self.tracking, self.latest_dep, self.seen_hash, self._drifted, self._first_sight_retry):
             d.pop(key, None)
 
+    def _still_current(self, key: Key, h: str) -> bool:
+        """The spec hash this call works on is still the newest one seen for a workload that still exists."""
+        return self.seen_hash.get(key) == h and key in self.latest_dep
+
     def _set_seen(self, key: Key, h: str) -> None:
         if self.seen_hash.get(key) != h:
             self._spec_epoch[key] = self._spec_epoch.get(key, 0) + 1
@@ -428,10 +432,14 @@ class HealthAgent:
                 logger.info(f"{namespace}/{name} drifted spec was already assessed; waiting for a change")
                 return
         except Exception as e:
+            if not self._still_current(key, h):          # a newer event or a deletion owns the state now
+                return
             logger.warning(f"first sight of {namespace}/{name} failed ({e}); will retry in {FIRST_SIGHT_RETRY_S:.0f}s "
                            "or on the next event")
             self.seen_hash.pop(key, None)
             self._first_sight_retry[key] = (dep, spec, h, self.clock() + FIRST_SIGHT_RETRY_S)
+            return
+        if not self._still_current(key, h):
             return
         self._first_sight_retry.pop(key, None)
         self._mark_change(key, dep, spec, h)
@@ -477,7 +485,7 @@ class HealthAgent:
             if key in self.seen_hash or key not in self.latest_dep:    # a newer event handled it, or it was deleted
                 continue
             self._set_seen(key, h)
-            await self._first_sight(key, dep, spec, h)
+            self._spawn(self._first_sight(key, dep, spec, h))     # not inline: a slow Redis must not stall the tick
         for key, p in list(self.pending.items()):
             if now >= p.deadline:
                 self._fire(key)
@@ -1024,7 +1032,8 @@ class HealthAgent:
             meta = dep.get("metadata") or {}
             live.add((meta.get("namespace", ""), meta.get("name", "")))
             await self.handle_deployment_event("ADDED", dep)
-        for key in [k for k in self.seen_hash if k not in live and scope in (None, k[0])]:
+        known = {*self.seen_hash, *self._first_sight_retry, *self.latest_dep}
+        for key in [k for k in known if k not in live and scope in (None, k[0])]:
             self._forget(key)
         return body["metadata"]["resourceVersion"]
 
