@@ -27,8 +27,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
-from agents.executor.actions import _write
-from agents.executor.support import poll_until
+from agents.executor.actions import ModeBlocked, _write
+from agents.executor.support import gate_open, poll_until
 
 STREAM_PREFIX = "kubeheal.contain.req"
 RESULT_PREFIX = "kubeheal:contain:result"
@@ -86,6 +86,11 @@ async def request_freeze(gate, redis, namespace: str, incident_id: str, pod: Dic
     meta, spec = pod.get("metadata") or {}, pod.get("spec") or {}
     node, uid, pod_name = spec.get("nodeName") or "", meta.get("uid") or "", meta.get("name") or ""
     if not (node and uid and pod_name):
+        # Nothing can be requested. In a dry run the answer is still the usual blocked step, not a gap.
+        if not gate_open(gate, namespace):
+            if gate is not None and hasattr(gate, "record_step"):
+                await gate.record_step(namespace, "request_freeze", "blocked_by_kill_switch")
+            raise ModeBlocked("request_freeze")
         return FreezeOutcome(False, "pod_node_or_uid_unknown")
     request_id = uuid.uuid4().hex
     fields = {

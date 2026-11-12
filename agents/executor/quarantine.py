@@ -26,7 +26,7 @@ from agents.executor.freeze import FREEZE_LABELS, request_freeze
 from agents.executor.ledger_guard import LedgerUnavailable
 from agents.executor.snapshots import (GROUP, KIND_FORENSIC, PLURAL, VERSION, SnapshotFreeze,
                                        volume_snapshot)
-from agents.executor.support import Recorder, gate_open, poll_until, to_dict
+from agents.executor.support import Recorder, poll_until, to_dict
 from agents.executor.validation import Request
 
 logger = logging.getLogger(__name__)
@@ -155,15 +155,8 @@ async def contain(gate, core_api, networking_api, apps_api, custom_api, req: Req
         else:
             await record("freeze_skipped", {"reason": "no automatic containment label", "label": label})
 
-        # 2. forensic snapshot (and the rolling snapshots are frozen so nothing prunes the history)
+        # 2. forensic snapshot
         claims = sorted(set(pod_pvc_claims(pod).values()))
-        if freeze is not None and gate_open(gate, ns):      # a dry run writes nothing, not even this marker
-            for c in claims:
-                try:
-                    await freeze.freeze(ns, c, req.incident_id)
-                except Exception as e:
-                    gaps.append(f"freeze {c}: {e}")
-            await record("rolling_snapshots_frozen", {"pvcs": claims})
         if not claims:
             await record("forensic_snapshot_skipped", {"reason": "pod mounts no PVC"})
         else:
@@ -206,6 +199,15 @@ async def contain(gate, core_api, networking_api, apps_api, custom_api, req: Req
                      {"metadata": {"labels": quarantine_labels(req.incident_id)}})
         done.append("label_pod")
         await record("pod_labelled", {"pod": pod_name, "labels": quarantine_labels(req.incident_id)})
+        # The rolling snapshots are frozen (so nothing prunes the history) only after a gated write succeeded:
+        # this is a Redis marker, and a dry run must not write even that.
+        if freeze is not None:
+            for c in claims:
+                try:
+                    await freeze.freeze(ns, c, req.incident_id)
+                except Exception as e:
+                    gaps.append(f"freeze {c}: {e}")
+            await record("rolling_snapshots_frozen", {"pvcs": claims})
 
         # 4. scale to zero (exfiltration; for ransomware the restore request does it)
         if scale_after:
