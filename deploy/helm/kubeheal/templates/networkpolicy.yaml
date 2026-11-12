@@ -76,6 +76,23 @@ spec:
               kubernetes.io/metadata.name: {{ $np.prometheusNamespace }}
       ports:
         - {protocol: TCP, port: {{ .Values.inference.port }}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-inference-from-p11-k6
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchLabels: {app: {{ .Values.inference.name }}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        # A podSelector without a namespaceSelector is scoped to this NetworkPolicy's namespace.
+        - podSelector:
+            matchLabels: {app: kubeheal-p11-k6}
+      ports:
+        - {protocol: TCP, port: 8000}
 {{- end }}
 ---
 apiVersion: networking.k8s.io/v1

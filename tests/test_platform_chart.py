@@ -807,6 +807,15 @@ def test_inference_network_policy(env, fixture_file):
     assert any(f.get("namespaceSelector", {}).get("matchLabels", {}).get("kubernetes.io/metadata.name")
                == "monitoring" for f in frm)
     assert pol["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 8000}]
+    p11 = get(docs, "NetworkPolicy", "allow-inference-from-p11-k6")["spec"]
+    assert p11["podSelector"]["matchLabels"] == {"app": INFERENCE}
+    assert p11["policyTypes"] == ["Ingress"]
+    assert p11["ingress"] == [{
+        "from": [{"podSelector": {"matchLabels": {"app": "kubeheal-p11-k6"}}}],
+        "ports": [{"protocol": "TCP", "port": 8000}],
+    }]
+    # A podSelector alone is same-namespace scoped; this P11-only allowance has no egress or
+    # namespace-wide exception and opens only the inference service's TCP port.
     # the legacy ingress policy is gone while the legacy servers are off
     names = {d["metadata"]["name"] for d in by_kind(docs, "NetworkPolicy")}
     assert "allow-model-servers-from-agents-dashboard-prometheus" not in names
