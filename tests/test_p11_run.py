@@ -21,15 +21,21 @@ def test_k6_duration_parser_converts_milliseconds_and_seconds():
 
 def test_load_cleanup_removes_only_the_named_job_and_its_configmap(monkeypatch):
     calls = []
+    owner = {"metadata": {"labels": {"kubeheal.ai/p11-run-id": "p11-load-10-test"}}}
 
-    def fake_kubectl(context, args, **kwargs):
+    def owned_kubectl(context, args, **kwargs):
         calls.append((context, args))
+        if args[0] == "get":
+            return json.dumps(owner)
         return "deleted"
 
-    monkeypatch.setattr(p11_run.harness, "kubectl", fake_kubectl)
-    assert p11_run._cleanup_load("p11-load-10-test") == ["deleted", "deleted"]
+    monkeypatch.setattr(p11_run.harness, "kubectl", owned_kubectl)
+    assert p11_run._cleanup_load("p11-load-10-test") == [
+        "job/p11-load-10-test: deleted", "configmap/p11-load-10-test-script: deleted"]
     assert calls == [
+        ("k3d-kubeheal", ["get", "job", "p11-load-10-test", "-n", "kubeheal", "-o", "json", "--ignore-not-found=true"]),
         ("k3d-kubeheal", ["delete", "job", "p11-load-10-test", "-n", "kubeheal", "--ignore-not-found=true"]),
+        ("k3d-kubeheal", ["get", "configmap", "p11-load-10-test-script", "-n", "kubeheal", "-o", "json", "--ignore-not-found=true"]),
         ("k3d-kubeheal", ["delete", "configmap", "p11-load-10-test-script", "-n", "kubeheal", "--ignore-not-found=true"]),
     ]
 
@@ -48,4 +54,72 @@ def test_coverage_report_lists_every_p11_item_and_v5_e1_with_reasons():
     assert "not measured" in report
     assert "no disposable database-volume scenario" in report
     assert "no live result sidecar exists yet" in report
+
+
+def test_load_target_is_fixed_before_any_cluster_call(monkeypatch):
+    called = []
+    monkeypatch.setattr(p11_run.harness, "assert_test_mode", lambda context: called.append(context))
+    import pytest
+    with pytest.raises(ValueError, match="restricted"):
+        p11_run.run_load(10, "30s", "http://example.invalid/")
+    assert called == []
+
+
+def test_namespace_is_validated_before_deployment_read(monkeypatch):
+    called = []
+    monkeypatch.setattr(p11_run.harness, "assert_test_mode", lambda context: called.append(context))
+    import pytest
+    with pytest.raises(ValueError, match="allowlist"):
+        p11_run.run_pod_chaos("kube-system", "kubeheal-inference", "delete-one-pod")
+    assert called == []
+
+
+def test_cleanup_continues_after_one_resource_failure(monkeypatch):
+    calls = []
+    owner = {"metadata": {"labels": {"kubeheal.ai/p11-run-id": "owned-run"}}}
+
+    def fake_kubectl(context, args, **kwargs):
+        calls.append(args)
+        if args[:2] == ["get", "job"]:
+            raise RuntimeError("temporary API error")
+        if args[:2] == ["get", "configmap"]:
+            return json.dumps(owner)
+        return "deleted"
+
+    monkeypatch.setattr(p11_run.harness, "kubectl", fake_kubectl)
+    result = p11_run._cleanup_load("owned-run")
+    assert "job/owned-run: cleanup failed" in result[0]
+    assert result[1] == "configmap/owned-run-script: deleted"
+    assert any(args[:2] == ["delete", "configmap"] for args in calls)
+
+
+def test_cleanup_retains_foreign_objects(monkeypatch):
+    calls = []
+    foreign = {"metadata": {"labels": {"kubeheal.ai/p11-run-id": "another-run"}}}
+    monkeypatch.setattr(p11_run.harness, "kubectl", lambda context, args, **kwargs: calls.append(args) or json.dumps(foreign))
+    result = p11_run._cleanup_load("owned-run")
+    assert all("ownership label mismatch" in row for row in result)
+    assert not any(args[0] == "delete" for args in calls)
+
+
+def test_run_names_use_full_uuid():
+    name = p11_run._name("p11-load-200")
+    assert len(name.rsplit("-", 1)[1]) == 32
+    assert len(name) <= 63
+
+
+def test_load_results_are_written_even_when_cleanup_reports_errors(monkeypatch, tmp_path):
+    monkeypatch.setattr(p11_run, "RESULTS", tmp_path)
+    monkeypatch.setattr(p11_run, "_name", lambda prefix: "p11-load-10-owned-run")
+    monkeypatch.setattr(p11_run.harness, "assert_test_mode", lambda context: None)
+    monkeypatch.setattr(p11_run, "_hpa_state", lambda: {"current_replicas": 2, "desired_replicas": 2})
+    monkeypatch.setattr(p11_run.harness, "apply_k6_job", lambda *args, **kwargs:
+                        "http_req_duration..............: med=2ms p(95)=4ms")
+    monkeypatch.setattr(p11_run, "_cleanup_load", lambda name: ["job cleanup failed", "configmap deleted"])
+
+    result = p11_run.run_load(10, "30s", p11_run.DEFAULT_URL)
+
+    assert result["cleanup"] == "job cleanup failed | configmap deleted"
+    assert (tmp_path / "p11-load-10-owned-run.log").is_file()
+    assert (tmp_path / "p11-load-10-owned-run.csv").is_file()
 

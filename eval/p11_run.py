@@ -44,7 +44,7 @@ def _now() -> str:
 
 def _name(prefix: str) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    return f"{prefix}-{stamp}-{uuid.uuid4().hex[:6]}"
+    return f"{prefix}-{stamp}-{uuid.uuid4().hex}"
 
 
 def _hpa_state() -> dict:
@@ -94,8 +94,22 @@ def _parse_k6_latency(logs: str) -> tuple[float | str, float | str]:
 def _cleanup_load(name: str) -> list[str]:
     results = []
     for kind, resource in (("job", name), ("configmap", name + "-script")):
-        result = harness.kubectl(CONTEXT, ["delete", kind, resource, "-n", NAMESPACE, "--ignore-not-found=true"])
-        results.append(result.strip())
+        try:
+            raw = harness.kubectl(CONTEXT, ["get", kind, resource, "-n", NAMESPACE,
+                                            "-o", "json", "--ignore-not-found=true"])
+            if not raw.strip():
+                results.append(f"{kind}/{resource}: absent")
+                continue
+            item = json.loads(raw)
+            labels = ((item.get("metadata") or {}).get("labels") or {})
+            if labels.get("kubeheal.ai/p11-run-id") != name:
+                results.append(f"{kind}/{resource}: retained, ownership label mismatch")
+                continue
+            deleted = harness.kubectl(CONTEXT, ["delete", kind, resource, "-n", NAMESPACE,
+                                                "--ignore-not-found=true"])
+            results.append(f"{kind}/{resource}: {deleted.strip()}")
+        except Exception as exc:
+            results.append(f"{kind}/{resource}: cleanup failed: {type(exc).__name__}: {exc}")
     return results
 
 
@@ -161,9 +175,14 @@ def _deployment_counts(namespace: str, deployment: str) -> tuple[int, int]:
 def run_load(vus: int, duration: str, target_url: str) -> dict:
     if not 10 <= vus <= 200:
         raise ValueError("vus must be between 10 and 200")
+    if target_url != DEFAULT_URL:
+        raise ValueError(f"target_url is restricted to {DEFAULT_URL}")
     harness.assert_test_mode(CONTEXT)
     name = _name(f"p11-load-{vus}")
     manifest = harness.k6_job_manifest(name, NAMESPACE, target_url, vus)
+    for obj in manifest["objects"]:
+        labels = obj["metadata"].setdefault("labels", {})
+        labels["kubeheal.ai/p11-run-id"] = name
     script = _load_script(target_url, vus, duration)
     manifest["objects"][0]["data"]["load.js"] = script
     manifest["script"] = script
@@ -217,6 +236,8 @@ def run_load(vus: int, duration: str, target_url: str) -> dict:
 
 
 def run_pod_chaos(namespace: str, deployment: str, action: str) -> dict:
+    if namespace not in harness.ALLOWED_NAMESPACES:
+        raise ValueError(f"namespace is not in the P11 allowlist: {namespace!r}")
     if action not in {"restart", "delete-one-pod"}:
         raise ValueError("action must be restart or delete-one-pod")
     if deployment not in SAFE_CHAOS_DEPLOYMENTS:
