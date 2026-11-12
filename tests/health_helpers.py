@@ -73,6 +73,25 @@ def prediction(label="degradation", risk=0.6, pset=None, uncertain=False, versio
                       top_factors=[Factor(feature="cpu_limit_ratio", value=0.1, contribution=0.5)])
 
 
+class PromoRedis(FakeRedis):
+    """FakeRedis plus the two things the V5-D5 baseline code uses: the compare-and-set overwrite of the golden
+    baseline (a Python mirror of PROMOTE_BASELINE_LUA in agents/health_agent/baseline.py) and SCAN."""
+
+    async def eval(self, script, n, key, token, *extra):
+        if "kubeheal:promote_baseline" in script:
+            if await self.get(key) != token:
+                return 0
+            self.store[key] = extra[0]
+            return 1
+        return await super().eval(script, n, key, token, *extra)
+
+    async def scan_iter(self, match=None):
+        prefix = (match or "").rstrip("*")
+        for k in list(self.store) + list(self.hashes):
+            if k.startswith(prefix):
+                yield k
+
+
 class Resp:
     def __init__(self, body):
         self.body = body
@@ -133,14 +152,29 @@ class FakeAutoscaling:
                                for ns, name in self.targets if ns == namespace]})
 
 
+def make_mode(value="enforce", readable=True, ns_labels=None):
+    """A real ModeWatcher fed the way the Watch API would feed it: the kubeheal-mode ConfigMap, optional
+    namespace labels. value=None or readable=False is an unreadable mode (the effective mode is test)."""
+    from types import SimpleNamespace
+    from agents.common.killswitch import ModeWatcher
+    w = ModeWatcher()
+    if value is not None and readable:
+        w.apply_configmap(SimpleNamespace(data={"mode": value}))
+    w.ns_readable = True
+    w.ns_labels = dict(ns_labels or {})
+    return w
+
+
 class Env:
-    """An agent wired to the fakes, plus the recorded calls."""
+    """An agent wired to the fakes, plus the recorded calls. The kill-switch mode is `enforce` unless a test
+    passes its own `mode=`."""
 
     def __init__(self, **kw):
+        kw.setdefault("mode", make_mode("enforce"))
         self.clock = Clock()
         self.agent = HealthAgent(redis_url="redis://unused", observe_base_s=60, delay_s=60,
                                  clock=self.clock.mono, wall=self.clock.wall, **kw)
-        self.redis = self.agent.redis = FakeRedis()
+        self.redis = self.agent.redis = PromoRedis()
         self.core = self.agent.core_api = FakeCore()
         self.apps = self.agent.apps_api = FakeApps()
         self.agent.autoscaling_api = FakeAutoscaling()
