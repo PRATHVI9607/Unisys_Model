@@ -22,6 +22,7 @@ sent at all, and the ledger gets its "about to do" entry first. It is a Redis wr
 """
 
 import asyncio
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ from typing import Any, Callable, Dict, Optional
 from agents.executor.actions import ModeBlocked, _write
 from agents.executor.ledger_guard import LedgerUnavailable
 from agents.executor.support import gate_open, poll_until
+from agents.common.containment_auth import sign_fields, verify_fields
 
 STREAM_PREFIX = "kubeheal.contain.req"
 RESULT_PREFIX = "kubeheal:contain:result"
@@ -62,10 +64,13 @@ def _fields(raw: Any) -> Dict[str, str]:
     return {_text(k): _text(v) for k, v in (raw or {}).items()}
 
 
-def verify_result(result: Dict[str, str], expected: Dict[str, str]) -> str:
+def verify_result(result: Dict[str, str], expected: Dict[str, str], hmac_key: Optional[str] = None) -> str:
     """"" when the result confirms the freeze, otherwise the reason it does not."""
     if not result:
         return "no_result"
+    key = os.environ.get("CONTAIN_HMAC_KEY", "") if hmac_key is None else hmac_key
+    if not verify_fields(result, key):
+        return "invalid_hmac"
     status, frozen = result.get("status", ""), result.get("frozen", "")
     if status != "frozen" or frozen != "1":
         why = result.get("reason", "")
@@ -93,12 +98,15 @@ async def request_freeze(gate, redis, namespace: str, incident_id: str, pod: Dic
                 await gate.record_step(namespace, "request_freeze", "blocked_by_kill_switch")
             raise ModeBlocked("request_freeze")
         return FreezeOutcome(False, "pod_node_or_uid_unknown")
+    hmac_key = os.environ.get("CONTAIN_HMAC_KEY", "")
+    if not hmac_key:
+        return FreezeOutcome(False, "hmac_key_missing")
     request_id = uuid.uuid4().hex
-    fields = {
+    fields = sign_fields({
         "request_id": request_id, "incident_id": incident_id, "namespace": namespace, "pod": pod_name,
         "pod_uid": uid, "node": node, "action": "freeze", "label": label, "requested_by": "executor",
         "timestamp_ms": str(int(time.time() * 1000)),
-    }
+    }, hmac_key)
     stream = request_stream(node)
     try:
         await _write(gate, namespace, "request_freeze", redis.xadd, stream, fields)
@@ -122,5 +130,5 @@ async def request_freeze(gate, redis, namespace: str, incident_id: str, pod: Dic
         return FreezeOutcome(False, f"redis_error:{e}", request_id, node)
     if not got:
         return FreezeOutcome(False, "no_result_in_time", request_id, node)
-    why = verify_result(seen, expected)
+    why = verify_result(seen, expected, hmac_key)
     return FreezeOutcome(not why, why, request_id, node, seen)

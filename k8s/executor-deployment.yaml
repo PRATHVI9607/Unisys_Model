@@ -25,6 +25,11 @@ spec:
             - {name: metrics, containerPort: 9100}
           env:
             - {name: REDIS_URL, value: "redis://redis-master:6379"}
+            - name: CONTAIN_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kubeheal-redis
+                  key: password
             - {name: EXEC_NAMESPACES, value: "prod,staging,dev"}
             - {name: RESTORE_ENTROPY_IMAGE, value: "kubeheal/executor:v4"}
             - {name: RESTORE_ENTROPY_IMAGE_PULL_SECRETS, value: ""}

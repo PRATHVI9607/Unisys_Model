@@ -1,9 +1,10 @@
 # Handoff
 
-- **Agent/date:** Codex, 2026-11-12. Nothing pushed; no model training or cluster writes were run.
-- **Goal:** Demo readiness. Work is split between `wave/docs-runbook` (F1 safety, core docs) and `wave/demo-runbook` (runbook and push plan), both based on the latest corresponding branches.
-- **What changed and why:** Removed import-time cluster probes from live RBAC and kill-switch tests; both now require explicit opt-in, with a guard test. README and AGENTS now describe the LightGBM/conformal design and current k3d evidence with its limits.
-- **Files touched:** `tests/test_killswitch.py`, `tests/test_rbac_k3d.py`, `tests/test_live_test_safety.py`, `README.md`, `AGENTS.md`.
-- **Checks:** Focused safety run: 34 passed, 2 skipped. `git diff --check` passed. Full suite remains for the orchestrator.
-- **Open issues:** Runbook commands need final review against merged feature implementations; F2-F13 live acceptance/evidence are not complete. Handoff update is on the work-based branch and should be reconciled after merge.
-- **Next:** Review and commit the two isolated branches, merge green core work into `work`, merge `work` into `demo`, then rehearse and update actual measured evidence.
+- **Agent:** Codex; **Date:** 2026-11-12.
+- **Goal:** Resume KubeHeal demo readiness and prepare green changes for work/demo; nothing pushed.
+- **What changed and why:** Integration branch `wave/codex-integration` combines F1 default-off live tests and the containment HMAC protocol from `wave/Codex-F3`. HMAC covers freeze requests/results and operator thaw; its key is the Redis password Secret, so Redis credential holders can also sign.
+- **Files touched:** F1 safety tests and README/AGENTS; containment auth helper, Executor/Security Agent paths, Helm/plain manifests, thaw script, tests, and `docs/kubeheal/PROGRESS.md`.
+- **Checks:** F1 focused run 34 passed, 2 skipped. Containment focused run 299 passed, 3 skipped. A fresh HPA attempt failed because the demo script flattened the JS file; its temporary resources were cleaned. `dev/freeze-scratch` is absent; merged S5c/CH4 worktrees were removed.
+- **Open issues:** Full suite and official work/demo merges remain. HPA cleanup hardening and rerun, D-5 replay, live stream-driven containment, F9/F10 acceptance, U6/P11, runbook rehearsal, final docs/evidence, and push prep remain.
+- **Next step:** Finish the integration merge, run the full suite, then merge only after review and green results. Keep mode `test` except one coordinated scripted acceptance window; never push or train models.
+

@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "tests" / "fixtures"))
 
 import remediation_fakes as fk
 from agents.executor import freeze as fz
+from agents.common.containment_auth import sign_fields
 from agents.executor import quarantine, snapshots
 from agents.executor.config import ExecConfig
 from agents.executor.ledger_guard import PROTECTIVE_STEPS
@@ -28,6 +29,11 @@ NODE, UID = "k3d-agent-0", "11111111-2222-3333-4444-555555555555"
 
 def run(c):
     return asyncio.run(c)
+
+
+@pytest.fixture(autouse=True)
+def _containment_hmac(monkeypatch):
+    monkeypatch.setenv("CONTAIN_HMAC_KEY", "test-containment-key")
 
 
 class AgentRedis(fk.Redis):
@@ -50,6 +56,7 @@ class AgentRedis(fk.Redis):
                       "frozen": "1" if self.answer == "frozen" else "0", "mode_seen": "enforce",
                       "cgroup": "kubepods.slice/pod-x", "ts_ms": "1"}
             result.update(self.overrides)
+            result = sign_fields(result, "test-containment-key")
             self.hashes[fz.result_key(f["request_id"])] = result
 
 
@@ -184,12 +191,18 @@ def test_request_freeze_is_a_protective_step_and_the_stream_name_is_per_node():
 
 
 def test_verify_result_accepts_only_a_frozen_one_with_matching_identity():
-    good = {"status": "frozen", "frozen": "1", "request_id": "r", "pod_uid": "u"}
-    assert fz.verify_result(good, {"request_id": "r", "pod_uid": "u"}) == ""
+    good = sign_fields({"status": "frozen", "frozen": "1", "request_id": "r", "pod_uid": "u"},
+                       "test-containment-key")
+    assert fz.verify_result(good, {"request_id": "r", "pod_uid": "u"}, "test-containment-key") == ""
     assert fz.verify_result({}, {}) == "no_result"
-    assert fz.verify_result({**good, "request_id": "x"}, {"request_id": "r"}) == "result_mismatch:request_id"
-    assert fz.verify_result({"status": "frozen"}, {}).startswith("status_frozen")
-    assert fz.verify_result({b"status".decode(): "refused", "reason": "expired"}, {}) == "status_refused: expired"
+    assert fz.verify_result({"status": "frozen", "frozen": "1"}, {},
+                            "test-containment-key") == "invalid_hmac"
+    assert fz.verify_result({**good, "request_id": "x"}, {"request_id": "r"},
+                            "test-containment-key") == "invalid_hmac"
+    assert fz.verify_result(sign_fields({"status": "frozen"}, "test-containment-key"), {},
+                            "test-containment-key").startswith("status_frozen")
+    refused = sign_fields({"status": "refused", "reason": "expired"}, "test-containment-key")
+    assert fz.verify_result(refused, {}, "test-containment-key") == "status_refused: expired"
 
 
 def test_the_executor_config_has_the_freeze_timeout_default_and_rejects_nonsense():
