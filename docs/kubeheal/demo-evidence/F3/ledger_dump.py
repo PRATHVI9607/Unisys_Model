@@ -1,11 +1,13 @@
 """Read-only dump of the ledger entries of one incident (F3 evidence helper).
 
     python docs/kubeheal/demo-evidence/F3/ledger_dump.py <incident_id> [<incident_id> ...]
+    python docs/kubeheal/demo-evidence/F3/ledger_dump.py --list-since <ISO time, UTC>   # every object key written since
 
 Context k3d-kubeheal only. Reads the client credentials from the cluster Secret without printing them, opens a
 kubectl port-forward to svc/minio, lists and reads `incidents/<id>/` objects (GET only, no write or delete) and
 prints one JSON line per entry in sequence order."""
 import base64
+from datetime import datetime
 import json
 import socket
 import subprocess
@@ -40,6 +42,12 @@ def main(incidents):
                 time.sleep(0.2)
         client = Minio(f"127.0.0.1:{port}", access_key=creds["access-key"], secret_key=creds["secret-key"],
                        secure=False)
+        if incidents[:1] == ["--list-since"]:
+            since = datetime.fromisoformat(incidents[1].replace("Z", "+00:00"))
+            for obj in sorted(client.list_objects(BUCKET, recursive=True), key=lambda o: o.object_name):
+                if obj.last_modified and obj.last_modified >= since:
+                    print(obj.last_modified.strftime("%H:%M:%S"), obj.object_name)
+            return
         for incident in incidents:
             for obj in sorted(client.list_objects(BUCKET, prefix=f"incidents/{incident}/", recursive=True),
                               key=lambda o: o.object_name):
