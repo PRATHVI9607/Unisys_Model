@@ -20,6 +20,11 @@ ingress:
 healthAgent:
   additionalWatchNamespaces: []
 
+# Owner decision 2026-11-12: workloads in the older `demo` namespace count as the dev tier. The k3d victim apps
+# run in prod and dev, which map by name. Any other namespace stays unknown (human review).
+namespaceTierMap:
+  demo: dev
+
 networkPolicy:
   enabled: true
   prometheusNamespace: monitoring

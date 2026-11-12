@@ -29,6 +29,10 @@ global:
 # Namespace the chart installs into. RBAC and the kill switch RoleBindings assume `kubeheal`.
 namespace: kubeheal
 
+# Explicit namespace to tier mapping for namespaces whose name does not say prod, staging or dev, for example
+# {demo: dev}. Empty by default: every other namespace is "unknown" (human review, never an automatic action).
+namespaceTierMap: {}
+
 # ---- protected namespaces and platform policy (S-CL-4) -------------------------
 namespaces:
   # Create the tier Namespace objects prod, staging and dev (label kubeheal/tier). Set false if

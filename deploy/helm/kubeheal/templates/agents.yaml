@@ -44,6 +44,9 @@ spec:
             {{- if .Values.inference.enabled }}
             - {name: INFERENCE_URL, value: "http://{{ .Values.inference.name }}:{{ .Values.inference.port }}"}
             {{- end }}
+            {{- if .Values.namespaceTierMap }}
+            - {name: NAMESPACE_TIER_MAP, value: {{ include "kubeheal.tierMap" . | quote }}}
+            {{- end }}
             - {name: WATCH_NAMESPACES, value: {{ join "," (concat (splitList " " (include "kubeheal.tiers" .)) .Values.healthAgent.additionalWatchNamespaces) | quote }} }
             - {name: PROMETHEUS_URL, value: {{ $ha.prometheusUrl | quote }}}
             - {name: NAMESPACE, value: {{ $ns | quote }}}
@@ -93,6 +96,9 @@ spec:
           env:
             - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
             - {name: PROC_ROOT, value: /proc}
+            {{- if .Values.namespaceTierMap }}
+            - {name: NAMESPACE_TIER_MAP, value: {{ include "kubeheal.tierMap" . | quote }}}
+            {{- end }}
             {{- include "kubeheal.redisEnv" . | nindent 12 }}
             {{- if .Values.inference.enabled }}
             - {name: INFERENCE_URL, value: "http://{{ .Values.inference.name }}:{{ .Values.inference.port }}"}

@@ -195,6 +195,23 @@ def test_k3d_demo_watches_the_tiers_only_by_default(fixture_file):
     assert {d["metadata"]["name"] for d in by_kind(docs, "Namespace")} == set(TIERS)
 
 
+def _agent_env(docs, kind, name):
+    return {e["name"]: e.get("value") for e in
+            get(docs, kind, name)["spec"]["template"]["spec"]["containers"][0]["env"]}
+
+
+def test_the_demo_namespace_maps_to_dev_for_both_sensing_agents(fixture_file):
+    docs = render("k3d-demo", fixture_file)
+    assert _agent_env(docs, "Deployment", "health-agent")["NAMESPACE_TIER_MAP"] == "demo=dev"
+    assert _agent_env(docs, "DaemonSet", "security-agent")["NAMESPACE_TIER_MAP"] == "demo=dev"
+
+
+def test_without_a_tier_map_the_variable_is_not_set(fixture_file):
+    docs = render("prod", fixture_file)
+    assert "NAMESPACE_TIER_MAP" not in _agent_env(docs, "Deployment", "health-agent")
+    assert "NAMESPACE_TIER_MAP" not in _agent_env(docs, "DaemonSet", "security-agent")
+
+
 def test_an_additional_watch_namespace_gets_a_read_binding_and_never_a_namespace_object(fixture_file):
     docs = render("k3d-demo", fixture_file, "healthAgent.additionalWatchNamespaces={demo}")
     health = get(docs, "Deployment", "health-agent")

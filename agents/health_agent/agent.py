@@ -54,6 +54,7 @@ from kubernetes_asyncio.config import load_incluster_config
 from prometheus_client import Counter
 
 from agents.common.metrics import KubeHealMetrics
+from agents.common.tiers import namespace_tier as _namespace_tier
 from agents.common.sampling import sampling_factor, scaled_interval
 from agents.health_agent import baseline
 from agents.health_agent import inference_client
@@ -67,19 +68,8 @@ from kubeheal.posture import PostureError, policy_violations
 
 
 def namespace_tier(namespace: str) -> str:
-    """Map a namespace to its risk tier (prod / staging / dev / unknown).
-
-    A namespace that matches none of the known names is "unknown", not "dev": the decision policy scores an
-    unknown tier with the highest multiplier and never acts automatically on it. (The `kubeheal/tier` namespace
-    label is set by the manifests but is not read by any agent yet; the name rule is all there is.)"""
-    n = (namespace or "").lower()
-    if "prod" in n:
-        return "prod"
-    if "stag" in n:
-        return "staging"
-    if "dev" in n:
-        return "dev"
-    return "unknown"
+    """See agents/common/tiers.py: NAMESPACE_TIER_MAP first, then the name rule; otherwise "unknown"."""
+    return _namespace_tier(namespace)
 
 
 logging.basicConfig(level=logging.INFO)
@@ -237,6 +227,9 @@ class HealthAgent:
         # first look at a workload failed (Redis error): key -> (deployment, spec, hash, retry not before). A quiet
         # drifted workload produces no further event, so the scheduler retries it; a newer event supersedes it.
         self._first_sight_retry: Dict[Key, Tuple[Dict, Dict, str, float]] = {}
+        # Counts the spec changes seen per workload. It is part of the OBSERVE no-score notice id, so a spec that
+        # flaps A, B, A during an outage is told to a human again instead of being absorbed by the 24 h marker.
+        self._spec_epoch: Dict[Key, int] = {}
         self.pending: Dict[Key, Pending] = {}
         self.tracking: Dict[Key, Tracked] = {}
         self.assessing: Dict[Key, str] = {}         # workload -> spec hash being assessed now
@@ -396,7 +389,7 @@ class HealthAgent:
             if self.seen_hash.get(key) == h:      # status-only or metadata-only update: nothing to assess
                 return
             first = key not in self.seen_hash
-            self.seen_hash[key] = h
+            self._set_seen(key, h)
             if first:
                 await self._first_sight(key, dep, spec, h)
             else:
@@ -407,6 +400,11 @@ class HealthAgent:
     def _forget(self, key: Key) -> None:
         for d in (self.pending, self.tracking, self.latest_dep, self.seen_hash, self._drifted, self._first_sight_retry):
             d.pop(key, None)
+
+    def _set_seen(self, key: Key, h: str) -> None:
+        if self.seen_hash.get(key) != h:
+            self._spec_epoch[key] = self._spec_epoch.get(key, 0) + 1
+        self.seen_hash[key] = h
 
     @staticmethod
     def _assessed_key(key: Key) -> str:
@@ -478,7 +476,7 @@ class HealthAgent:
             self._first_sight_retry.pop(key, None)
             if key in self.seen_hash or key not in self.latest_dep:    # a newer event handled it, or it was deleted
                 continue
-            self.seen_hash[key] = h
+            self._set_seen(key, h)
             await self._first_sight(key, dep, spec, h)
         for key, p in list(self.pending.items()):
             if now >= p.deadline:
@@ -664,7 +662,7 @@ class HealthAgent:
             event_id = p.unavailable_event_id
         else:
             h = self.seen_hash.get((ns, name), "unknown")
-            event_id = self._stable_event_id(ns, name, h, "unavailable")
+            event_id = self._stable_event_id(ns, name, h, f"unavailable-{self._spec_epoch.get((ns, name), 0)}")
         published = await self._publish_model_unavailable(ns, name, error, event_id=event_id)
         if published and p is not None:
             p.notified_unavailable = True
@@ -939,7 +937,7 @@ class HealthAgent:
                 self.latest_dep[key] = dep
                 # The live spec is now the newest known: an older pending change is superseded, and the watch
                 # event that reports this same spec later finds the hash already seen.
-                self.seen_hash[key] = h
+                self._set_seen(key, h)
                 self.pending.pop(key, None)
                 self.assessing[key] = h
                 try:
