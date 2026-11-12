@@ -425,7 +425,8 @@ class ExecutorService:
         freeze = SnapshotFreeze(self.redis)
         if req.action == "contain":
             outcome = await quarantine.contain(gate, self.core_api, self.networking_api, self.apps_api,
-                                               self.custom_api, req, rec, self.cfg, freeze)
+                                               self.custom_api, req, rec, self.cfg, freeze,
+                                               redis=self.redis, sleep=self.sleep, clock=self.clock)
         elif req.action == "patch":
             golden = await load_baseline(self.redis, namespace, req.deployment)
             async with self._lock(namespace, req.deployment):
