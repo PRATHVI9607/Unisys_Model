@@ -13,10 +13,22 @@ def test_scoring_load_script_uses_shipped_feature_names_and_exports_default():
 
 
 def test_k6_duration_parser_converts_milliseconds_and_seconds():
-    logs = "http_req_duration..............: avg=24.1ms min=2ms med=19.5ms max=90ms p(90)=50ms p(95)=62.5ms\n"
+    logs = "http_req_failed............: 0.00% 0 out of 10\nhttp_req_duration..............: avg=24.1ms min=2ms med=19.5ms max=90ms p(90)=50ms p(95)=62.5ms\n"
     assert p11_run._parse_k6_latency(logs) == (19.5, 62.5)
-    logs = "http_req_duration..............: avg=0.2s min=0.1s med=0.15s max=1s p(95)=0.5s\n"
+    logs = "http_req_failed............: 0.00% 0 out of 10\nhttp_req_duration..............: avg=0.2s min=0.1s med=0.15s max=1s p(95)=0.5s\n"
     assert p11_run._parse_k6_latency(logs) == (150.0, 500.0)
+
+
+def test_failed_k6_summary_is_not_reported_as_a_measurement():
+    logs = """checks.....................: 0.00%   0 out of 297
+http_req_duration..........: med=0s    p(95)=0s
+http_req_failed............: 100.00% 297 out of 297
+http_reqs..................: 297     2.638763/s
+"""
+    assert p11_run._parse_k6_rate(logs, "checks") == (0.0, 0, 297)
+    assert p11_run._parse_k6_rate(logs, "http_req_failed") == (100.0, 297, 297)
+    assert not p11_run._k6_succeeded(logs)
+    assert p11_run._parse_k6_latency(logs) == ("not measured", "not measured")
 
 
 def test_load_cleanup_removes_only_the_named_job_and_its_configmap(monkeypatch):
@@ -132,14 +144,41 @@ def test_load_results_are_written_even_when_cleanup_reports_errors(monkeypatch, 
     monkeypatch.setattr(p11_run.harness, "assert_test_mode", lambda context: None)
     monkeypatch.setattr(p11_run, "_hpa_state", lambda: {"current_replicas": 2, "desired_replicas": 2})
     monkeypatch.setattr(p11_run.harness, "apply_k6_job", lambda *args, **kwargs:
-                        "http_req_duration..............: med=2ms p(95)=4ms")
+                        "checks.....................: 100.00% 10 out of 10\n"
+                        "http_req_duration..........: med=2ms p(95)=4ms\n"
+                        "http_req_failed............: 0.00% 0 out of 10")
     monkeypatch.setattr(p11_run, "_cleanup_load", lambda name: ["job cleanup failed", "configmap deleted"])
 
     result = p11_run.run_load(10, "30s", p11_run.DEFAULT_URL)
 
     assert result["cleanup"] == "job cleanup failed | configmap deleted"
+    assert result["status"] == "measured"
     assert (tmp_path / "p11-load-10-owned-run.log").is_file()
     assert (tmp_path / "p11-load-10-owned-run.csv").is_file()
+
+
+def test_run_load_records_failed_checks_as_not_measured(monkeypatch, tmp_path):
+    monkeypatch.setattr(p11_run, "RESULTS", tmp_path)
+    monkeypatch.setattr(p11_run, "_name", lambda prefix: "p11-load-10-failed-run")
+    monkeypatch.setattr(p11_run.harness, "assert_test_mode", lambda context: None)
+    monkeypatch.setattr(p11_run, "_hpa_state", lambda: {"current_replicas": 2, "desired_replicas": 2})
+    failed_summary = """checks.....................: 0.00% 0 out of 12
+http_req_duration..........: med=0s p(95)=0s
+http_req_failed............: 100.00% 12 out of 12
+"""
+    monkeypatch.setattr(p11_run.harness, "apply_k6_job", lambda *args, **kwargs: failed_summary)
+    monkeypatch.setattr(p11_run, "_cleanup_load", lambda name: ["job deleted", "configmap deleted"])
+
+    result = p11_run.run_load(10, "30s", p11_run.DEFAULT_URL)
+
+    assert result["status"] == "failed"
+    assert result["latency_status"] == "not measured"
+    assert result["p50_ms"] == "not measured"
+    assert result["p95_ms"] == "not measured"
+    assert result["checks_passed"] == 0
+    assert result["checks_failed"] == 12
+    assert result["requests_failed"] == 12
+    assert result["request_count"] == 12
 
 
 def test_pod_chaos_waits_for_old_uid_to_disappear_and_ready_count_to_recover(monkeypatch, tmp_path):

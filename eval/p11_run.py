@@ -92,6 +92,9 @@ def _load_script(url: str, vus: int, duration: str) -> str:
 
 def _parse_k6_latency(logs: str) -> tuple[float | str, float | str]:
     """Return median and p95 milliseconds from k6 http_req_duration summary, if present."""
+    request_summary = _parse_k6_rate(logs, "http_req_failed")
+    if not request_summary or request_summary[2] == 0 or request_summary[1] == request_summary[2]:
+        return "not measured", "not measured"
     pattern = re.compile(r"\b(med|p\(95\))=([0-9]+(?:\.[0-9]+)?)(µs|us|ms|s)\b")
     factors = {"µs": 0.001, "us": 0.001, "ms": 1.0, "s": 1000.0}
     found: dict[str, float] = {}
@@ -101,6 +104,26 @@ def _parse_k6_latency(logs: str) -> tuple[float | str, float | str]:
         for label, value, unit in pattern.findall(line):
             found[label] = float(value) * factors[unit]
     return found.get("med", "not measured"), found.get("p(95)", "not measured")
+
+
+def _parse_k6_rate(logs: str, metric: str) -> tuple[float, int, int] | None:
+    """Return summary percent/count/total for a k6 rate metric, if present."""
+    pattern = re.compile(r"([0-9]+(?:\.[0-9]+)?)%\s+(\d+)\s+out of\s+(\d+)")
+    for line in logs.splitlines():
+        if metric not in line:
+            continue
+        match = pattern.search(line)
+        if match:
+            return float(match.group(1)), int(match.group(2)), int(match.group(3))
+    return None
+
+
+def _k6_succeeded(logs: str) -> bool:
+    """Only count a load as successful when k6 reports real, passing checks and requests."""
+    checks = _parse_k6_rate(logs, "checks")
+    failures = _parse_k6_rate(logs, "http_req_failed")
+    return bool(checks and failures and checks[2] > 0 and checks[1] == checks[2]
+                and failures[2] > 0 and failures[1] == 0)
 
 
 def _cleanup_load(name: str) -> list[str]:
@@ -126,7 +149,7 @@ def _cleanup_load(name: str) -> list[str]:
 
 
 def _coverage_markdown(rows: list[dict]) -> str:
-    measured_e1 = [row for row in rows if row.get("scenario") == "E1 k6 health inference" and row.get("status") == "completed"]
+    measured_e1 = [row for row in rows if row.get("scenario") == "E1 k6 health inference" and row.get("status") == "measured"]
     measured_e2 = [row for row in rows if str(row.get("scenario", "")).startswith("E2 ") and row.get("status") == "measured"]
     lines = [
         "# P11 and V5-E1 evaluation coverage",
@@ -140,7 +163,7 @@ def _coverage_markdown(rows: list[dict]) -> str:
         levels = ", ".join(str(row.get("vus")) for row in measured_e1)
         lines.append(f"| P11-E1 k6 scoring load | measured | VUs {levels}; see per-run CSV, raw k6 logs, and HPA samples below |")
     else:
-        lines.append("| P11-E1 k6 scoring load | not measured | no completed live load run recorded yet |")
+        lines.append("| P11-E1 k6 scoring load | not measured | no run with passing checks and successful HTTP requests recorded yet |")
     if measured_e2:
         lines.append(f"| P11-E2 inference pod recovery | measured | {len(measured_e2)} completed recovery run(s); see per-run CSV |")
     else:
@@ -322,7 +345,7 @@ def run_load(vus: int, duration: str, target_url: str) -> dict:
                 time.sleep(5)
             logs = future.result()
         samples.append(_hpa_state())
-        outcome = "completed"
+        outcome = "measured" if _k6_succeeded(logs) else "failed"
     except Exception:
         try:
             logs = harness.kubectl(CONTEXT, ["logs", "job/" + name, "-n", NAMESPACE, "--all-containers=true", "--tail=200"])
@@ -333,6 +356,8 @@ def run_load(vus: int, duration: str, target_url: str) -> dict:
         cleanup = _cleanup_load(name)
         elapsed_s = round(time.monotonic() - start, 3)
         med, p95 = _parse_k6_latency(logs)
+        checks = _parse_k6_rate(logs, "checks")
+        failures = _parse_k6_rate(logs, "http_req_failed")
         RESULTS.mkdir(parents=True, exist_ok=True)
         run_id = name
         (RESULTS / f"{run_id}.log").write_text(logs, encoding="utf-8")
@@ -344,14 +369,18 @@ def run_load(vus: int, duration: str, target_url: str) -> dict:
             "status": outcome,
             "p50_ms": med,
             "p95_ms": p95,
-            "latency_status": "measured" if isinstance(med, float) and isinstance(p95, float) else "not measured",
+            "latency_status": "measured" if outcome == "measured" and isinstance(med, float) and isinstance(p95, float) else "not measured",
+            "checks_passed": checks[1] if checks else "not measured",
+            "checks_failed": checks[2] - checks[1] if checks else "not measured",
+            "requests_failed": failures[1] if failures else "not measured",
+            "request_count": failures[2] if failures else "not measured",
             "hpa_samples": len(samples),
             "replicas_before": before.get("current_replicas", "not measured"),
             "replicas_after": samples[-1].get("current_replicas", "not measured") if samples else "not measured",
             "elapsed_s": elapsed_s,
             "cleanup": " | ".join(cleanup),
         }
-        harness.write_results(RESULTS, run_id, [row], cluster=CONTEXT, status="measured" if outcome == "completed" else "not measured")
+        harness.write_results(RESULTS, run_id, [row], cluster=CONTEXT, status="measured" if outcome == "measured" else "not measured")
         update_coverage_summary()
         print(json.dumps(row, sort_keys=True))
     return row
@@ -430,7 +459,9 @@ def main() -> int:
         if len(set(args.vus)) != len(args.vus):
             parser.error("--vus values must be unique")
         for vus in args.vus:
-            run_load(vus, args.duration, args.target_url)
+            result = run_load(vus, args.duration, args.target_url)
+            if result["status"] != "measured":
+                return 1
     else:
         run_pod_chaos(args.namespace, args.deployment, args.action)
     return 0
