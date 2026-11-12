@@ -8,15 +8,15 @@ only place that translates one into the other, so the choices are visible and te
 
   * Opens become `open_w` / `open_r` from the open flags (`open_syscall`); an open without flags is a read, as in v5.
   * MAPPING CHOICE: a raw `write`, `pwrite` or `pwritev` event becomes `open_w`. v5 has no group for raw writes
-    (its Falco rule hooks opens, not write()), but the rules in `k8s/falco-kubeheal-rules.yaml` still emit raw
-    writes, so without this mapping `frac_write` would be 0 for every live window. One raw write event is one
-    `open_w` event (no de-duplication per file), which is not what the training windows counted (one open per
-    file): a train/serve skew that disappears when the rules emit opens with flags (V5-S1). Chosen, not measured.
+    (its Falco rule hooks opens, not write()). The rules in `k8s/falco-kubeheal-rules.yaml` (V5-S1) no longer hook
+    raw writes either: they emit opens with flags, which this module maps as above. The raw-write mapping stays for
+    older traces and other event sources; one raw write event is one `open_w` event (no de-duplication per file),
+    which is not what the training windows counted (one open per file). Chosen, not measured.
   * A syscall outside the captured groups (mmap, msync, ...) is dropped: the training windows never held them.
   * Renames: `path` is `fs.path.source` when the rule outputs it, `new_path` is `fs.path.target` or, for a
-    rename event that only carries `fd.name` (the rules in `k8s/` today), that name. The source is never
-    guessed from the target, so the suffix, temp and rotation rename features are None until the rules output
-    both paths (V5-S1).
+    rename event that only carries `fd.name` (older traces), that name. The source is never guessed from
+    the target, so the suffix, temp and rotation rename features are None for such events. The rules in `k8s/`
+    (V5-S1) output both paths.
   * Windows are cut like the v5 agent cuts them: at most MAX_WINDOW_EVENTS events, none older than WINDOW_S before
     the newest.
 """

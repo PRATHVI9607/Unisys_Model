@@ -50,7 +50,7 @@ spec:
             # Falco input mode: auto (use Falco when its socket or events file exists, otherwise the
             # /proc write-byte tracker only), live, off, or replay (FALCO_REPLAY_PATH, explicit opt-in
             # only: replay never starts from auto because it invents pids and pods).
-            # See agents/security_agent/falco_client.py. Falco itself is installed from k8s/falco.yaml.
+            # See agents/security_agent/falco_client.py. Falco itself is installed with k8s/falco-values.yaml and the rules file (see scripts/install.sh).
             - name: FALCO_MODE
               value: auto
             - name: FALCO_EVENTS_PATH

@@ -1,14 +1,15 @@
 # Falco config + KubeHeal ransomware rules.
-# Install Falco itself via Helm with this config (see scripts/install.sh):
+# Install Falco itself via Helm with the values in k8s/falco-values.yaml and the rules file (see scripts/install.sh):
 #   helm install falco falcosecurity/falco -n falco --create-namespace \
-#     --set driver.kind=ebpf \
-#     --set-file customRules."kubeheal_rules\.yaml"=k8s/falco-kubeheal-rules.yaml \
-#     --set falco.json_output=true --set falco.file_output.enabled=true \
-#     --set falco.file_output.filename=/var/run/falco/events.jsonl
+#     -f k8s/falco-values.yaml \
+#     --set-file customRules."kubeheal_rules\.yaml"=k8s/falco-kubeheal-rules.yaml
 #
 # Falco writes one JSON event per line to /var/run/falco/events.jsonl on each
 # node (hostPath). The KubeHeal Security Agent DaemonSet mounts the same path
 # read-only and tails it (FALCO_MODE=auto, FALCO_EVENTS_PATH).
+#
+# The ConfigMap below carries the same rules as k8s/falco-kubeheal-rules.yaml (an alternative way to ship them).
+# It is generated from that file and tests/test_falco_rules_sync.py fails if the two differ.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -17,30 +18,72 @@ metadata:
   namespace: falco
 data:
   kubeheal_rules.yaml: |
-    # Ransomware-behaviour rules feeding KubeHeal's Security Model.
-    - macro: pv_write
-      condition: (evt.type in (write,pwrite,pwritev,ftruncate,truncate) and fd.name startswith /data)
+    # KubeHeal ransomware-behaviour rules for Falco (--set-file customRules).
+    #
+    # V5-S1: adapted from the v5 rule (origin/main deploy/k8s/falco-kubeheal-rules.yaml). Falco puts a field into
+    # `output_fields` only when the rule's output string references it, and the Security Agent's LightGBM model is only
+    # as good as the fields it gets. The earlier rules emitted neither the open flags nor the rename source, so the
+    # shipped bundle scored a ransomware window benign. Now:
+    #   * every rule outputs the same field set, which is exactly what agents/security_agent/falco_client.py
+    #     `_normalise` reads: evt.type, evt.arg.flags (opens: read or write intent), proc.pid, fd.name (fd-based calls),
+    #     fs.path.name (path-based calls: unlink, chmod, truncate), fs.path.source and fs.path.target (BOTH rename paths),
+    #     k8s.pod.name, k8s.pod.uid, k8s.ns.name, container.id;
+    #   * opens are emitted with their flags (rule "KubeHeal Data File Activity") instead of hooking write(): the agent
+    #     no longer has to count raw write() calls as `open_w` (train/serve skew, see agents/security_agent/v5_window.py),
+    #     and Falco does not process every write() on the node;
+    #   * the rules are self-contained (no `container` macro from Falco's default rule set).
+    # The three rules are disjoint on evt.type or on the ransom-note name, so one syscall yields one event even when Falco
+    # runs with rule_matching=all. tests/test_falco_rules_sync.py keeps these fields, the evt.type list and the model's
+    # captured syscall groups (kubeheal.features.security.CAPTURED_GROUPS) in sync, and checks that the copy in the
+    # ConfigMap of k8s/falco.yaml is identical to this file.
+    # Not verified on a running Falco (none is installed on the k3d cluster).
 
-    - macro: rename_op
-      condition: (evt.type in (rename,renameat,renameat2))
+    # Mount points of the volumes KubeHeal protects (prefix match on path components). Add yours here.
+    - list: kh_data_dirs
+      items: [/data]
 
-    - rule: KubeHeal Ransomware Mass Rename
-      desc: Burst of file renames on a PersistentVolume (file-locking pattern)
-      condition: rename_op and fd.name startswith /data and container
-      output: "kubeheal_ransomware rename burst (pid=%proc.pid file=%fd.name pod=%k8s.pod.name ns=%k8s.ns.name)"
-      priority: WARNING
-      tags: [ransomware, kubeheal]
+    # Not the kubeheal namespace: its own Redis writes to /data (an emptyDir) and would feed back into the model.
+    - macro: kh_in_pod
+      condition: (container.id != host and k8s.pod.name exists and k8s.ns.name != kubeheal)
 
-    - rule: KubeHeal Ransomware Mass Write
-      desc: High-rate writes/truncates on a PersistentVolume (in-place encryption)
-      condition: pv_write and container
-      output: "kubeheal_ransomware pv write (pid=%proc.pid file=%fd.name pod=%k8s.pod.name ns=%k8s.ns.name)"
-      priority: WARNING
-      tags: [ransomware, kubeheal]
+    - macro: kh_on_data
+      condition: >
+        (fd.name pmatch (kh_data_dirs) or fs.path.name pmatch (kh_data_dirs) or
+         fs.path.source pmatch (kh_data_dirs) or fs.path.target pmatch (kh_data_dirs))
 
+    - macro: kh_open_op
+      condition: (evt.type in (open, openat, openat2, creat))
+
+    - macro: kh_rename_op
+      condition: (evt.type in (rename, renameat, renameat2))
+
+    - macro: kh_note_name
+      condition: (fd.name contains DECRYPT or fd.name endswith .locked or fd.name endswith .encrypted)
+
+    # The CRITICAL rule: the Security Agent treats a CRITICAL rule whose name contains "ransom" as a trigger on its own
+    # (agents/security_agent/syscall_window.py). The open still carries its flags, so the model counts it as a write open.
     - rule: KubeHeal Ransom Note Dropped
-      desc: A ransom-note style file was created
-      condition: evt.type in (open,openat,creat) and (fd.name contains DECRYPT or fd.name contains README_DECRYPT or fd.name endswith .locked or fd.name endswith .encrypted)
-      output: "kubeheal_ransomware note dropped (pid=%proc.pid file=%fd.name pod=%k8s.pod.name ns=%k8s.ns.name)"
+      desc: A ransom-note style file was created or opened
+      condition: kh_open_op and kh_note_name and kh_in_pod
+      output: "kubeheal_ransomware note dropped (evt_type=%evt.type flags=%evt.arg.flags pid=%proc.pid file=%fd.name path=%fs.path.name oldpath=%fs.path.source newpath=%fs.path.target pod=%k8s.pod.name pod_uid=%k8s.pod.uid ns=%k8s.ns.name cid=%container.id)"
       priority: CRITICAL
       tags: [ransomware, kubeheal]
+
+    - rule: KubeHeal Ransomware Mass Rename
+      desc: File renames on a data volume (file-locking pattern); outputs both the old and the new path
+      condition: kh_rename_op and kh_on_data and kh_in_pod
+      output: "kubeheal_ransomware rename burst (evt_type=%evt.type flags=%evt.arg.flags pid=%proc.pid file=%fd.name path=%fs.path.name oldpath=%fs.path.source newpath=%fs.path.target pod=%k8s.pod.name pod_uid=%k8s.pod.uid ns=%k8s.ns.name cid=%container.id)"
+      priority: WARNING
+      tags: [ransomware, kubeheal]
+
+    # Replaces the earlier "Mass Write" rule (raw write, pwrite, pwritev, ftruncate, truncate): write intent now comes from
+    # the open flags. Truncates stay, they are a model feature group of their own.
+    - rule: KubeHeal Data File Activity
+      desc: File opens (with flags), unlinks, truncates and permission changes on a data volume
+      condition: >
+        evt.type in (open, openat, openat2, creat, unlink, unlinkat, truncate, ftruncate,
+                     chmod, fchmod, fchmodat)
+        and kh_on_data and kh_in_pod and not (kh_open_op and kh_note_name)
+      output: "kubeheal file (evt_type=%evt.type flags=%evt.arg.flags pid=%proc.pid file=%fd.name path=%fs.path.name oldpath=%fs.path.source newpath=%fs.path.target pod=%k8s.pod.name pod_uid=%k8s.pod.uid ns=%k8s.ns.name cid=%container.id)"
+      priority: NOTICE
+      tags: [kubeheal]

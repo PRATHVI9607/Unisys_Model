@@ -1,0 +1,51 @@
+# Falco Helm values for KubeHeal (V5-S1), adapted from v5's deploy/k8s/helm/falco-values.yaml (origin/main).
+# Used with: helm install falco falcosecurity/falco -n falco --create-namespace -f k8s/falco-values.yaml \
+#              --set-file customRules."kubeheal_rules\.yaml"=k8s/falco-kubeheal-rules.yaml
+# The driver kind is left to the installer (scripts/install.sh sets driver.kind=ebpf; v5 used modern_ebpf).
+# Not verified on a running Falco here: none is installed on the k3d cluster.
+#
+# The Security Agent reads only `output_fields` (plus rule, priority and time), so the formatted `output` string and
+# the tags are switched off (v5 did the same to keep each line small), and the fields the rules reference are kept.
+# Falco only fills output_fields with the fields the rule output string references: that is why the rules in
+# k8s/falco-kubeheal-rules.yaml name every field the agent needs (tests/test_falco_rules_sync.py).
+# Only the KubeHeal rules are loaded (customRules land in rules.d); Falco's default rule set would add noisy events
+# to the same events.jsonl the agent counts. The image bundles the container plugin, so falcoctl (which fetches
+# plugins and rules from the network at start) is off. Both are kept from v5's values. The image tag and the driver
+# kind are left to the installer (v5 pinned a Falco tag for its own kernel; not verified here).
+falcoctl:
+  artifact:
+    install: {enabled: false}
+    follow: {enabled: false}
+collectors:
+  kubernetes: {enabled: false}   # k8s.ns.name / k8s.pod.name come from the container plugin (CRI labels)
+resources:
+  requests: {cpu: 100m, memory: 256Mi}      # v5's settings; not measured on this machine
+  limits: {cpu: "2", memory: 1Gi}
+falco:
+  rules_files: [/etc/falco/rules.d]
+  json_output: true
+  json_include_output_property: false
+  json_include_tags_property: false
+  json_include_output_fields_property: true
+  file_output:
+    enabled: true
+    keep_alive: true
+    filename: /var/run/falco/events.jsonl
+  stdout_output: {enabled: false}
+  append_output: [{suggested_output: false}]
+  syslog_output: {enabled: false}       # no /dev/log in the pod: a failed socket per alert
+  outputs_queue: {capacity: 100000}     # bounded (v5's value, not measured here): overload drops alerts, not the pod
+  base_syscalls:
+    all: false     # the rules hook no read()/write(), so Falco need not process every I/O call on the node
+    # Lines 1-2: the evt.type lists of the rules (keep in sync, tests/test_falco_rules_sync.py checks it).
+    # Line 3: state libsinsp needs to resolve container.id / k8s.* and fd.name (process lifecycle, fd table, chdir).
+    custom_set: [open, openat, openat2, creat, rename, renameat, renameat2, unlink, unlinkat, truncate, ftruncate,
+                 chmod, fchmod, fchmodat,
+                 clone, clone3, fork, vfork, execve, execveat, close, close_range, dup, dup2, dup3, fcntl, chdir, fchdir]
+    repair: true
+mounts:
+  volumes:
+    - name: kubeheal-events
+      hostPath: {path: /var/run/falco, type: DirectoryOrCreate}
+  volumeMounts:
+    - {name: kubeheal-events, mountPath: /var/run/falco}
