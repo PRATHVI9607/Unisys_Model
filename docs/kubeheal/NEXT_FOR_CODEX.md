@@ -9,7 +9,7 @@ chart changes and merges, provided it runs the full suite after each merge and k
 
 ## Handoff state (2026-11-12, Codex)
 
-Codex paused for handoff. No push is permitted. Get current tips with `git log -1` in each worktree: docs handoff commits are `work` `f43665a` and `demo` `bdec7cd`; `wave/V5-D4` is `ad464f3`; `wave/V5-S2` is `c221832`. Active task is V5-S2, committed WIP, unreviewed and unmerged. Owner stop points are credentials/passwords, model training, deleting user data, or changing `PROJECT_SPEC.md`.
+Codex paused for handoff. No push is permitted. Get current `work` and `demo` tips with `git log -1` in each worktree. Active task is V5-S2, committed WIP, unreviewed and unmerged. Owner stop points are credentials/passwords, model training, deleting user data, or changing `PROJECT_SPEC.md`.
 
 Owner decisions (all in `V5_INTEGRATION_PLAN.md` section 11): M1 option (b), M2, M3, D1, D2, D3, D5, D6, D7, plus the two latest answers Q1 and Q2.
 In short: LightGBM health and security bundles (split-conformal sets, TreeSHAP) run inside OUR architecture; an automatic action needs a prediction set of exactly one label (M2);
@@ -23,15 +23,25 @@ the eBPF sensor is optional and last (D6).
 
 | Branch | Worktree | Tip | State | What it needs |
 |---|---|---|---|---|
-| `work` | `../Unisys_Model-wt-metric-query` | `f43665a` at handoff | D4 merged; last suite 1363 passed, 3 skipped, 34 deselected. | Continue with S2 only after its full suite and review. |
-| `demo` | main checkout `C:/My_projects_1/cLOUD/Unisys_Model` | `bdec7cd` at handoff | D4 merged; last demo suite 1368 passed, 2 skipped, 34 deselected. Includes demo-only I2 scripts. | Sync reviewed work changes after each task. |
+| `work` | `../Unisys_Model-wt-metric-query` | `git log -1` | D4 merged; last suite 1363 passed, 3 skipped, 34 deselected. | Continue with S2 only after its full suite and review. |
+| `demo` | main checkout `C:/My_projects_1/cLOUD/Unisys_Model` | `git log -1` | D4 merged; last demo suite 1368 passed, 2 skipped, 34 deselected. Includes demo-only I2 scripts. | Sync reviewed work changes after each task. |
 | `wave/V5-D4` | `../Unisys_Model-wt-V5-D4` | `ad464f3` | Reviewed and merged into `work`; branch suite 1363 passed, 3 skipped, 34 deselected. Worktree clean. | Complete; keep branch. |
 | `wave/V5-S2` | `../Unisys_Model-wt-V5-S2` | `c221832` | Codex WIP commit. Focused review-fix tests 49 passed; full suite not completed after fixes. Not reviewed or merged. | Rerun full suite, review all changes, resolve findings, then merge only if green. |
-| `wave/P11` | none | `2240ec6` | Merged into work; reviewed, but P11 execution tasks remain. | No branch merge needed; run P11 tasks below. |
-| `wave/P5`, `wave/P6`, `wave/P7`, `wave/P8`, `wave/P9` | none | see `git branch -v` | Historical phase branches; implementation status is in PROGRESS. | No action unless checklist says otherwise. |
-| `wave/V5-M1`, `wave/V5-D1`, `wave/V5-D2`, `wave/V5-D3`, `wave/V5-D4a`, `wave/V5-I2`, `wave/V5-I2-demo` | none | see `git branch -v` | Previously reviewed/merged; I2-demo is demo-only. | No action unless checklist says otherwise. |
-| `wave/docs-p6d2` | none | `e611844` | Historical docs/settings branch; inspect ancestry before any merge. | No pending merge recorded. |
-| `wip/docs-p6d2` | none | `b229491` | P6-D2 merged into work. | No action. |
+| `wave/P11` | none | `2240ec6` | Ancestor of work; P11 harness implementation merged and reviewed. | Run remaining P11 tasks below. |
+| `wave/P5` | none | `8f1d8b6` | Ancestor of work; phase changes merged. | No branch action; follow open checklist items. |
+| `wave/P6` | none | `7f95f6c` | Ancestor of work; phase changes merged. | No branch action; follow open checklist items. |
+| `wave/P7` | none | `a294eb9` | Ancestor of work; phase changes merged. | Finish RR-7, RR-11 and RR-12 below. |
+| `wave/P8` | none | `246b973` | Ancestor of work; phase changes merged. | No branch action; follow open checklist items. |
+| `wave/P9` | none | `0451237` | Ancestor of work; phase changes merged. | No branch action; chart tasks below. |
+| `wave/V5-M1` | none | `012f7ec` | Ancestor of work; reviewed and merged. | No action. |
+| `wave/V5-D1` | none | `0d20936` | Ancestor of work; reviewed and merged. | No action. |
+| `wave/V5-D2` | none | `0db2343` | Ancestor of work; reviewed and merged. | No action. |
+| `wave/V5-D3` | none | `799028c` | Ancestor of work; reviewed and merged. | Executor field contract remains Task 7. |
+| `wave/V5-D4a` | none | `8d307b2` | Ancestor of work; reviewed and merged. | No action. |
+| `wave/V5-I2` | none | `0af66f1` | Ancestor of work; reviewed and merged. | Cluster deployment remains Task 4. |
+| `wave/V5-I2-demo` | none | `982949e` | Ancestor of demo; demo-only scripts are in demo. | No action. |
+| `wave/docs-p6d2` | none | `e611844` | Ancestor of work; merged. | No action. |
+| `wip/docs-p6d2` | none | `b229491` | Ancestor of work; P6-D2 merged. | No action; cluster verification remains open in PROGRESS. |
 
 Only four worktrees exist (listed above). All are clean at this handoff. Keep S2 and D4 worktrees for now; branches are retained.
 
