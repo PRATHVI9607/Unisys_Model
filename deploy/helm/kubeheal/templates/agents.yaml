@@ -122,6 +122,9 @@ spec:
             - {name: EXEC_NAMESPACES, value: {{ .Values.executor.execNamespaces | quote }}}
             {{- end }}
             {{- include "kubeheal.redisEnv" . | nindent 12 }}
+            {{- if $sa.cgroupFreeze.enabled }}
+            {{- include "kubeheal.containmentHmacEnv" . | nindent 12 }}
+            {{- end }}
             {{- if .Values.inference.enabled }}
             - {name: INFERENCE_URL, value: "http://{{ .Values.inference.name }}:{{ .Values.inference.port }}"}
             {{- end }}
@@ -243,6 +246,7 @@ spec:
             - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
             - {name: METRICS_PORT, value: {{ $ex.metricsPort | quote }}}
             {{- include "kubeheal.redisEnv" . | nindent 12 }}
+            {{- include "kubeheal.containmentHmacEnv" . | nindent 12 }}
             - {name: EXEC_NAMESPACES, value: {{ $ex.execNamespaces | quote }}}
             - {name: RESTORE_ENTROPY_IMAGE, value: {{ include "kubeheal.image" (dict "root" . "image" $ex.image) | quote }}}
             - {name: LEDGER_BACKEND, value: minio}

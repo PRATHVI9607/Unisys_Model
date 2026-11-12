@@ -417,6 +417,9 @@ def test_redis_aof_pvc_and_auth(env, fixture_file):
         assert url == "redis://:$(REDIS_PASSWORD)@redis-master:6379"
         sec = next(e for e in envs if e["name"] == "REDIS_PASSWORD")["valueFrom"]["secretKeyRef"]
         assert sec == {"name": "kubeheal-redis", "key": "password"}
+        if name in {"security-agent", "executor"}:
+            hmac = next(e for e in envs if e["name"] == "CONTAIN_HMAC_KEY")["valueFrom"]["secretKeyRef"]
+            assert hmac == sec
 
 
 def test_redis_secret_created_only_when_password_given(fixture_file):
