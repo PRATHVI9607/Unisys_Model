@@ -13,7 +13,11 @@ Usage:
   REDIS_URL=redis://:<password>@127.0.0.1:6379 python scripts/thaw_pod.py \\
       --namespace prod --pod web-abc-1 --pod-uid <uid> --node <node> --incident-id <incident>
 
-Exit code 0 only when the answer says status `thawed` with frozen 0; 1 otherwise (the reason is printed).
+Exit codes: 0 only when the answer says status `thawed` with frozen 0; 1 when it does not (refused, failed, no
+answer in time; the reason is printed); 2 when REDIS_URL is not set; 3 when Redis cannot be reached.
+The Security Agent refuses a request whose timestamp is more than CONTAIN_REQUEST_TTL_S (30 s, chosen) away from
+its own clock: a reason `expired` or `bad_timestamp` usually means the clocks differ (a Docker Desktop VM can
+drift); fix the clock and retry.
 """
 import argparse
 import os
@@ -45,7 +49,11 @@ def thaw(redis, request, wait_s=15.0, poll_s=0.5, sleep=time.sleep, clock=time.m
         if result:
             ok = result.get("status") == "thawed" and result.get("frozen") == "0"
             why = result.get("reason", "")
-            return ok, f"status={result.get('status')} frozen={result.get('frozen')}" + (f" reason={why}" if why else ""), result
+            hint = ""
+            if why.startswith(("expired", "bad_timestamp")):
+                hint = " (the clocks of this machine and the node probably differ by more than the request window)"
+            return ok, (f"status={result.get('status')!r} frozen={result.get('frozen')!r}"
+                        + (f" reason={why!r}" if why else "") + hint), result
         if clock() >= deadline:
             return False, "no answer in time (is the Security Agent on that node running with the freeze consumer?)", {}
         sleep(poll_s)
@@ -67,7 +75,11 @@ def main(argv=None):
     import redis as redis_lib
     client = redis_lib.from_url(url, decode_responses=True)
     request = build_request(args.namespace, args.pod, args.pod_uid, args.node, args.incident_id)
-    ok, message, _result = thaw(client, request, wait_s=args.wait_s)
+    try:
+        ok, message, _result = thaw(client, request, wait_s=args.wait_s)
+    except redis_lib.exceptions.RedisError as e:
+        print(f"NOT THAWED: redis unreachable or failing ({type(e).__name__})", file=sys.stderr)
+        return 3
     print(("THAWED: " if ok else "NOT THAWED: ") + message)
     return 0 if ok else 1
 

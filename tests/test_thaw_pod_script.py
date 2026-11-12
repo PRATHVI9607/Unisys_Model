@@ -67,3 +67,11 @@ def test_no_answer_in_time_is_not_a_success():
     ok, msg, result = mod.thaw(FakeRedis(None), mod.build_request("prod", "p", "u", "n", "i"), wait_s=2,
                                poll_s=0.5, sleep=sleep, clock=clock)
     assert not ok and result == {} and "no answer" in msg
+
+
+def test_a_clock_problem_gets_a_hint_and_control_characters_are_not_echoed_raw():
+    mod = load()
+    ok, msg, _ = mod.thaw(FakeRedis({"status": "refused", "frozen": "0", "reason": "expired\x1b[31m"}),
+                          mod.build_request("prod", "p", "u", "n", "i"), wait_s=1, sleep=lambda s: None)
+    assert not ok and "clocks" in msg and "\x1b" in msg and "\x1b[31m" not in msg
+

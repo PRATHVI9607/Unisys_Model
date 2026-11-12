@@ -924,3 +924,17 @@ def test_the_executor_and_the_security_agent_use_the_same_namespace_list(fixture
     _spec, c = _security_agent(docs)
     assert {e["name"]: e.get("value") for e in c["env"]}["EXEC_NAMESPACES"] == "prod,dev"
 
+
+def test_the_dashboard_image_copies_the_baseline_module_the_promotion_approvals_import():
+    """dashboard/baseline_routes.py imports agents.health_agent.baseline lazily: without these COPY lines the baseline
+    endpoints answer 503 in the real image while every local test passes."""
+    text = (ROOT / "dockerfiles" / "Dockerfile.dashboard").read_text(encoding="utf-8")
+    assert "COPY agents/health_agent/baseline.py /app/agents/health_agent/baseline.py" in text
+    assert "COPY agents/health_agent/__init__.py /app/agents/health_agent/__init__.py" in text
+    assert "COPY agents/common/ /app/agents/common/" in text
+    baseline = (ROOT / "agents" / "health_agent" / "baseline.py").read_text(encoding="utf-8")
+    import re
+    imported = set(re.findall(r"^from (agents\.[\w.]+) import", baseline, re.M)) | \
+        set(re.findall(r"^import (agents\.[\w.]+)", baseline, re.M))
+    assert imported <= {"agents.common"}, f"baseline.py now imports {imported}: copy those into the dashboard image"
+
