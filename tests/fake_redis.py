@@ -88,6 +88,27 @@ class FakeRedis:
             self.store[marker] = entry_id
             self.expiry[marker] = self.now + 86400
             return 1
+        if "kubeheal:record_security_score" in script:
+            # Python mirror of RECORD_SECURITY_SCORE_LUA (agents/security_agent/agent.py); keep the two in step.
+            model_scored, risk, ts_ms, ttl, publish = token, extra[0], extra[1], int(extra[2]), float(extra[3])
+            now_ms, hold = int(ts_ms), int(extra[2]) * 1000
+            previous = self.hashes.get(key, {})
+            alive = self.expiry.get(key, 0) > self.now
+            if model_scored == "true":
+                false_ts = previous.get("false_ts_ms")
+                if (false_ts and now_ms - int(false_ts) < hold and float(risk) < publish and alive):
+                    return ""
+                high, high_ts = previous.get("high_risk"), previous.get("high_ts_ms")
+                if high and high_ts and now_ms - int(high_ts) < hold and float(high) > float(risk):
+                    risk = high
+                else:
+                    previous["high_risk"], previous["high_ts_ms"] = risk, ts_ms
+            else:
+                previous["false_ts_ms"] = ts_ms
+            previous.update({"sec_risk": risk, "model_scored": model_scored, "ts_ms": ts_ms})
+            self.hashes[key] = previous
+            self.expiry[key] = self.now + ttl
+            return risk
         if await self.get(key) != token:
             return 0
         if "expire" in script:

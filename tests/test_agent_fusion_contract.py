@@ -25,9 +25,12 @@ def test_health_publishes_fusion_fields():
 
 def test_security_publishes_fusion_fields():
     pub = published_keys(SEC_SRC, "security")
-    for need in ["sec_risk","sec_label","sec_ci_width","top_syscall",
-                 "namespace_tier","security_embedding_b64","event_id","deployment"]:
+    for need in ["sec_risk","sec_label","sec_prediction_set","sec_uncertain","top_factors_json","model_scored",
+                 "model_version","top_syscall","namespace_tier","event_id","deployment","pod_name","pod_uid"]:
         assert need in pub, f"security agent must publish {need}"
+    # V5-S2: the LightGBM model has no CI width and no embedding; Fusion no longer reads them
+    for gone in ["sec_ci_width","security_embedding_b64"]:
+        assert gone not in pub, f"security agent must not publish {gone} any more"
 
 def test_no_stale_v3_endpoints():
     # no agent should reference the removed v3 monolith service
