@@ -3,7 +3,7 @@
 ## Current state
 
 - Nothing pushed. ALLOW_PUSH was not set. No model training or PROJECT_SPEC.md changes.
-- Before this handoff update, work was f3434a1 and demo was 1fcc1ba. F3 d0ed188 was reviewed and merged into both; work is merged into demo. This documentation commit advances both refs; see .ai/handoff.md and the final reply for resulting hashes.
+- Before the stop-for-today docs, work was f3434a1 and demo was 1fcc1ba. Handoff docs commit 4ee6c09 is on work and was merged into demo by da3e021. This hash-note commit advances both refs; the final reply gives the latest heads. F3 d0ed188 is reviewed and merged into both; work is merged into demo.
 - Latest full suites after product-code changes: work 2,158 passed, 11 skipped (90.05s); demo 2,158 passed, 11 skipped (66.43s). Later commits are documentation-only. Rerun both after any code merge.
 - F3 test_fusion_incident.py still checks no containment request and unsupported-owner escalation; any(...) allows the deliberately injected late escalation. D-5 produced a real Security Agent-scored event and Fusion/Executor test-mode evidence. Full containment through restore was live on a scratch Deployment. Sense was scripted because Falco is absent.
 
