@@ -29,24 +29,49 @@ function KText([string[]]$kubectlArgs) {
     return (@($value) -join '').Trim()
 }
 
-Assert-TestMode
 $scriptPath = Join-Path $PSScriptRoot 'k6_health_model.js'
-$cmPath = Join-Path $env:TEMP 'kubeheal-k6-script.yaml'
-$policyPath = Join-Path $env:TEMP 'kubeheal-k6-networkpolicy.yaml'
-$jobPath = Join-Path $env:TEMP 'kubeheal-k6-job.yaml'
+$runId = [Guid]::NewGuid().ToString('N')
+$cmName = "kubeheal-k6-script-$runId"
+$policyName = "kubeheal-k6-net-$runId"
+$jobName = "kubeheal-k6-load-$runId"
+$cmPath = Join-Path $env:TEMP "kubeheal-k6-script-$runId.yaml"
+$policyPath = Join-Path $env:TEMP "kubeheal-k6-networkpolicy-$runId.yaml"
+$jobPath = Join-Path $env:TEMP "kubeheal-k6-job-$runId.yaml"
 $duration = "${DurationSeconds}s"
 
-# Let kubectl encode the file as ConfigMap data. Out-String -NoNewline flattened every JS line,
-# causing the first // comment to consume the exports and k6 to report "no exported functions".
-K create configmap kubeheal-k6-health-load -n kubeheal "--from-file=health.js=$scriptPath" `
-    --dry-run=client -o yaml | Set-Content -LiteralPath $cmPath -Encoding utf8
+function Remove-RunResource([string]$kind, [string]$name, [string]$runId) {
+    # Names include a per-invocation UUID; the label check ensures this invocation owns the resource.
+    # Each call is best effort so an API error never skips later resources or local temp-file removal.
+    try {
+        $raw = KText @('-n', 'kubeheal', 'get', $kind, $name, '-o', 'json')
+        if (-not $raw) { return }
+        $resource = $raw | ConvertFrom-Json -AsHashtable
+        if ($resource.metadata.labels['kubeheal.k8s.io/run-id'] -ne $runId) {
+            Write-Warning "Leaving $kind/$name in place because its run-id label does not match this invocation."
+            return
+        }
+        K -n kubeheal delete $kind $name --ignore-not-found | Out-Host
+    } catch {
+        Write-Warning "Could not clean up $kind/$name for run ${runId}: $($_.Exception.Message)"
+    }
+}
 
-$policy = @'
+try {
+    Assert-TestMode
+    # Let kubectl encode the file as ConfigMap data. Out-String -NoNewline flattened every JS line,
+    # causing the first // comment to consume the exports and k6 to report "no exported functions".
+    K create configmap $cmName -n kubeheal "--from-file=health.js=$scriptPath" `
+        "--labels=kubeheal.k8s.io/run-id=$runId" --dry-run=client -o yaml |
+        Set-Content -LiteralPath $cmPath -Encoding utf8
+
+$policy = @"
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: kubeheal-k6-health-load
+  name: $policyName
   namespace: kubeheal
+  labels:
+    kubeheal.k8s.io/run-id: $runId
 spec:
   podSelector:
     matchLabels: {app: kubeheal-inference}
@@ -54,24 +79,30 @@ spec:
   ingress:
     - from:
         - podSelector:
-            matchLabels: {app: kubeheal-k6}
+            matchLabels:
+              app: kubeheal-k6
+              kubeheal.k8s.io/run-id: $runId
       ports:
         - {protocol: TCP, port: 8000}
-'@
-Set-Content -LiteralPath $policyPath -Value $policy -Encoding utf8
+"@
+    Set-Content -LiteralPath $policyPath -Value $policy -Encoding utf8
 
-$job = @"
+    $job = @"
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: kubeheal-k6-health-load
+  name: $jobName
   namespace: kubeheal
+  labels:
+    kubeheal.k8s.io/run-id: $runId
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: $($DurationSeconds + 60)
   template:
     metadata:
-      labels: {app: kubeheal-k6}
+      labels:
+        app: kubeheal-k6
+        kubeheal.k8s.io/run-id: $runId
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
@@ -98,12 +129,10 @@ spec:
             - {name: script, mountPath: /scripts, readOnly: true}
       volumes:
         - name: script
-          configMap: {name: kubeheal-k6-health-load}
+          configMap: {name: $cmName}
 "@
-Set-Content -LiteralPath $jobPath -Value $job -Encoding utf8
+    Set-Content -LiteralPath $jobPath -Value $job -Encoding utf8
 
-$jobStarted = $false
-try {
     Assert-TestMode
     Write-Host 'Waiting for HPA baseline current=2 desired=2:'
     $baselineDeadline = [DateTime]::UtcNow.AddSeconds($ScaleDownWaitSeconds)
@@ -120,8 +149,10 @@ try {
         throw "HPA did not return to baseline within $ScaleDownWaitSeconds seconds (current=$baselineCurrent desired=$baselineDesired)."
     }
     Write-Host 'HPA baseline confirmed.'
-    K apply -f $cmPath | Out-Host
-    K apply -f $policyPath | Out-Host
+    # `create` refuses to adopt/update an existing object. The UUID names and run-id labels let cleanup
+    # distinguish these resources from anything created by another invocation or operator.
+    K create -f $cmPath | Out-Host
+    K create -f $policyPath | Out-Host
     $endpointDeadline = [DateTime]::UtcNow.AddSeconds(120)
     do {
         $endpoints = KText @('-n', 'kubeheal', 'get', 'endpoints', 'kubeheal-inference',
@@ -131,8 +162,7 @@ try {
     } while ([DateTime]::UtcNow -lt $endpointDeadline)
     if (-not $endpoints) { throw 'Inference Service has no ready endpoints; refusing to start k6.' }
     Write-Host "Inference ready endpoints: $endpoints"
-    $jobStarted = $true   # set first so a partial apply is still cleaned up in finally
-    K apply -f $jobPath | Out-Host
+    K create -f $jobPath | Out-Host
     Write-Host 'HPA before load:'
     Read-Hpa
 
@@ -142,15 +172,15 @@ try {
         Start-Sleep -Seconds $SampleSeconds
         Write-Host 'HPA during load:'
         Read-Hpa
-        $complete = KText @('-n', 'kubeheal', 'get', 'job', 'kubeheal-k6-health-load',
+        $complete = KText @('-n', 'kubeheal', 'get', 'job', $jobName,
             '-o', 'jsonpath={.status.succeeded}')
         if ($complete -eq '1') { $jobSucceeded = $true; break }
-        $failed = KText @('-n', 'kubeheal', 'get', 'job', 'kubeheal-k6-health-load',
+        $failed = KText @('-n', 'kubeheal', 'get', 'job', $jobName,
             '-o', 'jsonpath={.status.failed}')
-        if ($failed -eq '1') { throw 'k6 Job failed; inspect kubectl logs for kubeheal-k6-health-load.' }
+        if ($failed -eq '1') { throw "k6 Job failed; inspect kubectl logs for $jobName." }
     }
     if (-not $jobSucceeded) { throw "k6 Job did not complete within $($DurationSeconds + 60) seconds." }
-    K -n kubeheal logs job/kubeheal-k6-health-load | Out-Host
+    K -n kubeheal logs "job/$jobName" | Out-Host
     Write-Host 'HPA immediately after load:'
     Read-Hpa
 
@@ -164,19 +194,24 @@ try {
             '-o', 'jsonpath={.status.desiredReplicas}')
         if ($current -eq '2' -and $desired -eq '2') { break }
     } while ([DateTime]::UtcNow -lt $scaleDownDeadline)
+    if ($current -ne '2' -or $desired -ne '2') {
+        throw "HPA did not return to baseline within $ScaleDownWaitSeconds seconds (current=$current desired=$desired)."
+    }
 }
 catch {
     Write-Host 'k6 Job diagnostics:'
-    KTry -n kubeheal get job kubeheal-k6-health-load -o yaml | Out-Host
-    KTry -n kubeheal get pods -l app=kubeheal-k6 -o wide | Out-Host
-    KTry -n kubeheal logs job/kubeheal-k6-health-load --all-containers=true --tail=100 | Out-Host
+    KTry -n kubeheal get job $jobName -o yaml | Out-Host
+    KTry -n kubeheal get pods -l "kubeheal.k8s.io/run-id=$runId" -o wide | Out-Host
+    KTry -n kubeheal logs "job/$jobName" --all-containers=true --tail=100 | Out-Host
     throw
 }
 finally {
-    if ($jobStarted) {
-        K -n kubeheal delete job kubeheal-k6-health-load --ignore-not-found | Out-Host
+    Remove-RunResource 'job' $jobName $runId
+    Remove-RunResource 'networkpolicy' $policyName $runId
+    Remove-RunResource 'configmap' $cmName $runId
+    try {
+        Remove-Item -LiteralPath $cmPath, $policyPath, $jobPath -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Warning "Could not remove local k6 staging files for run ${runId}: $($_.Exception.Message)"
     }
-    K -n kubeheal delete networkpolicy kubeheal-k6-health-load --ignore-not-found | Out-Host
-    K -n kubeheal delete configmap kubeheal-k6-health-load --ignore-not-found | Out-Host
-    Remove-Item -LiteralPath $cmPath, $policyPath, $jobPath -Force -ErrorAction SilentlyContinue
 }
