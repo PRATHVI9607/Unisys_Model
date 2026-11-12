@@ -236,9 +236,13 @@ def test_workload_kind_pod_is_not_sent_to_the_executor():
     a = make_agent()
     ev = sec_event(t0_ms=str(T0), workload_kind="Pod")                  # the Security Agent's fallback
     handle_sec(a, ev)
+    # F3: a Pod-kind event never queues a containment (no owner to name); the context is still stored, so a
+    # `contained` result arriving anyway must still not produce a restore.
+    assert [r for r in stream(a.redis, fusion.EXEC_STREAM) if r["action"] == "contain"] == []
+    assert "contain_not_requested" in escalations(a)[0]["reason"]
     contained(a, incident_id_of(ev))
     assert restores(a) == []
-    assert "workload_kind_unsupported" in escalations(a)[0]["reason"]
+    assert any("workload_kind_unsupported" in e["reason"] for e in escalations(a))
 
 
 def test_an_unknown_incident_is_escalated_not_restored():
