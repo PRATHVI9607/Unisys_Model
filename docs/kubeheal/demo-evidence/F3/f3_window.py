@@ -261,7 +261,11 @@ def cleanup():
     """Deletes the scratch objects in `staging` only. Staging held nothing but these before the run
     (30_pre_window_state.txt), so the namespace-wide listing below is the scratch set; it is printed first."""
     assert mode() == "test"
-    say(kc("get", "all,pvc,volumesnapshot,networkpolicy,job", "-o", "name", ns=NS))
+    listing = kc("get", "all,pvc,volumesnapshot,networkpolicy,job", "-o", "name", ns=NS)
+    say(listing)
+    foreign = [n for n in listing.split() if not n.split("/", 1)[1].startswith(("f3-", "kubeheal-"))]
+    if foreign:
+        raise SystemExit(f"ABORT: staging holds objects that are not F3 scratch objects: {foreign}")
     say(kc("delete", "deployment", NAME, "--ignore-not-found", ns=NS))
     for kind in ("job", "networkpolicy"):
         for n in kc("get", kind, "-o", "name", ns=NS).split():
