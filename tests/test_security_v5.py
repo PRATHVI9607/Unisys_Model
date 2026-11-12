@@ -336,7 +336,8 @@ def test_every_window_writes_the_score_hash_even_below_the_publish_threshold():
     ag = make_agent_sec(FakeService((200, body(risk=0.05, label="benign"))))
     check(ag, burst_window())
     h = score_hash(ag)
-    assert h == {"sec_risk": "0.0500", "ts_ms": str(int(NOW_S * 1000)), "model_scored": "true"}
+    ts = str(int(NOW_S * 1000))
+    assert h == {"sec_risk": "0.0500", "ts_ms": ts, "model_scored": "true", "high_risk": "0.0500", "high_ts_ms": ts}
     assert published(ag) == []                                           # below SECURITY_PUBLISH_RISK
 
 
@@ -344,10 +345,10 @@ def test_the_hash_is_written_in_both_entropy_phases_and_expires():
     writes = []
 
     class Counting(AgentRedis):
-        async def eval(self, script, n, key, model_scored, risk, ts_ms, ttl):
+        async def eval(self, script, n, key, model_scored, risk, ts_ms, ttl, publish):
             if "kubeheal:record_security_score" in script:
                 writes.append({"model_scored": model_scored, "sec_risk": risk, "ts_ms": ts_ms})
-            return await super().eval(script, n, key, model_scored, risk, ts_ms, ttl)
+            return await super().eval(script, n, key, model_scored, risk, ts_ms, ttl, publish)
 
     ag = make_agent_sec(redis=Counting())
     check(ag, burst_window())
@@ -860,3 +861,80 @@ def test_the_event_timestamp_is_epoch_milliseconds_of_the_agent_clock():
     ag._wall = lambda: 1_794_303_000.25
     check(ag, burst_window())
     assert published(ag)[0]["timestamp_ms"] == "1794303000250"
+
+
+# ---- review fixes D1 to D3: hash semantics across writes, and T0 after an activity gap ---------------------
+
+POD_WORKLOAD = "victim-app-7d9f8b6c5-x2k4q"
+
+
+def record(ag, risk):
+    """One _record_score call: a model answer with `risk`, or no answer (None)."""
+    pred = None if risk is None else {"risk": risk}
+    run(ag._record_score("demo", POD_WORKLOAD, pred))
+
+
+def test_a_later_low_answer_does_not_flip_a_heuristic_conflict_false_to_confirmed_low():
+    ag = make_agent_sec(FakeService((200, body(risk=0.15, label="benign"))))
+    run(ag._assess_and_publish(4242, {"pid": 4242, "pod": POD_WORKLOAD, "namespace": "demo"},
+                               EntropyResult(4242, [7.9]), burst_window(RANSOM_CURRENT), "replay", False, "complete"))
+    assert score_hash(ag)["model_scored"] == "false"
+    record(ag, 0.05)                                                     # the idle-pod scorer, one tick later
+    assert score_hash(ag)["model_scored"] == "false" and score_hash(ag)["sec_risk"] == ""
+    record(ag, 0.93)                                                     # a high answer is accepted as evidence
+    assert score_hash(ag)["model_scored"] == "true" and score_hash(ag)["sec_risk"] == "0.9300"
+
+
+def test_a_false_hash_gives_way_to_a_low_answer_after_one_hold_period():
+    ag = make_agent_sec()
+    now = [NOW_S]
+    ag._wall = lambda: now[0]
+    record(ag, None)
+    now[0] = NOW_S + 61
+    ag.redis.advance(61)
+    record(ag, 0.05)
+    assert score_hash(ag)["model_scored"] == "true" and score_hash(ag)["sec_risk"] == "0.0500"
+
+
+def test_a_high_risk_does_not_stay_forever_while_the_pod_keeps_being_scored():
+    ag = make_agent_sec()
+    now = [NOW_S]
+    ag._wall = lambda: now[0]
+    record(ag, 0.9)
+    for offset in (20, 40, 59):                                          # low answers inside the hold period
+        now[0] = NOW_S + offset
+        ag.redis.advance(20 if offset < 59 else 19)
+        record(ag, 0.1)
+        assert score_hash(ag)["sec_risk"] == "0.9000"                    # the high value is held
+    now[0] = NOW_S + 61                                                  # but its own age, not later writes, decides
+    ag.redis.advance(2)
+    record(ag, 0.1)
+    assert score_hash(ag)["sec_risk"] == "0.1000"
+
+
+def test_t0_starts_again_after_an_activity_gap_longer_than_the_window():
+    tracker = FalcoWindowTracker(burst_threshold=15, clock=lambda: 0.0, wall=lambda: NOW_S)
+    base_ms = int(NOW_S * 1000)
+
+    def rename(i, ts, seen_ms):
+        return {"pid": 4242, "syscall": "rename", "fd_path": f"/d/f{i}", "ts": ts, "seen_ms": seen_ms,
+                "fs_source": f"/d/f{i}", "fs_target": f"/d/f{i}.enc"}
+    assert tracker.add(rename(0, "2026-11-10T10:00:00Z", base_ms)) is None
+    trigger = None
+    for i in range(1, 16):                                               # 15 renames an hour later
+        trigger = tracker.add(rename(i, "2026-11-10T11:00:00Z", base_ms + 3_600_000 + i)) or trigger
+    assert trigger is not None and trigger.first_ts == "2026-11-10T11:00:00Z"
+
+
+def test_mmap_heuristic_uses_the_mapping_length_under_the_configured_proc_root(tmp_path):
+    ag = make_agent_sec()
+    ag.proc_root = str(tmp_path)
+    ag.mmap_size_threshold = 1 << 20
+    (tmp_path / "7").mkdir()
+    maps = tmp_path / "7" / "maps"
+    # a small file mapping at a high address: its END address is huge, its length is one page
+    maps.write_text("7f0000000000-7f0000001000 rw-p 00000000 08:01 12 /data/small.bin\n", encoding="utf-8")
+    assert run(sa.SecurityAgent._check_mmap_entropy(ag, 7)) is False
+    maps.write_text("7f0000000000-7f0000400000 rw-p 00000000 08:01 12 /data/big.bin\n", encoding="utf-8")
+    assert run(sa.SecurityAgent._check_mmap_entropy(ag, 7)) is True
+    assert run(sa.SecurityAgent._check_mmap_entropy(ag, 8)) is False        # no such process

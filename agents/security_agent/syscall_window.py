@@ -110,6 +110,11 @@ class FalcoWindowTracker:
         self._ensure_pid(pid, evt.get("proc_starttime"))
         w = self._windows.setdefault(pid, [])
         self._windows.move_to_end(pid)
+        seen_ms = int(evt.get("seen_ms") or self._wall() * 1000)
+        # An activity gap longer than WINDOW_S ends the burst: the earliest-seen time (the T0 of a later trigger)
+        # must start again, or one old rename would pull T0 hours back and Fusion would pick an older snapshot.
+        if w and seen_ms - w[-1]["seen_ms"] > WINDOW_S * 1000:
+            self._first_seen.pop(pid, None)
         self._note_first_seen(pid, evt.get("ts", ""))
         # Keep the Falco source timestamp for Fusion's T0/restore decision. `build_model_input` deliberately
         # strips it from the Security Model's fixed event schema.
@@ -118,7 +123,7 @@ class FalcoWindowTracker:
         w.append({"syscall": sysc, "fd_path": evt.get("fd_path", ""), "ts": evt.get("ts", ""),
                   "flags": evt.get("flags", ""), "fs_name": evt.get("fs_name", ""),
                   "fs_source": evt.get("fs_source", ""), "fs_target": evt.get("fs_target", ""),
-                  "seen_ms": int(evt.get("seen_ms") or self._wall() * 1000),
+                  "seen_ms": seen_ms,
                   "proc_starttime": evt.get("proc_starttime")})
         cutoff_ms = w[-1]["seen_ms"] - WINDOW_S * 1000
         w[:] = [event for event in w if event["seen_ms"] >= cutoff_ms]

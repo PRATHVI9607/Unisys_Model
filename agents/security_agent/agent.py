@@ -54,16 +54,37 @@ HEURISTIC_LABEL = "suspicious"                          # label of a heuristic-o
 MAX_TRACKED_WORKLOADS = 1024                            # chosen, not measured: bound on the per-workload state maps
 MAX_TRACKED_PIDS = 4096                                 # chosen, not measured: bound on PID-scoped state
 
+# ARGV: 1 model_scored ('true'|'false'), 2 risk ('' when false), 3 now ms, 4 ttl s, 5 publish risk.
+# The hold time of both rules below is the TTL itself (ttl * 1000 ms).
+#  - A 'true' answer keeps the highest risk of the last hold period, but never extends that high value's life:
+#    high_ts_ms is set only when a new high is stored, so one false positive cannot keep the risk raised forever.
+#  - A 'false' (no model answer, or a heuristic conflict) is kept for one hold period against a lower-evidence
+#    'true' (risk below the publish risk): an idle-pod score must not flip an attack's 'false' to 'confirmed low'.
 RECORD_SECURITY_SCORE_LUA = """
 -- kubeheal:record_security_score
-local risk = ARGV[2]
-if ARGV[1] == 'true' and redis.call('HGET', KEYS[1], 'model_scored') == 'true' and redis.call('TTL', KEYS[1]) > 0 then
-  local old = tonumber(redis.call('HGET', KEYS[1], 'sec_risk'))
+local key = KEYS[1]
+local scored, risk = ARGV[1], ARGV[2]
+local now, ttl, publish = tonumber(ARGV[3]), tonumber(ARGV[4]), tonumber(ARGV[5])
+local hold = ttl * 1000
+local false_ts = tonumber(redis.call('HGET', key, 'false_ts_ms'))
+if scored == 'true' then
   local incoming = tonumber(risk)
-  if old and incoming and old > incoming then risk = tostring(old) end
+  if false_ts and now - false_ts < hold and incoming and incoming < publish
+     and redis.call('TTL', key) > 0 then
+    return ''
+  end
+  local high = tonumber(redis.call('HGET', key, 'high_risk'))
+  local high_ts = tonumber(redis.call('HGET', key, 'high_ts_ms'))
+  if high and high_ts and now - high_ts < hold and high > incoming then
+    risk = redis.call('HGET', key, 'high_risk')
+  else
+    redis.call('HSET', key, 'high_risk', risk, 'high_ts_ms', ARGV[3])
+  end
+else
+  redis.call('HSET', key, 'false_ts_ms', ARGV[3])
 end
-redis.call('HSET', KEYS[1], 'sec_risk', risk, 'model_scored', ARGV[1], 'ts_ms', ARGV[3])
-redis.call('EXPIRE', KEYS[1], ARGV[4])
+redis.call('HSET', key, 'sec_risk', risk, 'model_scored', scored, 'ts_ms', ARGV[3])
+redis.call('EXPIRE', key, ARGV[4])
 return risk
 """
 
@@ -582,7 +603,8 @@ class SecurityAgent:
         try:
             await self.redis.eval(RECORD_SECURITY_SCORE_LUA, 1, hkey,
                                   model_scored, risk, str(int(now * 1000)),
-                                  str(max(1, int(math.ceil(self.score_ttl_s)))))
+                                  str(max(1, int(math.ceil(self.score_ttl_s)))),
+                                  str(SECURITY_PUBLISH_RISK))
         except Exception as e:           # a Redis error must not end the check; Fusion treats a missing hash as stale
             self.score_write_errors += 1
             logger.warning("score hash %s not written (%s); %d write error(s) so far", hkey, e,
@@ -756,7 +778,7 @@ class SecurityAgent:
     async def _check_mmap_entropy(self, pid: int) -> bool:
         """Check for anonymous mmap with high entropy."""
         try:
-            maps_path = f"/proc/{pid}/maps"
+            maps_path = os.path.join(self.proc_root, str(pid), "maps")
             if not os.path.exists(maps_path):
                 return False
 
@@ -768,14 +790,13 @@ class SecurityAgent:
                         path = parts[5]
 
                         if "rw-p" in perms and path.startswith("/"):
-                            size_str = parts[0].split("-")[1]
-                            if size_str:
-                                try:
-                                    size = int(size_str, 16)
-                                    if size > self.mmap_size_threshold:
-                                        return True
-                                except:
-                                    continue
+                            try:
+                                start_hex, end_hex = parts[0].split("-")
+                                size = int(end_hex, 16) - int(start_hex, 16)   # the mapping length, not its end address
+                            except ValueError:
+                                continue
+                            if size > self.mmap_size_threshold:
+                                return True
         except Exception as e:
             logger.debug(f"mmap check error: {e}")
 

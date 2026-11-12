@@ -84,7 +84,7 @@ class _Redis:
     async def expire(self, *a):
         pass
 
-    async def eval(self, script, numkeys, key, model_scored, risk, ts_ms, ttl):
+    async def eval(self, script, numkeys, key, model_scored, risk, ts_ms, ttl, publish):
         if "kubeheal:record_security_score" in script:
             self.hashes[key] = {"model_scored": model_scored, "sec_risk": risk, "ts_ms": ts_ms}
             return risk
