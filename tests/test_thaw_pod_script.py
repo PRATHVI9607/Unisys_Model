@@ -3,6 +3,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -21,7 +23,9 @@ class FakeRedis:
     def xadd(self, stream, fields):
         self.added.append((stream, fields))
         if self.answer is not None:
-            self.hashes[f"kubeheal:contain:result:{fields['request_id']}"] = dict(self.answer)
+            from agents.common.containment_auth import sign_fields
+            self.hashes[f"kubeheal:contain:result:{fields['request_id']}"] = sign_fields(
+                self.answer, "test-containment-key")
 
     def hgetall(self, key):
         return dict(self.hashes.get(key, {}))
@@ -33,6 +37,11 @@ def test_constants_match_the_executor_freeze_module():
     assert mod.STREAM_PREFIX == freeze.STREAM_PREFIX and mod.RESULT_PREFIX == freeze.RESULT_PREFIX
 
 
+@pytest.fixture(autouse=True)
+def _containment_hmac(monkeypatch):
+    monkeypatch.setenv("CONTAIN_HMAC_KEY", "test-containment-key")
+
+
 def test_the_request_is_an_operator_thaw_without_a_label_on_the_nodes_stream():
     mod, redis = load(), FakeRedis()
     req = mod.build_request("prod", "web-1", "uid-1", "node-a", "inc-1", now_ms=1234, request_id="a" * 32)
@@ -41,6 +50,8 @@ def test_the_request_is_an_operator_thaw_without_a_label_on_the_nodes_stream():
     assert stream == "kubeheal.contain.req:node-a"
     assert fields["action"] == "thaw" and fields["requested_by"] == "operator" and fields["label"] == ""
     assert fields["timestamp_ms"] == "1234" and len(fields["request_id"]) == 32
+    from agents.common.containment_auth import verify_fields
+    assert verify_fields(fields, "test-containment-key")
 
 
 def test_success_only_for_a_verified_thaw():

@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fake_redis import FakeRedis
 from agents.security_agent import containment as ct
+from agents.common.containment_auth import sign_fields
 from agents.security_agent.proc_scanner import PodIndex
 from redis.exceptions import ResponseError
 
@@ -28,7 +29,8 @@ NOW = 1_700_000_000.0
 NL = chr(10)
 POD_REL = f"kubepods/burstable/pod{UID}"
 RESULT_FIELDS = {"status", "reason", "request_id", "incident_id", "namespace", "pod", "pod_uid", "node", "action",
-                 "frozen", "mode_seen", "cgroup", "ts_ms"}
+                 "frozen", "mode_seen", "cgroup", "ts_ms", "hmac_sha256"}
+TEST_HMAC_KEY = "test-containment-key"
 
 
 def run(coro):
@@ -72,6 +74,7 @@ class Scene:
         self.jumps = jumps or {}                          # mode call number -> seconds the clock moves forward
         self.protected = protected
         cfg_over.setdefault("own_pod_uid", AGENT_UID)
+        cfg_over.setdefault("hmac_key", TEST_HMAC_KEY)
         self.cfg = ct.ContainmentConfig(node=NODE, proc_root=str(self.proc), cgroup_root=str(self.root),
                                         consumer="c1", **cfg_over)
         self.handler = ct.ContainmentHandler(self.cfg, self.index, self._mode_for, writer=self._writer,
@@ -120,12 +123,13 @@ def req(**over):
          "node": NODE, "action": "freeze", "label": "ransomware", "requested_by": "executor",
          "timestamp_ms": str(int(NOW * 1000))}
     f.update(over)
-    return f
+    return sign_fields(f, TEST_HMAC_KEY)
 
 
 @pytest.fixture(autouse=True)
 def _namespaces(monkeypatch):
     monkeypatch.setenv("EXEC_NAMESPACES", "prod,staging,dev")
+    monkeypatch.setenv("CONTAIN_HMAC_KEY", TEST_HMAC_KEY)
 
 
 def assert_untouched(s, result):
@@ -180,6 +184,19 @@ def test_validation_matrix_refuses_and_touches_nothing(tmp_path, over, reason):
     assert RESULT_FIELDS <= set(result)
 
 
+@pytest.mark.parametrize("signature", [None, "0" * 64, "not-hex"])
+def test_unsigned_or_invalid_hmac_request_is_refused_before_any_lookup_or_write(tmp_path, signature):
+    s = Scene(tmp_path)
+    fields = req()
+    if signature is None:
+        fields.pop("hmac_sha256")
+    else:
+        fields["hmac_sha256"] = signature
+    result = run(s.handler.handle(fields))
+    assert result["status"] == "refused" and result["reason"] == "invalid_hmac"
+    assert s.mode_calls == ["prod"] and s.writes == [] and s.freeze_file() == "0"
+
+
 def test_pod_on_another_node_is_refused(tmp_path):
     s = Scene(tmp_path, pod_node=OTHER_NODE)
     result = s.handle()
@@ -199,7 +216,8 @@ def test_request_exactly_at_the_ttl_is_still_served(tmp_path):
 
 def test_ttl_comes_from_the_environment():
     cfg = ct.ContainmentConfig.from_env({"NODE_NAME": NODE, "CONTAIN_REQUEST_TTL_S": "5",
-                                         "CONTAIN_FREEZE_VERIFY_S": "bad", "CGROUP_ROOT": "/x"})
+                                         "CONTAIN_FREEZE_VERIFY_S": "bad", "CGROUP_ROOT": "/x",
+                                         "CONTAIN_HMAC_KEY": TEST_HMAC_KEY})
     assert cfg.request_ttl_s == 5.0 and cfg.verify_s == ct.DEFAULT_VERIFY_S and cfg.cgroup_root == "/x"
     assert cfg.stream == f"kubeheal.contain.req:{NODE}"
 
@@ -527,7 +545,8 @@ def test_the_real_mode_watcher_protects_unknown_namespaces_and_labelled_ones():
 
 
 def test_the_service_hands_the_watchers_protected_check_to_the_handler():
-    svc = ct.ContainmentService.from_env(FakeRedis(), PodIndex(), env={"NODE_NAME": NODE})
+    svc = ct.ContainmentService.from_env(FakeRedis(), PodIndex(), env={"NODE_NAME": NODE,
+                                                                       "CONTAIN_HMAC_KEY": TEST_HMAC_KEY})
     assert svc.consumer.handler._protected_for == svc.mode.protected_for
     assert svc.consumer.handler._protected("prod") is True          # no data yet: protected
 
@@ -997,7 +1016,7 @@ def test_the_agents_own_pod_name_in_its_namespace_refuses_a_freeze(tmp_path):
 
 def test_without_pod_uid_the_consumer_starts_but_refuses_every_freeze(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
-        cfg = ct.ContainmentConfig.from_env({"NODE_NAME": NODE})
+        cfg = ct.ContainmentConfig.from_env({"NODE_NAME": NODE, "CONTAIN_HMAC_KEY": TEST_HMAC_KEY})
     assert cfg is not None and cfg.own_pod_uid == "" and "POD_UID" in caplog.text
     s = Scene(tmp_path, own_pod_uid="")
     for label in ("ransomware", "exfiltration"):
@@ -1012,9 +1031,10 @@ def test_without_pod_uid_the_consumer_starts_but_refuses_every_freeze(tmp_path, 
 
 def test_pod_uid_and_pod_name_come_from_the_environment():
     cfg = ct.ContainmentConfig.from_env({"NODE_NAME": NODE, "POD_UID": AGENT_UID.upper(), "POD_NAME": "sa-1",
-                                         "NAMESPACE": "kubeheal"})
+                                         "NAMESPACE": "kubeheal", "CONTAIN_HMAC_KEY": TEST_HMAC_KEY})
     assert (cfg.own_pod_uid, cfg.own_pod_name, cfg.own_namespace) == (AGENT_UID, "sa-1", "kubeheal")
-    assert ct.ContainmentConfig.from_env({"NODE_NAME": NODE, "POD_UID": "not-a-uid"}).own_pod_uid == ""
+    assert ct.ContainmentConfig.from_env({"NODE_NAME": NODE, "POD_UID": "not-a-uid",
+                                          "CONTAIN_HMAC_KEY": TEST_HMAC_KEY}).own_pod_uid == ""
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -1323,7 +1343,7 @@ def test_a_reclaimed_expired_freeze_of_a_frozen_pod_is_failed_expired_but_frozen
 
 def test_the_default_ttl_is_30_seconds_and_the_docstring_explains_why():
     assert ct.DEFAULT_REQUEST_TTL_S == 30.0
-    cfg = ct.ContainmentConfig.from_env({"NODE_NAME": NODE})
+    cfg = ct.ContainmentConfig.from_env({"NODE_NAME": NODE, "CONTAIN_HMAC_KEY": TEST_HMAC_KEY})
     assert cfg.request_ttl_s == 30.0
     assert "CONTAIN_FREEZE_TIMEOUT_S" in ct.__doc__ and "expired_but_frozen" in ct.__doc__
 
@@ -1340,7 +1360,8 @@ def test_without_node_name_the_consumer_does_not_start_and_says_so(caplog):
 
 
 def test_service_with_node_name_reads_only_its_stream():
-    svc = ct.ContainmentService.from_env(FakeRedis(), PodIndex(), env={"NODE_NAME": NODE, "HOSTNAME": "h1"})
+    svc = ct.ContainmentService.from_env(FakeRedis(), PodIndex(), env={"NODE_NAME": NODE, "HOSTNAME": "h1",
+                                                                       "CONTAIN_HMAC_KEY": TEST_HMAC_KEY})
     assert svc.consumer.cfg.stream == f"kubeheal.contain.req:{NODE}" and svc.consumer.cfg.consumer == "h1"
     assert svc.mode.mode_for("prod") == "test"            # no watcher data yet: fail safe
 

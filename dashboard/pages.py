@@ -261,6 +261,30 @@ def _actions(incident_id: str, status: str, dry_runs: Optional[List[Dict[str, An
             f'<button type="button" class="danger" data-action="reject" data-incident="{esc(incident_id)}">Reject</button>')
 
 
+def _snapshot_freeze_control(incident_id: str, snapshot_freeze: Optional[Dict[str, Any]]) -> str:
+    view = snapshot_freeze or {"available": False, "held": []}
+    if not view.get("available"):
+        return ('<section class="card"><h2>SnapshotFreeze</h2>'
+                '<p class="na">Freeze status is unavailable.</p></section>')
+    held = view.get("held") or []
+    if not held:
+        return ('<section class="card"><h2>SnapshotFreeze</h2>'
+                '<p>No rolling-snapshot freeze is held by this incident.</p></section>')
+    rows = "".join(f'<li>{esc(item.get("namespace"))}/{esc(item.get("pvc"))}</li>' for item in held)
+    return (
+        '<section class="card"><h2>SnapshotFreeze</h2>'
+        '<p>This incident holds rolling-snapshot freezes for:</p>'
+        f'<ul>{rows}</ul>'
+        '<label for="snapshot-freeze-reason">Reason (at least 10 characters)</label> '
+        '<input type="text" id="snapshot-freeze-reason" minlength="10" maxlength="1000" autocomplete="off"> '
+        '<label><input type="checkbox" id="snapshot-freeze-force"> Force release while the incident is open</label> '
+        f'<button type="button" class="danger" data-action="snapshot-freeze-release" '
+        f'data-incident="{esc(incident_id)}">Release snapshot freeze</button>'
+        '<p class="hint">The release is audited first and removes only freeze keys still owned by this incident. '
+        'In test mode it is a dry run.</p></section>'
+    )
+
+
 def incident_page(inc: Dict[str, Any]) -> str:
     d = inc.get("decision") or {}
     tgt = inc["target"]
@@ -281,7 +305,8 @@ def incident_page(inc: Dict[str, Any]) -> str:
         f'tier {_na(d.get("namespace_tier"))}; dry run {_na(d.get("dry_run"))}</p>'
         f'<p>Rationale: {_na(d.get("rationale"))}</p>'
         + _decision_details(d) + _token_box() + _actions(inc["incident_id"], inc["status"], inc.get("dry_run_approvals")) + '</section>'
-        '<section class="grid"><h2>Scores</h2>'
+        + _snapshot_freeze_control(inc["incident_id"], inc.get("snapshot_freeze"))
+        + '<section class="grid"><h2>Scores</h2>'
         + _score_block("Health model", sc.get("health")) + _score_block("Security model", sc.get("security")) +
         f'<div class="card"><h3>Correlation</h3>{_bar("correlation", sc.get("correlation_score"), 1.0)}'
         f'<p>compound: {_na(sc.get("compound"))}</p></div></section>'
