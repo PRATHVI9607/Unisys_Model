@@ -20,6 +20,13 @@ from dashboard.incident_view import NOT_AVAILABLE
 _LAYOUT = os.path.join(os.path.dirname(__file__), "templates", "admin_layout.html")
 
 
+MAX_TIMELINE_PAYLOAD = 4000       # chosen: longest ledger payload dump shown per timeline row
+BASELINE_MODE_NOTE = (
+    "The dashboard reads only the global kubeheal-mode ConfigMap; a per-namespace kubeheal/mode label is not "
+    "checked here, so an approval in global enforce mode overwrites the baseline even if the namespace is "
+    "labelled test. The previous baseline stays in the ledger.")
+
+
 def esc(value: Any) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
@@ -106,13 +113,85 @@ def approvals_page(pending: List[Dict[str, Any]], incidents: List[Dict[str, Any]
 
 # ------------------------------------------------------------------ incident page
 
+def _set_marker(view: Dict[str, Any]) -> str:
+    """The prediction set with a clear certain or not certain marker (rule M2: an automatic action needs a
+    one-label set)."""
+    cls = "pset-certain" if view.get("certain") else "pset-uncertain"
+    return f'<span class="pset {cls}">{esc(view.get("summary"))}</span>'
+
+
+def _factor_rows(factors: List[Dict[str, Any]], total: int) -> str:
+    """Signed TreeSHAP contributions: the bar length is the absolute value, the text keeps the sign."""
+    if not factors:
+        return f'<p class="na">{NOT_AVAILABLE}</p>'
+    peak = max(abs(f["contribution"]) for f in factors) or 1.0
+    rows = []
+    for f in factors:
+        c = f["contribution"]
+        cls = "pos" if c >= 0 else "neg"
+        value = "" if f.get("value") is None else f' (value {f["value"]:.4g})'
+        rows.append(
+            f'<div class="row"><span class="lab">{esc(f["feature"])}{esc(value)}</span>'
+            f'<span class="bar"><i class="{cls}" style="width:{_pct(abs(c), peak)}%"></i></span>'
+            f'<span class="val">{c:+.4f}</span></div>')
+    more = f'<p class="hint">Showing {len(factors)} of {total} factors.</p>' if total > len(factors) else ""
+    return "".join(rows) + more
+
+
+def _legacy_note(legacy: Optional[Dict[str, Any]]) -> str:
+    """Fields an older incident carries (CI width) or that are kept for compatibility (top field, the first changed
+    field). Shown only when present, never required."""
+    if not legacy:
+        return ""
+    parts = []
+    ci_width, top = legacy.get("ci_width"), legacy.get("top")
+    if ci_width is not None:
+        parts.append(f"CI width {ci_width:.4f}")
+    if top:
+        parts.append(f"top field {esc(top)}")
+    return f'<p class="hint">Legacy or compatibility fields (not required): {"; ".join(parts)}</p>' if parts else ""
+
+
 def _score_block(name: str, s: Optional[Dict[str, Any]]) -> str:
     if not s:
         return f'<div class="card"><h3>{esc(name)}</h3><p class="na">{NOT_AVAILABLE}</p></div>'
+    scored = s.get("model_scored")
+    meta = []
+    if s.get("model_version"):
+        meta.append(f'model version {esc(s["model_version"])}')
+    if scored is not None:
+        meta.append("model scored" if scored else "NOT model scored")
     return (f'<div class="card"><h3>{esc(name)}</h3>'
             f'{_bar("risk", s.get("risk"), 1.0)}'
-            f'{_bar("CI width", s.get("ci_width"), 1.0)}'
-            f'<p>label: {_na(s.get("label"))}; top: {_na(s.get("top"))}</p></div>')
+            f'<p>label: {_na(s.get("label"))}</p>'
+            f'<p>prediction set: {_set_marker(s["prediction_set"])}</p>'
+            '<h4>Top factors (TreeSHAP)</h4>'
+            f'{_factor_rows(s.get("top_factors") or [], s.get("top_factors_total") or 0)}'
+            + (f'<p class="hint">{"; ".join(meta)}</p>' if meta else "")
+            + _legacy_note(s.get("legacy")) + '</div>')
+
+
+def _yes_no(value: Optional[bool]) -> str:
+    return f'<span class="na">{NOT_AVAILABLE}</span>' if value is None else ("yes" if value else "no")
+
+
+def _decision_details(d: Dict[str, Any]) -> str:
+    """Containment, rule path and patch fields of the decision record (absent on older incidents)."""
+    out = []
+    c = d.get("containment")
+    if c:
+        out.append(f'<p>Containment label: <strong>{_na(c.get("label"))}</strong>; restore after: '
+                   f'{_yes_no(c.get("restore_after"))}; human follow-up: {_yes_no(c.get("human_followup"))}</p>')
+    if d.get("rule_path") is not None:
+        out.append(f'<p>Decided by the rule path: {_yes_no(d.get("rule_path"))}</p>')
+    if d.get("rule_reasons"):
+        out.append("<p>Rule reasons:</p><ul>" + "".join(f"<li>{esc(r)}</li>" for r in d["rule_reasons"]) + "</ul>")
+    if d.get("patch_fields"):
+        out.append("<p>Changed fields (spec diff, patch candidates):</p><ul>"
+                   + "".join(f"<li><code>{esc(f)}</code></li>" for f in d["patch_fields"]) + "</ul>")
+    if d.get("security_fresh") is not None:
+        out.append(f'<p>Security score fresh: {_yes_no(d.get("security_fresh"))}</p>')
+    return "".join(out)
 
 
 def _weights(rows: List[Dict[str, Any]]) -> str:
@@ -120,6 +199,27 @@ def _weights(rows: List[Dict[str, Any]]) -> str:
         return f'<p class="na">{NOT_AVAILABLE}</p>'
     peak = max(abs(r["weight"]) for r in rows) or 1.0
     return "".join(_bar(r["name"], r["weight"], peak, f'{r["weight"]:.4f}') for r in rows)
+
+
+def _legacy_attribution(att: Dict[str, Any]) -> str:
+    """Attribution of older incidents (removed in V5). Rendered only when the event still carries it."""
+    out = ""
+    health = att.get("health") or {}
+    if health.get("available") or health.get("top_metric"):
+        out += (f'<div class="card"><h3>Legacy config field attribution (health)</h3>{_weights(health.get("fields") or [])}'
+                f'<p>top metric: {_na(health.get("top_metric"))}</p></div>')
+    sec = att.get("security") or {}
+    if sec.get("available"):
+        out += f'<div class="card"><h3>Legacy syscall attribution (security)</h3>{_weights(sec.get("syscalls") or [])}</div>'
+    return out
+
+
+def _bounded_dump(payload: Any) -> str:
+    """The ledger payload as JSON text, cut at MAX_TIMELINE_PAYLOAD characters with a visible marker."""
+    text = json.dumps(payload, sort_keys=True, default=str)
+    if len(text) <= MAX_TIMELINE_PAYLOAD:
+        return text
+    return text[:MAX_TIMELINE_PAYLOAD] + f" ... [truncated, {len(text) - MAX_TIMELINE_PAYLOAD} more characters]"
 
 
 def _json_block(value: Any) -> str:
@@ -170,7 +270,7 @@ def incident_page(inc: Dict[str, Any]) -> str:
     steps = "".join(f"<li>{esc(s)}</li>" for s in chain["steps"]) or f'<li class="na">{NOT_AVAILABLE}</li>'
     timeline = "".join(
         f"<tr><td>{esc(r['sequence'])}</td><td>{_ts(r['timestamp'])}</td><td>{esc(r['step'])}</td>"
-        f"<td><pre>{esc(json.dumps(r['payload'], sort_keys=True, default=str))}</pre></td></tr>"
+        f"<td><pre>{esc(_bounded_dump(r['payload']))}</pre></td></tr>"
         for r in inc["timeline"]
     )
     body = (
@@ -180,19 +280,19 @@ def incident_page(inc: Dict[str, Any]) -> str:
         f'<p>Decision: <strong>{_na(d.get("decision"))}</strong>; adjusted score {_na(d.get("adjusted_score"), "{:.4f}")}; '
         f'tier {_na(d.get("namespace_tier"))}; dry run {_na(d.get("dry_run"))}</p>'
         f'<p>Rationale: {_na(d.get("rationale"))}</p>'
-        + _token_box() + _actions(inc["incident_id"], inc["status"], inc.get("dry_run_approvals")) + '</section>'
+        + _decision_details(d) + _token_box() + _actions(inc["incident_id"], inc["status"], inc.get("dry_run_approvals")) + '</section>'
         '<section class="grid"><h2>Scores</h2>'
         + _score_block("Health model", sc.get("health")) + _score_block("Security model", sc.get("security")) +
         f'<div class="card"><h3>Correlation</h3>{_bar("correlation", sc.get("correlation_score"), 1.0)}'
         f'<p>compound: {_na(sc.get("compound"))}</p></div></section>'
-        '<p class="hint">Bars show the published values. "CI width" is the width of the conformal interval; '
-        'its position is not published, so no bounds are drawn.</p>'
-        '<section class="grid"><h2>Attribution (SHAP / attention)</h2>'
-        f'<div class="card"><h3>Config fields (health)</h3>{_weights(att["health"]["fields"])}'
-        f'<p>top metric: {_na(att["health"].get("top_metric"))}</p></div>'
-        f'<div class="card"><h3>Syscalls (security)</h3>{_weights(att["security"]["syscalls"])}'
+        '<p class="hint">Bars show the published values. The prediction set is the set of labels the model cannot '
+        'rule out: exactly one label is certain, anything else is not certain, and an automatic action needs a '
+        'certain set (rule M2). Factors are TreeSHAP contributions toward the predicted class; the sign is kept.</p>'
+        '<section class="grid"><h2>Observed signals</h2>'
+        f'<div class="card"><h3>Security signals</h3>'
         f'<h4>Early signals</h4>{_json_block(att["security"].get("early_signals"))}'
-        f'<h4>Entropy spike</h4>{_json_block(att["security"].get("entropy_spike"))}</div></section>'
+        f'<h4>Entropy spike</h4>{_json_block(att["security"].get("entropy_spike"))}</div>'
+        + _legacy_attribution(att) + '</section>'
         '<section class="card"><h2>Causal chain</h2>' + _t0(chain["t0"]) +
         f'<ol>{steps}</ol><p class="hint">Offsets in the chain are as published by the DCM chain builder, '
         'not wall clock measurements.</p></section>'
@@ -200,3 +300,45 @@ def incident_page(inc: Dict[str, Any]) -> str:
         f'<th>Payload</th></tr></thead><tbody>{timeline}</tbody></table></section>'
     )
     return _layout(f"Incident {inc['incident_id']}", body)
+
+
+# ------------------------------------------------------------------ baseline promotion candidates (V5-I3)
+
+def baseline_candidates_page(candidates: List[Dict[str, Any]], kill_switch: Dict[str, Any]) -> str:
+    mode = kill_switch.get("mode")
+    if kill_switch.get("dry_run"):
+        why = "" if kill_switch.get("readable") else " (the ConfigMap could not be read, which counts as test)"
+        note = (f'<p class="warn">The kill switch mode is {esc(mode)}{esc(why)}. Approving now only writes a dry-run '
+                'entry to the ledger: the golden baseline is NOT replaced and the candidate stays pending. '
+                'Rejecting works in every mode.</p>')
+    else:
+        note = '<p>The kill switch mode is enforce: an approval replaces the golden baseline.</p>'
+    rows = ""
+    for c in candidates:
+        a = c.get("assessment") or {}
+        fields = "".join(f"<li><code>{esc(f)}</code></li>" for f in c.get("changed_fields") or []) or             f'<li class="na">{NOT_AVAILABLE}</li>'
+        attrs = (f'data-namespace="{esc(c.get("namespace"))}" data-deployment="{esc(c.get("deployment"))}" '
+                 f'data-candidate="{esc(c.get("candidate_id"))}"')
+        rows += (
+            f'<tr><td>{esc(c.get("namespace"))}/{esc(c.get("deployment"))}</td><td>{_na(c.get("tier"))}</td>'
+            f'<td><ul>{fields}</ul></td>'
+            f'<td>label {_na(a.get("label"))}, risk {_na(a.get("risk"), "{:.4f}")}<br>'
+            f'{_set_marker(a["prediction_set"]) if a.get("prediction_set") else _na(None)}<br>'
+            f'model {_na(a.get("model_version"))}</td>'
+            f'<td>{_ts(c.get("created_at"))}<br><code>{esc(c.get("candidate_id"))}</code></td>'
+            f'<td><button type="button" data-action="baseline-approve" {attrs}>Approve</button> '
+            f'<button type="button" class="danger" data-action="baseline-reject" {attrs}>Reject</button></td></tr>')
+    rows = rows or '<tr><td colspan="6" class="na">no pending baseline candidates</td></tr>'
+    body = (
+        '<h1>Baseline promotion candidates</h1>'
+        '<p class="hint">In prod the Health Agent only proposes a new golden baseline (the live spec was judged '
+        'benign and certain, the rollout is complete). Nothing replaces the baseline until it is approved here, and '
+        'every decision is a ledger entry that keeps the previous baseline.</p>'
+        + _token_box() + f'<section class="card"><h2>Mode</h2>{note}<p class="hint" id="mode-note">{esc(BASELINE_MODE_NOTE)}</p></section>'
+        '<section class="card"><h2>Pending candidates</h2>'
+        '<label for="baseline-reason">Reason (optional, at most 512 characters)</label> '
+        '<input type="text" id="baseline-reason" maxlength="512" autocomplete="off">'
+        '<table><thead><tr><th>Workload</th><th>Tier</th><th>Changed fields</th><th>Assessment</th>'
+        f'<th>Candidate</th><th>Decision</th></tr></thead><tbody>{rows}</tbody></table></section>'
+    )
+    return _layout("Baseline candidates", body)

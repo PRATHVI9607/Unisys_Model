@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agents.common.ledger import Ledger
+from fake_redis import FakeRedis
 from dashboard.admin_routes import DashboardServices
 from dashboard.fastapi_app import app
 
@@ -36,6 +37,59 @@ class FakeModeStore:
         self.mode = mode
 
 
+class DashRedis(FakeRedis):
+    """FakeRedis plus SCAN and the compare-and-set overwrite of the golden baseline (a Python mirror of
+    PROMOTE_BASELINE_LUA in agents/health_agent/baseline.py)."""
+
+    async def eval(self, script, n, key, token, *extra):
+        if "kubeheal:promote_baseline" in script:
+            if await self.get(key) != token:
+                return 0
+            self.store[key] = extra[0]
+            return 1
+        return await super().eval(script, n, key, token, *extra)
+
+    async def scan_iter(self, match=None):
+        prefix = (match or "").rstrip("*")
+        for k in list(self.store) + list(self.hashes):
+            if k.startswith(prefix):
+                yield k
+
+
+class BytesRedis:
+    """What the dashboard's client (decode_responses=False) returns: bytes keys and values. Writes pass through."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    @staticmethod
+    def _b(v):
+        return v.encode() if isinstance(v, str) else v
+
+    @staticmethod
+    def _s(k):
+        return k.decode() if isinstance(k, bytes) else k
+
+    async def get(self, k):
+        return self._b(await self.inner.get(self._s(k)))
+
+    async def hgetall(self, k):
+        return {self._b(a): self._b(b) for a, b in (await self.inner.hgetall(self._s(k))).items()}
+
+    async def scan_iter(self, match=None):
+        async for k in self.inner.scan_iter(match=match):
+            yield self._b(k)
+
+    async def set(self, *a, **kw):
+        return await self.inner.set(*a, **kw)
+
+    async def delete(self, *a):
+        return await self.inner.delete(*a)
+
+    async def eval(self, *a):
+        return await self.inner.eval(*a)
+
+
 class Harness:
     def __init__(self, mode="test", **mode_kwargs):
         self.ledger = Ledger()
@@ -46,6 +100,8 @@ class Harness:
         self.enqueue_error = None
         self.claim_denied = False
         self.claim_set_error = None
+        self.redis_inner = DashRedis()                    # inspect `.store` here
+        self.redis = BytesRedis(self.redis_inner)         # what the dashboard sees
 
     def services(self) -> DashboardServices:
         async def enqueue(fields):
@@ -82,7 +138,7 @@ class Harness:
             return self.events.get((kind, event_id))
 
         return DashboardServices(self.ledger, self.mode_store, enqueue, claim, release, claim_set, claim_get,
-                                 list_claims, exec_entry_exists, fetch)
+                                 list_claims, exec_entry_exists, fetch, get_redis=lambda: self.redis)
 
     def steps(self, incident_id=INC):
         prefix = f"incidents/{incident_id}/"
@@ -134,6 +190,53 @@ def seed_incident(h: Harness, incident_id=INC, decision="human_patch", *, namesp
             "early_signals_json": json.dumps({"rename_burst": True}),
             "entropy_spike_json": json.dumps({}),
         }
+    return incident_id
+
+
+def seed_v5_incident(h: Harness, incident_id=INC, decision="human_contain", *, namespace="staging",
+                     deployment="web", pod="web-abc-1", approval=True, health_set='["degradation"]',
+                     health_uncertain="false", sec_set='["ransomware"]', sec_uncertain="false",
+                     n_factors=10, rule_path=False, rule_reasons=None, patch_fields=None, containment="default",
+                     with_events=True, events_have_legacy=False):
+    """An incident as the V5 agents write it: prediction sets and TreeSHAP factors, NO ci width, no embeddings,
+    no field attribution. The numbers are arbitrary fixtures."""
+    def factors(prefix):
+        return json.dumps([{"feature": f"{prefix}_f{i}", "value": float(i), "contribution": ((-1) ** i) * (i + 1) / 100}
+                           for i in range(n_factors)])
+
+    health = {"health_risk": "0.7100", "health_label": "degradation", "health_prediction_set": health_set,
+              "health_uncertain": health_uncertain, "top_factors_json": factors("h"), "model_scored": "true",
+              "model_version": "health-fixture-1"}
+    security = {"sec_risk": "0.9100", "sec_label": "ransomware", "sec_prediction_set": sec_set,
+                "sec_uncertain": sec_uncertain, "top_factors_json": factors("s"), "model_scored": "true",
+                "model_version": "security-fixture-1"}
+    led = h.ledger
+    led.append(incident_id, "detection", {"namespace": namespace, "deployment": deployment, "pod": pod,
+                                          "health_event_id": HEALTH_EVENT, "security_event_id": SECURITY_EVENT,
+                                          "signals": ["health", "security"]})
+    led.append(incident_id, "scores", {"health": health, "security": security, "correlation_score": 0.5,
+                                       "compound": True})
+    dec = {"decision": decision, "adjusted_score": 0.8, "rationale": "fixture", "dry_run": True,
+           "namespace_tier": "staging", "compound": True, "causal_chain": ["step one"], "models_ok": True,
+           "health_prediction_set": json.loads(health_set), "sec_prediction_set": json.loads(sec_set),
+           "rule_path": rule_path, "rule_reasons": rule_reasons if rule_reasons is not None else [],
+           "patch_fields": patch_fields if patch_fields is not None else [], "security_fresh": True,
+           "top_factors_json": {"health": health["top_factors_json"], "security": security["top_factors_json"]}}
+    if containment == "default":
+        containment = {"containment_label": "ransomware", "restore_after": True, "human_followup": False}
+    if containment:
+        dec.update(containment)
+    led.append(incident_id, "decision", dec)
+    if approval:
+        led.append(incident_id, "approval_requested", {"decision": decision, "status": "pending", "rationale": "fixture"})
+    if with_events:
+        hev = {**health, "top_metric": "unused"} if events_have_legacy else dict(health)
+        if events_have_legacy:
+            hev["field_attribution_json"] = json.dumps({"resources.limits.cpu": 0.8})
+        h.events[("health", HEALTH_EVENT)] = hev
+        h.events[("security", SECURITY_EVENT)] = {**security, "syscall_attribution_json": "{}",
+                                                  "early_signals_json": json.dumps({"rename_burst": True}),
+                                                  "entropy_spike_json": "{}"}
     return incident_id
 
 

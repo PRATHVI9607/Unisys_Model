@@ -11,8 +11,10 @@ def test_incident_json_has_scores_attribution_chain_and_timeline(client, harness
     assert body["incident_id"] == INC and body["status"] == "pending"
     assert body["target"] == {"namespace": "staging", "deployment": "web", "pod": "web-abc-1"}
     h, s = body["scores"]["health"], body["scores"]["security"]
-    assert (h["risk"], h["ci_width"], h["label"], h["top"]) == (0.7, 0.2, "high", "resources.limits.cpu")
-    assert (s["risk"], s["ci_width"], s["top"]) == (0.6, 0.1, "rename")
+    # A legacy incident (it carries CI widths and top_field): they are shown as legacy, never required.
+    assert (h["risk"], h["label"], h["legacy"]) == (0.7, "high", {"ci_width": 0.2, "top": "resources.limits.cpu"})
+    assert (s["risk"], s["legacy"]) == (0.6, {"ci_width": 0.1, "top": "rename"})
+    assert h["prediction_set"]["published"] is False and h["prediction_set"]["certain"] is False
     assert body["scores"]["correlation_score"] == 0.5
     assert body["decision"]["decision"] == "human_contain" and body["decision"]["adjusted_score"] == 0.66
     fields = body["attribution"]["health"]["fields"]
