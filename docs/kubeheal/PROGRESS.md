@@ -466,3 +466,9 @@ Review method: the `kubeheal-reviewer` agent type was not registered in this ses
 - Candidate branch `wave/codex-demo-candidate` combines the verified F1/F3 work changes with the demo runbook and HPA cleanup branch for pre-rehearsal testing. This is not yet the official `demo` merge.
 - Full suite on the candidate passed: 2073 passed, 11 skipped in 60.34 s. Live cluster tests were opt-in and not run. HPA focused staging/cleanup tests: 4 passed. Live HPA rerun remains pending.
 - P11 output coverage is being expanded to E1-E7 and V5-E1; only bounded E1/E2 scenarios will be run live, with all other fields explicitly `not measured` and a reason.
+
+### F11 live HPA acceptance (2026-11-12)
+
+- On `k3d-kubeheal`, mode `test`, machine `LAPTOP-74N9LTFA`, the corrected `demo/scripts/hpa_load.ps1` passed with 32 VUs for 90 s and a 330 s scale-down wait. Run `8c10202427fa45e7aa63c1d4a22b5bda` ran from 16:08:27 to 16:15:41 IST (7m14s).
+- Measured: 121,088 HTTP checks passed (100%), 121,088 requests, request rate 1,269.57/s, `http_req_duration` median 22.86 ms, p95 38.45 ms, average 25.12 ms, maximum 1.76 s. HPA current/desired moved 2/2 -> 2/4 -> 4/7 -> 7/7; after load the metric returned to 0 and HPA returned to 2/2. The owned Job, NetworkPolicy, and ConfigMap were deleted.
+- Detailed run summary: `docs/kubeheal/demo-evidence/F11/hpa-run-2026-11-12.md`. No full terminal transcript or screenshots were captured in this run; capture them in final rehearsal. This single synthetic load run is not a performance guarantee.
