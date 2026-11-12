@@ -91,12 +91,18 @@ def python_findings(source: str):
     out = []
     tree = ast.parse(source)
     consts = []
+    docstrings = set()          # a docstring cannot write anything: it must not count as a "cgroup string"
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)                     and isinstance(first.value.value, str):
+                docstrings.add(id(first.value))
     for node in ast.walk(tree):
         folded = fold(node) if isinstance(node, (ast.BinOp, ast.JoinedStr, ast.Call, ast.Constant)) else None
         if folded:
             for m in _mentions(folded):
                 out.append(f"line {node.lineno}: builds {m}")
-            if isinstance(node, ast.Constant):
+            if isinstance(node, ast.Constant) and id(node) not in docstrings:
                 consts.append(folded)
         if isinstance(node, ast.Call) and _dotted(node.func) in SHELL_CALLS and node.args:
             cmd = fold(node.args[0])
