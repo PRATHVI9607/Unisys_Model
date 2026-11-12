@@ -821,6 +821,64 @@ def test_a_file_or_a_symlink_named_like_the_container_does_not_count(tmp_path):
     assert result["reason"].startswith("cgroup_container_missing") and s.writes == []
 
 
+def test_a_symlink_named_like_the_container_does_not_count_even_where_symlinks_cannot_be_made(tmp_path, monkeypatch):
+    line, rel = REAL["guaranteed"]
+    s = real_scene(tmp_path, line, rel)
+    _fake_symlinks(monkeypatch, CID)
+    result = s.handle()
+    assert result["reason"].startswith("cgroup_container_missing") and s.writes == [] and s.freeze_file() == "0"
+
+
+def test_a_container_runtime_prefix_the_scanner_cannot_read_is_refused_not_guessed(tmp_path):
+    # `crio-<id>` under the cgroupfs form: the old absolute regex yields the one-letter id "c"; a short id never matches
+    s = Scene(tmp_path, proc_line=f"0::/{POD_REL}/crio-{CID}" + NL)
+    result = s.handle()
+    assert (result["status"], result["reason"].split(":")[0]) == ("refused", "cgroup_container_missing")
+    assert s.writes == [] and s.freeze_file() == "0"
+    with pytest.raises(ct._Refuse):
+        ct.require_container_dir(str(s.pod_dir), set())
+    with pytest.raises(ct._Refuse):
+        ct.require_container_dir(str(s.pod_dir), {"", "c", "0123456789a"})            # empty or under 12 characters
+
+
+def test_an_unreadable_pod_directory_is_refused_for_the_container_check(tmp_path, monkeypatch):
+    line, rel = REAL["guaranteed"]
+    s = real_scene(tmp_path, line, rel)
+    def boom(path):
+        raise OSError("denied")
+    monkeypatch.setattr(ct.os, "scandir", boom)
+    with pytest.raises(ct._Refuse) as e:
+        ct.require_container_dir(str(s.pod_dir), {CID[:12]})
+    assert e.value.reason.startswith("cgroup_container_missing")
+
+
+def test_a_found_directory_that_is_not_canonical_or_not_named_like_the_pod_is_refused(tmp_path, monkeypatch):
+    line, rel = REAL["guaranteed"]
+    s = real_scene(tmp_path, line, rel)
+    monkeypatch.setattr(ct, "find_pod_dir", lambda root, name: os.path.join(root, "kubepods", ".", name))
+    with pytest.raises(ct._Refuse) as e:                                             # not equal to its realpath
+        ct.resolve_pod_cgroup(s.index, "prod", "web-1", UID, str(s.proc), str(s.root))
+    assert "not the directory that was found" in e.value.reason
+    other = s.root / "kubepods" / f"pod{OTHER_UID}"
+    (other / CID).mkdir(parents=True)
+    (other / "cgroup.freeze").write_text("0")
+    monkeypatch.setattr(ct, "find_pod_dir", lambda root, name: os.path.realpath(str(other)))
+    with pytest.raises(ct._Refuse) as e:                                             # canonical, but another pod's name
+        ct.resolve_pod_cgroup(s.index, "prod", "web-1", UID, str(s.proc), str(s.root))
+    assert "not the directory that was found" in e.value.reason
+    monkeypatch.setattr(ct, "find_pod_dir", lambda root, name: root)                 # the root itself
+    with pytest.raises(ct._Refuse):
+        ct.resolve_pod_cgroup(s.index, "prod", "web-1", UID, str(s.proc), str(s.root))
+    assert not (other / "cgroup.freeze").read_text() == "1"
+
+
+def test_more_forms_the_relative_scan_must_not_map():
+    from agents.security_agent.proc_scanner import parse_cgroup_line
+    for line in (f"0::/../../pod{UID}/{CID}-extra", f"0::/../../x.slice/kubepods-pod{US}.slice/cri-containerd-{CID}.scope",
+                 f"0::/system.slice/kubepods-pod{US}.slice/cri-containerd-{CID}.scope"):
+        assert parse_cgroup_line(line) is None, line
+
+
 def test_the_systemd_container_scope_is_matched_by_its_id(tmp_path):
     line, rel = REAL["systemd_guaranteed"]
     s = real_scene(tmp_path, line, rel)
