@@ -99,4 +99,3 @@ def test_enforce_mode_runs_the_same_pipeline_and_fake_kubernetes_actions(monkeyp
     assert executor_redis.stream(ACTIONS_STREAM)[-1]["outcome"] == "contained"
     assert {entry[1] for entry in cluster.log} >= {"create_snapshot", "create_policy", "patch_pod"}
     assert any(name.startswith("kubeheal.contain.req:") for name, _ in executor_redis.added)
-
