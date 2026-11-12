@@ -90,7 +90,7 @@ spec:
     matchExpressions:
       - key: app
         operator: In
-        values: [fusion-agent, executor, minio-bootstrap, kubeheal-dashboard{{ if $ms.legacy.enabled }}, {{ $ms.health.name }}, {{ $ms.security.name }}, {{ $ms.dcm.name }}{{ end }}]
+        values: [fusion-agent, executor, health-agent, minio-bootstrap, kubeheal-dashboard{{ if $ms.legacy.enabled }}, {{ $ms.health.name }}, {{ $ms.security.name }}, {{ $ms.dcm.name }}{{ end }}]
   policyTypes: [Egress]
   egress:
     - to:
