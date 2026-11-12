@@ -482,3 +482,10 @@ Focused verification on the isolated branch, 2026-11-12: `tests/test_containment
 - HPA script cleanup fixes were cherry-picked into the demo candidate and included in `e41eb3d`; focused staging tests: 4 passed. No HPA live rerun was performed this session.
 - Last cluster check before this update: `k3d-kubeheal` mode `test`, no `CLUSTER_LOCK.md`, no `dev/freeze-scratch`; no cluster write was made. Claude owns F3, including the pod owner correction and D-5 rerun. Codex did not work those items.
 - Still not accepted as fully demo-ready: live HMAC, baseline promotion, F6 request validation, F7 policy, F8 workflow, F9 kill-switch, F10 healing/rollback, Grafana display, U6 twice, successful P11 evaluation, runbook rehearsal, final design docs, secret scan, and PUSH_PLAN.
+
+### Codex resume after Claude F3 handoff, 2026-11-12
+
+- Claude reports `wave/claude-F3` ready at `d0ed188`, with full-suite output 2,138 passed, 11 skipped and live evidence in `docs/kubeheal/demo-evidence/F3/`. Codex review and independent full suite are pending.
+- Before any cluster operation, created the lock file with `CLUSTER LOCK Codex 2026-11-12 20:00 IST`. It must remain present through the F3 image rebuild, Helm upgrade, and any enforce window, then be removed and committed.
+- Pre-F3 tips were work `3aa5994` and demo `036f54b`; their latest suites were work 2,081 passed, 12 skipped and demo 2,090 passed, 11 skipped. No cluster changes were made while taking this handoff.
+- Review checklist: inspect the full branch diff, specifically `tests/test_fusion_incident.py`; confirm the escalation assertion still checks the unsupported-workload contract while permitting additional escalation records. Then run full suite, merge F3 into work, merge work into demo, merge F3 runbook into the main runbook, rebuild all images from demo, upgrade using only new demo tags, and record Helm revision/tags.
