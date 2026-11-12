@@ -460,3 +460,13 @@ Focused verification on the isolated branch, 2026-11-12: `tests/test_containment
 - Current cluster state observed during the session: `k3d-kubeheal` components Running, kill switch mode `test`, inference HPA present at 2/2 idle. No live containment, replay, drift, or mode-toggle demo ran in this session.
 - U6 reset constraint: `demo/k3d/down.ps1` destroys the cluster and PVCs holding MinIO/Redis data. Do not run it. The delegated acceptance uses a documented non-destructive clean workload baseline with volumes preserved; a fresh-cluster baseline remains not measured.
 - Next: finish the HPA fix review/rerun, bounded U6/P11 evidence, then one coordinated acceptance window for replay/containment/F9/F10. Rehearse the runbook from an available clean workload baseline, run final full suites on work/demo, update exact evidence and PUSH_PLAN. Never push or set ALLOW_PUSH.
+
+### Codex resume 2026-11-12 (F3 reserved to Claude)
+
+- Official tips at start: `work` `62426c0`, `demo` `9986b73`. Claude Code is taking F3 on `wave/claude-F3`, including the pod-to-Deployment owner correction, D-5 rerun, and live containment chain. Codex is not modifying the Fusion publish path, Executor intake/containment, or Security Agent freeze code. Codex alone performs merges to `work` and `demo`.
+- Cluster coordination: `docs/kubeheal/CLUSTER_LOCK.md` was absent at the last check; `kubeheal-mode` read `test`; `dev/freeze-scratch` was absent and the only pod in `dev` was `victim-app`. No cluster mutation was performed in this session. Check the lock before any future cluster access. A committed `CLUSTER LOCK <who> <start time>` line is required before an enforce window or Helm upgrade and must be removed after.
+- Removed four clean, merged worktrees (`Codex-F3`, `codex-integration`, `docs-runbook`, `Codex-F7F8`) and pruned metadata. Unmerged or active agent worktrees remain intact.
+- Delegated on isolated branches: F1 live-test safety; F5-F8 policy/dashboard work; F2 and F4-F11 runbook updates, excluding F3. Agents do not merge or edit this progress file or `.ai/handoff.md`.
+- Offline P11 runner review tests on `wave/Codex-NP-k6`: 35 passed, 0 failed, using an isolated pytest temp directory. No live P11 run was performed in this resume.
+- Current blockers/open verification: full suite after current `work` tip not yet rerun; F3 is in progress with Claude; F4 live HMAC, F5-F11 live checks, U6 twice, post-cutoff runbook rehearsal, final full suites on both branches, README/AGENTS final-design pass, secret scan, and `PUSH_PLAN.md` remain.
+- Next: review the active agent commits, verify their focused tests, run the full suite, and merge only green work. Then merge `work` into `demo` and update this section with exact results. Nothing is pushed.
