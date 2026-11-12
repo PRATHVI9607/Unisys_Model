@@ -165,7 +165,8 @@ def _normalise(evt: Dict) -> Optional[Dict]:
         "pid": _to_int(of.get("proc.pid") or of.get("pid")),
         "pod": of.get("k8s.pod.name") or of.get("container.name") or "",
         "namespace": of.get("k8s.ns.name") or "default",
-        "fd_path": of.get("fd.name") or of.get("fd.path") or "",
+        # Falco prints <NA> for fd.name on path-based calls (rename, unlink, chmod, truncate): never a path.
+        "fd_path": _na(of.get("fd.name")) or _na(of.get("fd.path")),
         # V5-S2: what the v5 features need and the old normaliser dropped. Each is "" when the rule does not
         # output it (Falco prints <NA> for a field that does not apply to the syscall).
         "flags": _na(of.get("evt.arg.flags")),

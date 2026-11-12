@@ -50,7 +50,8 @@ def test_earliest_falco_event_time_is_normalized_to_epoch_ms_without_publish_tim
 
 def test_directory_replay_reads_all_files_in_name_order():
     evs = events(FIX)
-    assert len(evs) == 3 + 21 + 25
+    # 3 benign + 21 current-rules + 25 hand-written (old rules) + 37 hand-written (new rules, V5-S1)
+    assert len(evs) == 3 + 21 + 25 + 37
     assert evs[0]["pid"] == 5150               # benign file sorts first
 
 
