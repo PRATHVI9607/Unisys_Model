@@ -415,7 +415,12 @@ class ExecutorService:
             return f"escalated:{reason}"
         await rec("request_accepted", {"action": req.action, "namespace": req.namespace,
                                        "deployment": req.deployment, "pod": req.pod,
-                                       "dry_run_requested": req.dry_run})
+                                       "dry_run_requested": req.dry_run,
+                                       "patch_fields": req.patch_fields, "rule_path": req.rule_path,
+                                       "rule_reasons": req.rule_reasons,
+                                       "containment_label": req.containment_label,
+                                       "restore_after": req.restore_after,
+                                       "human_followup": req.human_followup})
         gate = RequestGate(self.mode, force_dry=req.dry_run, intent=self._intent_for(lambda: incident_id))
         freeze = SnapshotFreeze(self.redis)
         if req.action == "contain":

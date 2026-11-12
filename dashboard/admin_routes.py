@@ -309,12 +309,20 @@ def _exec_request(incident_id: str, records: List[Dict[str, Any]], approver: str
     pod = detection.get("pod") or ""
     if decision == "human_patch":
         action = "patch"
-        field = (step_payload(records, "scores").get("health") or {}).get("top_field") or ""
-        if not (namespace and deployment and field and str(field).lower() != "unknown"):
+        # Candidates are the changed fields of the spec diff that Fusion recorded with the decision (V5-D9). Older
+        # incidents carried a model attribution (top_field); it is only a fallback for those.
+        decision_record = step_payload(records, "decision")
+        recorded = decision_record.get("patch_fields")
+        patch_fields = [str(f) for f in recorded if isinstance(f, str) and f.strip()] if isinstance(recorded, list) else []
+        if "patch_fields" not in decision_record:          # an older incident; a recorded empty list is final
+            legacy = (step_payload(records, "scores").get("health") or {}).get("top_field") or ""
+            patch_fields = [str(legacy)] if legacy and str(legacy).lower() != "unknown" else []
+        field = patch_fields[0] if patch_fields else ""
+        if not (namespace and deployment and field):
             raise HTTPException(status_code=422, detail="cannot approve: the incident names no drifted field to restore")
     elif decision == "human_contain":
         action = "contain"
-        field = ""
+        field, patch_fields = "", []
         if not (namespace and pod):
             raise HTTPException(status_code=422, detail="cannot approve: the incident names no pod to contain")
     else:
@@ -326,6 +334,7 @@ def _exec_request(incident_id: str, records: List[Dict[str, Any]], approver: str
         "deployment": deployment,
         "pod": pod,
         "patch_field": str(field),
+        "patch_fields": json.dumps(patch_fields),
         "approved_by": approver,
         "dry_run": "true" if dry_run else "false",
         "source": "dashboard",

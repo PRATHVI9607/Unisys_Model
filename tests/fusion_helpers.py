@@ -45,7 +45,7 @@ def sec_event(**kw):
 def health_event(**kw):
     ev = {"event_id": "health-1", "namespace": "prod", "deployment": "payments", "pod_name": "payments",
           "namespace_tier": "prod", "health_risk": "0.95", "health_label": "degradation",
-          "health_prediction_set": '["degradation"]', "health_uncertain": "false", "top_field": "spec.cpu", "model_scored": "true",
+          "health_prediction_set": '["degradation"]', "health_uncertain": "false", "changed_fields_json": '["template.spec.containers[0].resources.limits.cpu"]', "model_scored": "true",
           "timestamp_ms": str(NOW_MS + 1000)}
     ev.update(kw)
     return ev

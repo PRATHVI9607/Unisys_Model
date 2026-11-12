@@ -42,7 +42,6 @@ class DecisionInput:
     # certain unless it triggers the action). Exactly one label equal to health_label = certain; anything else
     # (empty, several labels, a different label, wrong type) = uncertain, fail closed.
     health_prediction_set: Optional[list] = None
-    health_field_top: str = ""   # kept until V5-D9 replaces model attribution with the spec diff
 
     sec_risk: float = 0.0
     sec_label: str = "benign"
@@ -230,7 +229,7 @@ def _decide(inp: DecisionInput) -> DecisionOutput:
         health_adjusted *= COMPOUND_ESCALATION
         sec_adjusted *= COMPOUND_ESCALATION
 
-    params = {"nl_summary": inp.nl_summary}
+    params = {"nl_summary": inp.nl_summary, "patch_fields": _clean_list(inp.changed_fields)}
     top = max(health_adjusted, sec_adjusted)
 
     # D2/Q1: rule-based rollback. Evaluated BEFORE the model-response gate because it does not need the Health
@@ -301,14 +300,18 @@ def _decide(inp: DecisionInput) -> DecisionOutput:
         why = blockers(_breaker_closed(inp.circuit_breaker_patches, CB_PATCH_LIMIT_PER_HOUR),
                        f"circuit breaker open: {inp.circuit_breaker_patches} patches for this Deployment "
                        f"this hour, limit {CB_PATCH_LIMIT_PER_HOUR}", "health")
+        candidate_fields = _clean_list(inp.changed_fields)
+        if not candidate_fields:      # V5-D9: candidates come from the spec diff, never from a model attribution
+            why.append("no changed field to restore (changed_fields is empty), so there is nothing the "
+                       "Executor could patch automatically")
         if why:
             return DecisionOutput(Decision.HUMAN_PATCH, health_adjusted,
                 f"Health incident. Automatic action blocked: {'; '.join(why)}. Human approval required.",
                 True, params)
         return DecisionOutput(Decision.AUTO_PATCH, health_adjusted,
-            f"Health incident. health_risk={inp.health_risk:.2f}, "
-            f"top_field={inp.health_field_top}. AUTO-PATCH.", True,
-            {"patch_field": inp.health_field_top, "patch_fields": _clean_list(inp.changed_fields),
+            f"Health incident. health_risk={inp.health_risk:.2f}, {len(candidate_fields)} changed field(s) "
+            f"from the spec diff. AUTO-PATCH.", True,
+            {"patch_field": candidate_fields[0], "patch_fields": candidate_fields,
              "nl_summary": inp.nl_summary})
 
     # ── HUMAN APPROVAL ZONE ──

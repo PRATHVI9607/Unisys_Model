@@ -13,7 +13,8 @@ from agents.fusion_agent.decision_policy import (
 
 OK = dict(models_ok=True, namespace_protected=False, metric_samples_seen=BURN_IN_SAMPLES, mode="enforce",
           namespace_tier="staging", health_label="drift", health_prediction_set=["drift"],
-          sec_label="ransomware", sec_prediction_set=["ransomware"])
+          sec_label="ransomware", sec_prediction_set=["ransomware"],
+          changed_fields=["template.spec.containers[0].resources.limits.cpu"])
 AUTO = (Decision.AUTO_CONTAIN, Decision.AUTO_PATCH)
 
 
