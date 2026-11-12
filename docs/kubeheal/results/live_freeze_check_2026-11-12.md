@@ -7,6 +7,14 @@ cgroupfs driver. Three nodes (server-0, agent-0, agent-1), each a Docker contain
 verified on a real node.** Real hardware or a real cloud node may differ (cgroup driver, mount layout, QoS directories,
 permissions, a read-only cgroup mount).
 
+## Scope of this check (read first)
+
+The driver called `agents.executor.freeze.request_freeze` directly inside the Executor pod, with the Executor's real
+gate, ledger guard and mode watcher. It did not use the Executor's stream consumer, `parse_request`, `check_target` or
+`quarantine.contain`. Request intake and the containment order (freeze, snapshot, quarantine, scale to 0) were not
+exercised live. The `mode_change` ledger entries at 09:07:36Z and 09:08:07Z came from the driver's own mode watcher
+starting up; the real flips are 09:08:02Z and 09:08:08Z.
+
 ## What ran
 
 - Security Agent image `b20261112143524` (built from `demo` after the merge of V5-S5c and V5-CH4), Helm release `kubeheal`
@@ -49,5 +57,5 @@ scripted_freeze_check_start`, `000002 request_freeze` (blocked_by_kill_switch).
 - The full pytest suite used to flip the live cluster to `enforce` for a few seconds through
   `tests/test_killswitch.py::test_live_watch_follows_configmap_without_polling`. Three bursts (08:44:52Z, 09:03:08Z,
   09:04:45Z, each of four mode changes) were found in the Fusion log and the ledger (`mode_change` entries) during this
-  session. The ledger holds no corrective action from those windows, only `mode_change` and `rolling_snapshot_dry_run`
-  entries. The test is now opt-in (`KUBEHEAL_LIVE_KILLSWITCH_TEST=1`).
+  session. The MinIO ledger since 08:30Z holds no corrective action from those windows, only `mode_change` and
+  `rolling_snapshot_dry_run` entries; the Redis fallback ledger stream was empty and no baseline promotion was recorded. The test is now opt-in (`KUBEHEAL_LIVE_KILLSWITCH_TEST=1`).

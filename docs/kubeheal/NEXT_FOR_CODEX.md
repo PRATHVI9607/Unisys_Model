@@ -99,7 +99,9 @@ Images: `.\demo\k3d\images.ps1 -Only <names>` from the `demo` checkout (it build
 
 1. DONE 2026-11-12: S5c and CH4 reviewed, fixed, merged; Security Agent image rebuilt, revision 7; live freeze and thaw
    verified on k3d (results file above). Still open from it: record operator thaws in the ledger, HMAC over request and result
-   (with V5-P3), narrow the hostPath to `kubepods` (chart value plus test), repeat the check on a real node.
+   (with V5-P3), narrow the hostPath to `kubepods` (chart value plus test), repeat the check on a real node. The live check called `freeze.request_freeze` directly (scope in the
+   results file): the stream-driven `contain` path (intake, `parse_request`, `check_target`, the containment order) still needs a
+   live run on a scratch Deployment in `dev`; do it as a scripted enforce window together with the containment-order task.
 2. D-5 replay on the cluster (P10-D5 and P10-U2): mount the new hand-written trace
    `tests/fixtures/falco/ransomware_pv_encrypt_new_rules.jsonl`, adapted to the live `prod` victim pod identity, with
    `FALCO_MODE=replay` on the Security Agent, in mode `test`; record whether a `kubeheal.security.events` record is
