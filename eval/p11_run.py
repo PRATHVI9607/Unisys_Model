@@ -181,6 +181,70 @@ def _deployment_counts(namespace: str, deployment: str) -> tuple[int, int]:
     return int((item.get("spec") or {}).get("replicas", 1) or 0), int((item.get("status") or {}).get("readyReplicas", 0) or 0)
 
 
+def _selector_matches(labels: dict, selector: dict) -> bool:
+    for key, value in (selector.get("matchLabels") or {}).items():
+        if labels.get(key) != value:
+            return False
+    for expr in selector.get("matchExpressions") or []:
+        key = expr.get("key")
+        operator = expr.get("operator")
+        values = set(expr.get("values") or [])
+        present = key in labels
+        if operator == "In" and (not present or labels[key] not in values):
+            return False
+        if operator == "NotIn" and present and labels[key] in values:
+            return False
+        if operator == "Exists" and not present:
+            return False
+        if operator == "DoesNotExist" and present:
+            return False
+        if operator not in {"In", "NotIn", "Exists", "DoesNotExist"}:
+            return False
+    return True
+
+
+def _ready_pods(namespace: str, deployment: str) -> list[dict]:
+    deployment_obj = json.loads(harness.kubectl(
+        CONTEXT, ["get", "deployment/" + deployment, "-n", namespace, "-o", "json"]))
+    deployment_meta = deployment_obj.get("metadata") or {}
+    deployment_uid = deployment_meta.get("uid")
+    selector = (deployment_obj.get("spec") or {}).get("selector") or {}
+    if not deployment_uid or not selector:
+        raise RuntimeError(f"{namespace}/{deployment} has no UID or pod selector")
+    raw = harness.kubectl(CONTEXT, ["get", "pods", "-n", namespace, "-o", "json"])
+    items = json.loads(raw).get("items", [])
+    ready = []
+    replica_owner_cache: dict[str, bool] = {}
+    for item in items:
+        meta = item.get("metadata") or {}
+        labels = meta.get("labels") or {}
+        if not _selector_matches(labels, selector):
+            continue
+        owner_refs = meta.get("ownerReferences") or []
+        replica_refs = [ref for ref in owner_refs if ref.get("kind") == "ReplicaSet" and ref.get("controller") is True]
+        if len(replica_refs) != 1:
+            continue
+        replica_name = replica_refs[0].get("name")
+        if not replica_name:
+            continue
+        if replica_name not in replica_owner_cache:
+            raw_rs = harness.kubectl(CONTEXT, ["get", "replicaset/" + replica_name, "-n", namespace, "-o", "json"])
+            rs = json.loads(raw_rs)
+            rs_meta = rs.get("metadata") or {}
+            parents = [ref for ref in rs_meta.get("ownerReferences", [])
+                       if ref.get("kind") == "Deployment" and ref.get("controller") is True]
+            replica_owner_cache[replica_name] = len(parents) == 1 and parents[0].get("name") == deployment \
+                and parents[0].get("uid") == deployment_uid
+        if not replica_owner_cache[replica_name]:
+            continue
+        status = item.get("status") or {}
+        container_statuses = status.get("containerStatuses") or []
+        if status.get("phase") == "Running" and container_statuses \
+                and all(container.get("ready") is True for container in container_statuses):
+            ready.append(item)
+    return ready
+
+
 def run_load(vus: int, duration: str, target_url: str) -> dict:
     if not 10 <= vus <= 200:
         raise ValueError("vus must be between 10 and 200")
@@ -248,32 +312,44 @@ def run_load(vus: int, duration: str, target_url: str) -> dict:
 def run_pod_chaos(namespace: str, deployment: str, action: str) -> dict:
     if namespace not in harness.ALLOWED_NAMESPACES:
         raise ValueError(f"namespace is not in the P11 allowlist: {namespace!r}")
-    if action not in {"restart", "delete-one-pod"}:
-        raise ValueError("action must be restart or delete-one-pod")
+    if action != "delete-one-pod":
+        raise ValueError("P11 runner supports only delete-one-pod")
     if deployment not in SAFE_CHAOS_DEPLOYMENTS:
         raise ValueError(f"P11 chaos is restricted to {sorted(SAFE_CHAOS_DEPLOYMENTS)}")
     harness.assert_test_mode(CONTEXT)
     desired, ready = _deployment_counts(namespace, deployment)
-    if desired < 1 or ready < desired:
-        raise RuntimeError(f"refusing chaos: {namespace}/{deployment} is not at baseline ready replicas ({ready}/{desired})")
+    original_desired = desired
+    if desired < 1 or ready < original_desired:
+        raise RuntimeError(f"refusing chaos: {namespace}/{deployment} is not at baseline ready replicas ({ready}/{original_desired})")
+    before_pods = _ready_pods(namespace, deployment)
+    if not before_pods:
+        raise RuntimeError(f"refusing chaos: {namespace}/{deployment} has no Ready pod")
+    target = before_pods[0]
+    target_name = (target.get("metadata") or {}).get("name")
+    target_uid = (target.get("metadata") or {}).get("uid")
+    if not target_name or not target_uid:
+        raise RuntimeError("refusing chaos: selected pod is missing its name or UID")
     start_utc = _now()
     start = time.monotonic()
-    result = harness.chaos_command(CONTEXT, namespace, deployment, action=action)
+    harness.assert_test_mode(CONTEXT)
+    result = harness.kubectl(CONTEXT, ["delete", "pod", target_name, "-n", namespace, "--wait=false"])
     deadline = time.monotonic() + 180
     recovered = False
     samples = []
     while time.monotonic() < deadline:
         harness.assert_test_mode(CONTEXT)
         desired, ready = _deployment_counts(namespace, deployment)
-        samples.append({"time_utc": _now(), "desired": desired, "ready": ready})
-        if desired > 0 and ready >= desired:
+        pods = _ready_pods(namespace, deployment)
+        old_uid_present = any((pod.get("metadata") or {}).get("uid") == target_uid for pod in pods)
+        samples.append({"time_utc": _now(), "desired": desired, "ready": ready, "old_uid_ready": old_uid_present})
+        if desired == original_desired and ready >= original_desired and not old_uid_present:
             recovered = True
             break
         time.sleep(2)
     if not recovered:
         raise TimeoutError(f"{namespace}/{deployment} did not return to ready replicas within 180s")
     row = {
-        "scenario": "E2 deployment restart" if action == "restart" else "E2 pod delete/recreate",
+        "scenario": "E2 pod delete/recreate",
         "namespace": namespace,
         "deployment": deployment,
         "action_output": result.strip(),
@@ -300,7 +376,7 @@ def main() -> int:
     chaos = sub.add_parser("chaos", help="restart an allowlisted Deployment or delete one pod")
     chaos.add_argument("--namespace", choices=sorted(harness.ALLOWED_NAMESPACES), required=True)
     chaos.add_argument("--deployment", choices=sorted(SAFE_CHAOS_DEPLOYMENTS), required=True)
-    chaos.add_argument("--action", choices=("restart", "delete-one-pod"), required=True)
+    chaos.add_argument("--action", choices=("delete-one-pod",), required=True)
     args = parser.parse_args()
     if args.scenario == "load":
         if len(set(args.vus)) != len(args.vus):

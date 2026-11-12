@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCAN_DIRS = ["agents", "services", "dashboard", "models", "kernel", "chaos", "eval", "scripts", "demo", "deploy"]
-ALLOWED_FILES = {ROOT / "eval" / "p11_harness.py"}
+ALLOWED_FILES = {ROOT / "eval" / "p11_harness.py", ROOT / "eval" / "p11_run.py"}
 WRITE_VERBS = {
     "apply", "create", "delete", "patch", "replace", "scale", "rollout", "annotate", "label", "taint", "cordon",
     "uncordon", "drain", "edit", "set", "run", "cp", "exec", "debug",
@@ -80,3 +80,10 @@ def test_the_allow_listed_harness_still_pins_context_and_mode():
     text = (ROOT / "eval" / "p11_harness.py").read_text(encoding="utf-8")
     assert 'ALLOWED_CONTEXT = "k3d-kubeheal"' in text
     assert "assert_test_mode(context" in text
+
+
+def test_p11_runner_stays_on_the_allowlisted_context_and_checks_test_mode():
+    text = (ROOT / "eval" / "p11_run.py").read_text(encoding="utf-8")
+    assert "CONTEXT = harness.ALLOWED_CONTEXT" in text
+    assert 'ALLOWED_CONTEXT = "k3d-kubeheal"' in (ROOT / "eval" / "p11_harness.py").read_text(encoding="utf-8")
+    assert "harness.assert_test_mode(CONTEXT)" in text

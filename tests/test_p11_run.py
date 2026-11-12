@@ -44,7 +44,16 @@ def test_chaos_runner_rejects_services_outside_the_safe_allowlist():
     import pytest
 
     with pytest.raises(ValueError, match="restricted"):
-        p11_run.run_pod_chaos("kubeheal", "redis", "restart")
+        p11_run.run_pod_chaos("kubeheal", "redis", "delete-one-pod")
+
+
+def test_chaos_runner_rejects_unapproved_action_before_cluster_call(monkeypatch):
+    import pytest
+    called = []
+    monkeypatch.setattr(p11_run.harness, "assert_test_mode", lambda context: called.append(context))
+    with pytest.raises(ValueError, match="only delete-one-pod"):
+        p11_run.run_pod_chaos("kubeheal", "kubeheal-inference", "restart")
+    assert called == []
 
 
 def test_coverage_report_lists_every_p11_item_and_v5_e1_with_reasons():
@@ -131,4 +140,64 @@ def test_load_results_are_written_even_when_cleanup_reports_errors(monkeypatch, 
     assert result["cleanup"] == "job cleanup failed | configmap deleted"
     assert (tmp_path / "p11-load-10-owned-run.log").is_file()
     assert (tmp_path / "p11-load-10-owned-run.csv").is_file()
+
+
+def test_pod_chaos_waits_for_old_uid_to_disappear_and_ready_count_to_recover(monkeypatch, tmp_path):
+    monkeypatch.setattr(p11_run, "RESULTS", tmp_path)
+    monkeypatch.setattr(p11_run, "_name", lambda prefix: "p11-chaos-owned-run")
+    monkeypatch.setattr(p11_run.harness, "assert_test_mode", lambda context: None)
+    monkeypatch.setattr(p11_run, "_deployment_counts", lambda namespace, deployment: (2, 2))
+    pod_states = iter([
+        [{"metadata": {"name": "inference-old", "uid": "old-uid"}}],
+        [{"metadata": {"name": "inference-new", "uid": "new-uid"}}],
+    ])
+    monkeypatch.setattr(p11_run, "_ready_pods", lambda namespace, deployment: next(pod_states))
+    calls = []
+    monkeypatch.setattr(p11_run.harness, "kubectl", lambda context, args, **kwargs: calls.append(args) or "pod/inference-old deleted")
+
+    result = p11_run.run_pod_chaos("kubeheal", "kubeheal-inference", "delete-one-pod")
+
+    assert result["status"] == "measured"
+    assert calls == [["delete", "pod", "inference-old", "-n", "kubeheal", "--wait=false"]]
+    assert (tmp_path / "p11-chaos-owned-run.csv").is_file()
+
+
+def test_ready_pods_use_deployment_selector_and_verify_replicaset_owner_chain(monkeypatch):
+    deployment = {
+        "metadata": {"uid": "deployment-uid"},
+        "spec": {"selector": {"matchLabels": {"app": "kubeheal-inference", "track": "model"}}},
+    }
+    def pod(name, uid, rs_name, labels=None, statuses=None):
+        return {"metadata": {"name": name, "uid": uid,
+                              "labels": labels or {"app": "kubeheal-inference", "track": "model"},
+                              "ownerReferences": [{"kind": "ReplicaSet", "name": rs_name, "controller": True}]},
+                "status": {"phase": "Running", "containerStatuses": statuses if statuses is not None else [{"ready": True}]}}
+    pods = [
+        pod("owned", "pod-good", "rs-good"),
+        pod("foreign-owner", "pod-foreign", "rs-foreign"),
+        pod("unready-shape", "pod-empty-status", "rs-good", statuses=[]),
+        pod("other-selector", "pod-other", "rs-good", labels={"app": "kubeheal-inference", "track": "other"}),
+    ]
+    replicasets = {
+        "rs-good": {"metadata": {"ownerReferences": [{"kind": "Deployment", "name": "kubeheal-inference",
+                                                        "uid": "deployment-uid", "controller": True}]}},
+        "rs-foreign": {"metadata": {"ownerReferences": [{"kind": "Deployment", "name": "other-workload",
+                                                           "uid": "other-uid", "controller": True}]}},
+    }
+    calls = []
+
+    def fake_kubectl(context, args, **kwargs):
+        calls.append(args)
+        if args[:2] == ["get", "deployment/kubeheal-inference"]:
+            return json.dumps(deployment)
+        if args[:2] == ["get", "pods"]:
+            return json.dumps({"items": pods})
+        if args[0] == "get" and args[1].startswith("replicaset/"):
+            return json.dumps(replicasets[args[1].split("/", 1)[1]])
+        raise AssertionError(args)
+
+    monkeypatch.setattr(p11_run.harness, "kubectl", fake_kubectl)
+    ready = p11_run._ready_pods("kubeheal", "kubeheal-inference")
+    assert [item["metadata"]["name"] for item in ready] == ["owned"]
+    assert ["get", "pods", "-n", "kubeheal", "-o", "json"] in calls
 
