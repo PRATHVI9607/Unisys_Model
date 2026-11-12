@@ -23,12 +23,19 @@ class FakeModeStore:
 
     def __init__(self, mode="test", fail_read=False, fail_write=False):
         self.mode, self.fail_read, self.fail_write = mode, fail_read, fail_write
+        self.namespace_modes = {}
+        self.fail_namespace_read = False
         self.writes = []
 
     async def read_mode(self):
         if self.fail_read:
             raise RuntimeError("no access")
         return self.mode
+
+    async def read_namespace_mode(self, namespace):
+        if self.fail_namespace_read:
+            raise RuntimeError("namespace labels unavailable")
+        return self.namespace_modes.get(namespace)
 
     async def write_mode(self, mode):
         if self.fail_write:

@@ -101,7 +101,9 @@ def test_detail_has_fields_assessment_tier_mode_and_blocker(client, harness):
     assert d["assessment"]["prediction_set"]["labels"] == ["benign"]
     assert d["golden_baseline_unchanged"] is True and d["blocker"] is None
     assert d["spec_hash"] == "hash-img:2" and d["golden_sha256"]
-    assert d["mode"] == {"mode": "test", "readable": True, "approval_is_dry_run": True}
+    assert d["mode"] == {"mode": "test", "readable": True, "global_readable": True,
+                         "global_mode": "test", "namespace_mode": None, "namespace_readable": True,
+                         "approval_is_dry_run": True}
     assert [h["step"] for h in d["history"]] == ["baseline_candidate_created"]
 
 
@@ -164,6 +166,44 @@ def test_approve_in_test_mode_is_a_dry_run_and_the_candidate_stays(client, harne
     harness.mode_store.mode = "enforce"
     assert post(client, "approve", {"candidate_id": cid}).json()["status"] == "promoted"
     assert golden_image(harness) == "img:2"
+
+
+def test_namespace_test_label_makes_global_enforce_approval_a_dry_run(client, enforce):
+    cid = put_candidate(enforce)
+    enforce.mode_store.namespace_modes[NS] = "test"
+
+    detail = client.get(BASE).json()
+    assert detail["mode"] == {"mode": "test", "readable": True, "global_readable": True,
+                              "global_mode": "enforce",
+                              "namespace_mode": "test", "namespace_readable": True,
+                              "approval_is_dry_run": True}
+    r = post(client, "approve", {"candidate_id": cid, "reason": "namespace is test"})
+    assert r.status_code == 200 and r.json()["status"] == "dry_run"
+    assert r.json()["mode"] == "test" and r.json()["global_mode"] == "enforce"
+    assert r.json()["namespace_mode"] == "test" and r.json()["applied"] is False
+    assert "target namespace mode label makes the effective mode test" in r.json()["message"]
+    assert golden_image(enforce) == "img:1" and candidate_present(enforce)
+    (entry,) = baseline_records(enforce, "baseline_promotion_dry_run")
+    assert entry["reason"] == "namespace is test"
+
+
+def test_unreadable_namespace_label_fails_closed_for_approval(client, enforce):
+    cid = put_candidate(enforce)
+    enforce.mode_store.fail_namespace_read = True
+    r = post(client, "approve", {"candidate_id": cid})
+    assert r.status_code == 200 and r.json()["status"] == "dry_run"
+    assert r.json()["mode"] == "test" and r.json()["namespace_readable"] is False
+    assert golden_image(enforce) == "img:1" and candidate_present(enforce)
+
+
+def test_rejection_reports_effective_namespace_mode_and_never_overwrites(client, enforce):
+    cid = put_candidate(enforce)
+    enforce.mode_store.namespace_modes[NS] = "test"
+    r = post(client, "reject", {"candidate_id": cid, "reason": "reject safely"})
+    assert r.status_code == 200 and r.json()["status"] == "rejected"
+    assert r.json()["mode"] == "test" and r.json()["global_mode"] == "enforce"
+    assert r.json()["namespace_mode"] == "test"
+    assert golden_image(enforce) == "img:1" and not candidate_present(enforce)
 
 
 def test_approve_with_an_unreadable_mode_is_a_dry_run(client, harness):
@@ -419,15 +459,17 @@ def test_workload_names_with_a_trailing_newline_are_rejected(client, enforce):
     bl.validate_workload("prod", "a.b-c")
 
 
-def test_the_namespace_label_limit_is_visible_everywhere(client, enforce):
+def test_namespace_label_enforcement_is_described_everywhere(client, enforce):
     from dashboard.pages import BASELINE_MODE_NOTE
-    assert "per-namespace kubeheal/mode label is not checked here" in BASELINE_MODE_NOTE
+    assert "An unreadable global mode or namespace label fails closed to test." in BASELINE_MODE_NOTE
     assert "The previous baseline stays in the ledger." in BASELINE_MODE_NOTE
     cid = put_candidate(enforce)
+    enforce.mode_store.namespace_modes[NS] = "test"
     assert client.get(BASE).json()["mode_note"] == BASELINE_MODE_NOTE
     page = client.get("/baseline-candidates").text
-    assert 'id="mode-note"' in page and "per-namespace kubeheal/mode label is not checked here" in page
+    assert 'id="mode-note"' in page and "unreadable global mode or namespace label fails closed" in page
     body = post(client, "approve", {"candidate_id": cid}).json()
+    assert body["status"] == "dry_run" and body["mode"] == "test"
     assert body["mode_note"] == BASELINE_MODE_NOTE and body["message"].endswith(BASELINE_MODE_NOTE)
 
 

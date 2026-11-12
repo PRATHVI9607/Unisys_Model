@@ -22,9 +22,9 @@ _LAYOUT = os.path.join(os.path.dirname(__file__), "templates", "admin_layout.htm
 
 MAX_TIMELINE_PAYLOAD = 4000       # chosen: longest ledger payload dump shown per timeline row
 BASELINE_MODE_NOTE = (
-    "The dashboard reads only the global kubeheal-mode ConfigMap; a per-namespace kubeheal/mode label is not "
-    "checked here, so an approval in global enforce mode overwrites the baseline even if the namespace is "
-    "labelled test. The previous baseline stays in the ledger.")
+    "Baseline approvals require global enforce mode and an enforce or absent kubeheal/mode label on the target "
+    "namespace. An unreadable global mode or namespace label fails closed to test. The previous baseline stays "
+    "in the ledger.")
 
 
 def esc(value: Any) -> str:
