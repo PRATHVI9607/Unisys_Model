@@ -484,6 +484,35 @@ def test_a_candidate_is_dropped_when_the_workload_is_deleted_or_returns_to_the_b
     run_env(go, ledger=Ledger())
 
 
+def test_a_candidate_is_dropped_when_the_spec_returns_to_the_baseline():
+    async def go(env):
+        await prod_candidate(env)
+        await env.send("MODIFIED", dep(ns="prod"))                    # back to img:1, the golden spec
+        await env.agent.drain()
+        assert await bl.get_candidate(env.redis, "prod", "victim-app") is None
+        assert len(entries(env.agent.ledger, "baseline_candidate_superseded", "prod")) == 1
+    run_env(go, ledger=Ledger())
+
+
+def test_a_candidate_written_while_a_newer_spec_arrives_is_removed():
+    async def go(env):
+        env.result = prediction(**BENIGN)
+        real_set = env.redis.set
+
+        async def racing_set(k, v, **kw):
+            res = await real_set(k, v, **kw)
+            if k == bl.candidate_key("prod", "victim-app"):
+                env.agent.seen_hash[key_of("prod")] = "a-newer-hash"        # the newer spec lands during the write
+            return res
+
+        env.redis.set = racing_set
+        await drift(env, "prod", image="img:2")
+        assert await bl.get_candidate(env.redis, "prod", "victim-app") is None
+        assert len(entries(env.agent.ledger, "baseline_candidate_superseded", "prod")) == 1
+        assert await golden_image(env, "prod") == "img:1"
+    run_env(go, ledger=Ledger())
+
+
 def test_the_same_assessment_does_not_rewrite_the_candidate():
     async def go(env):
         cand = await prod_candidate(env)

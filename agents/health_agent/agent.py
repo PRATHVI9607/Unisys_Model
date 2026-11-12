@@ -283,7 +283,11 @@ class HealthAgent:
             return None
 
     def log_promotion_config(self) -> None:
-        if self.ledger is None:
+        if self.ledger is None and os.environ.get("LEDGER_BACKEND"):
+            logger.error("baseline promotion: automatic promotion in dev and staging is DISABLED, LEDGER_BACKEND is "
+                         "set but the ledger could not be built (see the earlier error: MinIO credentials, or the "
+                         "minio package missing from the image); prod candidates are still stored")
+        elif self.ledger is None:
             logger.warning("baseline promotion: automatic promotion in dev and staging is DISABLED, no ledger is "
                            "configured (set LEDGER_BACKEND, MINIO_ENDPOINT, MINIO_BUCKET and the MinIO "
                            "credentials); prod promotion candidates are still stored, but approving one needs "
@@ -978,6 +982,11 @@ class HealthAgent:
                                                  golden_raw=golden_raw, tier=tier,
                                                  changed_fields=verdict["changed_fields"], assessment=evidence)
             if res["status"] == "stored":
+                if not self._promotable_now(key, h):
+                    # a newer spec arrived while the candidate was being written: its housekeeping may already
+                    # have run, so do not leave a candidate for a spec that is no longer live
+                    await baseline.drop_candidate(self.redis, self.ledger, ns, name, "superseded during store")
+                    return "superseded"
                 logger.info(f"baseline promotion candidate stored for {ns}/{name} ({tier}); waiting for approval")
             return "candidate_" + res["status"]
         res = await baseline.promote_baseline(
