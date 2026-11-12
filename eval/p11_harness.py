@@ -40,14 +40,16 @@ def _check_namespace(namespace: str) -> None:
 
 
 def kubectl(context: str, args: Sequence[str], *, runner: Runner = subprocess.run,
-            input_text: str | None = None) -> str:
+            input_text: str | None = None, timeout_s: float = 30) -> str:
     """Run kubectl against the allow-listed context only; runner injection keeps tests offline."""
+    if timeout_s <= 0:
+        raise ValueError("timeout_s must be positive")
     if context in FORBIDDEN_CONTEXTS:
         raise ValueError(f"context {context!r} must never be used")
     if context != ALLOWED_CONTEXT:
         raise ValueError(f"context must be exactly {ALLOWED_CONTEXT!r}")
     result = runner(["kubectl", "--context", context, *args], check=True, capture_output=True,
-                    text=True, input=input_text)
+                    text=True, input=input_text, timeout=timeout_s)
     return result.stdout
 
 
@@ -156,7 +158,8 @@ def apply_k6_job(context: str, manifest: Mapping, *, runner: Runner = subprocess
     ns = job["metadata"]["namespace"]
     _check_namespace(ns)
     rendered = "---\n".join(yaml.safe_dump(item, sort_keys=False) for item in objects)
-    kubectl(context, ["apply", "-f", "-"], runner=runner, input_text=rendered)
+    # create refuses to adopt or modify an object that already exists.
+    kubectl(context, ["create", "-f", "-"], runner=runner, input_text=rendered)
     deadline = clock() + wait_seconds
     while True:
         state = _job_state(context, name, ns, runner)

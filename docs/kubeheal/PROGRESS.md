@@ -1,4 +1,4 @@
-# KubeHeal build progress
+﻿# KubeHeal build progress
 
 Resume state for the autonomous build. Plan: `IMPLEMENTATION_PLAN.md`. Target: `PROJECT_SPEC.md`.
 Branch: `work` (created from local `main` at 88ce586). `demo` is created from `work` in P10.
@@ -489,3 +489,12 @@ Focused verification on the isolated branch, 2026-11-12: `tests/test_containment
 - Before any cluster operation, created the lock file with `CLUSTER LOCK Codex 2026-11-12 20:00 IST`. It must remain present through the F3 image rebuild, Helm upgrade, and any enforce window, then be removed and committed.
 - Pre-F3 tips were work `3aa5994` and demo `036f54b`; their latest suites were work 2,081 passed, 12 skipped and demo 2,090 passed, 11 skipped. No cluster changes were made while taking this handoff.
 - Review checklist: inspect the full branch diff, specifically `tests/test_fusion_incident.py`; confirm the escalation assertion still checks the unsupported-workload contract while permitting additional escalation records. Then run full suite, merge F3 into work, merge work into demo, merge F3 runbook into the main runbook, rebuild all images from demo, upgrade using only new demo tags, and record Helm revision/tags.
+
+### F3 review and integration (2026-11-12)
+
+- Reviewed `wave/claude-F3` at `d0ed188`, including owner resolution, entropy-result parsing, HMAC wiring, tests, D-5 replay output, and F3 ledger evidence. Independent full suite on the candidate under Python 3.11: 2,138 passed, 11 skipped in 59.00s.
+- The changed `test_fusion_incident.py` contract is valid: the Pod-kind case asserts no contain request was queued, requires the `contain_not_requested` escalation for an unexpected result, and still requires a `workload_kind_unsupported` escalation after the late result adds another escalation.
+- F2 D-5 rerun produced a real Security Agent-scored replay event with `deployment=victim-app`; Fusion queued it to Executor in test mode and the Executor recorded dry-run entries. This is a hand-written replay, not Falco capture.
+- F3 status: LIVE-VERIFIED for the Fusion-to-Executor-to-restore chain, including freeze, forensic snapshot, quarantine, scale to zero, pre-T0 restore, entropy scan, quarantine lift, and ledger. Sense/alert input was scripted because Falco is absent. Three windows are documented; first two failed safely, third restored successfully. See `docs/kubeheal/demo-evidence/F3/`.
+- Review found `f3_window.py cleanup` deletes staging resources by broad `f3-*` / `kubeheal-*` prefixes. The main runbook blocks this helper until it selects resources by unique run labels. Four stale SnapshotFreeze keys and two fail-safe escalations from deleted scratch runs remain and must be shown honestly.
+- Work-side HMAC and F8 dashboard changes, bounded F2 runner/evidence, and both failed P11 attempts were preserved during conflict resolution. Full suite on the merged work tree is pending; cluster upgrade from demo is pending and lock remains held.

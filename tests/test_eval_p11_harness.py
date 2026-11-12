@@ -65,6 +65,7 @@ def test_apply_k6_job_uses_fake_runner_and_explicit_context():
     assert out == "k6 summary"
     assert len(fake.calls) == 3
     assert all(call[0][1:3] == ["--context", "k3d-kubeheal"] for call in fake.calls)
+    assert fake.calls[0][0][3] == "create"  # create-only; do not adopt existing objects
     rendered = fake.calls[0][1]["input"]
     assert "load.js" in rendered
     assert "_script" not in rendered
@@ -105,8 +106,11 @@ def test_context_required_and_forwarded():
     fake = FakeRunner(["yes"])
     assert kubectl("k3d-kubeheal", ["get", "pods"], runner=fake) == "yes"
     assert fake.calls[0][0] == ["kubectl", "--context", "k3d-kubeheal", "get", "pods"]
+    assert fake.calls[0][1]["timeout"] == 30
     with pytest.raises(ValueError):
         kubectl("", ["get", "pods"], runner=fake)
+    with pytest.raises(ValueError, match="timeout_s"):
+        kubectl("k3d-kubeheal", ["get", "pods"], runner=fake, timeout_s=0)
 
 
 def test_context_allow_list_rejects_hybrid_demo_and_others():

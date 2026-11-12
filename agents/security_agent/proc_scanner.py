@@ -138,6 +138,44 @@ class PodIndex:
     def lookup(self, uid: str) -> Optional[PodInfo]:
         return self.by_uid.get(uid)
 
+    async def resolve_live(self, core_api, apps_api, namespace: str, pod: str,
+                           pod_uid: str = "") -> Optional[PodInfo]:
+        """Resolve the controller of one pod straight from the API (read-only), for a pod the index does not know
+        or knows without a Deployment or StatefulSet owner. ownerReferences are the authority: Pod -> ReplicaSet ->
+        Deployment, or Pod -> StatefulSet. Returns None (fail closed) when there is no such owner: a bare pod, a
+        ReplicaSet without a Deployment, any other controller kind, a pod whose live UID differs from the one the
+        event carries (a recreated pod must not inherit the target), or any API error. A pod-name fallback is never
+        returned. A resolved pod is added to the index until the next refresh replaces it."""
+        if not (namespace and pod):
+            return None
+        try:
+            p = await core_api.read_namespaced_pod(pod, namespace)
+            md = p.metadata
+            if pod_uid and md.uid != pod_uid:
+                return None
+            refs = list(md.owner_references or [])
+            if len(refs) != 1:
+                return None
+            ref = refs[0]
+            if ref.kind == "StatefulSet":
+                kind, workload = "StatefulSet", ref.name
+            elif ref.kind == "ReplicaSet":
+                rs = await apps_api.read_namespaced_replica_set(ref.name, namespace)
+                owners = [o for o in (rs.metadata.owner_references or []) if o.kind == "Deployment"]
+                if len(owners) != 1:
+                    return None
+                kind, workload = "Deployment", owners[0].name
+            else:
+                return None
+            container = p.spec.containers[0].name if p.spec and p.spec.containers else ""
+            node = (getattr(p.spec, "node_name", "") or "") if p.spec else ""
+        except Exception:
+            return None
+        info = PodInfo(namespace, pod, container, kind, workload, md.uid, node)
+        self.by_uid[md.uid] = info
+        self.by_pod[(namespace, pod)] = info
+        return info
+
     def lookup_pod(self, namespace: str, pod: str) -> Optional[PodInfo]:
         """The pod by name (what a Falco event carries); None when the index does not know it (yet)."""
         return self.by_pod.get((namespace, pod))

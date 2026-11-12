@@ -20,6 +20,7 @@ from agents.executor.config import ExecConfig
 from agents.executor.ledger_guard import PROTECTIVE_STEPS
 from agents.executor.support import ESCALATE_PREFIXES, Recorder
 from agents.executor.validation import Request
+from agents.executor.main import RequestGate
 
 INC = "inc-20261110-101500-ab12cd"
 ENV = {"SNAPSHOT_CLASS": "csi-snap", "ROLLOUT_TIMEOUT_S": "50", "ROLLOUT_POLL_S": "5",
@@ -165,6 +166,15 @@ def test_a_dry_run_blocks_first_even_when_the_pod_has_no_node():
     s = Scene(node="", uid="", gate=fk.Gate(allow=0))
     assert s.go().startswith("DRY RUN: would have CONTAIN")
     assert s.c.log == [] and s.redis.added == []
+
+
+def test_replay_request_stays_write_free_even_if_executor_mode_is_enforce():
+    # Fusion tags replay-origin requests dry_run=true; Executor turns that into force_dry even if
+    # its independently observed global mode is enforce. No Kubernetes writes or freeze request occur.
+    s = Scene(gate=RequestGate(fk.Mode(dry=False), force_dry=True))
+    out = s.go()
+    assert out.startswith("DRY RUN: would have CONTAIN")
+    assert s.c.log == [] and s.redis.added == [] and s.redis.store == {}
 
 
 @pytest.mark.parametrize("label", ["", "suspicious", "benign", "weird"])

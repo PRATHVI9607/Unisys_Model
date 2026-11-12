@@ -247,6 +247,7 @@ def test_agent_replay_publishes_event_scored_from_the_features_of_the_trace(monk
     assert stream == "kubeheal.security.events"
     assert p["pod_name"] == "victim-app-7d9f8b6c5-x2k4q" and p["namespace"] == "demo"
     assert p["syscall_source"] == "replay" and p["model_scored"] == "true"
+    assert p["dry_run"] == "true"
     assert p["t0_ms"] == "1794303000000" and p["window_start_ms"] == "1794303000000"
     assert p["entropy"] == "" and p["entropy_valid_samples"] == "0" and p["entropy_phase"] == "complete"
     assert float(p["sec_risk"]) == pytest.approx(0.91) and p["sec_label"] == "ransomware"
@@ -343,6 +344,22 @@ def test_replay_is_only_reachable_with_explicit_mode():
         mode, _ = fc.resolve_falco_mode({**env, **mode_env}, exists=lambda p: p == str(RANSOM))
         assert mode != "replay", mode_env
     assert fc.resolve_falco_mode({**env, "FALCO_MODE": "replay"})[0] == "replay"
+
+
+def test_replay_node_gate_only_runs_on_the_named_security_agent_node():
+    assert fc.resolve_falco_mode({"FALCO_MODE": "replay", "FALCO_REPLAY_PATH": "/trace",
+                                  "FALCO_REPLAY_NODE": "node-a", "NODE_NAME": "node-a"})[0] == "replay"
+    mode, reason = fc.resolve_falco_mode({"FALCO_MODE": "replay", "FALCO_REPLAY_PATH": "/trace",
+                                          "FALCO_REPLAY_NODE": "node-a", "NODE_NAME": "node-b",
+                                          "FALCO_EVENTS_PATH": "/events"}, exists=lambda p: p == "/events")
+    assert mode == "live" and "auto: Falco JSON output" in reason
+
+
+def test_replay_node_mismatch_falls_back_to_off_only_when_live_falco_is_absent():
+    mode, reason = fc.resolve_falco_mode({"FALCO_MODE": "replay", "FALCO_REPLAY_PATH": "/trace",
+                                          "FALCO_REPLAY_NODE": "node-a", "NODE_NAME": "node-b",
+                                          "FALCO_EVENTS_PATH": "/events"}, exists=lambda _p: False)
+    assert mode == "off" and "auto: no Falco output found" in reason
 
 
 # ---- gRPC priority mapping ---------------------------------------------------------------------------
