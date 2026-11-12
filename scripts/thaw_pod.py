@@ -1,0 +1,76 @@
+"""Operator tool: thaw a pod that the cgroup freeze (V5-S5) left frozen.
+
+A contained pod stays frozen until an operator releases it: nothing thaws automatically. This script publishes a
+`thaw` request for the pod on the stream of its node (`kubeheal.contain.req:<node>`) and waits for the verified
+answer of the node-local Security Agent (hash `kubeheal:contain:result:<request_id>`).
+
+A thaw is the safe direction, so it is accepted in every kill-switch mode (including `test`), but only from
+requested_by `operator`, and the Security Agent still validates everything else (namespace guard, pod UID, node,
+request age). The script writes ONLY to Redis. It reads nothing from Kubernetes: give it the facts, for example from
+`kubectl --context k3d-kubeheal -n <ns> get pod <pod> -o jsonpath='{.metadata.uid} {.spec.nodeName}'`.
+
+Usage:
+  REDIS_URL=redis://:<password>@127.0.0.1:6379 python scripts/thaw_pod.py \\
+      --namespace prod --pod web-abc-1 --pod-uid <uid> --node <node> --incident-id <incident>
+
+Exit code 0 only when the answer says status `thawed` with frozen 0; 1 otherwise (the reason is printed).
+"""
+import argparse
+import os
+import sys
+import time
+import uuid
+
+STREAM_PREFIX = "kubeheal.contain.req"      # keep in step with agents/executor/freeze.py
+RESULT_PREFIX = "kubeheal:contain:result"
+
+
+def build_request(namespace, pod, pod_uid, node, incident_id, now_ms=None, request_id=None):
+    return {
+        "request_id": request_id or uuid.uuid4().hex, "incident_id": incident_id, "namespace": namespace,
+        "pod": pod, "pod_uid": pod_uid, "node": node, "action": "thaw", "label": "",
+        "requested_by": "operator", "timestamp_ms": str(int(now_ms if now_ms is not None else time.time() * 1000)),
+    }
+
+
+def thaw(redis, request, wait_s=15.0, poll_s=0.5, sleep=time.sleep, clock=time.monotonic):
+    """Publish the request and wait for the answer. Returns (ok, message, result dict)."""
+    redis.xadd(f"{STREAM_PREFIX}:{request['node']}", request)
+    key = f"{RESULT_PREFIX}:{request['request_id']}"
+    deadline = clock() + wait_s
+    while True:
+        raw = redis.hgetall(key) or {}
+        result = {(k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
+                  for k, v in raw.items()}
+        if result:
+            ok = result.get("status") == "thawed" and result.get("frozen") == "0"
+            why = result.get("reason", "")
+            return ok, f"status={result.get('status')} frozen={result.get('frozen')}" + (f" reason={why}" if why else ""), result
+        if clock() >= deadline:
+            return False, "no answer in time (is the Security Agent on that node running with the freeze consumer?)", {}
+        sleep(poll_s)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--namespace", required=True)
+    ap.add_argument("--pod", required=True)
+    ap.add_argument("--pod-uid", required=True)
+    ap.add_argument("--node", required=True)
+    ap.add_argument("--incident-id", required=True)
+    ap.add_argument("--wait-s", type=float, default=15.0)
+    args = ap.parse_args(argv)
+    url = os.environ.get("REDIS_URL")
+    if not url:
+        print("REDIS_URL is not set", file=sys.stderr)
+        return 2
+    import redis as redis_lib
+    client = redis_lib.from_url(url, decode_responses=True)
+    request = build_request(args.namespace, args.pod, args.pod_uid, args.node, args.incident_id)
+    ok, message, _result = thaw(client, request, wait_s=args.wait_s)
+    print(("THAWED: " if ok else "NOT THAWED: ") + message)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
