@@ -470,3 +470,14 @@ Focused verification on the isolated branch, 2026-11-12: `tests/test_containment
 - Offline P11 runner review tests on `wave/Codex-NP-k6`: 35 passed, 0 failed, using an isolated pytest temp directory. No live P11 run was performed in this resume.
 - Current blockers/open verification: full suite after current `work` tip not yet rerun; F3 is in progress with Claude; F4 live HMAC, F5-F11 live checks, U6 twice, post-cutoff runbook rehearsal, final full suites on both branches, README/AGENTS final-design pass, secret scan, and `PUSH_PLAN.md` remain.
 - Next: review the active agent commits, verify their focused tests, run the full suite, and merge only green work. Then merge `work` into `demo` and update this section with exact results. Nothing is pushed.
+
+### Codex integration update 2026-11-12
+
+- F1 guard now checks the two registered live tests are opt-in and scans module test functions, nested `Test*` class methods, and local helper chains for cluster readiness/kubectl, raw kubectl or docker-exec subprocesses, Kubernetes config loading, Redis/MinIO client construction, and direct `kubeheal-mode` patches. Regression guard focused tests: 37 passed, 2 opt-in integration tests skipped.
+- F4 mode-test HMAC runner is merged. It signs a valid request, an unsigned request, and a tampered request, checks signed results, and cleans only run-owned Redis keys. Offline focused tests: 9 passed. Live Redis/Security Agent smoke is not yet measured.
+- F8 SnapshotFreeze incident status and release controls are merged. Focused dashboard suite reported by reviewer: 636 passed. It uses the existing authenticated release API and does not display raw freeze keys.
+- `DEMO_RUNBOOK.md` contains F2 and F4-F11 sections with commands, expected output, timing, and fallbacks; the F3 section was left for Claude. F2 and F11 evidence is present. P11 E1 remains not measured as an accepted benchmark; both attempts failed, and E2 was not run.
+- `work` merge `48bbda3` passed the full suite: 2,079 passed, 12 skipped in 58.93s. `demo` merge `e41eb3d` passed: 2,088 passed, 11 skipped in 59.77s. Both runs used the default-safe test configuration.
+- HPA script cleanup fixes were cherry-picked into the demo candidate and included in `e41eb3d`; focused staging tests: 4 passed. No HPA live rerun was performed this session.
+- Last cluster check before this update: `k3d-kubeheal` mode `test`, no `CLUSTER_LOCK.md`, no `dev/freeze-scratch`; no cluster write was made. Claude owns F3, including the pod owner correction and D-5 rerun. Codex did not work those items.
+- Still not accepted as fully demo-ready: live HMAC, baseline promotion, F6 request validation, F7 policy, F8 workflow, F9 kill-switch, F10 healing/rollback, Grafana display, U6 twice, successful P11 evaluation, runbook rehearsal, final design docs, secret scan, and PUSH_PLAN.
