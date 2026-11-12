@@ -12,10 +12,13 @@ events. It does not import torch (the agent image has none); the constants below
 """
 
 import time
+from collections import OrderedDict
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Sequence
 
 from agents.security_agent.falco_client import RANSOMWARE_SYSCALLS
+from agents.security_agent.v5_window import v5_syscall
+from kubeheal.features.security import OPEN_SYSCALLS, WINDOW_S
 
 # models/security_model/falco_transformer_encoder.py: MAX_SEQUENCE_LENGTH
 MODEL_MAX_EVENTS = 256
@@ -53,14 +56,33 @@ class Trigger:
 class FalcoWindowTracker:
     def __init__(self, burst_threshold: int = DEFAULT_BURST_THRESHOLD,
                  cooldown_s: float = DEFAULT_COOLDOWN_S, max_events: int = MODEL_MAX_EVENTS,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time):
+        self._wall = wall
         self.burst_threshold = burst_threshold
         self.cooldown_s = cooldown_s
         self.max_events = max_events
         self._clock = clock
-        self._windows: Dict[int, List[Dict]] = {}
-        self._last_fire: Dict[int, float] = {}
-        self._first_seen: Dict[int, tuple] = {}     # pid -> (epoch ms, original ts string)
+        self._windows: "OrderedDict[int, List[Dict]]" = OrderedDict()
+        self._last_fire: "OrderedDict[int, float]" = OrderedDict()
+        self._first_seen: "OrderedDict[int, tuple]" = OrderedDict()  # pid -> (epoch ms, original ts string)
+        self._instances: "OrderedDict[int, Optional[int]]" = OrderedDict()
+
+    def discard(self, pid: int) -> None:
+        """Forget one PID's bounded tracker state (also used when its starttime changes)."""
+        self._windows.pop(pid, None)
+        self._last_fire.pop(pid, None)
+        self._first_seen.pop(pid, None)
+        self._instances.pop(pid, None)
+
+    def _ensure_pid(self, pid: int, starttime: Optional[int]) -> None:
+        old = self._instances.get(pid)
+        if starttime is not None and old is not None and old != starttime:
+            self.discard(pid)
+        if pid not in self._instances and len(self._instances) >= MAX_TRACKED_PIDS:
+            oldest = next(iter(self._instances))
+            self.discard(oldest)
+        self._instances[pid] = starttime if starttime is not None else old
+        self._instances.move_to_end(pid)
 
     def first_seen(self, pid: int) -> str:
         return self._first_seen.get(pid, (0, ""))[1]
@@ -71,11 +93,10 @@ class FalcoWindowTracker:
             return
         known = self._first_seen.get(pid)
         if known is None:
-            if len(self._first_seen) >= MAX_TRACKED_PIDS:
-                self._first_seen.pop(next(iter(self._first_seen)))      # oldest tracked PID goes
             self._first_seen[pid] = (ms, ts)
         elif ms < known[0]:
             self._first_seen[pid] = (ms, ts)
+        self._first_seen.move_to_end(pid)
 
     def window(self, pid: int) -> List[Dict]:
         return list(self._windows.get(pid, []))
@@ -86,15 +107,31 @@ class FalcoWindowTracker:
         pid, sysc = evt.get("pid"), evt.get("syscall", "")
         if not pid or sysc not in RANSOMWARE_SYSCALLS:
             return None
+        self._ensure_pid(pid, evt.get("proc_starttime"))
         w = self._windows.setdefault(pid, [])
+        self._windows.move_to_end(pid)
+        seen_ms = int(evt.get("seen_ms") or self._wall() * 1000)
+        # An activity gap longer than WINDOW_S ends the burst: the earliest-seen time (the T0 of a later trigger)
+        # must start again, or one old rename would pull T0 hours back and Fusion would pick an older snapshot.
+        if w and seen_ms - w[-1]["seen_ms"] > WINDOW_S * 1000:
+            self._first_seen.pop(pid, None)
         self._note_first_seen(pid, evt.get("ts", ""))
         # Keep the Falco source timestamp for Fusion's T0/restore decision. `build_model_input` deliberately
         # strips it from the Security Model's fixed event schema.
-        w.append({"syscall": sysc, "fd_path": evt.get("fd_path", ""), "ts": evt.get("ts", "")})
+        # V5-S2: the entry also keeps what the v5 feature mapping needs (open flags, rule path fields) and the
+        # arrival time, the fallback event time of an event without a Falco timestamp (agents/security_agent/v5_window.py).
+        w.append({"syscall": sysc, "fd_path": evt.get("fd_path", ""), "ts": evt.get("ts", ""),
+                  "flags": evt.get("flags", ""), "fs_name": evt.get("fs_name", ""),
+                  "fs_source": evt.get("fs_source", ""), "fs_target": evt.get("fs_target", ""),
+                  "seen_ms": seen_ms,
+                  "proc_starttime": evt.get("proc_starttime")})
+        cutoff_ms = w[-1]["seen_ms"] - WINDOW_S * 1000
+        w[:] = [event for event in w if event["seen_ms"] >= cutoff_ms]
         if len(w) > self.max_events:
             del w[: len(w) - self.max_events]
         renames = sum(1 for e in w if e["syscall"].startswith("rename"))
-        writes = sum(1 for e in w if "write" in e["syscall"] or e["syscall"] == "ftruncate")
+        writes = sum(1 for e in w if "write" in e["syscall"] or e["syscall"] == "ftruncate"
+                     or (e["syscall"] in OPEN_SYSCALLS and v5_syscall(e) == "open_w"))
         # A CRITICAL ransomware rule (the ransom-note rule) triggers on its own. The WARNING rules (mass write,
         # mass rename) fire on every single matching syscall, so they only count towards the burst threshold;
         # treating each of them as a trigger would start a check with a one-event window.
@@ -106,6 +143,7 @@ class FalcoWindowTracker:
         if now - self._last_fire.get(pid, float("-inf")) <= self.cooldown_s:
             return None
         self._last_fire[pid] = now
+        self._last_fire.move_to_end(pid)
         return Trigger(pid, list(w), "falco_rule" if ransom_rule else "burst", self.first_seen(pid))
 
 

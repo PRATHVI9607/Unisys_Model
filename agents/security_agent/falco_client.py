@@ -51,6 +51,8 @@ logger = logging.getLogger(__name__)
 RANSOMWARE_SYSCALLS = {
     "open", "openat", "write", "pwrite", "pwritev", "rename", "renameat",
     "renameat2", "ftruncate", "truncate", "unlink", "unlinkat", "mmap", "msync",
+    # V5-S2: the rest of the syscalls the v5 security features count (kubeheal.features.security.CAPTURED_GROUPS)
+    "openat2", "creat", "chmod", "fchmod", "fchmodat",
 }
 
 
@@ -164,10 +166,23 @@ def _normalise(evt: Dict) -> Optional[Dict]:
         "pod": of.get("k8s.pod.name") or of.get("container.name") or "",
         "namespace": of.get("k8s.ns.name") or "default",
         "fd_path": of.get("fd.name") or of.get("fd.path") or "",
+        # V5-S2: what the v5 features need and the old normaliser dropped. Each is "" when the rule does not
+        # output it (Falco prints <NA> for a field that does not apply to the syscall).
+        "flags": _na(of.get("evt.arg.flags")),
+        "fs_name": _na(of.get("fs.path.name")),
+        "fs_source": _na(of.get("fs.path.source")),
+        "fs_target": _na(of.get("fs.path.target")),
+        "container_id": _na(of.get("container.id")),
+        "pod_uid": _na(of.get("k8s.pod.uid")),
         "rule": evt.get("rule", ""),
         "priority": priority_name(evt.get("priority") or ""),
         "ts": event_time or "",
     }
+
+
+def _na(v) -> str:
+    """Falco field value as text; missing, empty and Falco's "<NA>" all become ""."""
+    return "" if v in (None, "", "<NA>") else str(v)
 
 
 def _to_int(v) -> Optional[int]:
