@@ -280,6 +280,24 @@ async def test_first_sight_retries_after_a_redis_error_on_the_same_event(env):
 
 
 @scenario
+async def test_a_quiet_drifted_workload_is_retried_by_the_scheduler_after_a_redis_error(env):
+    await env.send("ADDED", dep())
+    another = Env()
+    another.redis.store.update(env.redis.store)
+    another.redis.fail["get"] = ha.aioredis.RedisError("temporary Redis error")
+    try:
+        await another.send("ADDED", dep(image="img:2"))          # no further event will ever arrive for it
+        assert KEY not in another.agent.pending and KEY in another.agent._first_sight_retry
+        another.redis.fail.clear()
+        await another.tick(1)
+        assert KEY not in another.agent.pending                 # not before FIRST_SIGHT_RETRY_S
+        await another.tick(ha.FIRST_SIGHT_RETRY_S)
+        assert KEY in another.agent.pending and KEY not in another.agent._first_sight_retry
+    finally:
+        await another.agent.stop()
+
+
+@scenario
 async def test_missing_metrics_are_null_features_never_zeros(env):
     win = full_window()
     win["latency_p99_s"] = None

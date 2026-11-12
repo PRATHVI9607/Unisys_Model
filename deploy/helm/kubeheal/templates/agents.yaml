@@ -41,7 +41,6 @@ spec:
             - {containerPort: {{ $ha.port }}, name: http}
           env:
             {{- include "kubeheal.redisEnv" . | nindent 12 }}
-            - {name: HEALTH_MODEL_URL, value: "http://{{ .Values.modelServers.health.name }}:{{ .Values.modelServers.health.port }}"}
             {{- if .Values.inference.enabled }}
             - {name: INFERENCE_URL, value: "http://{{ .Values.inference.name }}:{{ .Values.inference.port }}"}
             {{- end }}
@@ -95,7 +94,6 @@ spec:
             - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
             - {name: PROC_ROOT, value: /proc}
             {{- include "kubeheal.redisEnv" . | nindent 12 }}
-            - {name: SECURITY_MODEL_URL, value: "http://{{ .Values.modelServers.security.name }}:{{ .Values.modelServers.security.port }}"}
             {{- if .Values.inference.enabled }}
             - {name: INFERENCE_URL, value: "http://{{ .Values.inference.name }}:{{ .Values.inference.port }}"}
             {{- end }}
@@ -166,7 +164,6 @@ spec:
             - {name: MINIO_ENDPOINT, value: {{ .Values.minio.endpoint | quote }}}
             - {name: MINIO_BUCKET, value: {{ .Values.minio.bucket | quote }}}
             {{- include "kubeheal.minioClientEnv" (dict "root" .) | nindent 12 }}
-            - {name: DCM_URL, value: "http://{{ .Values.modelServers.dcm.name }}:{{ .Values.modelServers.dcm.port }}"}
             - {name: BURN_IN_MODE, value: {{ $fu.burnInMode | quote }}}
             - {name: NAMESPACE, value: {{ $ns | quote }}}
             - {name: LOG_LEVEL, value: {{ $fu.logLevel | quote }}}

@@ -44,7 +44,14 @@ def prediction_set(event: Optional[Dict], name: str):
     if not event:
         return None
     value = _loads(event.get(name))
-    return value if isinstance(value, list) else MALFORMED_SET
+    if not isinstance(value, list):
+        return MALFORMED_SET
+    # A producer that marks the event uncertain (`health_uncertain` / `sec_uncertain`) must not pass the one-label
+    # gate even if it sent a one-label set together with the flag: fail closed with an empty set.
+    flag = event.get(name.replace("_prediction_set", "_uncertain"))
+    if len(value) == 1 and str(flag).strip().lower() in ("true", "1"):
+        return []
+    return value
 
 
 def safe_float(raw, default: float = 0.0) -> float:

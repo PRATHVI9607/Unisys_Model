@@ -107,7 +107,8 @@ minio:
 healthAgent:
   image: {repository: kubeheal/health-agent}
   port: 8080
-  # Extra namespaces beyond prod/staging/dev. Each gets a namespaced read-only HPA RoleBinding.
+  # Extra namespaces beyond prod/staging/dev. Each gets a namespaced read-only HPA RoleBinding. The Namespace itself is
+  # NOT rendered (it must already exist and belongs to its workload); its tier is "unknown" (human review only).
   additionalWatchNamespaces: []
   prometheusUrl: http://prometheus-operated.monitoring.svc.cluster.local:9090
   logLevel: INFO

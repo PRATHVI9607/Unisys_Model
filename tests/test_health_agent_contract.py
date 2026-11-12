@@ -149,3 +149,11 @@ def test_a_follow_up_event_maps_with_the_late_failure_reasons():
     ev = em.to_health_event(follow, "prod", "victim-app")
     assert ev is not None and ev.failure_reasons == ["ImagePullBackOff"] and ev.event_id != first["event_id"]
     assert ev.risk == em.to_health_event(first, "prod", "victim-app").risk
+
+
+def test_an_uncertain_flag_turns_a_one_label_set_into_an_empty_set_for_both_sides():
+    for prefix in ("health", "sec"):
+        event = {f"{prefix}_prediction_set": '["benign"]', f"{prefix}_uncertain": "true"}
+        assert em.prediction_set(event, f"{prefix}_prediction_set") == []
+        event[f"{prefix}_uncertain"] = "false"
+        assert em.prediction_set(event, f"{prefix}_prediction_set") == ["benign"]

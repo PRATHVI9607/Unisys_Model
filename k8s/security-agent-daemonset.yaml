@@ -41,8 +41,6 @@ spec:
               value: /proc
             - name: REDIS_URL
               value: redis://redis-master:6379
-            - name: SECURITY_MODEL_URL
-              value: http://kubeheal-security-model:8002
             - name: ENTROPY_THRESHOLD
               value: "7.2"
             - name: MMAP_ENTROPY_THRESHOLD
