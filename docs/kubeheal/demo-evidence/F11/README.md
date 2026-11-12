@@ -1,10 +1,5 @@
-# F11 k6 staging diagnostic
+# F11 HPA evidence index
 
-- **Date:** 2026-11-12
-- **Machine/cluster:** not recorded in the copied console note; the target was `k3d-kubeheal`.
-- **Command:** `demo/scripts/hpa_load.ps1` (32 VUs, 90 seconds, default values).
-- **Result:** failed before any load measurement. k6 reported `no exported functions in script` for `/scripts/health.js`.
-- **Cleanup:** the operator confirmed no temporary `kubeheal-k6-health-load` Job, ConfigMap, or NetworkPolicy remained.
-- **Cause/fix:** PowerShell `Out-String -NoNewline` flattened the JavaScript source lines. Commit `6f97f88` stages the source through `kubectl create configmap --from-file` and adds a static regression check.
-- **Measurements:** not measured. No HPA scale-out or Grafana result is claimed from this attempt.
-- **Next:** rerun after the fix, record exact command, date, machine, k6 output, HPA samples, and dashboard screenshots here.
+- The first attempt on 2026-11-12 failed before measurement because PowerShell `Out-String -NoNewline` flattened the JS source and k6 reported `no exported functions in script`. Cleanup removed its temporary Job, ConfigMap, and NetworkPolicy.
+- The staging fix is in `6f97f88`; the later successful run is recorded in [hpa-run-2026-11-12.md](hpa-run-2026-11-12.md).
+- One successful synthetic scoring load was measured. The final runbook rehearsal still needs full raw terminal screenshots and Grafana screenshots.

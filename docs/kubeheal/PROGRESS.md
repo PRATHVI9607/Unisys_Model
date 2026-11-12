@@ -189,6 +189,10 @@ Ransomware:
 - [ ] P11-E7 size: S. Each results file states machine, cluster and date. Verify: scripts produce CSV plus markdown.
 - P11 coverage table: `docs/kubeheal/results/p11/P11_COVERAGE.md` lists E1-E7 and V5-E1. E3 RPO/RTO, E4 stage timing, E5 comparative baselines, E6 FP32/FP16, and V5-E1 remain `not measured` with reasons. Do not run E3 or V5-E1 against existing volumes or before the full containment flow is verified.
 
+### Demo runbook
+- [x] `docs/kubeheal/DEMO_RUNBOOK.md` lists F2-F11 commands, screen/demo expectations, planned durations, and safe fallback evidence paths. Missing live triggers are explicitly marked `NOT VERIFIED`; no unsaved screenshots or unmeasured results are claimed. F10's existing script is explicitly limited to drift signal/dry-run evidence.
+- [ ] Final rehearsal from a fresh cluster start; capture transcripts and screenshots under `docs/kubeheal/demo-evidence/`. F11 has one measured result but no full rehearsal screenshots.
+
 ## P0 log
 
 Plan: switch to `work`; copy plan into repo; update CLAUDE.md; push-blocking guards and verify; untrack
