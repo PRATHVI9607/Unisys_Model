@@ -880,7 +880,7 @@ def test_a_harmful_verdict_vetoes_the_spec_even_if_a_later_rescore_says_benign(n
         env.result = prediction(label="degradation", risk=0.6, pset=["degradation"])
         await drift(env, ns, image="img:2")
         h = env.agent.seen_hash[key]
-        assert env.redis.store[bl.veto_key(*key)] == h and env.redis.expiry[bl.veto_key(*key)] - env.redis.now == 86400
+        assert json.loads(env.redis.store[bl.veto_key(*key)]) == [h] and env.redis.expiry[bl.veto_key(*key)] - env.redis.now == 86400
         assert h in env.agent._vetoed[key]
         # a later OBSERVE re-score says certain benign, the cool-off has passed: still no promotion or candidate
         env.redis.advance(301)
@@ -1239,3 +1239,227 @@ def test_the_mode_watcher_is_started_only_when_asked(monkeypatch):
     assert started == []
     run(go(True))
     assert len(started) == 2 and started[1] == "stopped"
+
+
+# =====================================================================================================================
+# Re-review fixes: bytes-returning Redis (the dashboard client does not decode), constants, the final check, veto set
+# =====================================================================================================================
+class BytesRedis:
+    """What a redis client without decode_responses returns: bytes keys and values. Writes go through."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    @staticmethod
+    def _b(v):
+        return v.encode() if isinstance(v, str) else v
+
+    @staticmethod
+    def _s(k):
+        return k.decode() if isinstance(k, bytes) else k      # a real client accepts bytes keys
+
+    async def get(self, k):
+        return self._b(await self.inner.get(self._s(k)))
+
+    async def hgetall(self, k):
+        return {self._b(a): self._b(b) for a, b in (await self.inner.hgetall(self._s(k))).items()}
+
+    async def scan_iter(self, match=None):
+        async for k in self.inner.scan_iter(match=match):
+            yield self._b(k)
+
+    async def set(self, *a, **kw):
+        return await self.inner.set(*a, **kw)
+
+    async def delete(self, *a):
+        return await self.inner.delete(*a)
+
+    async def eval(self, *a):
+        return await self.inner.eval(*a)
+
+
+async def bytes_approve(env, cid, **kw):
+    return await bl.approve_promotion(BytesRedis(env.redis), "prod", "victim-app", "alice", env.agent.ledger, cid,
+                                      mode="enforce", **kw)
+
+
+@pytest.mark.parametrize("block", [
+    lambda env: block_rollback(env, "prod"),
+    lambda env: block_lock(env, "prod"),
+    lambda env: block_cooloff(env, "prod"),
+    lambda env: block_incident(env, "prod"),
+    lambda env: block_incident(env, "prod", state="human_pending"),
+    lambda env: env.redis.store.__setitem__(bl.veto_key("prod", "victim-app"),
+                                            json.dumps([env.agent.seen_hash[PROD]])),
+    lambda env: env.redis.store.__setitem__(bl.veto_key("prod", "victim-app"), env.agent.seen_hash[PROD]),
+], ids=["rollback", "lock", "cooloff", "incident-queued", "incident-human", "veto-list", "veto-old-form"])
+def test_bytes_redis_still_blocks_an_approval(block):
+    async def go(env):
+        cand = await prod_candidate(env)
+        block(env)
+        res = await bytes_approve(env, cand["candidate_id"])
+        assert res["status"] == "blocked", res
+        assert await golden_image(env, "prod") == "img:1"
+    run_env(go, ledger=Ledger())
+
+
+def test_bytes_redis_unrelated_state_does_not_block_and_approval_promotes():
+    async def go(env):
+        cand = await prod_candidate(env)
+        block_incident(env, "prod", name="other-app")
+        block_rollback(env, "prod", state="done")
+        assert (await bytes_approve(env, cand["candidate_id"]))["status"] == "promoted"
+        assert await golden_image(env, "prod") == "img:2"
+    run_env(go, ledger=Ledger())
+
+
+def test_bytes_redis_candidate_reads_and_reject():
+    async def go(env):
+        cand = await prod_candidate(env)
+        b = BytesRedis(env.redis)
+        assert await bl.get_candidate(b, "prod", "victim-app") == cand
+        assert [c["candidate_id"] for c in await bl.list_candidates(b)] == [cand["candidate_id"]]
+        held = await bl.load_baseline_raw(b, "prod", "victim-app")
+        assert held[0] == await golden_text(env, "prod")
+        assert (await bl.load_baseline(b, "prod", "victim-app"))["spec"] == held[1]["spec"]
+        res = await bl.reject_promotion(b, "prod", "victim-app", "bob", env.agent.ledger, cand["candidate_id"])
+        assert res["status"] == "rejected"
+        assert await bl.vetoed_hashes(b, "prod", "victim-app") == set()
+        env.redis.store[bl.rejected_key("prod", "victim-app")] = "old-hash"
+        await bl.clear_rejected_if_changed(b, "prod", "victim-app", "another-hash")
+        assert bl.rejected_key("prod", "victim-app") not in env.redis.store
+    run_env(go, ledger=Ledger())
+
+
+def test_bytes_redis_security_blocker():
+    async def go(env):
+        b = BytesRedis(env.redis)
+        now = 1_000_000.0
+        key = "kubeheal:security:score:dev:victim-app"
+        env.redis.hashes[key] = {"sec_risk": "0.9", "model_scored": "true", "ts_ms": str(int(now))}
+        assert "0.4" in await bl.security_blocker(b, "dev", "victim-app", now_ms=now, fresh_s=30, require=False)
+        env.redis.hashes[key] = {"sec_risk": "0.1", "model_scored": "true", "ts_ms": str(int(now))}
+        assert await bl.security_blocker(b, "dev", "victim-app", now_ms=now, fresh_s=30, require=False) is None
+        env.redis.hashes[key] = {"sec_risk": "0.1", "model_scored": "false", "ts_ms": str(int(now))}
+        assert "not model scored" in await bl.security_blocker(b, "dev", "victim-app", now_ms=now, fresh_s=30,
+                                                               require=False)
+    run_env(go, ledger=Ledger())
+
+
+# ---- L1: the copied constants equal their producers -------------------------------------------------------------
+def test_copied_constants_equal_their_producers():
+    from agents.executor import drift
+    from agents.fusion_agent import agent as fusion
+    from agents.fusion_agent import incident_lock
+    from agents.fusion_agent.config import FusionConfig
+    from agents.fusion_agent.decision_policy import RAW_SEC_RISK_PATCH_CEILING
+    from agents.health_agent import agent as health
+    from agents.security_agent import agent as security
+    assert bl.ROLLBACK_PREFIX == drift.ROLLBACK_PREFIX
+    assert bl.LOCK_PREFIX == incident_lock.LOCK_PREFIX
+    assert bl.FUSION_INCIDENT_PREFIX == fusion.INCIDENT_PREFIX
+    assert bl.SECURITY_SCORE_PREFIX == security.SCORE_KEY_PREFIX == fusion.SECURITY_SCORE_PREFIX
+    assert bl.RAW_SEC_RISK_CEILING == RAW_SEC_RISK_PATCH_CEILING
+    assert health.DEFAULT_SECURITY_FRESH_S == FusionConfig().security_fresh_s
+    assert drift.RollbackStore.key("ns", "d") == f"{bl.ROLLBACK_PREFIX}:ns:d"
+    assert set(bl.OPEN_INCIDENT_STATES) == {"queued", "human_pending"}
+
+
+# ---- L2: the final check after the ledger write -----------------------------------------------------------------
+@pytest.mark.parametrize("what", ["mode", "veto", "cooloff"])
+def test_a_change_during_the_ledger_write_aborts_the_automatic_promotion(what):
+    class ChangingLedger(Ledger):
+        agent = None
+
+        def append(self, incident_id, step, payload):
+            entry = super().append(incident_id, step, payload)
+            if step == "baseline_promoted":
+                a = self.agent
+                if what == "mode":
+                    a.mode = make_mode("test")
+                elif what == "veto":
+                    a._vetoed.setdefault(DEV, set()).add(a.seen_hash[DEV])
+                else:
+                    a._cooloff_until[DEV] = a.clock() + 100
+            return entry
+
+    async def go(env):
+        env.agent.ledger.agent = env.agent
+        env.result = prediction(**BENIGN)
+        await drift(env, "dev", image="img:2")
+        assert await golden_image(env, "dev") == "img:1"
+        [abort] = entries(env.agent.ledger, "baseline_promotion_aborted")
+        assert abort["payload"]["applied"] is False
+    run_env(go, ledger=ChangingLedger(), mode=make_mode("enforce"))
+
+
+def test_approval_asks_a_mode_provider_again_before_the_overwrite():
+    state = {"mode": "enforce"}
+
+    class FlippingLedger(Ledger):
+        def append(self, incident_id, step, payload):
+            entry = super().append(incident_id, step, payload)
+            if step == "baseline_promoted":
+                state["mode"] = "test"                      # the operator switched to test meanwhile
+            return entry
+
+    async def go(env):
+        cand = await prod_candidate(env)
+        res = await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", env.agent.ledger,
+                                         cand["candidate_id"], mode=lambda: state["mode"])
+        assert res["status"] == "aborted"
+        assert await golden_image(env, "prod") == "img:1"
+        assert len(entries(env.agent.ledger, "baseline_promotion_aborted", "prod")) == 1
+        state["mode"] = "enforce"
+        env.agent.ledger.__class__ = Ledger                  # no more flipping
+        res = await bl.approve_promotion(env.redis, "prod", "victim-app", "alice", env.agent.ledger,
+                                         cand["candidate_id"], mode=lambda: state["mode"])
+        assert res["status"] == "promoted"
+    run_env(go, ledger=FlippingLedger())
+
+
+# ---- L4: the veto is a set ---------------------------------------------------------------------------------------
+def test_the_veto_keeps_every_vetoed_hash_and_refreshes_the_expiry():
+    async def go(env):
+        r = env.redis
+        await bl.add_veto(r, "dev", "victim-app", "h1")
+        r.advance(1000)
+        await bl.add_veto(r, "dev", "victim-app", "h2")
+        await bl.add_veto(r, "dev", "victim-app", "h1")                # again: moved last, no duplicate
+        key = bl.veto_key("dev", "victim-app")
+        assert json.loads(r.store[key]) == ["h2", "h1"]
+        assert r.expiry[key] - r.now == 86400                          # refreshed on write
+        assert await bl.vetoed_hashes(r, "dev", "victim-app") == {"h1", "h2"}
+        for i in range(40):
+            await bl.add_veto(r, "dev", "victim-app", f"x{i}")
+        assert len(json.loads(r.store[key])) == bl.MAX_VETOED_HASHES
+        assert await bl.vetoed_hashes(r, "dev", "victim-app") >= {"x39"}
+        # the old single-string form is still read, and upgraded on the next write
+        r.store[key] = "oldhash"
+        assert await bl.vetoed_hashes(r, "dev", "victim-app") == {"oldhash"}
+        await bl.add_veto(r, "dev", "victim-app", "newhash")
+        assert json.loads(r.store[key]) == ["oldhash", "newhash"]
+        r.store[key] = "[not json"
+        assert await bl.vetoed_hashes(r, "dev", "victim-app") == set()
+    run_env(go, ledger=Ledger())
+
+
+def test_two_vetoed_specs_both_stay_vetoed_in_redis():
+    async def go(env):
+        env.result = prediction(label="degradation", risk=0.6, pset=["degradation"])
+        await drift(env, "dev", image="img:2")
+        h2 = env.agent.seen_hash[DEV]
+        await env.send("MODIFIED", dep(ns="dev", image="img:3"))
+        await env.tick(60)
+        h3 = env.agent.seen_hash[DEV]
+        assert await bl.vetoed_hashes(env.redis, "dev", "victim-app") == {h2, h3}
+    run_env(go, ledger=Ledger())
+
+
+# ---- L3: the tool says it is not gated ----------------------------------------------------------------------------
+def test_baseline_tool_documents_that_reset_and_restore_are_not_gated():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import baseline_tool
+    assert "NOT gated by the kill switch" in baseline_tool.__doc__

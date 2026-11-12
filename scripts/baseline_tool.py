@@ -17,6 +17,9 @@ the new configuration should become the golden baseline, or to put back a baseli
 `reset` deletes the key. The agent records the live spec as the new golden baseline the next time it sees an
 event for that Deployment (touch the Deployment, for example by adding an annotation).
 
+`reset` and `restore` are operator actions: they are NOT gated by the kill switch (they write Redis whatever the
+mode is) and they write no ledger entry.
+
 `candidates` lists the pending prod promotion candidates (`kubeheal:baseline-candidate:*`).
 
 `restore` writes back the PREVIOUS golden record kept in a promotion's ledger entry: download the object
@@ -61,7 +64,8 @@ def main(argv=None) -> int:
     rp.add_argument("deployment")
     rp.add_argument("ledger_entry", help="a baseline_promoted ledger entry (JSON file)")
     rp.add_argument("--force", action="store_true",
-                    help="restore even when the entry is not the latest promotion of the current golden record")
+                    help="restore even when the entry is not the latest promotion of the current golden record "
+                         "(reset and restore are NOT gated by the kill switch)")
     args = ap.parse_args(argv)
 
     r = redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"),

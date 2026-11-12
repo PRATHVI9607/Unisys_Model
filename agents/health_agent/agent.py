@@ -1022,7 +1022,7 @@ class HealthAgent:
         start the cool-off. Later re-scoring of the same spec can never lift the veto."""
         self._vetoed.setdefault(key, set()).add(h)
         try:
-            await self.redis.set(baseline.veto_key(*key), h, ex=baseline.VETO_TTL_S)
+            await baseline.add_veto(self.redis, key[0], key[1], h)
         except Exception as e:
             logger.warning(f"could not store the promotion veto of {key[0]}/{key[1]}: {e!r}; kept in memory")
         await self._note_cooloff(key)
@@ -1032,6 +1032,13 @@ class HealthAgent:
         newer = self.pending.get(key)
         return (self._still_current(key, h) and self.assessing.get(key) in (None, h)
                 and (newer is None or newer.hash == h))
+
+    def _final_check(self, key: Key, h: str) -> bool:
+        """Synchronous, in-memory, right before the overwrite (after the ledger write): the spec is still the
+        newest, the kill switch still says enforce, and no veto or cool-off appeared meanwhile."""
+        until = self._cooloff_until.get(key)
+        return (self._promotable_now(key, h) and not self.mode.dry_run_for(key[0])
+                and h not in self._vetoed.get(key, ()) and not (until is not None and self.clock() < until))
 
     async def _maybe_promote(self, key: Key, h: str, verdict: Dict) -> str:
         """Promote (dev, staging) or store a candidate (prod, unknown) when the assessment of spec hash `h` allows
@@ -1153,7 +1160,7 @@ class HealthAgent:
         res = await baseline.promote_baseline(
             self.redis, self.ledger, ns, name, new_spec=view, spec_hash=h, golden_raw=golden_raw, kind="auto",
             actor=baseline.AUTO_ACTOR, tier=tier, evidence=evidence, changed_fields=verdict["changed_fields"],
-            proceed=lambda: self._promotable_now(key, h))
+            proceed=lambda: self._final_check(key, h))
         if res["status"] == "promoted":
             self._drifted.pop(key, None)          # the live spec is the golden baseline now: OBSERVE stops
             self.tracking.pop(key, None)

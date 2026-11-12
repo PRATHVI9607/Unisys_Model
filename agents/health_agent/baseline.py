@@ -168,6 +168,12 @@ def _text(raw: Any) -> Optional[str]:
     return raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
 
 
+def _norm_map(h: Any) -> Dict[str, Optional[str]]:
+    """A Redis hash with keys and values as str, whether the client decodes responses or returns bytes (the
+    dashboard's client may not decode)."""
+    return {_text(k): _text(v) for k, v in (h or {}).items()}
+
+
 def raw_digest(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -186,12 +192,12 @@ async def get_or_set_baseline(redis, namespace: str, deployment: str,
     created = await redis.set(key, json.dumps(record, sort_keys=True), nx=True)
     if created:
         return record, True
-    raw = await redis.get(key)
+    raw = _text(await redis.get(key))
     return json.loads(raw), False
 
 
 async def load_baseline(redis, namespace: str, deployment: str) -> Optional[Dict]:
-    raw = await redis.get(baseline_key(namespace, deployment))
+    raw = _text(await redis.get(baseline_key(namespace, deployment)))
     return json.loads(raw) if raw else None
 
 
@@ -239,6 +245,44 @@ def promotion_route(tier: str, auto_enabled: bool, ledger_available: bool) -> Tu
     return "auto", f"tier {tier} promotes automatically"
 
 
+MAX_VETOED_HASHES = 32     # chosen: the newest vetoed spec hashes of one workload that are kept
+
+
+async def vetoed_hashes(redis, namespace: str, deployment: str) -> set:
+    """Spec hashes vetoed for the workload. The value is a JSON list; the old form (one plain hash string) is
+    still read. An unreadable value is returned as a hash nothing can match, so it is simply ignored here, but a
+    Redis error propagates (the caller fails closed)."""
+    raw = _text(await redis.get(veto_key(namespace, deployment)))
+    if not raw:
+        return set()
+    if raw.lstrip().startswith("["):
+        try:
+            return {str(x) for x in json.loads(raw)}
+        except ValueError:
+            return set()
+    return {raw}
+
+
+async def add_veto(redis, namespace: str, deployment: str, spec_hash: str) -> None:
+    """Add a spec hash to the workload's veto set (JSON list, newest last, at most MAX_VETOED_HASHES) and refresh
+    the 24 h expiry."""
+    try:
+        old = _text(await redis.get(veto_key(namespace, deployment)))
+    except Exception:
+        old = None
+    if old and old.lstrip().startswith("["):
+        try:
+            hashes = [str(x) for x in json.loads(old)]
+        except ValueError:
+            hashes = []
+    else:
+        hashes = [old] if old else []
+    if spec_hash in hashes:
+        hashes.remove(spec_hash)
+    hashes.append(spec_hash)
+    await redis.set(veto_key(namespace, deployment), json.dumps(hashes[-MAX_VETOED_HASHES:]), ex=VETO_TTL_S)
+
+
 # ── coordination and security gates ──────────────────────────────────────────
 async def coordination_blocker(redis, namespace: str, deployment: str, spec_hash: Optional[str] = None
                                ) -> Optional[str]:
@@ -257,10 +301,10 @@ async def coordination_blocker(redis, namespace: str, deployment: str, spec_hash
             return "the incident lock is held"
         if await redis.get(cooloff_key(namespace, deployment)):
             return "cool-off after a non-benign or uncertain event"
-        if spec_hash and _text(await redis.get(veto_key(namespace, deployment))) == spec_hash:
+        if spec_hash and spec_hash in await vetoed_hashes(redis, namespace, deployment):
             return "this spec was vetoed by an earlier non-benign or uncertain verdict"
         async for key in redis.scan_iter(match=f"{FUSION_INCIDENT_PREFIX}:*"):
-            fields = await redis.hgetall(key)
+            fields = _norm_map(await redis.hgetall(key))
             if (fields.get("namespace") == namespace and fields.get("deployment") == deployment
                     and fields.get("action_state") in OPEN_INCIDENT_STATES):
                 return f"a Fusion incident is open ({fields.get('action_state')})"
@@ -274,7 +318,7 @@ async def security_blocker(redis, namespace: str, deployment: str, *, now_ms: fl
     """Refuse while a fresh Security Agent score says the workload is under attack (sec_risk at or above the
     ceiling, or not model scored). A missing or stale hash blocks only when `require` is set (default off)."""
     try:
-        h = await redis.hgetall(f"{SECURITY_SCORE_PREFIX}:{namespace}:{deployment}")
+        h = _norm_map(await redis.hgetall(f"{SECURITY_SCORE_PREFIX}:{namespace}:{deployment}"))
     except Exception as e:
         return f"the security score is unreadable ({e!r})"
     fresh = False
@@ -358,7 +402,8 @@ async def promote_baseline(redis, ledger, namespace: str, deployment: str, *, ne
     if proceed is not None:
         try:
             if not proceed():
-                abort_reason = "the spec was superseded while the ledger entry was written"
+                abort_reason = ("superseded or no longer allowed (spec, mode, cool-off or veto) while the ledger "
+                                "entry was written")
         except Exception as e:
             abort_reason = f"final check failed: {e!r}"
     if abort_reason is None:
@@ -418,7 +463,7 @@ def candidate_id_for(namespace: str, deployment: str, spec_hash: str, golden_raw
 
 
 async def get_candidate(redis, namespace: str, deployment: str) -> Optional[Dict]:
-    raw = await redis.get(candidate_key(namespace, deployment))
+    raw = _text(await redis.get(candidate_key(namespace, deployment)))
     return json.loads(raw) if raw else None
 
 
@@ -426,7 +471,7 @@ async def list_candidates(redis) -> List[Dict]:
     """All pending candidates (uses SCAN: the dashboard side lists them)."""
     out = []
     async for key in redis.scan_iter(match=f"{CANDIDATE_PREFIX}:*"):
-        raw = await redis.get(key)
+        raw = _text(await redis.get(key))
         if raw:
             out.append(json.loads(raw))
     return sorted(out, key=lambda c: (c.get("namespace", ""), c.get("deployment", "")))
@@ -498,7 +543,9 @@ async def approve_promotion(redis, namespace: str, deployment: str, approver: st
     candidate is superseded), dry_run (`mode` is not exactly "enforce", or unknown: a ledger entry
     `baseline_promotion_dry_run` is written, nothing is overwritten, the candidate stays pending), ledger_failed,
     aborted, conflict (see `promote_baseline`). `mode` is the caller's effective kill-switch mode for the
-    namespace ("enforce" or "test"); the default None means unknown and is a dry run (fail safe)."""
+    namespace ("enforce" or "test"); the default None means unknown and is a dry run (fail safe). Pass a callable
+    returning the mode to have it asked again right before the overwrite (after the ledger write); a plain string
+    is a snapshot taken by the caller."""
     validate_workload(namespace, deployment)
     _check_actor(approver, reason)
     if not candidate_id or not isinstance(candidate_id, str):
@@ -522,17 +569,19 @@ async def approve_promotion(redis, namespace: str, deployment: str, approver: st
     if blocker:
         logger.warning(f"approval of the baseline candidate of {namespace}/{deployment} refused: {blocker}")
         return {"status": "blocked", "reason": blocker}
-    if killswitch.is_dry_run(mode):
+    current_mode = mode() if callable(mode) else mode
+    if killswitch.is_dry_run(current_mode):
         return await record_dry_run(
             ledger, namespace, deployment, new_spec=candidate["spec"], spec_hash=candidate["spec_hash"],
             golden_raw=golden_raw, kind="approved", actor=approver.strip(), tier=candidate.get("tier", ""),
             evidence=candidate.get("assessment") or {}, changed_fields=candidate.get("changed_fields") or [],
-            mode=killswitch.normalize(mode), candidate_id=candidate.get("candidate_id"))
+            mode=killswitch.normalize(current_mode), candidate_id=candidate.get("candidate_id"))
     result = await promote_baseline(
         redis, ledger, namespace, deployment, new_spec=candidate["spec"], spec_hash=candidate["spec_hash"],
         golden_raw=golden_raw, kind="approved", actor=approver.strip(), tier=candidate.get("tier", ""),
         evidence=candidate.get("assessment") or {}, changed_fields=candidate.get("changed_fields") or [],
-        candidate_id=candidate.get("candidate_id"), reason=reason)
+        candidate_id=candidate.get("candidate_id"), reason=reason,
+        proceed=(lambda: not killswitch.is_dry_run(mode())) if callable(mode) else None)
     if result["status"] == "promoted":
         current = await get_candidate(redis, namespace, deployment)
         if current and current.get("candidate_id") == candidate.get("candidate_id"):
