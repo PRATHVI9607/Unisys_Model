@@ -80,7 +80,8 @@ class ExecConfig:
 
     @property
     def freeze_timeout_s(self) -> float:
-        """How long the Executor waits for the Security Agent's verified freeze answer (V5-S5)."""
+        """How long the Executor waits for the Security Agent's verified freeze answer (V5-S5). The default 10 s
+        is a chosen default, not a measurement."""
         return self._positive_float("CONTAIN_FREEZE_TIMEOUT_S")
 
     @property

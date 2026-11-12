@@ -1,14 +1,16 @@
 """
-Ransomware step 1: quarantine and forensic snapshot (S-RR-2, S-RR-3, P7-RR-4).
-================================================================================
-Order of writes (each one through `_write`, so the kill switch can stop between any two):
+Containment: freeze, forensic snapshot, quarantine (S-RR-2, S-RR-3, P7-RR-4, V5-S5).
+====================================================================================
+Order of writes (each one through `_write`, so the kill switch can stop between any two). V5-S5 order, see
+`contain()`:
 
-  1. create the deny-all NetworkPolicy of this incident. It selects ONLY pods that carry both
+  0. for the labels ransomware and exfiltration: the cgroup freeze request (agents/executor/freeze.py).
+  1. on-demand forensic VolumeSnapshot of every PVC the pod mounts (never pruned).
+  2. create the deny-all NetworkPolicy of this incident. It selects ONLY pods that carry both
      `kubeheal/quarantine=true` and `kubeheal/incident=<id>`, so it quarantines the labelled pod and
      nothing else in the namespace, and lifting one incident never un-quarantines another.
-     (It replaces the interim policy with `podSelector: {}`.)
-  2. label the target pod.
-  3. on-demand forensic VolumeSnapshot of every PVC the pod mounts (never pruned).
+  3. label the target pod.
+  4. for exfiltration only: remember the replicas and scale the owner to zero.
 
 The pod is NOT deleted: its ReplicaSet would remount the same encrypted volume. Removing the workload
 is the restore path (scale to zero). Rolling snapshots of the pod's PVCs are frozen so they are not
@@ -90,7 +92,8 @@ async def contain(gate, core_api, networking_api, apps_api, custom_api, req: Req
     """Containment, in the order the owner fixed (V5-S5, D5 and Q2):
 
       1. freeze the pod's cgroup (request to the node-local Security Agent, bounded wait, verified answer);
-      2. forensic snapshot of the pod's PVCs (and the rolling snapshots are frozen);
+      2. forensic snapshot of the pod's PVCs (the rolling snapshots are frozen right after the first gated
+         write, so the scheduler cannot prune the history);
       3. quarantine (deny-all NetworkPolicy plus the pod label);
       4. scale the owner to zero, for an `exfiltration` containment (restore_after false) only. For
          `ransomware` the scale to zero is the first mutation of the restore request that Fusion queues right
@@ -126,6 +129,24 @@ async def contain(gate, core_api, networking_api, apps_api, custom_api, req: Req
             await record("ownership_mismatch", {"pod": pod_name, "workload": req.deployment})
             return f"contain_failed:pod {pod_name} is not owned by {'/'.join(kinds)} {req.deployment}"
 
+        # The rolling snapshots are frozen (so the scheduler cannot prune the history) as soon as a gated write has
+        # succeeded: it is a Redis marker, and a dry run must not write even that. It is set after the freeze
+        # request or the first snapshot and again (idempotent) after the quarantine.
+        claims = sorted(set(pod_pvc_claims(pod).values()))
+        marked = False
+
+        async def mark_rolling():
+            nonlocal marked
+            if freeze is None or marked or not done:
+                return
+            marked = True
+            for c in claims:
+                try:
+                    await freeze.freeze(ns, c, req.incident_id)
+                except Exception as e:
+                    gaps.append(f"freeze {c}: {e}")
+            await record("rolling_snapshots_frozen", {"pvcs": claims})
+
         # 1. freeze
         if freezing:
             if redis is None:
@@ -155,8 +176,9 @@ async def contain(gate, core_api, networking_api, apps_api, custom_api, req: Req
         else:
             await record("freeze_skipped", {"reason": "no automatic containment label", "label": label})
 
+        await mark_rolling()
+
         # 2. forensic snapshot
-        claims = sorted(set(pod_pvc_claims(pod).values()))
         if not claims:
             await record("forensic_snapshot_skipped", {"reason": "pod mounts no PVC"})
         else:
@@ -181,6 +203,8 @@ async def contain(gate, core_api, networking_api, apps_api, custom_api, req: Req
                         gaps.append(f"forensic snapshot of {c}: {e}")
                         await record("forensic_snapshot_failed", {"pvc": c, "error": str(e)})
 
+        await mark_rolling()
+
         # 3. quarantine
         try:
             await _write(gate, ns, "create_quarantine_policy", networking_api.create_namespaced_network_policy,
@@ -199,15 +223,7 @@ async def contain(gate, core_api, networking_api, apps_api, custom_api, req: Req
                      {"metadata": {"labels": quarantine_labels(req.incident_id)}})
         done.append("label_pod")
         await record("pod_labelled", {"pod": pod_name, "labels": quarantine_labels(req.incident_id)})
-        # The rolling snapshots are frozen (so nothing prunes the history) only after a gated write succeeded:
-        # this is a Redis marker, and a dry run must not write even that.
-        if freeze is not None:
-            for c in claims:
-                try:
-                    await freeze.freeze(ns, c, req.incident_id)
-                except Exception as e:
-                    gaps.append(f"freeze {c}: {e}")
-            await record("rolling_snapshots_frozen", {"pvcs": claims})
+        await mark_rolling()
 
         # 4. scale to zero (exfiltration; for ransomware the restore request does it)
         if scale_after:

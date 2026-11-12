@@ -196,3 +196,42 @@ def test_the_executor_config_has_the_freeze_timeout_default_and_rejects_nonsense
     assert ExecConfig({}, use_defaults=True).freeze_timeout_s == 10.0
     with pytest.raises(Exception):
         ExecConfig({"CONTAIN_FREEZE_TIMEOUT_S": "0"}).freeze_timeout_s
+
+
+# ---- review fixes ---------------------------------------------------------------------------------------
+class BrokenRedis(AgentRedis):
+    def __init__(self, fail="xadd"):
+        super().__init__()
+        self.fail = fail
+
+    async def xadd(self, s, f):
+        if self.fail == "xadd" and s.startswith(fz.STREAM_PREFIX):
+            raise ConnectionError("redis down")
+        await super().xadd(s, f)
+
+    async def hgetall(self, key):
+        if self.fail == "hgetall":
+            raise ConnectionError("redis down")
+        return await super().hgetall(key)
+
+
+@pytest.mark.parametrize("fail", ["xadd", "hgetall"])
+def test_a_redis_error_on_the_freeze_is_a_gap_and_the_other_protective_steps_still_run(fail):
+    s = Scene(answer=None)
+    s.redis = BrokenRedis(fail)
+    out = s.go()
+    assert out.startswith("contained_with_gaps:freeze_unconfirmed:redis_error"), out
+    assert s.writes() == ["create_snapshot", "create_policy", "patch_pod"]
+
+
+def test_the_rolling_snapshots_are_frozen_right_after_the_freeze_not_only_at_the_end():
+    s = Scene()
+    s.go()
+    assert s.steps.index("freeze_confirmed") < s.steps.index("rolling_snapshots_frozen") \
+        < s.steps.index("forensic_snapshot_created")
+
+
+def test_the_result_must_also_say_the_action_was_a_freeze():
+    s = Scene(answer="frozen", overrides={"action": "thaw"})
+    assert s.go().startswith("contained_with_gaps:freeze_unconfirmed:result_mismatch:action")
+

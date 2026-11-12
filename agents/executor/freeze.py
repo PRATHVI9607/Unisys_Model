@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
 from agents.executor.actions import ModeBlocked, _write
+from agents.executor.ledger_guard import LedgerUnavailable
 from agents.executor.support import gate_open, poll_until
 
 STREAM_PREFIX = "kubeheal.contain.req"
@@ -99,10 +100,15 @@ async def request_freeze(gate, redis, namespace: str, incident_id: str, pod: Dic
         "timestamp_ms": str(int(time.time() * 1000)),
     }
     stream = request_stream(node)
-    await _write(gate, namespace, "request_freeze", redis.xadd, stream, fields)
+    try:
+        await _write(gate, namespace, "request_freeze", redis.xadd, stream, fields)
+    except (ModeBlocked, LedgerUnavailable):
+        raise
+    except Exception as e:           # a Redis error is a gap, not a reason to skip the other protective steps
+        return FreezeOutcome(False, f"redis_error:{e}", request_id, node)
     key = result_key(request_id)
     expected = {"request_id": request_id, "incident_id": incident_id, "pod_uid": uid, "node": node,
-                "namespace": namespace, "pod": pod_name}
+                "namespace": namespace, "pod": pod_name, "action": "freeze"}
     seen: Dict[str, str] = {}
 
     async def answered() -> bool:
@@ -110,7 +116,10 @@ async def request_freeze(gate, redis, namespace: str, incident_id: str, pod: Dic
         seen = _fields(await redis.hgetall(key))
         return bool(seen)
 
-    got = await poll_until(answered, timeout_s, poll_s, sleep, clock)
+    try:
+        got = await poll_until(answered, timeout_s, poll_s, sleep, clock)
+    except Exception as e:
+        return FreezeOutcome(False, f"redis_error:{e}", request_id, node)
     if not got:
         return FreezeOutcome(False, "no_result_in_time", request_id, node)
     why = verify_result(seen, expected)

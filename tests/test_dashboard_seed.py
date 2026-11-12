@@ -96,7 +96,7 @@ class Harness:
 def seed_incident(h: Harness, incident_id=INC, decision="human_patch", *, namespace="staging",
                   deployment="web", pod="", top_field="resources.limits.cpu", approval=True,
                   t0_ms=None, rationale="fixture rationale", chain=None, with_events=True,
-                  field_weights=None, syscall_weights=None, patch_fields=None):
+                  field_weights=None, syscall_weights=None, patch_fields=None, containment=None):
     """Write detection, scores, decision (and approval_requested) the way the Fusion Agent does."""
     led = h.ledger
     detection = {"namespace": namespace, "deployment": deployment, "pod": pod,
@@ -114,6 +114,8 @@ def seed_incident(h: Harness, incident_id=INC, decision="human_patch", *, namesp
         dec["t0_ms"] = t0_ms
     if patch_fields is not None:                 # what Fusion records since V5-D9 (the spec-diff candidates)
         dec["patch_fields"] = patch_fields
+    if containment is not None:                  # what Fusion records for a contain decision since V5-S5
+        dec.update(containment)
     led.append(incident_id, "detection", detection)
     led.append(incident_id, "scores", scores)
     led.append(incident_id, "decision", dec)

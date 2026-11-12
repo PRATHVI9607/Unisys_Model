@@ -67,7 +67,7 @@ Example: `kubectl -n kubeheal create secret generic kubeheal-dashboard-admin --f
 ## Executor settings (fail closed)
 
 The Executor needs `PROMETHEUS_URL`, `SNAPSHOT_CLASS`, `CANARY_WINDOW_S`, `ROLLOUT_TIMEOUT_S` and
-`ROLLOUT_POLL_S`. The chart always renders all five from `executor.env`, with the owner's chosen defaults (chosen,
+`ROLLOUT_POLL_S`. The chart always renders all of them (the five P7 settings and `CONTAIN_FREEZE_TIMEOUT_S`) from `executor.env`, with the owner's chosen defaults (chosen,
 not measured; `tests` compare them with `agents/executor/config.py` DEFAULTS). Override any of them with
 `--set executor.env.NAME=value`. Overriding one to an empty string still renders it, and the Executor then
 escalates to a human before it writes anything, instead of guessing. `SNAPSHOT_CLASS` names a VolumeSnapshotClass

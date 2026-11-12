@@ -511,3 +511,29 @@ def test_a_recorded_empty_candidate_list_is_final_and_the_model_attribution_is_n
     seed_incident(harness, patch_fields=[])                   # a new incident whose spec diff named nothing
     r = post(client, f"/api/approvals/{INC}/approve", AUTH)
     assert r.status_code == 422 and harness.exec_requests == []
+
+
+def test_a_human_approved_ransomware_containment_carries_the_label_so_the_executor_freezes(client, harness):
+    seed_incident(harness, decision="human_contain", pod="web-abc-123",
+                  containment={"containment_label": "ransomware", "restore_after": True, "human_followup": False})
+    assert post(client, f"/api/approvals/{INC}/approve", AUTH).status_code == 200
+    (req,) = harness.exec_requests
+    assert req["action"] == "contain" and req["containment_label"] == "ransomware"
+    assert req["restore_after"] == "true" and req["human_followup"] == "false"
+
+
+def test_a_human_approved_exfiltration_containment_asks_for_the_followup_not_a_restore(client, harness):
+    seed_incident(harness, decision="human_contain", pod="web-abc-123",
+                  containment={"containment_label": "exfiltration", "restore_after": False, "human_followup": True})
+    assert post(client, f"/api/approvals/{INC}/approve", AUTH).status_code == 200
+    (req,) = harness.exec_requests
+    assert req["containment_label"] == "exfiltration"
+    assert req["restore_after"] == "false" and req["human_followup"] == "true"
+
+
+def test_an_older_incident_without_the_containment_fields_sends_no_label(client, harness):
+    seed_incident(harness, decision="human_contain", pod="web-abc-123")
+    assert post(client, f"/api/approvals/{INC}/approve", AUTH).status_code == 200
+    (req,) = harness.exec_requests
+    assert req["containment_label"] == "" and req["restore_after"] == "false"
+
