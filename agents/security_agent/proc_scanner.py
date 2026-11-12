@@ -71,6 +71,7 @@ class PodInfo:
     workload_kind: str
     workload: str
     uid: str = ""
+    node: str = ""      # spec.nodeName (V5-S5a containment checks that the pod runs on this node)
 
     def as_dict(self) -> Dict[str, str]:
         return asdict(self)
@@ -109,7 +110,8 @@ class PodIndex:
             container = ""
             if p.spec and p.spec.containers:
                 container = p.spec.containers[0].name
-            index[md.uid] = PodInfo(md.namespace, md.name, container, kind, workload, md.uid)
+            node = (getattr(p.spec, "node_name", "") or "") if p.spec else ""
+            index[md.uid] = PodInfo(md.namespace, md.name, container, kind, workload, md.uid, node)
         self.by_uid = index
         self.by_pod = {(i.namespace, i.pod): i for i in index.values()}
 

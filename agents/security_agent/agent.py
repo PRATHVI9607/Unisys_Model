@@ -15,6 +15,7 @@ from kubernetes_asyncio import client, config
 from agents.common.metrics import KubeHealMetrics
 from agents.common.tiers import namespace_tier as _namespace_tier
 from agents.common.sampling import sampling_factor, scaled_interval
+from agents.security_agent.containment import ContainmentService
 from agents.security_agent.counters import CounterSamples, read_pod_counters
 from agents.security_agent.inference import InferenceClient
 from agents.security_agent.proc_scanner import PodIndex, process_start_time, scan_pids
@@ -215,6 +216,7 @@ class SecurityAgent:
         self.running = False
 
         self.pod_index = PodIndex()
+        self.containment: Optional[ContainmentService] = None      # V5-S5a, created in start() when NODE_NAME is set
         self.apps_api: Optional[client.AppsV1Api] = None
         self.inotify_watcher = InotifyWatcher()
 
@@ -268,11 +270,17 @@ class SecurityAgent:
         asyncio.create_task(self._handle_falco_events())
         asyncio.create_task(self._process_write_events())
         asyncio.create_task(self._score_quiet_workloads_periodic())
+        # V5-S5a: node-local cgroup-freeze consumer (reads only this node's request stream; none without NODE_NAME)
+        self.containment = ContainmentService.from_env(self.redis, self.pod_index, METRICS)
+        if self.containment:
+            await self.containment.start(self.core_api)
 
     async def stop(self) -> None:
         """Stop the Security Agent."""
         logger.info("Stopping Security Agent...")
         self.running = False
+        if self.containment:
+            await self.containment.stop()
         for t in list(self._checks.values()):
             t.cancel()
 
