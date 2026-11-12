@@ -51,7 +51,7 @@ kubectl --context k3d-kubeheal -n kubeheal logs daemonset/security-agent --since
 kubectl --context k3d-kubeheal -n kubeheal logs deployment/executor --since=5m
 ```
 
-**NOT VERIFIED live:** this branch has no validated trigger for signed, unsigned, and tampered stream messages. The safe cluster commands above inspect Secret names and recent logs; they do not prove HMAC rejection. Never print or decode Secret data. Fallback: save actual output from `kubectl --context k3d-kubeheal -n kubeheal get secret kubeheal-redis -o name` plus redacted log screenshots under `docs/kubeheal/demo-evidence/F4/`; mark HMAC results not verified until the focused HMAC tests and safe live trigger are present.
+**NOT VERIFIED live:** this branch has no validated trigger for signed, unsigned, and tampered stream messages. The safe cluster commands above inspect Secret names and recent logs; they do not prove HMAC rejection. Never print or decode Secret data. Fallback: save actual output from `kubectl --context k3d-kubeheal -n kubeheal get secrets -o name` plus redacted log screenshots under `docs/kubeheal/demo-evidence/F4/`; mark HMAC results not verified until the focused HMAC tests and safe live trigger are present.
 
 ## F5. Baseline promotion
 
