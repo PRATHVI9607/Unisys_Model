@@ -1,11 +1,12 @@
 """Kill switch ConfigMap access for the dashboard (S-KS-6).
 
 `KubernetesModeStore.write_mode` is the ONLY place where the dashboard writes to Kubernetes. It patches
-the single ConfigMap `kubeheal-mode` (key `mode`) in namespace `kubeheal`. The dashboard ServiceAccount
-is bound to the Role `kubeheal-mode-admin`, which allows get/patch/update on that one ConfigMap and
-nothing else (k8s/kill-switch.yaml, k8s/rbac/rbac.yaml). Callers must have passed `require_admin` first.
+the single ConfigMap `kubeheal-mode` (key `mode`) in namespace `kubeheal`; it also reads the requested
+namespace's labels to honor `kubeheal/mode`. The dashboard's observer role allows namespace reads, while its
+admin role alone can patch the mode ConfigMap (k8s/kill-switch.yaml, k8s/rbac/rbac.yaml). Callers must have
+passed `require_admin` before changing the global mode.
 
-The store is injectable: tests pass a fake with the same two methods and never touch a cluster.
+The store is injectable: tests pass a fake and never touch a cluster.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ VALID_MODES = (TEST, ENFORCE)
 
 class ModeStore(Protocol):
     async def read_mode(self) -> Optional[str]: ...
+    async def read_namespace_mode(self, namespace: str) -> Optional[str]: ...
     async def write_mode(self, mode: str) -> None: ...
 
 
@@ -43,6 +45,14 @@ class KubernetesModeStore:
         async with client.ApiClient() as api:
             cm = await client.CoreV1Api(api).read_namespaced_config_map(self.name, self.namespace)
         return (cm.data or {}).get(MODE_KEY)
+
+    async def read_namespace_mode(self, namespace: str) -> Optional[str]:
+        """Read the target namespace's stricter kill-switch label for baseline decisions."""
+        client = await self._client_module()
+        async with client.ApiClient() as api:
+            obj = await client.CoreV1Api(api).read_namespace(namespace)
+        labels = getattr(obj.metadata, "labels", None) or {}
+        return labels.get("kubeheal/mode")
 
     async def write_mode(self, mode: str) -> None:
         """THE dashboard write path to Kubernetes: set `data.mode` of the kubeheal-mode ConfigMap."""

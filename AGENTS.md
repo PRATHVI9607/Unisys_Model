@@ -26,21 +26,23 @@ It works as a five-stage pipeline: **Sense -> Score -> Decide -> Act -> Record**
 - Decide: Fusion Agent uses deterministic correlation (`compound_score`); LightGBM does not provide the
   embeddings required by the legacy DCM. The pure, unit-tested policy (`agents/fusion_agent/decision_policy.py`)
   requires an exactly one-label conformal set for automatic actions (M2).
-- Act: Remediation Executor (`agents/executor/`), the only component with remediation write permissions. The dashboard has a separate narrow permission to update the kill-switch ConfigMap with admin authentication.
+- Act: Remediation Executor (`agents/executor/`), the only agent with remediation Kubernetes write permissions. It validates requests, records intent before each write, and checks the kill switch before every write. The node-local Security Agent performs the cgroup freeze only after an authenticated Executor request and its own mode check. The dashboard has a separate narrow permission to update the kill-switch ConfigMap with admin authentication.
 - Record: append-only audit ledger in MinIO, Prometheus counters, Grafana.
 
 The neural model servers and DCM are legacy components and are disabled by default. Shipped security bundle
 validation figures use synthetic classes and do not establish live model quality. Retraining is not approved.
-On 2026-11-12, cgroup freeze and operator thaw were read back on a k3d scratch pod. That direct helper check
-did not exercise the stream-driven containment pipeline and does not establish real-node support. See
-`docs/kubeheal/results/live_freeze_check_2026-11-12.md`.
+On 2026-11-12, cgroup freeze and operator thaw were read back on a k3d scratch pod. A separate F3 run
+verified the stream-driven Fusion-to-Executor containment and restore chain on a scratch Deployment in
+`staging`. Its alert was scripted with model fields from the D-5 replay because Falco was absent; this does
+not verify live Sense/detection. Both results are k3d-only, not real-node validation. See
+`docs/kubeheal/results/live_freeze_check_2026-11-12.md` and `docs/kubeheal/demo-evidence/F3/RUNBOOK_F3.md`.
 
 ## Branch plan
 
 | Branch | Purpose | Lifetime |
 |---|---|---|
 | `work` | The complete project, matching `docs/kubeheal/PROJECT_SPEC.md`. All real code changes land here first. | Permanent |
-| `demo` | Branched from `work` in P10. A trimmed, reliable version for a live demo on a local machine using **k3d**. Shortcuts and hard-coded demo values are allowed here. | For the demo on 2026-11-11 only. Tag it (`demo-2026-11-11`) afterwards, then it is discontinued. |
+| `demo` | Branched from `work` in P10. A trimmed version for rehearsals and live demonstrations on a local machine using **k3d**. Shortcuts and hard-coded demo values are allowed here. | Demo branch; no fixed retirement date. |
 
 Rules:
 - A bug fix to core code (models, agents, policy, executor, servers) is committed on `work` first,
@@ -70,6 +72,39 @@ Rules:
   entry and changes nothing. `scripts/baseline_tool.py` (reset, restore) is an operator action and is NOT gated.
 - The cgroup freeze of a contained pod (V5-S5) is requested by the Executor behind the same gate and carried out by
   the node-local Security Agent, which checks the mode again right before it writes; in `test` nothing is frozen.
+
+## Containment order and message authentication
+
+For ransomware containment, the Executor applies and records the steps in this order: freeze the target pod;
+take the forensic snapshot; quarantine the workload; scale it to zero; restore the volume from the snapshot
+created before T0; run the entropy rescan Job; lift quarantine only after a clean scan; then record the final
+result. A failed or unreadable scan keeps the workload isolated and escalates to a human.
+
+The containment freeze request and Security Agent result, plus the operator thaw protocol, use HMAC-SHA256.
+`CONTAIN_HMAC_KEY` comes from the chart-managed `kubeheal-containment-hmac` Secret, key `key`; the chart
+injects it only into Executor and Security Agent pods. The operator thaw tool must be supplied the same key
+through secure operator secret handling. Redis authentication uses a separate Secret, so a Redis credential
+alone cannot sign containment messages. A Kubernetes operator who can read the HMAC Secret can sign them.
+Never print or log Secret values.
+
+## Verified on k3d (2026-11-12)
+
+- The F3 scratch Deployment chain completed in `staging`. The final enforce window was 45 seconds; 5 restored
+  files were scanned and 0 were high entropy. The alert was scripted, so this verifies the Fusion-to-Executor
+  chain, not live Falco sensing. This run does not establish real-node behavior. See
+  `docs/kubeheal/demo-evidence/F3/RUNBOOK_F3.md`.
+- The D-5 hand-written replay produced a model-scored Security event and Fusion dry-run on k3d. It is not a
+  live Falco capture or Executor containment. See `docs/kubeheal/demo-evidence/F3/10_d5_rerun.txt` and
+  `docs/kubeheal/demo-evidence/F3/11_d5_rerun_ledger.jsonl`.
+- One F11 synthetic scoring-load run used 32 VUs for 90 seconds, passed 121,088/121,088 checks, measured
+  median 22.86 ms and p95 38.45 ms, and scaled HPA replicas 2 -> 7 -> 2 in 7m14s. This is one run, not a
+  performance guarantee. See `docs/kubeheal/demo-evidence/F11/hpa-run-2026-11-12.md`.
+- A post-merge repeat scaled 2 -> 8 -> 2 but had 12 connection refusals out of 99,431 checks, so it is not a
+  clean load result. Grafana's queue-depth and available-replica panels and Prometheus samples are recorded in
+  `docs/kubeheal/demo-evidence/F11/grafana-hpa-api-2026-11-12.json`; no Grafana screenshot was captured because
+  the renderer is not installed.
+- P11 E1 has no accepted benchmark: both runs failed. U6's full acceptance run twice is **not measured**.
+  Do not reuse F11 numbers as P11 or U6 results. See `docs/kubeheal/results/p11/P11_COVERAGE.md`.
 
 ## Working rules (all agents)
 

@@ -135,6 +135,10 @@ def test_kubernetes_store_patches_only_the_mode_key(monkeypatch):
         async def read_namespaced_config_map(self, name, namespace):
             return types.SimpleNamespace(data={"mode": "test"})
 
+        async def read_namespace(self, namespace):
+            calls.append(("namespace", namespace))
+            return types.SimpleNamespace(metadata=types.SimpleNamespace(labels={"kubeheal/mode": "test"}))
+
     class Api:
         async def __aenter__(self):
             return self
@@ -157,11 +161,12 @@ def test_kubernetes_store_patches_only_the_mode_key(monkeypatch):
     from dashboard.mode_admin import KubernetesModeStore
     store = KubernetesModeStore()
     assert asyncio.run(store.read_mode()) == "test"
+    assert asyncio.run(store.read_namespace_mode("prod")) == "test"
     asyncio.run(store.write_mode("enforce"))
-    assert calls == [("kubeheal-mode", "kubeheal", {"data": {"mode": "enforce"}})]
+    assert calls == [("namespace", "prod"), ("kubeheal-mode", "kubeheal", {"data": {"mode": "enforce"}})]
     with pytest.raises(ValueError):
         asyncio.run(store.write_mode("Enforce"))
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 class FakeMinio:

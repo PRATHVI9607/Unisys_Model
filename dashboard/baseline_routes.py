@@ -15,11 +15,10 @@ baseline functions into an HTTP answer with a plain message.
   GET  /baseline-candidates                                  page
 
 Kill switch: the dashboard can only read the global ConfigMap `kubeheal-mode` (its RBAC covers that one object),
-and only asynchronously, so `approve_promotion` gets a SNAPSHOT string read just before the call, not a live
-callable. Anything but exactly `enforce`, or an unreadable ConfigMap, is a dry run: the ledger gets a
-`baseline_promotion_dry_run` entry, nothing is overwritten and the candidate stays pending. The dashboard cannot
-see a per-namespace `kubeheal/mode` label (no namespace read permission), so a namespace made stricter by that
-label is not honoured here; that is a known limit, written down in the report of V5-I3.
+and only asynchronously, so `approve_promotion` gets a snapshot read just before the call, not a live callable.
+The target namespace's `kubeheal/mode` label is also read for each decision. Anything but exactly `enforce`, or
+an unreadable global mode or namespace, is a dry run: the ledger gets a `baseline_promotion_dry_run` entry,
+nothing is overwritten and the candidate stays pending.
 
 The baseline module is imported lazily: the dashboard image copies only `agents/common/` today, and without
 `agents/health_agent/baseline.py` these endpoints answer 503 while the rest of the dashboard keeps working.
@@ -45,6 +44,7 @@ from dashboard.admin_routes import (
     current_mode,
     get_services,
 )
+from agents.common.killswitch import ENFORCE, effective_mode
 from dashboard.incident_view import num, prediction_set_view, string_list
 from dashboard.ledger_view import read_incident
 
@@ -53,6 +53,25 @@ logger = logging.getLogger(__name__)
 MAX_ASSESSMENT_TEXT = 200      # chosen: longest assessment string shown
 
 router = APIRouter()
+
+
+async def _baseline_mode(svc: DashboardServices, namespace: str) -> Dict[str, Any]:
+    """Return the effective mode for this workload; unreadable namespace labels fail closed to test."""
+    global_state = await current_mode(svc)
+    try:
+        namespace_label = await svc.mode_store.read_namespace_mode(namespace)
+        namespace_readable = True
+    except Exception as exc:
+        logger.warning("namespace mode label read failed for %s: %s", namespace, type(exc).__name__)
+        namespace_label = None
+        namespace_readable = False
+    mode = effective_mode(global_state["mode"], namespace_label,
+                          global_state["readable"] and namespace_readable)
+    return {"mode": mode, "readable": global_state["readable"] and namespace_readable,
+            "global_readable": global_state["readable"],
+            "dry_run": mode != ENFORCE, "global_mode": global_state["mode"],
+            "namespace_mode": namespace_label if namespace_readable else None,
+            "namespace_readable": namespace_readable}
 
 
 class CandidateDecision(BaseModel):
@@ -180,8 +199,11 @@ async def baseline_candidate_detail(namespace: str, deployment: str, svc: Dashbo
         logger.warning("golden baseline read failed: %s", type(exc).__name__)
     out["golden_baseline_unchanged"] = golden_current       # False: an approval would answer stale
     out["blocker"] = await bl.coordination_blocker(redis, namespace, deployment, candidate.get("spec_hash"))
-    mode = await current_mode(svc)
+    mode = await _baseline_mode(svc, namespace)
     out["mode"] = {"mode": mode["mode"], "readable": mode["readable"],
+                   "global_readable": mode["global_readable"],
+                   "global_mode": mode["global_mode"], "namespace_mode": mode["namespace_mode"],
+                   "namespace_readable": mode["namespace_readable"],
                    "approval_is_dry_run": mode["dry_run"]}
     out["mode_note"] = pages.BASELINE_MODE_NOTE
     out["history"] = await _history(svc, bl, namespace, deployment)
@@ -214,12 +236,21 @@ _MESSAGES = {
 }
 
 
-def _dry_run_message(mode: str, readable: bool) -> str:
-    why = (f"the kill switch mode is {mode}" if readable
-           else "the kill switch mode could not be read, which counts as test")
+def _dry_run_message(mode: Dict[str, Any]) -> str:
+    if not mode["global_readable"]:
+        why = "the global kill switch mode could not be read, which counts as test"
+        next_step = "Restore global mode read access, set it to enforce, and approve again."
+    elif not mode["namespace_readable"]:
+        why = "the target namespace mode label could not be read, which counts as test"
+        next_step = "Restore namespace label read access, confirm the effective mode, and approve again."
+    elif mode["global_mode"] == ENFORCE and mode["namespace_mode"] is not None and mode["mode"] == "test":
+        why = "the target namespace mode label makes the effective mode test"
+        next_step = "Remove the namespace test label or set it to enforce, then approve again."
+    else:
+        why = f"the effective kill switch mode is {mode['mode']}"
+        next_step = "Set the global mode to enforce and approve again."
     return (f"DRY RUN: {why}, so nothing was changed. The golden baseline is unchanged and the candidate is "
-            "still pending. A baseline_promotion_dry_run entry was written to the ledger. Switch the mode to "
-            "enforce and approve again to promote.")
+            f"still pending. A baseline_promotion_dry_run entry was written to the ledger. {next_step}")
 
 
 def _answer(status: str, table: Dict[str, int], extra: Dict[str, Any], message: Optional[str] = None):
@@ -237,7 +268,7 @@ async def _decide(kind: str, namespace: str, deployment: str, request: Request, 
     redis = _redis(svc)
     reason = (body.reason or "").strip()
     await _read_candidate(bl, redis, namespace, deployment)       # a corrupt record is a clear 422 first
-    mode = await current_mode(svc)
+    mode = await _baseline_mode(svc, namespace)
     try:
         if kind == "approve":
             result = await bl.approve_promotion(redis, namespace, deployment, admin.actor, svc.ledger,
@@ -263,6 +294,8 @@ async def _decide(kind: str, namespace: str, deployment: str, request: Request, 
         logger.error("baseline %s of %s/%s: ledger write failed: %s", kind, namespace, deployment, result.get("error"))
     extra: Dict[str, Any] = {"mode_note": pages.BASELINE_MODE_NOTE, "namespace": namespace, "deployment": deployment, "candidate_id": body.candidate_id,
                              "actor": admin.actor, "mode": mode["mode"], "mode_readable": mode["readable"],
+                             "global_mode": mode["global_mode"], "namespace_mode": mode["namespace_mode"],
+                             "namespace_readable": mode["namespace_readable"],
                              "applied": status == "promoted"}
     for key in ("ledger_key", "reason"):
         if result.get(key):
@@ -272,7 +305,7 @@ async def _decide(kind: str, namespace: str, deployment: str, request: Request, 
     if status == "dry_run":
         extra["candidate_unchanged"] = True
         return _answer(status, _APPROVE_HTTP, extra,
-                       _dry_run_message(mode["mode"], mode["readable"]) + " " + pages.BASELINE_MODE_NOTE)
+                       _dry_run_message(mode) + " " + pages.BASELINE_MODE_NOTE)
     if kind == "approve":
         message = _MESSAGES.get(status)
         if status == "promoted" and message:
