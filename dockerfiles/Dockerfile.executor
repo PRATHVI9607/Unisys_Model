@@ -3,8 +3,10 @@ COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /bin/
 ENV UV_NO_CACHE=1 UV_SYSTEM_PYTHON=1
 WORKDIR /app
 RUN uv pip install --system \
-    kubernetes-asyncio==29.0.1 "redis>=5.0.1,<6" "numpy<2" "prometheus-client>=0.20.0" "minio>=7.2.0"
+    kubernetes-asyncio==29.0.1 "redis>=5.0.1,<6" pydantic==2.6.0 "numpy<2" "prometheus-client>=0.20.0" "minio>=7.2.0"
 COPY agents/ /app/agents/
+# drift.py imports kubeheal.posture (V5-D6), which imports kubeheal.contracts (pydantic) and kubeheal.features
+COPY kubeheal/ /app/kubeheal/
 ENV REDIS_URL=redis://redis-master:6379
 ENV EXEC_NAMESPACES=prod,staging,dev
 ENV METRICS_PORT=9100
