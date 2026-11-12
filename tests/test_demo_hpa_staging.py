@@ -6,12 +6,16 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_hpa_load_stages_javascript_as_a_file_and_mounts_the_same_key():
+def test_hpa_load_stages_labeled_configmap_without_unsupported_create_labels_flag():
     source = (ROOT / "demo" / "scripts" / "hpa_load.ps1").read_text(encoding="utf-8")
     normalized = " ".join(source.split())
 
-    assert '"--from-file=health.js=$scriptPath"' in normalized
-    assert "--dry-run=client -o yaml | Set-Content -LiteralPath $cmPath -Encoding utf8" in normalized
+    assert "[Convert]::ToBase64String([IO.File]::ReadAllBytes($scriptPath))" in normalized
+    assert "binaryData:" in source and "health.js: $scriptBase64" in source
+    assert "kubeheal.k8s.io/run-id: $runId" in source
+    assert "--labels=" not in source
+    assert "Set-Content -LiteralPath $cmPath -Value $configMap -Encoding utf8" in normalized
+    assert "K create -f $cmPath" in source
     assert "configMap: {name: $cmName}" in source
     assert "mountPath: /scripts, readOnly: true" in source
     assert 'command: ["k6", "run", "/scripts/health.js"]' in source
@@ -43,6 +47,7 @@ def test_hpa_load_cleanup_continues_after_api_failures_and_removes_temp_files():
     assert "Remove-RunResource 'networkpolicy'" in cleanup
     assert "Remove-RunResource 'configmap'" in cleanup
     assert "Could not clean up $kind/$name" in source
+    assert "if ($message -match '(?i)not.?found') { return }" in source
     assert "Remove-Item -LiteralPath $cmPath, $policyPath, $jobPath" in cleanup
     assert "Could not remove local k6 staging files" in cleanup
 

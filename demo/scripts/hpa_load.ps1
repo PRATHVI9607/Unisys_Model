@@ -52,17 +52,30 @@ function Remove-RunResource([string]$kind, [string]$name, [string]$runId) {
         }
         K -n kubeheal delete $kind $name --ignore-not-found | Out-Host
     } catch {
-        Write-Warning "Could not clean up $kind/$name for run ${runId}: $($_.Exception.Message)"
+        $message = $_.Exception.Message
+        if ($message -match '(?i)not.?found') { return }
+        Write-Warning "Could not clean up $kind/$name for run ${runId}: $message"
     }
 }
 
 try {
     Assert-TestMode
-    # Let kubectl encode the file as ConfigMap data. Out-String -NoNewline flattened every JS line,
-    # causing the first // comment to consume the exports and k6 to report "no exported functions".
-    K create configmap $cmName -n kubeheal "--from-file=health.js=$scriptPath" `
-        "--labels=kubeheal.k8s.io/run-id=$runId" --dry-run=client -o yaml |
-        Set-Content -LiteralPath $cmPath -Encoding utf8
+    # Build a ConfigMap manifest directly so it can carry the ownership label. kubectl create
+    # configmap does not support --labels on all installed kubectl versions. binaryData preserves
+    # the exact JavaScript bytes and avoids PowerShell flattening newlines.
+    $scriptBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($scriptPath))
+    $configMap = @"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: $cmName
+  namespace: kubeheal
+  labels:
+    kubeheal.k8s.io/run-id: $runId
+binaryData:
+  health.js: $scriptBase64
+"@
+    Set-Content -LiteralPath $cmPath -Value $configMap -Encoding utf8
 
 $policy = @"
 apiVersion: networking.k8s.io/v1
