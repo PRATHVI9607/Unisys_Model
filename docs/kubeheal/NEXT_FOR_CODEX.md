@@ -1,127 +1,78 @@
-# KubeHeal next agent file (tool-neutral)
+# KubeHeal handoff for 2026-11-13
 
-First resume point for any agent (Claude Code, Codex, a local model). Read, in this order: `AGENTS.md`,
-`.ai/handoff.md` (short state), this file, the last sections of `docs/kubeheal/PROGRESS.md` (checklist, the section
-"Claude session 2026-11-12" and the V5 lines), and section 11 of `docs/kubeheal/V5_INTEGRATION_PLAN.md` (every owner
-decision, final). The filename is historical.
+## Current state
 
-## State at the 2026-11-12 handoff (Claude Code)
+- Nothing pushed. ALLOW_PUSH was not set. No model training or PROJECT_SPEC.md changes.
+- Before this handoff update, work was f3434a1 and demo was 1fcc1ba. F3 d0ed188 was reviewed and merged into both; work is merged into demo. This documentation commit advances both refs; see .ai/handoff.md and the final reply for resulting hashes.
+- Latest full suites after product-code changes: work 2,158 passed, 11 skipped (90.05s); demo 2,158 passed, 11 skipped (66.43s). Later commits are documentation-only. Rerun both after any code merge.
+- F3 test_fusion_incident.py still checks no containment request and unsupported-owner escalation; any(...) allows the deliberately injected late escalation. D-5 produced a real Security Agent-scored event and Fusion/Executor test-mode evidence. Full containment through restore was live on a scratch Deployment. Sense was scripted because Falco is absent.
 
-Nothing is pushed. Never push, never set `ALLOW_PUSH`. `PROJECT_SPEC.md` is changed only with the owner.
-Owner stop points: model training (P12 is NOT approved), `PROJECT_SPEC.md`, deleting user data, an irreversible decision.
+## Cluster state at stop
 
-- `work` (worktree `../Unisys_Model-wt-metric-query`) and `demo` (main checkout `C:/My_projects_1/cLOUD/Unisys_Model`) are in
-  sync apart from demo-only files. Run `git log -1` in each for the tips. Last suites (Windows, Python 3.11.9, helm on PATH):
-  work 2024 passed, 8 skipped, 1 deselected (`tests/test_rbac_k3d.py`; it passes against the cluster when run alone);
-  demo about 5 more (demo-only files). Run the FULL suite including `tests/test_killswitch.py` (its live test is opt-in since 2026-11-12:
-  `KUBEHEAL_LIVE_KILLSWITCH_TEST=1`, because it flips the real cluster mode to enforce for seconds); only `test_rbac_k3d.py`
-  reads the cluster (read-only) and stays deselected by default.
-- Merged since Codex paused: V5-S2, D4 review fixes, chart cleanup, namespace tier map (`demo` to dev), V5-S1 (Falco rules),
-  V5-D6 and D9 (Executor validation, candidate fields), V5-D5 (baseline promotion), V5-S5 (Executor freeze request,
-  Security Agent freeze consumer, DaemonSet wiring, thaw script), V5-I3 (dashboard), image fix V5-IMG1, chart pieces CH1 to CH3.
-- NO OPEN BRANCHES. `wave/V5-S5c` (reviewed, fixes applied) and `wave/V5-CH4` (reviewed) were merged into `work` on
-  2026-11-12 and `work` into `demo`. Their worktrees `../Unisys_Model-wt-V5-S5c` and `../Unisys_Model-wt-V5-CH4` can be removed
-  (`git worktree prune` plus deleting the empty folders; never `branch -D`).
-- Cluster `k3d-kubeheal` (only this context, never `hybrid-demo`): `kubeheal-mode` is `test`. Helm release `kubeheal` is
-  revision 8, `deployed`. Images in use: security-agent `b20261112150442` (with V5-S5c, its review fixes and CH4); executor `b20261112081307`;
-  health-agent, fusion-agent, dashboard and inference-server `b20261112075817`. The neural model servers and the DCM are not
-  deployed (`modelServers.legacy.enabled=false`). Docker Desktop must be running first (it was stopped at the start of the
-  2026-11-12 resume; the cluster restarted by itself).
-- The cgroup freeze was verified live on k3d on 2026-11-12 (scratch pod, freeze, readback, thaw): see
-  `docs/kubeheal/results/live_freeze_check_2026-11-12.md`. It is NOT verified on a real node.
+- Only use --context k3d-kubeheal. Mode read back test; no enforce window was active. No Helm upgrade was started during shutdown.
+- Helm revision 13, deployed at 2026-11-12 21:53:13 IST.
+- All KubeHeal agent images use b20261112215116: executor, fusion-agent, health-agent, dashboard, inference-server, and security-agent. They were built from demo; changes since were docs-only, so these are demo-code images, not branch-only images.
+- After the non-destructive stop/start, the last read showed these pods not Running, all Pending: dev/victim-app-558564f5cc-bnjtw, kube-system/snapshot-controller-55f6584bc6-pl88r, kubeheal/fusion-agent-5d787c845b-xgltk, kubeheal/health-agent-6d8c8f596-dkpbv, monitoring/monitoring-grafana-cbd564658-p79nc, monitoring/monitoring-kube-prometheus-operator-c8fd87dbf-q54nz. Recheck readiness tomorrow before any demo action. No PVC or ledger data was deleted.
+- Lock check found no docs/kubeheal/CLUSTER_LOCK.md, so there was no Codex line to remove. Before any cluster touch, check for a lock. Before each enforce window or Helm upgrade, add CLUSTER LOCK <who> <start time>, commit it, then remove and commit it afterward. Never upgrade with an older tag.
 
-## Facts from the cluster (2026-11-12, this machine, read-only checks unless stated)
+## Branches and worktrees
 
-- Inference service (called from the Health Agent pod): `/healthz` 200 `{"status":"ok"}`; `/readyz` 200
-  `{"ready":true,"models":{"health":"health-5.0.0-a374e498","security":"security-5.0.0-c6fa12d8"}}`. The API-server proxy
-  gives 502 because the NetworkPolicy only admits the agents and Prometheus: query it from an agent pod.
-- Revision 5 of the upgrade failed because the Executor image lacked `kubeheal/` and `pydantic` (found only by the
-  install); fixed in V5-IMG1; `tests/test_dockerfile_imports.py` now scans all five agent images. Revision 6 deployed.
-- The Health Agent assesses through the inference service (log: `label=critical risk=0.51 set=[]` for the stale
-  `prod/victim-app` baseline, whose image differs); an empty set is "not certain", so Fusion decides `observe` (no action,
-  as rule M2 requires). `prod/victim-app` is a drift against an old golden baseline (its image tag changed on 2026-11-11).
-- The Security Agent logged `containment consumer started on kubeheal.contain.req:<node>` and `KILL SWITCH mode None -> test`.
-  Falco is not installed (`FALCO_MODE` resolves to `off`).
-- cgroup layout seen from inside the Security Agent pod (cgroup v2, cgroupfs driver): its own `/proc/self/cgroup` is `0::/`
-  (a private cgroup namespace); other pods show `0::/../../pod<uid>/<container>` (Guaranteed) and
-  `0::/../../../burstable/pod<uid>/<container>`; node processes `0::/../../../../init` and `.../k3s`. `/host/cgroup` (the
-  new read-write hostPath mount) shows the node root with a `kubepods` directory, `cgroup.freeze` mode 0644, write access
-  true. The merged freeze code needs a `kubepods` path component and refuses `..`, so it refuses every freeze here (fails
-  safe, never freezes): V5-S5c fixes it. The actual `cgroup.freeze` write has NOT been exercised on this cluster.
+Worktrees were clean at handoff after preserving the unfinished cherry-pick as WIP. Completed delegated agents have no running tasks. Branches still listed by git branch --no-merged demo:
 
-## Safety rules (unchanged, apply to every task)
+| Branch | Tip | What remains |
+|---|---:|---|
+| wave/claude-F3b | 207ad87 | Unmerged Executor PVC claim guard (e6c5aa6) and evidence. Review tests/test_executor_volume_claim_guard.py, run focused/full suites, then decide whether this fixes F10 safely. |
+| wave/Codex-F4-HMAC-smoke | 520c8f8 | HMAC smoke runner/docs/tests; 9 focused tests reported. Compare with live F4 evidence and demo, then review/full-suite before any merge. |
+| wave/Codex-ThawHmac-docs | f730a7a | Dedicated HMAC Secret correction in scripts/thaw_pod.py; review against chart Secret and AGENTS, run thaw tests/full suite. |
+| wave/demo-runbook | b1eb497 | D-5/P11 runbook evidence; compare with current runbook and saved transcripts, retain only nonduplicated and current evidence. |
+| wave/Codex-F8-freeze-ui | 656ed87 | SnapshotFreeze incident UI/API and tests; review access controls, run dashboard tests/full suite. |
+| wave/Codex-NP-k6 | d2c6cde | k6 NetworkPolicy fixes; review rendered policy and HPA ingress, chart tests/full suite before another measured load run. |
+| wave/p11-safe-runner | a2ba42a | P11 failed-run data and coverage report; audit provenance and keep unmeasured fields as not measured. No accepted E1 result. |
+| wip/f4-hmac-smoke | fad3518 | WIP preservation of a conflicted F4 cherry-pick. Includes older candidate history; compare carefully and do not merge blindly. |
 
-Never push; no destructive git (`reset --hard`, `clean`, forced checkout, `branch -D`); no model training; no invented
-numbers (write "not measured"; a number in a doc must come from a run you did, with date and machine); no em dashes in docs;
-Python 3.11 only (no same-quote nesting in f-strings); no Kubernetes write outside `agents/executor/`
-(`tests/test_no_writes_outside_executor.py`), and every write through `actions._write` and the kill-switch gate; ledger entry
-BEFORE any corrective action; `decision_policy.py` stays pure and fails closed; every `kubectl` and `helm` command with
-`--context k3d-kubeheal` / `--kube-context k3d-kubeheal`; `kubeheal-mode` stays `test` except during a scripted demo or
-acceptance step, and is restored to `test` right after; core fixes go to `work` first and then to `demo`; never end with
-uncommitted changes; update `.ai/handoff.md` and `PROGRESS.md` after every merge. Process per task: worktree
-`../Unisys_Model-wt-<id>` on `wave/<id>`, small commits, full suite, independent review for reserved files (Executor,
-Security Agent write paths, RBAC, `decision_policy.py`), `git merge --no-ff` into `work`, full suite, merge `work` into
-`demo`, full suite, update the checklist. `git worktree remove` on Windows can fail with "Permission denied" while a shell
-sits in the directory: `git worktree prune` and remove the empty folder.
+These refs are not ancestors of demo. Some files overlap with later work, so compare actual diffs before cherry-picking. The F4 WIP branch is not a replacement for wave/Codex-F4-HMAC-smoke.
 
-## Verify commands
+## Feature checklist
 
-```powershell
-cd C:\My_projects_1\cLOUD\Unisys_Model-wt-metric-query        # the work worktree
-$env:Path += ";$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Helm.Helm_Microsoft.Winget.Source_8wekyb3d8bbwe\windows-amd64"
+| Feature | Status | Where it stopped |
+|---|---|---|
+| F1 Test safety | TESTED-ONLY | Default tests skip live cluster/Redis/MinIO/mode writes; guard is in suite. dev/freeze-scratch is absent. |
+| F2 D-5 replay | LIVE-VERIFIED | Hand-written replay emitted a real scored Security event, Fusion decision, and Executor dry-run evidence. Not live Falco capture. Do not rerun without Claude ownership review. |
+| F3 Containment | LIVE-VERIFIED | d0ed188 merged. Freeze, forensic snapshot, quarantine, scale-to-zero, pre-T0 restore, entropy Job, quarantine lift, ledger verified. Sense was scripted because Falco is absent. |
+| F4 HMAC | LIVE-VERIFIED | Test-mode smoke: signed request dry-ran; unsigned/tampered requests refused; signed results checked; run-owned Redis entries cleaned. Evidence in docs/kubeheal/demo-evidence/F4/. |
+| F5 Baseline promotion | TESTED-ONLY | Namespace-mode gate has 90 focused passing tests. Live candidate promotion and ledger entry not shown. |
+| F6 Executor validation | TESTED-ONLY | Request validation covered by suite. No safe live injector; runbook forbids direct Redis injection and fabricated workload patches. |
+| F7 M2/D1/rollback | TESTED-ONLY | Single-label, inclusive 10x boundary, fresh Security response tests pass. No live boundary/rollback sequence. |
+| F8 Dashboard | TESTED-ONLY | Controls are covered by tests. No populated incident walkthrough for approve/reject, kill switch, baseline, containment, ledger, and SnapshotFreeze release. |
+| F9 Kill switch | TESTED-ONLY | Automated tests pass. No validated paired test/enforce trigger; mode was not changed for a demo window. |
+| F10 Drift healing | TESTED-ONLY | Drift tests pass. No live canary-only patch, rollback point, bad-p99 measurement, or rollback. |
+| F11 Queue-depth HPA | LIVE-VERIFIED | Clean run: 32 VUs/90s, 121,088/121,088 checks, median 22.86ms, p95 38.45ms, HPA 2 -> 7 -> 2. Grafana API/Prometheus evidence exists. Post-merge repeat scaled 2 -> 8 -> 2 but had 12/99,431 refusals; visual screenshot missing. |
+| F12 U6 acceptance | NOT DONE | up.ps1 has not passed twice from a clean baseline. down.ps1 was not run because it deletes MinIO, Redis, ledger, and victim PVC data. |
+| F13 P11 evaluation | NOT DONE | No accepted E1 benchmark; both attempts failed. E2-E6 and V5-E1 remain not measured. |
+
+## Ordered work for tomorrow
+
+1. Confirm F3 is already merged into work/demo and read-only verify revision 13, mode test, and tag b20261112215116. Its demo image rebuild and upgrade from demo are already complete. Do not rerun Claude-owned D-5 or containment work.
+2. Recheck the cluster after stop/start and wait for needed pods to become Ready. Keep mode test. Do not run down.ps1 unless the owner explicitly authorizes deletion of cluster volumes.
+3. Review the unmerged branches above one at a time, starting with F8 dashboard and F10 volume-claim drift safety. Test each in isolation. Merge only after review and a green full suite; rerun full suites on work and demo after code changes. Leave red, duplicate, or unreviewed work on its branch.
+4. Rehearse docs/kubeheal/DEMO_RUNBOOK.md once from a fresh cluster start. Use saved F2/F3 evidence where rerunning crosses Claude ownership. Capture actual output/screenshots under docs/kubeheal/demo-evidence/; skip unsupported live steps and state why.
+5. Run U6 twice from a clean baseline only if reset does not delete user data; otherwise keep NOT DONE. No model training.
+6. Finish push prep: exact full-suite counts, full diff/secret scan against origin/main, no .env/tokens/kubeconfig/venvs/large binary changes, correct .gitignore, README/AGENTS verified design, measured numbers only, updated PUSH_PLAN.md, PROGRESS.md, and handoff. Never push or set ALLOW_PUSH.
+
+## Verification commands
+
+Run from the demo checkout in PowerShell using Python 3.11. Do not deselect the default suite.
+
+git status
+git worktree list
+git log --oneline -10 work
+git log --oneline -10 demo
+git diff --check origin/main...work
+git diff --check origin/main...demo
 $env:PYTHONPATH='.'
-C:\My_projects_1\cLOUD\Unisys_Model\.venv\Scripts\python.exe -m pytest tests/ -q -p no:warnings --basetemp=$env:TEMP\kubeheal-t --deselect tests/test_rbac_k3d.py
-C:\My_projects_1\cLOUD\Unisys_Model\.venv\Scripts\python.exe -m pytest tests/test_rbac_k3d.py -q -p no:warnings    # live, read-only
-kubectl --context k3d-kubeheal -n kubeheal get configmap kubeheal-mode -o jsonpath='{.data.mode}'
-helm --kube-context k3d-kubeheal list -n kubeheal
-git status; git worktree list; git log --oneline -8
-```
-
-Images: `.\demo\k3d\images.ps1 -Only <names>` from the `demo` checkout (it builds from the working tree there, tags
-`b<timestamp>` in `demo/k3d/.image-tags.json`, writes `demo/k3d/.generated-values.yaml`). Install or upgrade:
-`helm --kube-context k3d-kubeheal upgrade kubeheal deploy/helm/kubeheal -n kubeheal -f deploy/helm/kubeheal/values-k3d-demo.yaml -f demo/k3d/.generated-values.yaml --force-conflicts --wait --timeout 10m`
-(`--force-conflicts` is needed after a `kubectl set image` on an object Helm owns).
-
-## Pitfalls
-
-- A shell heredoc with long Python and many quotes was rejected by the tool several times: write the script to a file with
-  the Write tool and run it. Python on Windows cannot read `/c/...` paths from Git Bash: use `cygpath -w`.
-- LightGBM refuses `model.txt` with CRLF (`models/bundles/** -text` in `.gitattributes`); read v5 files with
-  `git show origin/main:<path>`; always pass features through `ModelBundle.restrict()`. The shipped security bundle's
-  conformal and accuracy figures are not evidence (synthetic classes).
-- Images are the only place missing packages show up (see V5-IMG1): after a change that adds an import, run
-  `tests/test_dockerfile_imports.py` and, for a reserved image, a real build.
-- Do not `git stash` (shared stack). The demo checkout holds demo-only files; merge `work` into it, never the reverse.
-- `tests/test_cgroup_writes_static.py` fails if any file other than `agents/security_agent/containment.py` writes or builds
-  a cgroup control file name (docs, tests and docstrings are exempt).
-
-## Remaining tasks, in order
-
-1. DONE 2026-11-12: S5c and CH4 reviewed, fixed, merged; Security Agent image rebuilt, revision 7; live freeze and thaw
-   verified on k3d (results file above). Still open from it: record operator thaws in the ledger, HMAC over request and result
-   (with V5-P3), narrow the hostPath to `kubepods` (chart value plus test), repeat the check on a real node. The live check called `freeze.request_freeze` directly (scope in the
-   results file): the stream-driven `contain` path (intake, `parse_request`, `check_target`, the containment order) still needs a
-   live run on a scratch Deployment in `dev`; do it as a scripted enforce window together with the containment-order task.
-2. D-5 replay on the cluster (P10-D5 and P10-U2): mount the new hand-written trace
-   `tests/fixtures/falco/ransomware_pv_encrypt_new_rules.jsonl`, adapted to the live `prod` victim pod identity, with
-   `FALCO_MODE=replay` on the Security Agent, in mode `test`; record whether a `kubeheal.security.events` record is
-   published and what Fusion decides (a heuristic-only event is human-only, a model-scored `ransomware` event with a
-   one-label set is the automatic case); remove the temporary mount and restore `FALCO_MODE=auto`. The trace is hand-written
-   and proves only that the pipeline scores events of this shape; live Falco is still unverified.
-3. P10-U6: two complete `up.ps1` plus scenario plus reset runs on this machine; record the real output in
-   `docs/kubeheal/results/`. The prod victim baseline is stale (see Facts): decide, with `scripts/baseline_tool.py` or a
-   promotion in dev, how the demo gets a clean baseline; do not fake it.
-4. P7-RR-11 (re-baseline after a restore), P7-RR-12 (resume of a partial restore), P7-RR-7 (RPO and RTO measurements),
-   the ransomware restore path still scales to zero itself (design decision on the V5-S5 line of PROGRESS).
-5. P11 runs (`eval/p11_harness.py`; every run in mode `test` unless a task says otherwise; results only from recorded runs):
-   E1 to E7 and V5-E1 scripted lab scenarios. No training.
-6. V5-DOC and P13: update `README.md`, `AGENTS.md` (the model sections still describe the neural models and the DCM),
-   `docs/kubeheal/ARCHITECTURE.md`, `SPEC_VS_CODE.md`, `docs/architecture-flow.md`, `demo/README.md` to the LightGBM design
-   with split-conformal prediction sets and TreeSHAP factors, the one-label gate (M2), the deterministic correlation, the
-   rule rollback with the fresh Security response (Q1), baseline promotion (D3), the containment order and labels (D5, Q2),
-   the kill-switch gates. Describe only what is merged and verified; mark the rest planned. Propose `PROJECT_SPEC.md`
-   amendments to the owner instead of editing it.
-7. V5-F1 (quarantine ownerReference and UID preconditions), V5-P1 (CI workflow), V5-P3 (Redis per-component ACL users,
-   dashboard and Health Agent key access listed on the V5-D5 and V5-I3 lines), V5-M3 (needs the owner), V5-S4 (eBPF sensor,
-   optional, last). Open owner items: M3 raw `collected/*.jsonl` from the teammate; the tag `demo-2026-11-11` after the demo.
-8. When everything is merged: final suite on `work` and `demo`, `git status` clean, `.ai/handoff.md` current, stop. The owner pushes.
+Push-Location ..\Unisys_Model-wt-metric-query
+.\.venv\Scripts\python.exe -m pytest tests -q -p no:warnings
+Pop-Location
+Push-Location .
+.\.venv\Scripts\python.exe -m pytest tests -q -p no:warnings
+Pop-Location
