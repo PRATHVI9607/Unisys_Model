@@ -99,6 +99,10 @@ Never print or log Secret values.
 - One F11 synthetic scoring-load run used 32 VUs for 90 seconds, passed 121,088/121,088 checks, measured
   median 22.86 ms and p95 38.45 ms, and scaled HPA replicas 2 -> 7 -> 2 in 7m14s. This is one run, not a
   performance guarantee. See `docs/kubeheal/demo-evidence/F11/hpa-run-2026-11-12.md`.
+- A post-merge repeat scaled 2 -> 8 -> 2 but had 12 connection refusals out of 99,431 checks, so it is not a
+  clean load result. Grafana's queue-depth and available-replica panels and Prometheus samples are recorded in
+  `docs/kubeheal/demo-evidence/F11/grafana-hpa-api-2026-11-12.json`; no Grafana screenshot was captured because
+  the renderer is not installed.
 - P11 E1 has no accepted benchmark: both runs failed. U6's full acceptance run twice is **not measured**.
   Do not reuse F11 numbers as P11 or U6 results. See `docs/kubeheal/results/p11/P11_COVERAGE.md`.
 

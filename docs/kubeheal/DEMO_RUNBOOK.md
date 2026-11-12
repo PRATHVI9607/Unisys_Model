@@ -140,7 +140,7 @@ kubectl --context k3d-kubeheal -n kubeheal port-forward svc/kubeheal-dashboard 8
 kubectl --context k3d-kubeheal -n kubeheal get configmap kubeheal-mode -o jsonpath='{.data.mode}'
 ```
 
-Open `http://127.0.0.1:8500/baseline-candidates` and `http://127.0.0.1:8500/approvals`. Approval and rejection are `POST /api/baseline-candidates/{namespace}/{deployment}/approve` and `/reject`, with JSON `{"candidate_id":"...","reason":"..."}` and an admin bearer token. Use the interactive dashboard token field; never put a real token in a transcript. Expected: a candidate status change and a corresponding ledger record. **NOT VERIFIED live:** no safe candidate-generation trigger or before/after promotion evidence is available, so do not approve a fabricated candidate. Safe fallback: `.\.venv\Scripts\python.exe -m pytest tests/test_baseline_promotion.py tests/test_dashboard_baseline.py -q`; capture test output and candidate/approval page screenshots (redacted) in `docs/kubeheal/demo-evidence/F5/`. Unit/UI evidence is not a live promotion.
+Open `http://127.0.0.1:8500/baseline-candidates` and `http://127.0.0.1:8500/approvals`. Approval and rejection are `POST /api/baseline-candidates/{namespace}/{deployment}/approve` and `/reject`, with JSON `{"candidate_id":"...","reason":"..."}` and an admin bearer token. Use the interactive dashboard token field; never put a real token in a transcript. Expected: a candidate status change and a corresponding ledger record. The dashboard now checks the target namespace's `kubeheal/mode` label and fails closed if it cannot read it. **NOT VERIFIED live:** no safe candidate-generation trigger or before/after promotion evidence is available, so do not approve a fabricated candidate. Safe fallback: `.\.venv\Scripts\python.exe -m pytest tests/test_baseline_promotion.py tests/test_dashboard_baseline.py -q`; capture test output and candidate/approval page screenshots (redacted) in `docs/kubeheal/demo-evidence/F5/`. Unit/UI evidence is not a live promotion.
 
 ## F6. Executor request validation
 
@@ -210,7 +210,7 @@ The script asserts mode `test`, temporarily changes only `prod/victim-app` CPU r
 
 ## F11. Queue-depth HPA and Grafana
 
-**Measured run duration:** 7m14s; plan 8 minutes for this run, baseline check, and Grafana view. **Show:** queue metric increasing under k6 load, HPA scaling 2 -> 7 -> 2, then the queue-depth and replicas panels.
+**Measured run duration:** 7m14s in the successful run; plan 8 minutes for load, baseline check, and Grafana view. **Show:** queue metric increasing under k6 load, HPA scaling, then the queue-depth and replicas panels. A post-merge repeat scaled 2 -> 8 -> 2 but had 12 connection refusals during scale-up, so do not present it as a clean load result.
 
 ```powershell
 pwsh -ExecutionPolicy Bypass -File .\demo\scripts\hpa_load.ps1 -Vus 32 -DurationSeconds 90 -SampleSeconds 10 -ScaleDownWaitSeconds 330
@@ -218,7 +218,7 @@ kubectl --context k3d-kubeheal -n kubeheal get hpa kubeheal-inference -o wide
 kubectl --context k3d-kubeheal -n monitoring port-forward svc/monitoring-grafana 3000:80
 ```
 
-Open `http://127.0.0.1:3000` and select the KubeHeal overview dashboard. The script checks mode `test`, waits for the HPA baseline, creates a bounded k6 job plus scoped NetworkPolicy/ConfigMap, emits samples and k6 summary, and cleans only its run-owned resources in `finally`. **Measured once on 2026-11-12:** 32 VUs for 90 seconds; 121,088/121,088 checks passed; median 22.86 ms, p95 38.45 ms; HPA 2 -> 7 -> 2; duration 7m14s. See [the saved run report](demo-evidence/F11/hpa-run-2026-11-12.md). This one synthetic scoring-load run is not a performance guarantee. The earlier script attempt failed because `Out-String -NoNewline` flattened the JS file; temporary resources were cleaned up, and the fix is `6f97f88`. No full terminal screenshots were saved. Fallback: use the recorded k6/HPA report, then capture fresh Grafana screenshots in `docs/kubeheal/demo-evidence/F11/` and label them as a fallback, not a rerun.
+Open `http://127.0.0.1:3000` and select the KubeHeal overview dashboard. The script checks mode `test`, waits for the HPA baseline, creates a bounded k6 job plus scoped NetworkPolicy/ConfigMap, emits samples and k6 summary, and cleans only its run-owned resources in `finally`. The earlier successful run on 2026-11-12 measured 32 VUs for 90 seconds; 121,088/121,088 checks passed; median 22.86 ms, p95 38.45 ms; HPA 2 -> 7 -> 2; duration 7m14s. A post-merge repeat scaled 2 -> 8 -> 2 but had 12 connection refusals out of 99,431 checks and is not a clean load result. Dashboard panel definitions and Prometheus samples for the repeat are in [Grafana API evidence](demo-evidence/F11/grafana-hpa-api-2026-11-12.json). The Grafana image renderer is not installed, so no screenshot was captured; save a visual screenshot during rehearsal if the browser is available. The earlier script attempt failed because `Out-String -NoNewline` flattened the JS file; cleanup succeeded, and the fix is `6f97f88`. These synthetic scoring-load runs do not measure the full incident pipeline or establish a performance guarantee.
 
 ### Separate P11 evaluation status
 
