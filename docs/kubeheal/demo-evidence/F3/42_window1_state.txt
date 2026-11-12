@@ -1,0 +1,17 @@
+# state after window 1 2026-11-12T14:02:49Z
+NAME                         READY   UP-TO-DATE   AVAILABLE   AGE     CONTAINERS   IMAGES                                                       SELECTOR         LABELS
+deployment.apps/f3-scratch   1/1     1            1           5m47s   app          kubeheal-registry:5000/kubeheal/victim-app:b20261111113631   app=f3-scratch   app=f3-scratch
+
+NAME                             READY   STATUS    RESTARTS   AGE     IP            NODE                   NOMINATED NODE   READINESS GATES   LABELS
+pod/f3-scratch-7d65d9769-wb2rs   1/1     Running   0          5m47s   10.42.0.111   k3d-kubeheal-agent-0   <none>           <none>            app=f3-scratch,kubeheal/incident=inc-20261112-140132-fe13751f,kubeheal/quarantine=true,pod-template-hash=7d65d9769
+
+NAME                                    STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS      VOLUMEATTRIBUTESCLASS   AGE     VOLUMEMODE   LABELS
+persistentvolumeclaim/f3-scratch-data   Bound    pvc-caba14b3-f369-45cd-abef-321912e74e0e   64Mi       RWO            csi-hostpath-sc   <unset>                 5m48s   Filesystem   app=f3-scratch
+
+NAME                                                                                                    READYTOUSE   SOURCEPVC         SOURCESNAPSHOTCONTENT   RESTORESIZE   SNAPSHOTCLASS            SNAPSHOTCONTENT                                    CREATIONTIM
+volumesnapshot.snapshot.storage.k8s.io/kubeheal-forensic-f3-scratch-data-inc-20261112-140132-fe13751f   true         f3-scratch-data                           64Mi          csi-hostpath-snapclass   snapcontent-54b641f4-f5b8-4b33-a17b-a923bda08c4f   76s        
+volumesnapshot.snapshot.storage.k8s.io/kubeheal-roll-f3-scratch-data-1794491835                         true         f3-scratch-data                           64Mi          csi-hostpath-snapclass   snapcontent-a9b34a1d-f69f-4d07-87ae-b1d7af8025d1   5m34s      
+
+NAME                                                                               POD-SELECTOR                                                              AGE   LABELS
+networkpolicy.networking.k8s.io/kubeheal-quarantine-inc-20261112-140132-fe13751f   kubeheal/incident=inc-20261112-140132-fe13751f,kubeheal/quarantine=true   76s   app.kubernetes.io/managed-by=kubeheal,kubeheal/incident=inc-20261112-140132-fe13751f
+mode=test

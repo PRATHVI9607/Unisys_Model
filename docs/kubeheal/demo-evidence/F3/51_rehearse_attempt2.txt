@@ -1,0 +1,6 @@
+[2026-11-12T14:06:09Z] publishing scripted alert sec-f3-1794492369603-f3-scratch-b for staging/f3-scratch-b-7558b97ff7-jg47q (T0 1794492369313, risk 0.9500, set ["ransomware"], source model security-5.0.0-c6fa12d8)
+[2026-11-12T14:06:09Z] XADD id 1794492369259-0
+[2026-11-12T14:06:09Z] action stream: auto_contain incident=inc-20261112-140609-a1e9eb03 outcome=queued_for_executor dry_run=true
+[2026-11-12T14:06:09Z] action stream: executed_contain incident=inc-20261112-140609-a1e9eb03 outcome=DRY RUN: would have CONTAIN staging/f3-scratch-b-7558b97ff7-jg47q (request_freeze, forensic_snapshot, create_quarantine_policy, label_pod) dry_run=
+[2026-11-12T14:06:09Z] rehearsal ended: executed_contain dry run
+[2026-11-12T14:06:10Z] mode after rehearsal: test

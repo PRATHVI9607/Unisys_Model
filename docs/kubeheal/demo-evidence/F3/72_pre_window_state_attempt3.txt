@@ -1,0 +1,20 @@
+# pre-window state (attempt 3) 2026-11-12T14:15:45Z
+mode=test
+prod kubeheal-roll-victim-data-1794370544 true
+prod kubeheal-roll-victim-data-1794370844 true
+staging kubeheal-roll-f3-scratch-c-data-1794492929 true
+kubeheal data-redis-0 Bound
+kubeheal minio-data Bound
+prod victim-data Bound
+staging f3-scratch-c-data Bound
+dev           victim-app                            kubeheal-registry:5000/kubeheal/victim-app:b20261111113631         1
+prod          victim-app                            kubeheal-registry:5000/kubeheal/victim-app:b20261111113631         1
+staging       f3-scratch-c                          kubeheal-registry:5000/kubeheal/victim-app:b20261111113631         1
+kubeheal.actions 48
+kubeheal.exec 10
+kubeheal.escalations 4
+kubeheal.security.events 9
+kubeheal.health.events 40
+executor             kubeheal-registry:5000/kubeheal/executor:b20261112194300
+fusion-agent         kubeheal-registry:5000/kubeheal/fusion-agent:b20261112192037
+security-agent       kubeheal-registry:5000/kubeheal/security-agent:b20261112192037
