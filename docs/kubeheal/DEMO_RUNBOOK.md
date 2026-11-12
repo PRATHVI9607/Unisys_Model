@@ -1,6 +1,6 @@
 # KubeHeal k3d live demo runbook
 
-This runbook is for the `k3d-kubeheal` context only. It does not claim an end-to-end feature is working until its evidence folder contains a dated terminal transcript and screenshots from the rehearsed run. Never use `hybrid-demo`. Keep `kubeheal-mode` in `test` except for the bounded, scripted F3, F9, and F10 windows below; restore `test` immediately after each window.
+This runbook is for the `k3d-kubeheal` context only. It does not claim an end-to-end feature is working until its evidence folder contains a dated terminal transcript and screenshots from the rehearsed run. Never use `hybrid-demo`. Keep `kubeheal-mode` in `test`; F3 and F9 currently have no verified live trigger, and the F10 script is test-mode only. Do not open an enforce window until a reviewed scratch trigger and automatic cleanup are documented.
 
 ## Common preflight
 
