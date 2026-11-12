@@ -47,6 +47,15 @@ def _name(prefix: str) -> str:
     return f"{prefix}-{stamp}-{uuid.uuid4().hex}"
 
 
+def _validate_duration(duration: str) -> None:
+    match = re.fullmatch(r"([1-9][0-9]?)(s|m)", duration)
+    if not match:
+        raise ValueError("duration must be an integer from 1 to 99 followed by s or m")
+    value = int(match.group(1)) * (60 if match.group(2) == "m" else 1)
+    if value > 600:
+        raise ValueError("duration is capped at 10 minutes per k6 Job")
+
+
 def _hpa_state() -> dict:
     raw = harness.kubectl(CONTEXT, ["get", "hpa", "kubeheal-inference", "-n", NAMESPACE, "-o", "json"])
     item = json.loads(raw)
@@ -175,6 +184,7 @@ def _deployment_counts(namespace: str, deployment: str) -> tuple[int, int]:
 def run_load(vus: int, duration: str, target_url: str) -> dict:
     if not 10 <= vus <= 200:
         raise ValueError("vus must be between 10 and 200")
+    _validate_duration(duration)
     if target_url != DEFAULT_URL:
         raise ValueError(f"target_url is restricted to {DEFAULT_URL}")
     harness.assert_test_mode(CONTEXT)

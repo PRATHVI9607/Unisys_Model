@@ -65,6 +65,15 @@ def test_load_target_is_fixed_before_any_cluster_call(monkeypatch):
     assert called == []
 
 
+def test_load_duration_is_bounded_before_any_cluster_call(monkeypatch):
+    called = []
+    monkeypatch.setattr(p11_run.harness, "assert_test_mode", lambda context: called.append(context))
+    import pytest
+    with pytest.raises(ValueError, match="capped at 10 minutes"):
+        p11_run.run_load(10, "11m", p11_run.DEFAULT_URL)
+    assert called == []
+
+
 def test_namespace_is_validated_before_deployment_read(monkeypatch):
     called = []
     monkeypatch.setattr(p11_run.harness, "assert_test_mode", lambda context: called.append(context))
