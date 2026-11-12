@@ -107,7 +107,7 @@ class ContainmentConfig:
             logger.warning("containment consumer not started: NODE_NAME is not set "
                            "(set it from the downward API, spec.nodeName)")
             return None
-        if len(node) > 253 or not _DNS_SUBDOMAIN.match(node):
+        if len(node) > 253 or not _DNS_SUBDOMAIN.fullmatch(node):
             logger.warning("containment consumer not started: NODE_NAME is not a valid node name")
             return None
         return cls(
@@ -294,7 +294,7 @@ class ContainmentHandler:
 
     def validate(self, f: Dict[str, str]) -> Optional[Tuple[str, str]]:
         """None when the request is acceptable, else (status, reason). Pure apart from the pod index and mode."""
-        if not _REQUEST_ID.match(_s(f.get("request_id"))):
+        if not _REQUEST_ID.fullmatch(_s(f.get("request_id"))):
             return STATUS_REFUSED, "bad_request_id"
         action, label = _s(f.get("action")), _s(f.get("label")).strip()
         if action not in ACTIONS:
@@ -306,14 +306,14 @@ class ContainmentHandler:
         if _s(f.get("requested_by")) not in REQUESTERS:
             return STATUS_REFUSED, "bad_requested_by"
         incident_id = _s(f.get("incident_id"))
-        if len(incident_id) > 63 or not _DNS_LABEL.match(incident_id):
+        if len(incident_id) > 63 or not _DNS_LABEL.fullmatch(incident_id):
             return STATUS_REFUSED, "bad_incident_id"
         namespace, pod, pod_uid, node = (_s(f.get(k)) for k in ("namespace", "pod", "pod_uid", "node"))
-        if len(namespace) > 63 or not _DNS_LABEL.match(namespace):
+        if len(namespace) > 63 or not _DNS_LABEL.fullmatch(namespace):
             return STATUS_REFUSED, "bad_namespace"
-        if len(pod) > 253 or not _DNS_SUBDOMAIN.match(pod):
+        if len(pod) > 253 or not _DNS_SUBDOMAIN.fullmatch(pod):
             return STATUS_REFUSED, "bad_pod"
-        if not _POD_UID.match(pod_uid):
+        if not _POD_UID.fullmatch(pod_uid):
             return STATUS_REFUSED, "bad_pod_uid"
         if node != self.cfg.node:
             return STATUS_REFUSED, "wrong_node: the request is for another node"
@@ -429,7 +429,7 @@ class ContainmentConsumer:
         message stays pending and is retried); anything else becomes a `failed` result."""
         f = _fields(raw_fields)
         request_id = f.get("request_id", "")
-        if not _SAFE_TOKEN.match(request_id):
+        if not _SAFE_TOKEN.fullmatch(request_id):
             logger.warning(f"containment message {msg_id} dropped: no usable request_id")
             await self.redis.xack(self.cfg.stream, self.cfg.group, msg_id)
             return
@@ -525,4 +525,8 @@ class ContainmentService:
         self.consumer.running = False
         if self._task:
             self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
         await self.mode.stop()

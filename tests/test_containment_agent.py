@@ -133,6 +133,10 @@ def assert_untouched(s, result):
     ({"request_id": "xyz"}, "bad_request_id"),
     ({"request_id": REQ_ID.upper()}, "bad_request_id"),
     ({"request_id": REQ_ID[:-1]}, "bad_request_id"),
+    ({"request_id": REQ_ID + chr(10)}, "bad_request_id"),
+    ({"incident_id": "inc-1" + chr(10)}, "bad_incident_id"),
+    ({"namespace": "prod" + chr(10)}, "bad_namespace"),
+    ({"pod_uid": UID + chr(10)}, "bad_pod_uid"),
     ({"incident_id": ""}, "bad_incident_id"),
     ({"incident_id": "Inc_1"}, "bad_incident_id"),
     ({"incident_id": "a" * 64}, "bad_incident_id"),
@@ -589,13 +593,14 @@ def test_a_message_left_pending_by_a_dead_consumer_is_reclaimed_and_answered_exp
     s = Scene(tmp_path)
     r, c = make_consumer(s)
     run(r.xgroup_create(s.cfg.stream, s.cfg.group, id="0", mkstream=True))
-    run(publish(r))
+    run(publish(r, timestamp_ms=str(int((NOW - 120) * 1000))))
     run(r.xreadgroup(s.cfg.group, "dead-consumer", {s.cfg.stream: ">"}, count=10))
+    assert len(r.pending_ids(s.cfg.stream, s.cfg.group)) == 1
     r.advance(120)                                        # idle for longer than the request TTL
     drain(r, c)
     res = r.hashes[ct.RESULT_KEY_PREFIX + REQ_ID]
-    assert res["status"] == "frozen" or res["reason"] == "expired"
-    assert r.pending_ids(s.cfg.stream, s.cfg.group) == []
+    assert (res["status"], res["reason"]) == ("refused", "expired") and s.writes == []
+    assert r.pending_ids(s.cfg.stream, s.cfg.group) == [] and len(r.acked) == 1
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -615,9 +620,30 @@ def test_service_with_node_name_reads_only_its_stream():
     assert svc.mode.mode_for("prod") == "test"            # no watcher data yet: fail safe
 
 
-def test_the_security_agent_hook_starts_and_stops_the_service(monkeypatch):
+def test_the_security_agent_hook_is_wired_and_idle_without_node_name(monkeypatch):
     from agents.security_agent import agent as sec_agent
     assert "ContainmentService" in vars(sec_agent)
     monkeypatch.delenv("NODE_NAME", raising=False)
     a = sec_agent.SecurityAgent(redis_url="redis://localhost:1")
     assert a.containment is None                          # created only in start(), and only with NODE_NAME
+
+
+def test_service_start_runs_the_consumer_and_stop_cancels_it(tmp_path):
+    s = Scene(tmp_path)
+
+    class Yielding(FakeRedis):                            # a real Redis read suspends the task; the fake does not
+        async def xreadgroup(self, *a, **k):
+            await asyncio.sleep(0)
+            return await super().xreadgroup(*a, **k)
+    r, c = make_consumer(s, redis=Yielding())
+    svc = ct.ContainmentService(c, __import__("agents.common.killswitch", fromlist=["ModeWatcher"]).ModeWatcher())
+
+    async def go():
+        await svc.start(core_api=None)                    # the watcher fails on a missing API and stays in test
+        run_task = svc._task
+        await asyncio.sleep(0)
+        await svc.stop()
+        return run_task
+    task = run(go())
+    assert task.done() and c.running is False
+    assert svc.mode.mode_for("prod") == "test"
