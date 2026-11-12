@@ -221,6 +221,19 @@ async def test_a_failed_sample_does_not_publish_a_fabricated_score(env):
     assert len(env.events) == base + 1
 
 
+@scenario
+async def test_a_spec_that_flaps_back_during_an_outage_tells_a_human_again(env):
+    base = await drifted(env)
+    env.result = None
+    env.redis.store[SAMPLING_KEY] = request()
+    for image in ("img:2", "img:3", "img:2"):               # A, B, A: the third notice must not be absorbed
+        env.apps.live[KEY] = dep(image=image)
+        await env.agent.observe_sample(KEY)
+    assert len(env.events) == base + 3
+    await env.agent.observe_sample(KEY)                     # the same spec again is still deduplicated
+    assert len(env.events) == base + 3
+
+
 # ---- lifecycle ----------------------------------------------------------------------------------------------
 def test_spec_json_uses_one_shared_client_and_stop_closes_it(monkeypatch):
     from types import SimpleNamespace

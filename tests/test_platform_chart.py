@@ -164,8 +164,7 @@ def test_k3d_placeholders_are_labelled():
 def test_tier_namespaces_quota_limitrange(env, fixture_file):
     docs = render(env, fixture_file)
     ns = {d["metadata"]["name"]: d for d in by_kind(docs, "Namespace")}
-    expected_namespaces = set(TIERS) | ({"demo"} if env == "k3d-demo" else set())
-    assert set(ns) == expected_namespaces    # the release namespace is created by `helm install --create-namespace`
+    assert set(ns) == set(TIERS)    # the release namespace is created by `helm install --create-namespace`
     for t in TIERS:
         assert ns[t]["metadata"]["labels"]["kubeheal/tier"] == t
         q = get(docs, "ResourceQuota", "kubeheal-quota", t)
@@ -185,15 +184,40 @@ def test_namespaces_create_false_keeps_policy(fixture_file):
 
 def test_release_namespace_is_opt_in(fixture_file):
     docs = render("k3d-demo", fixture_file, "namespaces.createReleaseNamespace=true")
-    assert {d["metadata"]["name"] for d in by_kind(docs, "Namespace")} == {"kubeheal", *TIERS, "demo"}
+    assert {d["metadata"]["name"] for d in by_kind(docs, "Namespace")} == {"kubeheal", *TIERS}
 
 
-def test_k3d_demo_watches_demo_and_grants_health_agent_read_access(fixture_file):
+def test_k3d_demo_watches_the_tiers_only_by_default(fixture_file):
     docs = render("k3d-demo", fixture_file)
     health = get(docs, "Deployment", "health-agent")
     env = {entry["name"]: entry.get("value") for entry in health["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["WATCH_NAMESPACES"] == "prod,staging,dev"
+    assert {d["metadata"]["name"] for d in by_kind(docs, "Namespace")} == set(TIERS)
+
+
+def _agent_env(docs, kind, name):
+    return {e["name"]: e.get("value") for e in
+            get(docs, kind, name)["spec"]["template"]["spec"]["containers"][0]["env"]}
+
+
+def test_the_demo_namespace_maps_to_dev_for_both_sensing_agents(fixture_file):
+    docs = render("k3d-demo", fixture_file)
+    assert _agent_env(docs, "Deployment", "health-agent")["NAMESPACE_TIER_MAP"] == "demo=dev"
+    assert _agent_env(docs, "DaemonSet", "security-agent")["NAMESPACE_TIER_MAP"] == "demo=dev"
+
+
+def test_without_a_tier_map_the_variable_is_not_set(fixture_file):
+    docs = render("prod", fixture_file)
+    assert "NAMESPACE_TIER_MAP" not in _agent_env(docs, "Deployment", "health-agent")
+    assert "NAMESPACE_TIER_MAP" not in _agent_env(docs, "DaemonSet", "security-agent")
+
+
+def test_an_additional_watch_namespace_gets_a_read_binding_and_never_a_namespace_object(fixture_file):
+    docs = render("k3d-demo", fixture_file, "healthAgent.additionalWatchNamespaces={demo}")
+    health = get(docs, "Deployment", "health-agent")
+    env = {entry["name"]: entry.get("value") for entry in health["spec"]["template"]["spec"]["containers"][0]["env"]}
     assert env["WATCH_NAMESPACES"] == "prod,staging,dev,demo"
-    assert get(docs, "Namespace", "demo")["metadata"]["labels"]["kubeheal.io/watch"] == "true"
+    assert "demo" not in {d["metadata"]["name"] for d in by_kind(docs, "Namespace")}
     binding = get(docs, "RoleBinding", "kubeheal-health-agent-read", "demo")
     assert binding["roleRef"]["name"] == "kubeheal-health-agent-read"
     assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "health-agent", "namespace": "kubeheal"}]
@@ -744,16 +768,18 @@ def test_inference_can_be_switched_off(fixture_file):
     assert "allow-inference-from-agents-and-prometheus" not in names
 
 
-def test_agents_get_inference_url_next_to_the_legacy_urls(fixture_file):
+def test_agents_get_the_inference_url_and_no_legacy_model_urls(fixture_file):
     docs = render("k3d-demo", fixture_file)
     for kind, name, legacy in (("Deployment", "health-agent", "HEALTH_MODEL_URL"),
                                ("DaemonSet", "security-agent", "SECURITY_MODEL_URL")):
         envs = {e["name"]: e.get("value") for e in
                 get(docs, kind, name)["spec"]["template"]["spec"]["containers"][0]["env"]}
         assert envs["INFERENCE_URL"] == "http://kubeheal-inference:8000"
-        assert legacy in envs                                       # legacy URL kept; agent code is unchanged
+        assert legacy not in envs                                   # the agents no longer read the neural servers
     fusion = get(docs, "Deployment", "fusion-agent")["spec"]["template"]["spec"]["containers"][0]["env"]
-    assert "INFERENCE_URL" not in {e["name"] for e in fusion}
+    names = {e["name"] for e in fusion}
+    assert "INFERENCE_URL" not in names
+    assert "DCM_URL" not in names                                   # a set DCM_URL switches Fusion to the legacy path
 
 
 @pytest.mark.parametrize("env", ENVS)

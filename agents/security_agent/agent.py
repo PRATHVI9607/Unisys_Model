@@ -13,6 +13,7 @@ import redis.asyncio as aioredis
 import kubernetes_asyncio
 from kubernetes_asyncio import client, config
 from agents.common.metrics import KubeHealMetrics
+from agents.common.tiers import namespace_tier as _namespace_tier
 from agents.common.sampling import sampling_factor, scaled_interval
 from agents.security_agent.counters import CounterSamples, read_pod_counters
 from agents.security_agent.inference import InferenceClient
@@ -35,17 +36,8 @@ METRICS = KubeHealMetrics()
 
 
 def namespace_tier(namespace: str) -> str:
-    n = (namespace or "").lower()
-    if "prod" in n:
-        return "prod"
-    if "stag" in n:
-        return "staging"
-    if "dev" in n:
-        return "dev"
-    # A namespace that matches none of the known names is "unknown", not "dev": the decision policy scores an
-    # unknown tier with the highest multiplier and never acts automatically on it. (The `kubeheal/tier`
-    # namespace label is set by the manifests but is not read by any agent yet; the name rule is all there is.)
-    return "unknown"
+    """See agents/common/tiers.py: NAMESPACE_TIER_MAP first, then the name rule; otherwise "unknown"."""
+    return _namespace_tier(namespace)
 
 
 SCORE_KEY_PREFIX = "kubeheal:security:score"          # + ":<namespace>:<workload>"; Fusion reads it (SECURITY_SCORE_PREFIX)

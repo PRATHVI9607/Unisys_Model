@@ -43,8 +43,6 @@ spec:
           env:
             - name: REDIS_URL
               value: redis://redis-master:6379
-            - name: HEALTH_MODEL_URL
-              value: http://kubeheal-health-model:8001
             - name: PROMETHEUS_URL
               value: http://prometheus-operated.monitoring.svc.cluster.local:9090
             - name: NAMESPACE

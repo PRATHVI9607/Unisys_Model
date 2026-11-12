@@ -59,8 +59,6 @@ spec:
                 secretKeyRef:
                   name: kubeheal-minio-client
                   key: secret-key
-            - name: DCM_URL
-              value: http://kubeheal-dcm:8003
             - name: BURN_IN_MODE
               value: "false"
             - name: NAMESPACE
@@ -69,8 +67,6 @@ spec:
               value: "3"
             - name: MAX_AUTO_PATCH_PER_DEP_PER_HOUR
               value: "10"
-            - name: CI_WIDTH_THRESHOLD
-              value: "0.15"
             - name: LOG_LEVEL
               value: "INFO"
           resources:
