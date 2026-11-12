@@ -6,6 +6,9 @@ RUN uv pip install --system \
     fastapi==0.110.0 uvicorn==0.27.0 "redis[asyncio]>=5.0.1,<6" pydantic==2.6.0 python-multipart==0.0.6 "prometheus-client>=0.20.0" kubernetes-asyncio==29.0.1 "minio>=7.2.0"
 COPY dashboard/ /app/dashboard/
 COPY agents/common/ /app/agents/common/
+# The baseline promotion approvals (V5-I3) call agents/health_agent/baseline.py, which imports only agents.common.
+COPY agents/health_agent/__init__.py /app/agents/health_agent/__init__.py
+COPY agents/health_agent/baseline.py /app/agents/health_agent/baseline.py
 ENV REDIS_URL=redis://redis-master:6379
 ENV HOST=0.0.0.0
 ENV PORT=5000
