@@ -43,15 +43,16 @@ kubectl --context k3d-kubeheal -n kubeheal port-forward service/kubeheal-dashboa
 
 ## F4. HMAC on Redis containment messages
 
-**Planned time (estimate):** 3 minutes. **Show:** the key name in the Secret metadata only, a signed accepted request/result, and unsigned and tampered messages refused. Never reveal Secret data.
+**Planned time (estimate):** 3 minutes. **Show:** the dedicated Secret name, a signed accepted request/result, and unsigned and tampered messages refused. Never reveal Secret data.
 
 ```powershell
 kubectl --context k3d-kubeheal -n kubeheal get secret
+kubectl --context k3d-kubeheal -n kubeheal get secret kubeheal-containment-hmac -o name
 kubectl --context k3d-kubeheal -n kubeheal logs daemonset/security-agent --since=5m
 kubectl --context k3d-kubeheal -n kubeheal logs deployment/executor --since=5m
 ```
 
-**NOT VERIFIED live:** this branch has no validated trigger for signed, unsigned, and tampered stream messages. The safe cluster commands above inspect Secret names and recent logs; they do not prove HMAC rejection. Never print or decode Secret data. Fallback: save actual output from `kubectl --context k3d-kubeheal -n kubeheal get secrets -o name` plus redacted log screenshots under `docs/kubeheal/demo-evidence/F4/`; mark HMAC results not verified until the focused HMAC tests and safe live trigger are present.
+The dedicated signing Secret is `kubeheal-containment-hmac`, key `key`, and is preserved across upgrades by the chart. **NOT VERIFIED live:** there is still no validated trigger for signed, unsigned, and tampered stream messages. These commands inspect the Secret name and recent logs; they do not prove HMAC rejection. Never print or decode Secret data. Safe fallback command after the D-5/HMAC code is integrated: `python -m pytest tests/test_containment_agent.py tests/test_executor_containment_v5.py -q`. Save actual output plus redacted Secret-name/log screenshots under `docs/kubeheal/demo-evidence/F4/`; leave signed-message behavior not verified until a live trigger is available.
 
 ## F5. Baseline promotion
 
