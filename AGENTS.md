@@ -58,6 +58,11 @@ Rules:
 - Fail safe: if the mode cannot be read, behave as `test`. Fresh installs default to `test`.
 - If switched to `test` mid-action, the Executor stops before the next step and escalates to a human.
 - Every mode change is written to the ledger (hook exists, connected in P4).
+- Baseline promotion (V5-D5) is gated too: the Health Agent overwrites the golden baseline automatically (dev and
+  staging) only in mode `enforce`; in `test` or an unreadable mode it writes a `baseline_promotion_dry_run` ledger
+  entry and changes nothing. `scripts/baseline_tool.py` (reset, restore) is an operator action and is NOT gated.
+- The cgroup freeze of a contained pod (V5-S5) is requested by the Executor behind the same gate and carried out by
+  the node-local Security Agent, which checks the mode again right before it writes; in `test` nothing is frozen.
 
 ## Working rules (all agents)
 
