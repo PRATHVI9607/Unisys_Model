@@ -2,7 +2,11 @@
 Drift path: canary patch (S-RD-1 .. S-RD-4, P7-RR-1, P7-RR-2).
 ================================================================
 1. Read the live Deployment, diff its drift view against the golden baseline and keep ONLY the
-   differences at or under the request's `patch_field` (never the whole pod template).
+   differences at or under the request's candidate fields `patch_fields` (the spec diff Fusion saw; never the
+   whole pod template). The Executor verifies the real diff itself: a candidate that does not differ is
+   skipped, and it escalates only when none of them differs. Before any write the patched template must keep
+   the Deployment selector matching (a matchExpressions selector always escalates) and must not weaken the
+   security posture of the live template (`kubeheal.posture.weakens_posture`; an unreadable spec escalates).
 2. Once the kill-switch gate allows the write, save the live spec and both patches as a rollback point
    (Redis, survives an Executor restart). State "pending" only exists while a patch may be in flight: it
    is closed ("failed") when nothing was patched.
@@ -35,6 +39,7 @@ from agents.executor.config import ConfigMissing, ExecConfig
 from agents.executor.support import Recorder, gate_open, poll_until, to_dict
 from agents.executor.validation import Request
 from agents.health_agent.baseline import drift_view
+from kubeheal.posture import PostureError, weakens_posture
 
 logger = logging.getLogger(__name__)
 
@@ -132,16 +137,50 @@ class PatchPlan:
         self.drifted, self.target = drifted, target
 
 
-def build_patch(golden_spec: Dict, live_spec: Dict, field: str) -> PatchPlan:
-    field = (field or "").strip()
-    if field.startswith("spec.") and "spec" not in golden_spec:
-        field = field[len("spec."):]
-    if not field or field.lower() == "unknown":
+def _normalise_fields(fields, strip_spec: bool = True) -> List[str]:
+    """Candidate field paths from one string or a list; `spec.` prefix dropped, blanks and "unknown" removed."""
+    if isinstance(fields, str):
+        fields = [fields]
+    out: List[str] = []
+    for f in fields or []:
+        f = (f or "").strip()
+        if strip_spec and f.startswith("spec."):
+            f = f[len("spec."):]
+        if f and f.lower() != "unknown" and f not in out:
+            out.append(f)
+    return out
+
+
+def validate_patch_target(raw_live_spec: Dict, live_view: Dict, target: Dict) -> None:
+    """V5-D6. Raises PlanError (the request escalates, nothing is written) unless the patched template still
+    matches the Deployment selector and does not weaken the live security posture."""
+    selector = (raw_live_spec or {}).get("selector") or {}
+    if selector.get("matchExpressions"):
+        raise PlanError("selector_match_expressions: the Deployment selector uses matchExpressions, "
+                        "the Executor cannot prove the template still matches it")
+    match_labels = selector.get("matchLabels") or {}
+    if not match_labels:
+        raise PlanError("selector_missing: the Deployment has no matchLabels selector")
+    template_labels = (((target.get("template") or {}).get("metadata") or {}).get("labels")) or {}
+    missing = sorted(k for k, v in match_labels.items() if template_labels.get(k) != v)
+    if missing:
+        raise PlanError(f"selector_mismatch: the patched template would not carry the selector labels {missing}")
+    try:
+        weakened = weakens_posture(target, live_view)
+    except PostureError as e:
+        raise PlanError(f"posture_unreadable: {e}")
+    if weakened:
+        raise PlanError(f"patch_weakens_posture: {', '.join(weakened)}")
+
+
+def build_patch(golden_spec: Dict, live_spec: Dict, fields) -> PatchPlan:
+    fields = _normalise_fields(fields, strip_spec="spec" not in golden_spec)
+    if not fields:
         raise PlanError("no_patch_field")
     all_ops = diff_ops(golden_spec, live_spec)
-    drift_ops = [o for o in all_ops if _under(key_path(o["tokens"]), field)]
+    drift_ops = [o for o in all_ops if any(_under(key_path(o["tokens"]), f) for f in fields)]
     if not drift_ops:
-        raise PlanError(f"no_drift_at_field:{field}")
+        raise PlanError(f"no_drift_at_fields:{','.join(fields)}")
     target = apply_ops(live_spec, drift_ops)
 
     strategy = target.get("strategy") or {}
@@ -275,13 +314,17 @@ async def canary_patch(gate, apps_api, req: Request, golden: Optional[Dict], rec
             await record("rollback_recovered_after_restart", {"incident_id": req.incident_id})
             return "rolled_back:executor_restart_recovery"
 
-        live = drift_view(to_dict(await apps_api.read_namespaced_deployment(name, ns)).get("spec") or {})
+        raw_live = to_dict(await apps_api.read_namespaced_deployment(name, ns)).get("spec") or {}
+        live = drift_view(raw_live)
+        candidates = req.patch_fields or ([req.patch_field] if req.patch_field else [])
         try:
-            plan = build_patch(golden.get("spec") or {}, live, req.patch_field)
+            plan = build_patch(golden.get("spec") or {}, live, candidates)
+            validate_patch_target(raw_live, live, plan.target)
         except PlanError as e:
-            await record("plan_refused", {"reason": str(e)})
+            await record("plan_refused", {"reason": str(e), "candidates": candidates})
             return f"escalated:{e}"
-        await record("plan", {"field": req.patch_field, "drifted": plan.drifted, "patch": plan.forward})
+        await record("plan", {"field": req.patch_field, "candidates": candidates, "rule_path": req.rule_path,
+                              "drifted": plan.drifted, "patch": plan.forward})
 
         before = await metric_source(ns, name, window_s)
         await record("metrics_before", {"metrics": before})

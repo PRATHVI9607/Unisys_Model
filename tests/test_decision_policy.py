@@ -55,9 +55,16 @@ def test_human_zone_security_leaning():
 
 # ── HEALTH-ONLY AUTO-PATCH ──────────────────────────────────
 def test_health_auto_patch_prod():
-    o = D(health_risk=0.79, sec_risk=0.11, namespace_tier="prod", health_field_top="cpu")
+    o = D(health_risk=0.79, sec_risk=0.11, namespace_tier="prod", changed_fields=["template.spec.containers[0].resources.limits.cpu"])
     assert o.decision == Decision.AUTO_PATCH
-    assert o.action_params.get("patch_field") == "cpu"
+    assert o.action_params.get("patch_field") == "template.spec.containers[0].resources.limits.cpu"
+    assert o.action_params.get("patch_fields") == ["template.spec.containers[0].resources.limits.cpu"]
+
+
+def test_health_auto_patch_needs_a_changed_field_from_the_spec_diff():
+    o = D(health_risk=0.79, sec_risk=0.11, namespace_tier="prod", changed_fields=[])
+    assert o.decision == Decision.HUMAN_PATCH
+    assert "no changed field" in o.rationale
 
 def test_health_no_autopatch_when_sec_elevated():
     # sec_risk >= 0.4 blocks the health-only path → falls to human zone

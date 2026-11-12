@@ -441,7 +441,6 @@ class FusionAgentV4:
             health_risk=health_risk,
             health_label=health.get("health_label", "benign"),
             health_prediction_set=health_set,
-            health_field_top=health.get("top_field", ""),
             sec_risk=sec_risk,
             sec_label=sec.get("sec_label", "benign"),
             sec_prediction_set=sec_set,
@@ -497,6 +496,7 @@ class FusionAgentV4:
             "top_factors_json": {"health": health.get("top_factors_json"), "security": sec.get("top_factors_json")},
             "rule_path": bool(out.action_params.get("rule_path", False)),
             "rule_reasons": out.action_params.get("rule_reasons", []),
+            "patch_fields": out.action_params.get("patch_fields", []),
             "security_fresh": security_fresh,
             "security_fresh_source": security_source,
         }

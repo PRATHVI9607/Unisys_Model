@@ -67,11 +67,11 @@ def test_rule_path_with_a_fresh_security_key_auto_patches_and_carries_the_fields
     assert parse_request(req)[0] == "ok"
 
 
-def test_model_path_patch_keeps_the_top_field_as_the_patch_field():
+def test_model_path_patch_uses_the_first_changed_field_as_the_patch_field():
     a = make_agent()
     decide(a, health=health_event())
     [req] = exec_requests(a)
-    assert req["action"] == "patch" and req["patch_field"] == "spec.cpu" and req["rule_path"] == "false"
+    assert req["action"] == "patch" and req["patch_field"] == "template.spec.containers[0].resources.limits.cpu" and req["rule_path"] == "false"
 
 
 def test_rule_path_needs_no_burn_in_no_threshold_and_no_health_model():
