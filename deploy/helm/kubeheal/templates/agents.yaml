@@ -49,6 +49,9 @@ spec:
             {{- if .Values.inference.enabled }}
             - {name: INFERENCE_URL, value: "http://{{ .Values.inference.name }}:{{ .Values.inference.port }}"}
             {{- end }}
+            # The kill-switch mode decides whether a baseline promotion is a dry run (V5-D5). Without this the Health
+            # Agent does not read the mode, which is "unknown" = test, and promotion stays a dry run.
+            - {name: HEALTH_MODE_WATCH, value: "on"}
             {{- if .Values.namespaceTierMap }}
             - {name: NAMESPACE_TIER_MAP, value: {{ include "kubeheal.tierMap" . | quote }}}
             {{- end }}

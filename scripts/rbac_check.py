@@ -51,11 +51,12 @@ EXPECT += [
     ("health-model", "list pods", "prod", False),
 ]
 
-# kill switch ConfigMap: read by fusion, executor, dashboard; written only by the dashboard admin role
-for sa in ("fusion-agent", "executor", "dashboard"):
+# kill switch ConfigMap: read by fusion, executor, dashboard and (V5-D5, V5-S5) the health and security agents;
+# written only by the dashboard admin role
+for sa in ("fusion-agent", "executor", "dashboard", "health-agent", "security-agent"):
     EXPECT.append((sa, "get configmaps/kubeheal-mode", "kubeheal", True))
     EXPECT.append((sa, "watch configmaps/kubeheal-mode", "kubeheal", True))
-for sa in ("health-agent", "security-agent", "health-model", "security-model", "dcm"):
+for sa in ("health-model", "security-model", "dcm"):
     EXPECT.append((sa, "get configmaps/kubeheal-mode", "kubeheal", False))
 for sa in ("fusion-agent", "executor", "health-agent", "security-agent"):
     EXPECT.append((sa, "patch configmaps/kubeheal-mode", "kubeheal", False))
