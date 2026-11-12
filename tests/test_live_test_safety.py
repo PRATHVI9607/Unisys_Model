@@ -57,16 +57,60 @@ def _live_call_reason(call):
     return None
 
 
+def _test_functions(tree):
+    """Yield pytest module functions and Test* class methods recursively."""
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+            yield node
+        elif isinstance(node, ast.ClassDef):
+            for member in node.body:
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name.startswith("test_"):
+                    yield member
+                elif isinstance(member, ast.ClassDef):
+                    yield from _test_functions(ast.Module(body=[member], type_ignores=[]))
+
+
+def _called_local_names(function):
+    names = set()
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            names.add(node.func.id)
+        elif isinstance(node.func, ast.Attribute):
+            names.add(node.func.attr)
+    return names
+
+
+def _live_helper_names(tree):
+    """Find module-local helper names that reach a known integration entry point."""
+    functions = [node for node in ast.walk(tree)
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and not node.name.startswith("test_")]
+    live = {fn.name for fn in functions
+            if any(isinstance(node, ast.Call) and _live_call_reason(node)
+                   for node in ast.walk(fn))}
+    changed = True
+    while changed:
+        changed = False
+        for fn in functions:
+            if fn.name not in live and _called_local_names(fn) & live:
+                live.add(fn.name)
+                changed = True
+    return live
+
+
 def _unregistered_live_test_calls(test_root=ROOT):
     findings = []
     for path in sorted(test_root.glob("test_*.py")):
         relative = path.relative_to(ROOT).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for function in tree.body:
-            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) or not function.name.startswith("test_"):
-                continue
+        live_helpers = _live_helper_names(tree)
+        for function in _test_functions(tree):
             reasons = sorted({reason for node in ast.walk(function) if isinstance(node, ast.Call)
                               if (reason := _live_call_reason(node))})
+            if _called_local_names(function) & live_helpers:
+                reasons.append("local helper reaches a live integration entry point")
             if reasons and (relative, function.name) not in LIVE_IDENTITIES:
                 findings.append((relative, function.name, reasons))
     return findings
@@ -126,4 +170,23 @@ def test_live_entry_point_guard_detects_regressions_in_test_source():
         found.update(reason for node in ast.walk(test) if isinstance(node, ast.Call)
                      if (reason := _live_call_reason(node)))
     assert found == expected
+
+
+def test_guard_discovers_class_methods_and_local_live_helpers():
+    source = """
+import subprocess
+class TestUnsafe:
+    def test_cluster_through_method(self):
+        self.probe()
+    def probe(self):
+        run_cluster_check()
+def run_cluster_check():
+    subprocess.run(['kubectl', 'get', 'pods'])
+"""
+    tree = ast.parse(source)
+    test_method, = _test_functions(tree)
+    helpers = _live_helper_names(tree)
+    assert test_method.name == "test_cluster_through_method"
+    assert {"run_cluster_check", "probe"} <= helpers
+    assert _called_local_names(test_method) & helpers == {"probe"}
 
