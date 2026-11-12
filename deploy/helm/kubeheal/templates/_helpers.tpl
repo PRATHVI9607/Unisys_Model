@@ -8,6 +8,16 @@
 prod staging dev
 {{- end -}}
 
+{{/* NAMESPACE_TIER_MAP value ("ns=tier,ns2=tier2", sorted by namespace) from .Values.namespaceTierMap; empty when unset.
+     Read by the Health and Security agents (agents/common/tiers.py); a namespace in no tier stays "unknown". */}}
+{{- define "kubeheal.tierMap" -}}
+{{- $pairs := list -}}
+{{- range $ns, $tier := (.Values.namespaceTierMap | default dict) -}}
+{{- $pairs = append $pairs (printf "%s=%s" $ns $tier) -}}
+{{- end -}}
+{{- join "," $pairs -}}
+{{- end -}}
+
 {{/* Image reference. Args: dict "root" $ "image" <map with repository, optional tag>. */}}
 {{- define "kubeheal.image" -}}
 {{- $g := .root.Values.global -}}

@@ -54,6 +54,7 @@ from kubernetes_asyncio.config import load_incluster_config
 from prometheus_client import Counter
 
 from agents.common.metrics import KubeHealMetrics
+from agents.common.tiers import namespace_tier as _namespace_tier
 from agents.common.sampling import sampling_factor, scaled_interval
 from agents.health_agent import baseline
 from agents.health_agent import inference_client
@@ -67,19 +68,8 @@ from kubeheal.posture import PostureError, policy_violations
 
 
 def namespace_tier(namespace: str) -> str:
-    """Map a namespace to its risk tier (prod / staging / dev / unknown).
-
-    A namespace that matches none of the known names is "unknown", not "dev": the decision policy scores an
-    unknown tier with the highest multiplier and never acts automatically on it. (The `kubeheal/tier` namespace
-    label is set by the manifests but is not read by any agent yet; the name rule is all there is.)"""
-    n = (namespace or "").lower()
-    if "prod" in n:
-        return "prod"
-    if "stag" in n:
-        return "staging"
-    if "dev" in n:
-        return "dev"
-    return "unknown"
+    """See agents/common/tiers.py: NAMESPACE_TIER_MAP first, then the name rule; otherwise "unknown"."""
+    return _namespace_tier(namespace)
 
 
 logging.basicConfig(level=logging.INFO)
@@ -114,7 +104,8 @@ POLL_S = 2.0                      # early-evidence and follow-up polling period
 TICK_S = 1.0                      # scheduler resolution
 RETRY_DELAY_S = 60.0              # re-assess after an inference or Redis failure
 WATCH_TIMEOUT_S = 300             # server-side watch timeout; the loop reconnects after it
-WATCH_RETRY_MIN_S = 1.0            # chosen minimum interval after idle timeout or 410 Gone
+WATCH_RETRY_MIN_S = 1.0            # chosen minimum interval between watch attempts (idle timeout, 410 Gone, normal stream end)
+FIRST_SIGHT_RETRY_S = 5.0         # chosen: how soon a failed first look at a workload (Redis error) is retried
 KUBE_TIMEOUT_S = 10               # one Kubernetes read (pod list, Deployment get, HPA list)
 HPA_POLL_S = 30                   # re-list HorizontalPodAutoscalers this often
 # Follow-up window after the first event: the Deployment's progress deadline (or its default) plus a margin;
@@ -233,6 +224,12 @@ class HealthAgent:
         self.sem = asyncio.Semaphore(self.max_concurrent)
         self.latest_dep: Dict[Key, Dict] = {}       # newest API-shaped Deployment seen (status included)
         self.seen_hash: Dict[Key, str] = {}         # last seen spec hash: only a changed hash is a change
+        # first look at a workload failed (Redis error): key -> (deployment, spec, hash, retry not before). A quiet
+        # drifted workload produces no further event, so the scheduler retries it; a newer event supersedes it.
+        self._first_sight_retry: Dict[Key, Tuple[Dict, Dict, str, float]] = {}
+        # Counts the spec changes seen per workload. It is part of the OBSERVE no-score notice id, so a spec that
+        # flaps A, B, A during an outage is told to a human again instead of being absorbed by the 24 h marker.
+        self._spec_epoch: Dict[Key, int] = {}
         self.pending: Dict[Key, Pending] = {}
         self.tracking: Dict[Key, Tracked] = {}
         self.assessing: Dict[Key, str] = {}         # workload -> spec hash being assessed now
@@ -392,7 +389,7 @@ class HealthAgent:
             if self.seen_hash.get(key) == h:      # status-only or metadata-only update: nothing to assess
                 return
             first = key not in self.seen_hash
-            self.seen_hash[key] = h
+            self._set_seen(key, h)
             if first:
                 await self._first_sight(key, dep, spec, h)
             else:
@@ -401,8 +398,17 @@ class HealthAgent:
             logger.error(f"Error handling deployment event: {e}", exc_info=True)
 
     def _forget(self, key: Key) -> None:
-        for d in (self.pending, self.tracking, self.latest_dep, self.seen_hash, self._drifted):
+        for d in (self.pending, self.tracking, self.latest_dep, self.seen_hash, self._drifted, self._first_sight_retry):
             d.pop(key, None)
+
+    def _still_current(self, key: Key, h: str) -> bool:
+        """The spec hash this call works on is still the newest one seen for a workload that still exists."""
+        return self.seen_hash.get(key) == h and key in self.latest_dep
+
+    def _set_seen(self, key: Key, h: str) -> None:
+        if self.seen_hash.get(key) != h:
+            self._spec_epoch[key] = self._spec_epoch.get(key, 0) + 1
+        self.seen_hash[key] = h
 
     @staticmethod
     def _assessed_key(key: Key) -> str:
@@ -426,9 +432,16 @@ class HealthAgent:
                 logger.info(f"{namespace}/{name} drifted spec was already assessed; waiting for a change")
                 return
         except Exception as e:
-            logger.warning(f"first sight of {namespace}/{name} failed ({e}); will retry on the next event")
+            if not self._still_current(key, h):          # a newer event or a deletion owns the state now
+                return
+            logger.warning(f"first sight of {namespace}/{name} failed ({e}); will retry in {FIRST_SIGHT_RETRY_S:.0f}s "
+                           "or on the next event")
             self.seen_hash.pop(key, None)
+            self._first_sight_retry[key] = (dep, spec, h, self.clock() + FIRST_SIGHT_RETRY_S)
             return
+        if not self._still_current(key, h):
+            return
+        self._first_sight_retry.pop(key, None)
         self._mark_change(key, dep, spec, h)
 
     def _mark_change(self, key: Key, dep: Dict, spec: Dict, h: str) -> None:
@@ -465,6 +478,14 @@ class HealthAgent:
         """One scheduler pass (split out so tests drive it with a fake clock): fire due assessments, poll for
         early evidence, poll followed-up rollouts, schedule OBSERVE samples."""
         now = self.clock()
+        for key, (dep, spec, h, due) in list(self._first_sight_retry.items()):
+            if now < due:
+                continue
+            self._first_sight_retry.pop(key, None)
+            if key in self.seen_hash or key not in self.latest_dep:    # a newer event handled it, or it was deleted
+                continue
+            self._set_seen(key, h)
+            self._spawn(self._first_sight(key, dep, spec, h))     # not inline: a slow Redis must not stall the tick
         for key, p in list(self.pending.items()):
             if now >= p.deadline:
                 self._fire(key)
@@ -583,7 +604,8 @@ class HealthAgent:
         try:
             violations = policy_violations(old, view)
         except PostureError as e:
-            # A failed assessment, never a verdict: nothing is published and no rule-based rollback can follow.
+            # A failed assessment, never a verdict: only a no-score notice (assessment_error) is published, so a human is
+            # told, and no rule-based rollback can follow.
             logger.error(f"posture of {ns}/{name} unreadable ({e}); no verdict, a human is told")
             return await self._failed(p, ns, name, f"posture unreadable: {e}")
 
@@ -648,7 +670,7 @@ class HealthAgent:
             event_id = p.unavailable_event_id
         else:
             h = self.seen_hash.get((ns, name), "unknown")
-            event_id = self._stable_event_id(ns, name, h, "unavailable")
+            event_id = self._stable_event_id(ns, name, h, f"unavailable-{self._spec_epoch.get((ns, name), 0)}")
         published = await self._publish_model_unavailable(ns, name, error, event_id=event_id)
         if published and p is not None:
             p.notified_unavailable = True
@@ -721,7 +743,7 @@ class HealthAgent:
         })
         return payload
 
-    async def _publish_event(self, payload: Dict[str, str]) -> None:
+    async def _publish_event(self, payload: Dict[str, str]) -> bool:
         """Atomically publish one idempotent stream event and its detail hash."""
         hkey = f"kubeheal:health:{payload['event_id']}"
         marker = f"kubeheal:health:published:{payload['event_id']}"
@@ -731,6 +753,7 @@ class HealthAgent:
             logger.info(f"Published {payload['event_id']}")
         else:
             logger.info(f"Health event {payload['event_id']} was already published")
+        return bool(result)
 
     async def _publish_model_unavailable(self, namespace: str, name: str, error: str = "",
                                          event_id: Optional[str] = None) -> bool:
@@ -752,8 +775,8 @@ class HealthAgent:
         if error:
             payload["assessment_error"] = error[:300]
         try:
-            await self._publish_event(payload)
-            logger.error(f"Published {payload['event_id']}: no health score for {namespace}/{name}")
+            if await self._publish_event(payload):
+                logger.error(f"Published {payload['event_id']}: no health score for {namespace}/{name}")
             return True
         except Exception as e:
             logger.error(f"Could not publish the model_unavailable event for {namespace}/{name}: {e}")
@@ -922,7 +945,7 @@ class HealthAgent:
                 self.latest_dep[key] = dep
                 # The live spec is now the newest known: an older pending change is superseded, and the watch
                 # event that reports this same spec later finds the hash already seen.
-                self.seen_hash[key] = h
+                self._set_seen(key, h)
                 self.pending.pop(key, None)
                 self.assessing[key] = h
                 try:
@@ -951,6 +974,7 @@ class HealthAgent:
         rv: Optional[str] = None
         backoff = 1.0
         while self.running:
+            attempt_started = self.clock()
             try:
                 fn, args = self._list_fn(scope)
                 if rv is None:
@@ -970,6 +994,8 @@ class HealthAgent:
                         if w in self._watchers:
                             self._watchers.remove(w)
                 backoff = 1.0
+                if self.running and self.clock() - attempt_started < WATCH_RETRY_MIN_S:
+                    await asyncio.sleep(WATCH_RETRY_MIN_S - (self.clock() - attempt_started))   # no hot loop
             except asyncio.CancelledError:
                 break
             except asyncio.TimeoutError:
@@ -1006,7 +1032,8 @@ class HealthAgent:
             meta = dep.get("metadata") or {}
             live.add((meta.get("namespace", ""), meta.get("name", "")))
             await self.handle_deployment_event("ADDED", dep)
-        for key in [k for k in self.seen_hash if k not in live and scope in (None, k[0])]:
+        known = {*self.seen_hash, *self._first_sight_retry, *self.latest_dep}
+        for key in [k for k in known if k not in live and scope in (None, k[0])]:
             self._forget(key)
         return body["metadata"]["resourceVersion"]
 

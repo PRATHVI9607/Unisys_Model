@@ -13,10 +13,17 @@ ingress:
   className: traefik          # k3s ships Traefik, not NGINX
   host: ""
 
-# The demo workload manifest under demo/ runs in `demo`; the Health Agent needs both
-# WATCH_NAMESPACES and a namespaced HPA read binding there.
+# The k3d victim apps (demo/k3d/victim.yaml) run in prod and dev, which the Health Agent watches already.
+# The older demo/victim-app.yaml uses a `demo` namespace that does not exist on the cluster: to watch it, create
+# the namespace first and pass --set healthAgent.additionalWatchNamespaces={demo} (the chart then renders only the
+# namespaced HPA read RoleBinding, never the Namespace itself).
 healthAgent:
-  additionalWatchNamespaces: [demo]
+  additionalWatchNamespaces: []
+
+# Owner decision 2026-11-12: workloads in the older `demo` namespace count as the dev tier. The k3d victim apps
+# run in prod and dev, which map by name. Any other namespace stays unknown (human review).
+namespaceTierMap:
+  demo: dev
 
 networkPolicy:
   enabled: true

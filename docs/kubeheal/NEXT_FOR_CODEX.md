@@ -119,7 +119,7 @@ Independent review verdict was merge after the demo-namespace item. The findings
 9. Early assessment (posture violation or failed rollout) queries a window of a few seconds, so the model effectively sees only the spec diff: widen the window or mark such events uncertain.
 10. `watch_loop`: no minimum interval between watch attempts or after a 410 (hot loop risk). Add about 1 s minimum.
 11. OBSERVE with inference down publishes a no-score notice per sample (Fusion's SET NX contains it); add per-spec dedup if cheap.
-Also: `field_attribution_json` is no longer published but `dashboard/fastapi_app.py`, `dashboard/incident_view.py` and `agents/fusion_agent/interpretation_client.py` still read it (handled in Task 9, make sure nothing crashes meanwhile). Task 1 is complete; continue with Task 2.
+Also: `field_attribution_json` is no longer published but `dashboard/fastapi_app.py`, `dashboard/incident_view.py` and `agents/fusion_agent/interpretation_client.py` still read it (handled in Task 9, make sure nothing crashes meanwhile). Status 2026-11-12 (Claude review): findings 2 (scheduler retry), 10 (minimum interval also after a normal stream end) and the demo-namespace item (chart no longer renders extra Namespace objects; k3d victim apps run in prod and dev; `namespaceTierMap` maps `demo` to dev) were only partly fixed by Codex and are fixed on `wave/V5-D4` (`f81a380`) and `wave/V5-T1`; the Health Agent image also lacked `COPY kubeheal/` and could not start. Task 1 is complete once those branches are merged.
 
 ### Task 2. Review fixes and merge of `wave/V5-S2` (Security Agent)
 

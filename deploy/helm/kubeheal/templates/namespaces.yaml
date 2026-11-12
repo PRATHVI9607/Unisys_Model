@@ -18,15 +18,7 @@ metadata:
   labels:
     kubeheal/tier: {{ $tier }}
 {{- end }}
-{{- range $watchNamespace := .Values.healthAgent.additionalWatchNamespaces }}
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: {{ $watchNamespace }}
-  labels:
-    kubeheal.io/watch: "true"
-{{- end }}
+{{- /* additionalWatchNamespaces are NOT created here: they belong to the workload that owns them (for example demo/victim-app.yaml), and a chart-owned Namespace would clash with an existing one and could delete its PVCs on uninstall. Only the RoleBinding is rendered (rbac.yaml). */ -}}
 {{- end }}
 {{- range $tier := splitList " " (include "kubeheal.tiers" .) }}
 {{- $q := index $.Values.namespaces.quotas $tier | default dict }}
