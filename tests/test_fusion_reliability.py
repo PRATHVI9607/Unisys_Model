@@ -91,7 +91,7 @@ def _out(decision, dry_run):
 
 
 def _inp():
-    return SimpleNamespace(health_field_top="", namespace_tier="prod")
+    return SimpleNamespace(namespace_tier="prod")
 
 
 def test_dry_run_does_not_use_circuit_breaker_budget():

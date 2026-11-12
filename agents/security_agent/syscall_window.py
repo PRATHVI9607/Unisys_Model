@@ -132,8 +132,8 @@ class FalcoWindowTracker:
         renames = sum(1 for e in w if e["syscall"].startswith("rename"))
         writes = sum(1 for e in w if "write" in e["syscall"] or e["syscall"] == "ftruncate"
                      or (e["syscall"] in OPEN_SYSCALLS and v5_syscall(e) == "open_w"))
-        # A CRITICAL ransomware rule (the ransom-note rule) triggers on its own. The WARNING rules (mass write,
-        # mass rename) fire on every single matching syscall, so they only count towards the burst threshold;
+        # A CRITICAL ransomware rule (the ransom-note rule) triggers on its own. The WARNING and NOTICE rules (mass rename,
+        # data file activity) fire on every single matching syscall, so they only count towards the burst threshold;
         # treating each of them as a trigger would start a check with a one-event window.
         ransom_rule = ("ransom" in (evt.get("rule") or "").lower()
                        and (evt.get("priority") or "") in ("critical", "alert", "emergency"))
