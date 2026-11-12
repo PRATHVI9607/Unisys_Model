@@ -45,6 +45,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: POD_UID        # the agent never freezes its own pod (its own cgroup path is 0::/)
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: CGROUP_ROOT
               value: /host/cgroup
             - name: EXEC_NAMESPACES    # must equal the Executor's

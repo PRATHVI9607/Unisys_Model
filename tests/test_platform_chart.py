@@ -901,6 +901,8 @@ def test_the_security_agent_gets_its_node_name_the_cgroup_root_and_a_separate_rw
     envs = {e["name"]: e for e in c["env"]}
     assert envs["NODE_NAME"]["valueFrom"] == {"fieldRef": {"fieldPath": "spec.nodeName"}}
     assert envs["CGROUP_ROOT"]["value"] == "/host/cgroup"
+    assert envs["POD_UID"]["valueFrom"] == {"fieldRef": {"fieldPath": "metadata.uid"}}
+    assert envs["POD_NAME"]["valueFrom"] == {"fieldRef": {"fieldPath": "metadata.name"}}
     assert envs["EXEC_NAMESPACES"]["value"] == "prod,staging,dev"          # equals the Executor's
     mounts = {m["name"]: m for m in c["volumeMounts"]}
     assert mounts["host-cgroup"]["mountPath"] == "/host/cgroup" and not mounts["host-cgroup"].get("readOnly")
@@ -914,7 +916,7 @@ def test_the_security_agent_gets_its_node_name_the_cgroup_root_and_a_separate_rw
 def test_the_cgroup_freeze_can_be_switched_off_and_then_nothing_host_writable_is_mounted(fixture_file):
     spec, c = _security_agent(render("k3d-demo", fixture_file, "securityAgent.cgroupFreeze.enabled=false"))
     names = {e["name"] for e in c["env"]}
-    assert not ({"NODE_NAME", "CGROUP_ROOT", "EXEC_NAMESPACES"} & names)
+    assert not ({"NODE_NAME", "CGROUP_ROOT", "EXEC_NAMESPACES", "POD_UID", "POD_NAME"} & names)
     assert "host-cgroup" not in {m["name"] for m in c["volumeMounts"]}
     assert "host-cgroup" not in {v["name"] for v in spec["volumes"]}
 
