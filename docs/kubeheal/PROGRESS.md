@@ -179,13 +179,17 @@ Ransomware:
 
 ### P11 Evaluation harness (touches `eval/`, `docs/kubeheal/results/`; cluster owner runs)
 - [ ] P11-H size: S. Harness `eval/p11_harness.py` (offline builders, k3d-kubeheal and namespace allow-lists, injectable runner, no silent overwrite): reviewed, fixed and merged 2026-11-11 (`a1590d1`). Nothing in it has been run against a cluster; every result file it writes says "not measured" until a run produces data.
-- [ ] P11-E1 size: M. k6 load test 10 to 200 simulated pods, p50 and p95 vs replicas. Also tune the queue-depth HPA target (a CHOSEN DEFAULT in the chart values, not a measurement) from the measured replicas-versus-load data.
-- [ ] P11-E2 size: M. Chaos runs (Chaos Mesh or kubectl): detection continuity, fail-closed rate.
+- [ ] P11-E1 size: M. Bounded runner exists on `wave/p11-safe-runner`. Its first 32 VU/90 s run failed all 297 requests, 0 checks passed, so latency is `not measured`; HPA stayed 2/2 and temporary resources were cleaned. Cause found read-only: current allow-inference NetworkPolicy excludes the P11 k6 Job label. See `docs/kubeheal/results/p11/P11_E1_ATTEMPT_2026-11-12.md` on that branch. Wait for the reviewed narrow allow rule before rerun.
+- [ ] P11-E2 size: M. Single inference-pod recovery runner is reviewed on `wave/p11-safe-runner`; live run paused pending a successful E1 and policy update.
 - [ ] P11-E3 size: M. RPO and RTO runs against a database volume. Needs: P7.
 - [ ] P11-E4 size: M. End-to-end time-to-action per stage.
 - [ ] P11-E5 size: M. Baselines (Falco rules only, fixed entropy threshold, diff-only drift, single replica, pod delete only).
 - [ ] P11-E6 size: S. FP32 vs FP16 latency and memory.
 - [ ] P11-E7 size: S. Each results file states machine, cluster and date. Verify: scripts produce CSV plus markdown.
+
+### Demo runbook
+- [x] `docs/kubeheal/DEMO_RUNBOOK.md` lists F2-F11 commands, screen/demo expectations, planned durations, and safe fallback evidence paths. Missing live triggers are explicitly marked `NOT VERIFIED`; no unsaved screenshots or unmeasured results are claimed. F10's existing script is explicitly limited to drift signal/dry-run evidence.
+- [ ] Final rehearsal from a fresh cluster start; capture transcripts and screenshots under `docs/kubeheal/demo-evidence/`. F11 has one measured result but no full rehearsal screenshots.
 
 ## P0 log
 
