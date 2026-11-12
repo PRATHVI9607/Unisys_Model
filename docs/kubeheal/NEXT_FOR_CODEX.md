@@ -13,24 +13,22 @@ Owner stop points: model training (P12 is NOT approved), `PROJECT_SPEC.md`, dele
 - `work` (worktree `../Unisys_Model-wt-metric-query`) and `demo` (main checkout `C:/My_projects_1/cLOUD/Unisys_Model`) are in
   sync apart from demo-only files. Run `git log -1` in each for the tips. Last suites (Windows, Python 3.11.9, helm on PATH):
   work 2024 passed, 8 skipped, 1 deselected (`tests/test_rbac_k3d.py`; it passes against the cluster when run alone);
-  demo about 5 more (demo-only files). Run the FULL suite including `tests/test_killswitch.py`: only `test_rbac_k3d.py`
-  needs the cluster, and a blanket deselect of `test_killswitch.py` hid two stale tests for a day.
+  demo about 5 more (demo-only files). Run the FULL suite including `tests/test_killswitch.py` (its live test is opt-in since 2026-11-12:
+  `KUBEHEAL_LIVE_KILLSWITCH_TEST=1`, because it flips the real cluster mode to enforce for seconds); only `test_rbac_k3d.py`
+  reads the cluster (read-only) and stays deselected by default.
 - Merged since Codex paused: V5-S2, D4 review fixes, chart cleanup, namespace tier map (`demo` to dev), V5-S1 (Falco rules),
   V5-D6 and D9 (Executor validation, candidate fields), V5-D5 (baseline promotion), V5-S5 (Executor freeze request,
   Security Agent freeze consumer, DaemonSet wiring, thaw script), V5-I3 (dashboard), image fix V5-IMG1, chart pieces CH1 to CH3.
-- OPEN BRANCHES (committed, worktrees kept, NOT merged, NOT independently reviewed: the reviewer was stopped by the handoff):
-  - `wave/V5-S5c` (`../Unisys_Model-wt-V5-S5c`, tip `6501c17`): fixes the Security Agent freeze for a private cgroup
-    namespace (see "Facts from the cluster" below) and the pod to pid mapping in `proc_scanner.py`; 144 containment tests.
-    Safety-critical (a host write): get an independent review (attack list: freezing the wrong cgroup, pid recycling,
-    uuid strictness, symlinks, self pod, `parse_cgroup_line` mapping node processes to pods), then merge.
-  - `wave/V5-CH4` (`../Unisys_Model-wt-V5-CH4`, tip `fb74a0a`): `POD_UID` and `POD_NAME` from the downward API on the
-    Security Agent DaemonSet (chart and plain manifest). Needed by V5-S5c (without POD_UID every freeze is refused).
-    Merge it together with V5-S5c.
-- Cluster `k3d-kubeheal` (only this context, never `hybrid-demo`): `kubeheal-mode` is `test` (verified at the handoff).
-  Helm release `kubeheal` is revision 6, `deployed`, with the LightGBM inference service, the new agents and the new RBAC.
-  Images in use: executor `b20261112081307`; health-agent, security-agent, fusion-agent, dashboard and inference-server
-  `b20261112075817` (built from `demo` before V5-S5c and CH4). The three neural model servers and the DCM are no longer
-  deployed (`modelServers.legacy.enabled=false`).
+- NO OPEN BRANCHES. `wave/V5-S5c` (reviewed, fixes applied) and `wave/V5-CH4` (reviewed) were merged into `work` on
+  2026-11-12 and `work` into `demo`. Their worktrees `../Unisys_Model-wt-V5-S5c` and `../Unisys_Model-wt-V5-CH4` can be removed
+  (`git worktree prune` plus deleting the empty folders; never `branch -D`).
+- Cluster `k3d-kubeheal` (only this context, never `hybrid-demo`): `kubeheal-mode` is `test`. Helm release `kubeheal` is
+  revision 7, `deployed`. Images in use: security-agent `b20261112143524` (with V5-S5c and CH4); executor `b20261112081307`;
+  health-agent, fusion-agent, dashboard and inference-server `b20261112075817`. The neural model servers and the DCM are not
+  deployed (`modelServers.legacy.enabled=false`). Docker Desktop must be running first (it was stopped at the start of the
+  2026-11-12 resume; the cluster restarted by itself).
+- The cgroup freeze was verified live on k3d on 2026-11-12 (scratch pod, freeze, readback, thaw): see
+  `docs/kubeheal/results/live_freeze_check_2026-11-12.md`. It is NOT verified on a real node.
 
 ## Facts from the cluster (2026-11-12, this machine, read-only checks unless stated)
 
@@ -99,13 +97,9 @@ Images: `.\demo\k3d\images.ps1 -Only <names>` from the `demo` checkout (it build
 
 ## Remaining tasks, in order
 
-1. Review and merge `wave/V5-S5c` and `wave/V5-CH4` (above). Then rebuild the Security Agent image
-   (`images.ps1 -Only security-agent`), `helm upgrade`, and check inside a Security Agent pod that a freeze request for a
-   victim pod resolves its cgroup directory (use mode `test` first: the answer must be `dry_run` and nothing is written).
-   A real freeze needs mode `enforce`: do it only as a scripted step on the `dev` victim (`demo/k3d` victim), thaw it with
-   `scripts/thaw_pod.py`, restore the mode to `test`, and record the real outcome (frozen read back from `cgroup.events`,
-   or the reason). Check whether Docker Desktop allows the write, whether a Redis password holder can forge a result
-   (recommended hardening: an HMAC over the result, with V5-P3), and whether the hostPath can be narrowed to `kubepods`.
+1. DONE 2026-11-12: S5c and CH4 reviewed, fixed, merged; Security Agent image rebuilt, revision 7; live freeze and thaw
+   verified on k3d (results file above). Still open from it: record operator thaws in the ledger, HMAC over request and result
+   (with V5-P3), narrow the hostPath to `kubepods` (chart value plus test), repeat the check on a real node.
 2. D-5 replay on the cluster (P10-D5 and P10-U2): mount the new hand-written trace
    `tests/fixtures/falco/ransomware_pv_encrypt_new_rules.jsonl`, adapted to the live `prod` victim pod identity, with
    `FALCO_MODE=replay` on the Security Agent, in mode `test`; record whether a `kubeheal.security.events` record is
