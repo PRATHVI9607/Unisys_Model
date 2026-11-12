@@ -84,7 +84,7 @@ spec:
         {{- include "kubeheal.scrapeAnnotations" (dict "port" $sa.metricsPort) | nindent 8 }}
     spec:
       serviceAccountName: security-agent
-      hostPID: true          # read /proc/<pid> of every pod (the agent never kills or writes)
+      hostPID: true          # read /proc/<pid> of every pod; the agent never writes to Kubernetes or kills a process
       {{- include "kubeheal.pullSecrets" . | nindent 6 }}
       containers:
         - name: agent
@@ -107,6 +107,14 @@ spec:
             {{- if .Values.namespaceTierMap }}
             - {name: NAMESPACE_TIER_MAP, value: {{ include "kubeheal.tierMap" . | quote }}}
             {{- end }}
+            {{- if $sa.cgroupFreeze.enabled }}
+            # The cgroup freeze consumer reads only the stream of its own node; without NODE_NAME it does not start.
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - {name: CGROUP_ROOT, value: /host/cgroup}
+            # Must equal the Executor's: the agent refuses a freeze outside the namespaces the Executor may act in.
+            - {name: EXEC_NAMESPACES, value: {{ .Values.executor.execNamespaces | quote }}}
+            {{- end }}
             {{- include "kubeheal.redisEnv" . | nindent 12 }}
             {{- if .Values.inference.enabled }}
             - {name: INFERENCE_URL, value: "http://{{ .Values.inference.name }}:{{ .Values.inference.port }}"}
@@ -128,9 +136,17 @@ spec:
             - {name: sys, mountPath: /sys, readOnly: true}
             - {name: falco-events, mountPath: /var/run/falco, readOnly: true}
             - {name: tmp, mountPath: /tmp}
+            {{- if $sa.cgroupFreeze.enabled }}
+            # READ-WRITE host cgroup tree, separate from the read-only /sys above. Used only by write_cgroup_freeze.
+            - {name: host-cgroup, mountPath: /host/cgroup}
+            {{- end }}
       volumes:
         - name: sys
           hostPath: {path: /sys}
+        {{- if $sa.cgroupFreeze.enabled }}
+        - name: host-cgroup
+          hostPath: {path: /sys/fs/cgroup, type: Directory}
+        {{- end }}
         - name: falco-events
           hostPath: {path: /var/run/falco, type: DirectoryOrCreate}
         - name: tmp

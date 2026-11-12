@@ -886,3 +886,41 @@ def test_inference_dockerfile_and_dockerignore():
     assert excluded("tests/test_platform_chart.py") and excluded("models/x.pt")      # the checker can say yes
     for f in ("models/bundles/health/model.txt", "models/bundles/security/model.txt"):
         assert b"\r\n" not in (ROOT / f).read_bytes(), f"{f} has CRLF; LightGBM refuses it"
+
+
+# ---- V5-S5: the cgroup freeze wiring of the Security Agent DaemonSet ------------------------------------
+
+def _security_agent(docs):
+    ds = get(docs, "DaemonSet", "security-agent")["spec"]["template"]["spec"]
+    return ds, ds["containers"][0]
+
+
+@pytest.mark.parametrize("env", ENVS)
+def test_the_security_agent_gets_its_node_name_the_cgroup_root_and_a_separate_rw_cgroup_mount(env, fixture_file):
+    spec, c = _security_agent(render(env, fixture_file))
+    envs = {e["name"]: e for e in c["env"]}
+    assert envs["NODE_NAME"]["valueFrom"] == {"fieldRef": {"fieldPath": "spec.nodeName"}}
+    assert envs["CGROUP_ROOT"]["value"] == "/host/cgroup"
+    assert envs["EXEC_NAMESPACES"]["value"] == "prod,staging,dev"          # equals the Executor's
+    mounts = {m["name"]: m for m in c["volumeMounts"]}
+    assert mounts["host-cgroup"]["mountPath"] == "/host/cgroup" and not mounts["host-cgroup"].get("readOnly")
+    assert mounts["sys"]["readOnly"] is True                                # the existing /sys mount stays read-only
+    vol = next(v for v in spec["volumes"] if v["name"] == "host-cgroup")
+    assert vol["hostPath"]["path"] == "/sys/fs/cgroup"
+    assert spec["hostPID"] is True
+    assert c["securityContext"]["capabilities"]["drop"] == ["ALL"] and c["securityContext"]["privileged"] is False
+
+
+def test_the_cgroup_freeze_can_be_switched_off_and_then_nothing_host_writable_is_mounted(fixture_file):
+    spec, c = _security_agent(render("k3d-demo", fixture_file, "securityAgent.cgroupFreeze.enabled=false"))
+    names = {e["name"] for e in c["env"]}
+    assert not ({"NODE_NAME", "CGROUP_ROOT", "EXEC_NAMESPACES"} & names)
+    assert "host-cgroup" not in {m["name"] for m in c["volumeMounts"]}
+    assert "host-cgroup" not in {v["name"] for v in spec["volumes"]}
+
+
+def test_the_executor_and_the_security_agent_use_the_same_namespace_list(fixture_file):
+    docs = render("k3d-demo", fixture_file, "executor.execNamespaces=prod\,dev")
+    _spec, c = _security_agent(docs)
+    assert {e["name"]: e.get("value") for e in c["env"]}["EXEC_NAMESPACES"] == "prod,dev"
+
