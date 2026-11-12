@@ -81,9 +81,11 @@ created before T0; run the entropy rescan Job; lift quarantine only after a clea
 result. A failed or unreadable scan keeps the workload isolated and escalates to a human.
 
 The containment freeze request and Security Agent result, plus the operator thaw protocol, use HMAC-SHA256.
-The configured Redis-auth Secret/key is injected as `CONTAIN_HMAC_KEY`; on the current k3d chart values this is
-`.Values.redis.auth.existingSecret=kubeheal-redis` and `.Values.redis.auth.key=password`. Never print Secret
-values. Redis-auth Secret holders can also sign containment messages because this deployment reuses that key.
+`CONTAIN_HMAC_KEY` comes from the chart-managed `kubeheal-containment-hmac` Secret, key `key`; the chart
+injects it only into Executor and Security Agent pods. The operator thaw tool must be supplied the same key
+through secure operator secret handling. Redis authentication uses a separate Secret, so a Redis credential
+alone cannot sign containment messages. A Kubernetes operator who can read the HMAC Secret can sign them.
+Never print or log Secret values.
 
 ## Verified on k3d (2026-11-12)
 
