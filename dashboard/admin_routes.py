@@ -672,7 +672,20 @@ async def _incident(svc: DashboardServices, incident_id: str) -> Dict[str, Any]:
     detection = step_payload(records, "detection")
     health = await svc.fetch_event("health", detection.get("health_event_id") or "")
     security = await svc.fetch_event("security", detection.get("security_event_id") or "")
-    return build_incident(incident_id, records, health, security)
+    incident = build_incident(incident_id, records, health, security)
+    if svc.freeze_list is None:
+        incident["snapshot_freeze"] = {"available": False, "held": []}
+    else:
+        try:
+            held = await svc.freeze_list(incident_id)
+            incident["snapshot_freeze"] = {
+                "available": True,
+                "held": [{"namespace": ns, "pvc": pvc} for ns, pvc, _key in held],
+            }
+        except Exception as exc:
+            logger.warning("SnapshotFreeze lookup failed for incident %s: %s", incident_id, type(exc).__name__)
+            incident["snapshot_freeze"] = {"available": False, "held": []}
+    return incident
 
 
 @router.get("/api/incidents")
