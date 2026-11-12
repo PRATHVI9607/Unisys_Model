@@ -42,7 +42,7 @@ Real usage is measured later and recorded under `docs/kubeheal/results/`.
 | P8 Dashboard | done, merged (218029c) |
 | P9 Platform | done, merged (see merge commit); helm lint and template pass with lab example overlay; nothing run on a cluster yet |
 | P10 | in progress (U4, D6, D8, V1-V3 verified; the LightGBM stack is installed on k3d since 2026-11-12, Helm revision 6; the D-5 replay with the new trace, the freeze check and U6 full acceptance remain) |
-| P11 | in progress (bounded E1/E2 runner implemented and reviewed; no P11 live run has produced data yet; E3-E6 and V5-E1 are explicitly not measured in `docs/kubeheal/results/p11/P11_COVERAGE.md`) |
+| P11 | in progress (bounded E1/E2 runner implemented and reviewed; first E1 attempt failed all requests and is recorded but has no valid latency measurement; E3-E6 and V5-E1 are explicitly not measured in `docs/kubeheal/results/p11/P11_COVERAGE.md`) |
 | P13 | not started (documentation waits for the code and live workflows to be verified) |
 | P12 Model hardening | NOT started; P12-H (retraining on live cluster data) is not approved |
 
@@ -180,7 +180,7 @@ Ransomware:
 
 ### P11 Evaluation harness (touches `eval/`, `docs/kubeheal/results/`; cluster owner runs)
 - [x] P11-H size: S. Offline harness `eval/p11_harness.py` (`a1590d1`) remains context/namespace allow-listed, injectable, and non-overwriting. Added `eval/p11_run.py` for bounded E1 scoring load and E2 inference-pod recovery; safety review fixes include 30 s kubectl call timeouts, create-only Job/ConfigMap setup, full UUID resource names, owner-label-checked best-effort cleanup, fixed inference target, UID-preconditioned Pod DELETE, and k6 outcome validation. Focused tests: 41 passed on 2026-11-12.
-- [ ] P11-E1 size: M. k6 scoring load 10 to 200 VUs, p50 and p95 against HPA samples. First 32 VU/90 s attempt failed: 297/297 requests refused, 0 checks passed, latencies `not measured`; Job and ConfigMap cleanup succeeded and HPA remained 2/2. The inference NetworkPolicy excludes the P11 Job label; Agent2 is implementing a narrow allow rule. Attempt details: `docs/kubeheal/results/p11/P11_E1_ATTEMPT_2026-11-12.md`. Tune the queue-depth HPA target only from measured replicas-versus-load data.
+- [ ] P11-E1 size: M. k6 scoring load 10 to 200 VUs, p50 and p95 against HPA samples. First 32 VU/90 s attempt failed: 297/297 requests refused, 0 checks passed, latencies `not measured`; Job and ConfigMap cleanup succeeded and HPA remained 2/2. A narrowly scoped allow policy now admits only `app=kubeheal-p11-k6` to inference on `.Values.inference.port`; chart regression also covers a custom inference port. The policy is not deployed; wait for full-suite clearance and orchestrator authorization before rerun. Attempt details: `docs/kubeheal/results/p11/P11_E1_ATTEMPT_2026-11-12.md`. Tune the queue-depth HPA target only from measured replicas-versus-load data.
 - [ ] P11-E2 size: M. Inference pod recovery under mode test; deletion is pinned to the Deployment selector and owner chain, with a UID precondition. Results not measured pending the authorized cluster run.
 - [ ] P11-E3 size: M. RPO and RTO runs against a database volume. Needs: P7.
 - [ ] P11-E4 size: M. End-to-end time-to-action per stage.
@@ -451,3 +451,5 @@ Review method: the `kubeheal-reviewer` agent type was not registered in this ses
 - The saved P11 E1 load recorded 297/297 failed requests to `kubeheal-inference:8000`; the raw log shows connection refusals/timeouts. The inference ingress allow policy admitted the health/security agents and monitoring namespace, while `default-deny-ingress` blocked the P11 k6 Job's `app=kubeheal-p11-k6` pods.
 - Added `allow-inference-from-p11-k6`: target selector `app=kubeheal-inference`, peer selector `app=kubeheal-p11-k6` in the same `kubeheal` namespace, and TCP port 8000 only. This is additive to default deny and creates no egress allowance.
 - Chart test asserts exact peer selector, ingress-only policy, and sole TCP/8000 port. Focused chart tests: 5 passed, 101 deselected. The chart change has not been applied to the cluster; E1 has not been rerun.
+
+- Follow-up: aligned `allow-inference-from-p11-k6` with `.Values.inference.port` instead of hard-coding 8000. Added a chart test that renders both inference ingress policies on custom port 8123. Focused chart tests: 6 passed, 101 deselected. No cluster calls.

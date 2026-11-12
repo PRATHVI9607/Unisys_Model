@@ -828,6 +828,13 @@ def test_inference_network_policy(env, fixture_file):
     assert set(MODEL_SERVERS) <= set(allowed)
 
 
+def test_inference_network_policies_follow_custom_service_port(fixture_file):
+    docs = render("k3d-demo", fixture_file, "inference.port=8123")
+    for name in ("allow-inference-from-agents-and-prometheus", "allow-inference-from-p11-k6"):
+        policy = get(docs, "NetworkPolicy", name)["spec"]
+        assert policy["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 8123}]
+
+
 def test_inference_hpa_modes_follow_the_global_mode(fixture_file):
     docs = render("k3d-demo", fixture_file, "hpa.mode=latency", "hpa.latency.targetAverageValue=3")
     metric = get(docs, "HorizontalPodAutoscaler", INFERENCE)["spec"]["metrics"][0]
