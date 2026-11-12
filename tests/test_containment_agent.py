@@ -71,6 +71,7 @@ class Scene:
         self.now = NOW
         self.jumps = jumps or {}                          # mode call number -> seconds the clock moves forward
         self.protected = protected
+        cfg_over.setdefault("own_pod_uid", AGENT_UID)
         self.cfg = ct.ContainmentConfig(node=NODE, proc_root=str(self.proc), cgroup_root=str(self.root),
                                         consumer="c1", **cfg_over)
         self.handler = ct.ContainmentHandler(self.cfg, self.index, self._mode_for, writer=self._writer,
@@ -287,18 +288,17 @@ def test_the_real_mode_watcher_is_used_global_absolute_label_only_stricter():
 # path safety
 # ---------------------------------------------------------------------------------------------------------
 @pytest.mark.parametrize("line,status,reason", [
-    # the PID scan matches the tail of these lines, so they reach the path check, which refuses them
+    # a `.` or `..` after the first normal component is refused (only a LEADING run of `..` is allowed)
     (f"0::/x/../kubepods/burstable/pod{UID}/{CID}" + NL, "refused", "cgroup_path_mismatch"),
-    (f"0::/../../kubepods/burstable/pod{UID}/{CID}" + NL, "refused", "cgroup_path_mismatch"),
+    (f"0::/../a/../pod{UID}/{CID}" + NL, "refused", "cgroup_path_mismatch"),
     (f"0::/./kubepods/burstable/pod{UID}/{CID}" + NL, "refused", "cgroup_path_mismatch"),
-    (f"0::/pod{UID}/kubepods/burstable/pod{UID}/{CID}" + NL, "refused", "cgroup_path_mismatch"),  # uid before kubepods
+    (f"0::/kubepods/../../../etc/pod{UID}/{CID}" + NL, "refused", "cgroup_path_mismatch"),
     (f"12:memory:/kubepods/burstable/pod{UID}/{CID}" + NL, "failed", "cgroup_v1_not_supported"),
     (f"12:memory:/kubepods/burstable/pod{UID}/{CID}" + NL + f"11:cpu:/kubepods/burstable/pod{UID}/{CID}" + NL,
      "failed", "cgroup_v1_not_supported"),
-    # the PID scan itself does not map these lines to the pod: no process, no write
-    (f"0::/kubepods/../../../etc/pod{UID}/{CID}" + NL, "failed", "pod_pids_not_found"),
-    (f"0::/system.slice/pod{UID}/{CID}" + NL, "failed", "pod_pids_not_found"),                  # not under kubepods
-    (f"0::/kubepods/burstable/pod{OTHER_UID}/{CID}" + NL, "failed", "pod_pids_not_found"),      # another pod's uid
+    # the PID scan does not map another pod's uid to this pod: no process, no write
+    (f"0::/kubepods/burstable/pod{OTHER_UID}/{CID}" + NL, "failed", "pod_pids_not_found"),
+    (f"0::/../../pod{UID}/../x/{CID}" + NL, "failed", "pod_pids_not_found"),     # the scan does not map it
 ])
 def test_path_safety(tmp_path, line, status, reason):
     s = Scene(tmp_path, proc_line=line)
@@ -307,14 +307,37 @@ def test_path_safety(tmp_path, line, status, reason):
     assert_untouched(s, result)
 
 
-def test_path_check_directly_refuses_dots_outside_kubepods_and_uid_mismatch():
-    for path in (f"/kubepods/../x/pod{UID}", f"/etc/pod{UID}/c", "/kubepods/burstable/podother/c",
-                 f"/pod{UID}/kubepods", "/", ""):
+def test_pod_dir_name_takes_the_pod_component_never_its_parent_or_a_scope():
+    us = UID.replace("-", "_")
+    assert ct.pod_dir_name(f"/kubepods/burstable/pod{UID}/{CID}", UID) == f"pod{UID}"
+    assert ct.pod_dir_name(f"/kubepods/burstable/pod{UID}/{CID}/sub", UID) == f"pod{UID}"
+    assert ct.pod_dir_name(f"/../../pod{UID}/{CID}", UID) == f"pod{UID}"
+    assert ct.pod_dir_name(f"/../../../burstable/pod{UID}/{CID}", UID) == f"pod{UID}"
+    assert ct.pod_dir_name(f"/../../kubepods-pod{us}.slice/cri-containerd-{CID}.scope", UID) == f"kubepods-pod{us}.slice"
+    assert ct.pod_dir_name(f"/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod{us}.slice/x.scope", UID) \
+        == f"kubepods-besteffort-pod{us}.slice"
+    for path in (f"/kubepods/../x/pod{UID}", f"/a/./pod{UID}", f"/../a/../pod{UID}", "/", "", "/../..",
+                 "/kubepods/burstable/podother/c", f"/kubepods/burstable/x{UID}/c", f"/kubepods/burstable/pod{UID}x/c"):
         with pytest.raises(ct._Refuse) as e:
-            ct.pod_cgroup_components(path, UID)
-        assert e.value.status == "refused" and e.value.reason.startswith("cgroup_path_mismatch")
-    assert ct.pod_cgroup_components(f"/kubepods/burstable/pod{UID}/{CID}", UID) == ["kubepods", "burstable", f"pod{UID}"]
-    assert ct.pod_cgroup_components(f"/kubepods/burstable/pod{UID}/{CID}/sub", UID)[-1] == f"pod{UID}"
+            ct.pod_dir_name(path, UID)
+        assert e.value.status == "refused" and e.value.reason.startswith("cgroup_path_mismatch"), path
+
+
+def test_find_pod_dir_looks_only_at_the_six_known_places(tmp_path):
+    root = str(tmp_path)
+    name = f"pod{UID}"
+    for rel in (("a", "kubepods", name), ("kubepods", "guaranteed", name), ("kubepods", "burstable", "x", name),
+                ("kubepods.slice", "kubepods-guaranteed.slice", name), ("system.slice", name)):
+        (tmp_path.joinpath(*rel)).mkdir(parents=True)
+    with pytest.raises(ct._Refuse) as e:                  # no recursive walk: none of these places is one of the six
+        ct.find_pod_dir(root, name)
+    assert e.value.reason.startswith("cgroup_dir_missing")
+    for rel in (("kubepods", name), ("kubepods", "burstable", name), ("kubepods", "besteffort", name),
+                ("kubepods.slice", name), ("kubepods.slice", "kubepods-burstable.slice", name),
+                ("kubepods.slice", "kubepods-besteffort.slice", name)):
+        base = tmp_path / ("c_" + "_".join(rel[:-1]))
+        base.joinpath(*rel).mkdir(parents=True)
+        assert ct.find_pod_dir(str(base), name) == str(base.joinpath(*rel))
 
 
 def test_hybrid_hierarchy_with_an_unrelated_v2_line_is_v1_not_supported(tmp_path):
@@ -332,10 +355,10 @@ def test_no_process_of_the_pod_is_failed_not_guessed(tmp_path):
     assert s.writes == []
 
 
-def test_missing_directory_is_failed(tmp_path):
+def test_missing_directory_is_refused(tmp_path):
     s = Scene(tmp_path, make_dir=False)
     result = s.handle()
-    assert (result["status"], result["reason"].split(":")[0]) == ("failed", "cgroup_dir_missing")
+    assert (result["status"], result["reason"].split(":")[0]) == ("refused", "cgroup_dir_missing")
 
 
 def test_a_symlink_that_leaves_the_cgroup_root_is_refused(tmp_path):
@@ -374,13 +397,24 @@ def test_the_writer_itself_refuses_a_directory_outside_the_root(tmp_path):
     assert (outside / "cgroup.freeze").read_text() == "0"
 
 
-def test_two_pods_cgroups_for_one_pod_are_ambiguous(tmp_path):
+def test_the_pods_processes_naming_two_different_pod_directories_are_refused(tmp_path):
     s = Scene(tmp_path)
+    us = UID.replace("-", "_")
     (s.proc / "102").mkdir()
-    (s.proc / "102" / "cgroup").write_text(f"0::/kubepods/besteffort/pod{UID}/{CID}\n")
+    (s.proc / "102" / "cgroup").write_text(
+        f"0::/../../kubepods-burstable-pod{us}.slice/cri-containerd-{CID}.scope" + NL)
     result = s.handle()
     assert result["status"] == "refused" and "different pod cgroups" in result["reason"]
     assert s.writes == []
+
+
+def test_two_directories_with_the_pod_name_are_ambiguous(tmp_path):
+    s = Scene(tmp_path)
+    (s.root / "kubepods" / "besteffort" / f"pod{UID}").mkdir(parents=True)
+    (s.root / "kubepods" / "besteffort" / f"pod{UID}" / "cgroup.freeze").write_text("0")
+    result = s.handle()
+    assert (result["status"], result["reason"].split(":")[0]) == ("refused", "cgroup_path_ambiguous")
+    assert s.writes == [] and s.freeze_file() == "0"
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -506,7 +540,7 @@ def test_a_freeze_of_the_agents_own_pod_is_refused(tmp_path):
     assert s.writes == []
 
 
-def test_refuse_own_pod_equal_ancestor_unreadable_and_unplaceable(tmp_path):
+def test_refuse_own_pod_by_path_applies_only_to_a_normal_absolute_path_with_a_pod_uid(tmp_path):
     s = Scene(tmp_path)
     root = str(s.root)
     target = os.path.realpath(s.root / "kubepods" / "burstable" / f"pod{UID}")
@@ -524,20 +558,18 @@ def test_refuse_own_pod_equal_ancestor_unreadable_and_unplaceable(tmp_path):
         ct.refuse_own_pod(ancestor, OTHER_UID.replace("a", "b"), str(s.proc), root)
     own(f"0::/kubepods/besteffort/pod{AGENT_UID}/{CID}")                          # a sibling pod is fine
     ct.refuse_own_pod(target, UID, str(s.proc), root)
-    own("0::/../../kubepods/besteffort/podx")                                     # cannot be placed
-    with pytest.raises(ct._Refuse):
-        ct.refuse_own_pod(target, UID, str(s.proc), root)
+    own(f"0::/kubepods/besteffort/pod{AGENT_UID}/{CID}".replace("0::/", "0::/../../"))   # not placeable: skipped
+    ct.refuse_own_pod(target, UID, str(s.proc), root)
+    own("0::/")                                                                    # the real private namespace
+    ct.refuse_own_pod(target, UID, str(s.proc), root)
     own("12:memory:/kubepods/besteffort/podx")                                    # no cgroup v2 line
-    with pytest.raises(ct._Refuse):
-        ct.refuse_own_pod(target, UID, str(s.proc), root)
-    (s.proc / "self" / "cgroup").unlink()                                         # unreadable: fail closed
-    with pytest.raises(ct._Refuse):
-        ct.refuse_own_pod(target, UID, str(s.proc), root)
+    ct.refuse_own_pod(target, UID, str(s.proc), root)
+    (s.proc / "self" / "cgroup").unlink()                                         # unreadable: POD_UID is the guard
+    ct.refuse_own_pod(target, UID, str(s.proc), root)
 
 
 def test_a_thaw_does_not_need_the_own_pod_check(tmp_path):
-    s = Scene(tmp_path)
-    (s.proc / "self" / "cgroup").unlink()
+    s = Scene(tmp_path, own_pod_uid="")
     s._set_frozen(1)
     assert s.handle(action="thaw", label="", requested_by="operator")["status"] == "thawed"
 
@@ -610,13 +642,15 @@ def test_only_the_pids_of_the_requested_pod_are_used(tmp_path):
     assert other["reason"].startswith("cgroup_dir_missing")           # its own pid was found, its directory is not
 
 
-def test_resolve_refuses_a_directory_that_normalises_outside_the_root(tmp_path, monkeypatch):
+def test_resolve_refuses_a_directory_that_is_outside_the_root_or_the_root_itself(tmp_path, monkeypatch):
     s = Scene(tmp_path)
-    monkeypatch.setattr(ct, "pod_cgroup_components", lambda path, uid: ["..", "outside", f"pod{UID}"])
+    outside = tmp_path / "outside" / f"pod{UID}"
+    outside.mkdir(parents=True)
+    monkeypatch.setattr(ct, "find_pod_dir", lambda root, name: str(s.root / ".." / "outside" / f"pod{UID}"))
     with pytest.raises(ct._Refuse) as e:
         ct.resolve_pod_cgroup(s.index, "prod", "web-1", UID, str(s.proc), str(s.root))
     assert e.value.status == "refused" and "outside the cgroup root" in e.value.reason
-    monkeypatch.setattr(ct, "pod_cgroup_components", lambda path, uid: [])               # the root itself
+    monkeypatch.setattr(ct, "find_pod_dir", lambda root, name: root)                       # the root itself
     with pytest.raises(ct._Refuse) as e:
         ct.resolve_pod_cgroup(s.index, "prod", "web-1", UID, str(s.proc), str(s.root))
     assert "outside the cgroup root" in e.value.reason
@@ -665,6 +699,183 @@ def test_the_proc_scan_runs_in_a_worker_thread(tmp_path, monkeypatch):
         return await s.handler.handle(req())
     assert run(go())["status"] == "frozen"
     assert seen and seen[0] != main[0]
+
+
+# ---------------------------------------------------------------------------------------------------------
+# V5-S5c: the layouts a real k3d run showed (private cgroup namespace, relative paths with leading `..`)
+# ---------------------------------------------------------------------------------------------------------
+US = UID.replace("-", "_")
+
+
+def real_scene(tmp_path, proc_line, rel_dir, **kw):
+    """The agent sees itself as `0::/`; the target pod's pid shows the given relative path; the mount shows the node
+    cgroup root with the pod directory at `rel_dir` (a tuple of components)."""
+    s = Scene(tmp_path, proc_line=proc_line + NL, make_dir=False, **kw)
+    (s.proc / "self" / "cgroup").write_text("0::/" + NL)
+    (s.proc / "999" / "cgroup").write_text("0::/../../../../init" + NL)             # a node process
+    s.pod_dir = s.root.joinpath(*rel_dir)
+    (s.pod_dir / "ctr").mkdir(parents=True)
+    (s.pod_dir / "cgroup.freeze").write_text("0")
+    (s.pod_dir / "cgroup.events").write_text("populated 1" + NL + "frozen 0" + NL)
+    return s
+
+
+REAL = {
+    "guaranteed": (f"0::/../../pod{UID}/{CID}", ("kubepods", f"pod{UID}")),
+    "burstable": (f"0::/../../../burstable/pod{UID}/{CID}", ("kubepods", "burstable", f"pod{UID}")),
+    "besteffort": (f"0::/../../../besteffort/pod{UID}/{CID}", ("kubepods", "besteffort", f"pod{UID}")),
+    "systemd_guaranteed": (f"0::/../../kubepods-pod{US}.slice/cri-containerd-{CID}.scope",
+                           ("kubepods.slice", f"kubepods-pod{US}.slice")),
+    "systemd_burstable": (f"0::/../../../kubepods-burstable.slice/kubepods-burstable-pod{US}.slice/"
+                          f"cri-containerd-{CID}.scope",
+                          ("kubepods.slice", "kubepods-burstable.slice", f"kubepods-burstable-pod{US}.slice")),
+    "systemd_besteffort": (f"0::/../../../kubepods-besteffort.slice/kubepods-besteffort-pod{US}.slice/"
+                           f"cri-containerd-{CID}.scope",
+                           ("kubepods.slice", "kubepods-besteffort.slice", f"kubepods-besteffort-pod{US}.slice")),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(REAL))
+def test_real_k3d_layouts_freeze_the_pod_directory_and_never_a_scope_or_a_qos_dir(tmp_path, kind):
+    line, rel = REAL[kind]
+    s = real_scene(tmp_path, line, rel)
+    result = s.handle()
+    assert result["status"] == "frozen" and result["frozen"] == "1", result
+    assert result["cgroup"] == "/".join(rel)
+    assert s.writes == ["1"] and s.freeze_file() == "1"
+    assert not (s.pod_dir / "ctr" / "cgroup.freeze").exists()                    # the container scope was not touched
+    for parent in s.pod_dir.parents:
+        if parent == s.root:
+            break
+        assert not (parent / "cgroup.freeze").exists()                          # neither was a QoS dir or kubepods
+
+
+@pytest.mark.parametrize("kind", sorted(REAL))
+def test_real_k3d_layouts_thaw(tmp_path, kind):
+    line, rel = REAL[kind]
+    s = real_scene(tmp_path, line, rel)
+    s._set_frozen(1)
+    result = s.handle(action="thaw", label="", requested_by="operator")
+    assert result["status"] == "thawed" and s.writes == ["0"]
+
+
+def test_the_proc_scanner_maps_the_relative_forms_and_nothing_else():
+    from agents.security_agent.proc_scanner import parse_cgroup_line
+    cid12 = CID[:12]
+    assert parse_cgroup_line(f"0::/../../pod{UID}/{CID}") == (UID, cid12)
+    assert parse_cgroup_line(f"0::/../../../burstable/pod{UID}/{CID}") == (UID, cid12)
+    assert parse_cgroup_line(f"0::/../../kubepods-pod{US}.slice/cri-containerd-{CID}.scope") == (UID, cid12)
+    assert parse_cgroup_line(f"0::/../../../kubepods-burstable.slice/kubepods-burstable-pod{US}.slice/"
+                             f"cri-containerd-{CID}.scope") == (UID, cid12)
+    assert parse_cgroup_line(f"0::/kubepods/burstable/pod{UID}/{CID}") == (UID, cid12)       # the old forms still work
+    for line in ("0::/", "0::/../../../../init", "0::/../../../../k3s", "0::/system.slice/sshd.service",
+                 f"0::/../../podnot-a-uuid/{CID}", f"0::/../../xpod{UID}/{CID}"):
+        assert parse_cgroup_line(line) is None, line
+
+
+def test_a_crafted_dot_dot_in_the_middle_of_a_real_layout_is_refused(tmp_path):
+    line, rel = REAL["burstable"]
+    s = real_scene(tmp_path, f"0::/../../../burstable/../pod{UID}/{CID}", rel)
+    result = s.handle()
+    assert (result["status"], result["reason"].split(":")[0]) == ("refused", "cgroup_path_mismatch")
+    assert s.writes == [] and s.freeze_file() == "0"
+
+
+def test_the_name_comes_from_the_pod_uid_not_from_where_the_path_says_the_pod_is(tmp_path):
+    # the only thing taken from /proc is the pod directory NAME; the place is found in the mounted tree
+    s = real_scene(tmp_path, f"0::/../../../besteffort/pod{UID}/{CID}", ("kubepods", "burstable", f"pod{UID}"))
+    assert s.handle()["status"] == "frozen"
+    (tmp_path / "two").mkdir()
+    s2 = real_scene(tmp_path / "two", f"0::/system.slice/pod{UID}/{CID}", ("kubepods", f"pod{UID}"))
+    assert s2.handle()["cgroup"] == f"kubepods/pod{UID}"
+
+
+def test_two_places_with_the_pod_name_are_ambiguous(tmp_path):
+    line, rel = REAL["guaranteed"]
+    s = real_scene(tmp_path, line, rel)
+    (s.root / "kubepods.slice" / f"pod{UID}").mkdir(parents=True)
+    (s.root / "kubepods.slice" / f"pod{UID}" / "cgroup.freeze").write_text("0")
+    result = s.handle()
+    assert (result["status"], result["reason"].split(":")[0]) == ("refused", "cgroup_path_ambiguous")
+    assert s.writes == []
+
+
+def test_a_real_layout_pod_without_a_directory_in_the_mount_is_refused_cgroup_dir_missing(tmp_path):
+    line, rel = REAL["burstable"]
+    s = real_scene(tmp_path, line, rel)
+    (s.pod_dir / "cgroup.freeze").unlink()
+    import shutil as _sh
+    _sh.rmtree(s.pod_dir)
+    result = s.handle()
+    assert (result["status"], result["reason"].split(":")[0]) == ("refused", "cgroup_dir_missing")
+
+
+def test_a_symlink_named_like_the_pod_directory_is_refused_and_never_followed(tmp_path):
+    line, rel = REAL["guaranteed"]
+    s = real_scene(tmp_path, line, rel)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "cgroup.freeze").write_text("0")
+    import shutil as _sh
+    _sh.rmtree(s.pod_dir)
+    try:
+        os.symlink(outside, s.pod_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+    result = s.handle()
+    assert (result["status"], result["reason"].split(":")[0]) == ("refused", "cgroup_path_mismatch")
+    assert "symlink" in result["reason"] and (outside / "cgroup.freeze").read_text() == "0"
+
+
+def test_a_symlinked_kubepods_directory_is_not_walked(tmp_path):
+    line, rel = REAL["guaranteed"]
+    s = real_scene(tmp_path, line, rel)
+    elsewhere = tmp_path / "elsewhere"
+    s.root.joinpath("kubepods").rename(elsewhere)
+    try:
+        os.symlink(elsewhere, s.root / "kubepods", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+    result = s.handle()
+    assert (result["status"], result["reason"].split(":")[0]) == ("refused", "cgroup_dir_missing")
+    assert (elsewhere / f"pod{UID}" / "cgroup.freeze").read_text() == "0"
+
+
+def test_the_agents_own_pod_uid_refuses_a_freeze(tmp_path):
+    s = Scene(tmp_path, own_pod_uid=UID)
+    result = s.handle()
+    assert result["status"] == "refused" and result["reason"].startswith("self_pod")
+    assert not result["reason"].startswith("self_pod_unknown") and s.writes == []
+
+
+def test_the_agents_own_pod_name_in_its_namespace_refuses_a_freeze(tmp_path):
+    s = Scene(tmp_path, own_pod_name="web-1", own_namespace="prod")
+    assert s.handle()["reason"].startswith("self_pod")
+    (tmp_path / "b").mkdir()
+    s2 = Scene(tmp_path / "b", own_pod_name="web-1", own_namespace="dev")           # same name, other namespace
+    assert s2.handle()["status"] == "frozen"
+
+
+def test_without_pod_uid_the_consumer_starts_but_refuses_every_freeze(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        cfg = ct.ContainmentConfig.from_env({"NODE_NAME": NODE})
+    assert cfg is not None and cfg.own_pod_uid == "" and "POD_UID" in caplog.text
+    s = Scene(tmp_path, own_pod_uid="")
+    for label in ("ransomware", "exfiltration"):
+        result = s.handle(label=label)
+        assert result["status"] == "refused" and result["reason"].startswith("self_pod_unknown"), result
+    assert s.writes == []
+    s.mode = "test"
+    assert s.handle()["reason"].startswith("self_pod_unknown")                      # even in test mode: fail closed
+    s._set_frozen(1)
+    assert s.handle(action="thaw", label="", requested_by="operator")["status"] == "thawed"   # a thaw is unaffected
+
+
+def test_pod_uid_and_pod_name_come_from_the_environment():
+    cfg = ct.ContainmentConfig.from_env({"NODE_NAME": NODE, "POD_UID": AGENT_UID.upper(), "POD_NAME": "sa-1",
+                                         "NAMESPACE": "kubeheal"})
+    assert (cfg.own_pod_uid, cfg.own_pod_name, cfg.own_namespace) == (AGENT_UID, "sa-1", "kubeheal")
+    assert ct.ContainmentConfig.from_env({"NODE_NAME": NODE, "POD_UID": "not-a-uid"}).own_pod_uid == ""
 
 
 # ---------------------------------------------------------------------------------------------------------

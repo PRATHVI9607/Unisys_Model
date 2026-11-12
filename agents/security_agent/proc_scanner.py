@@ -22,6 +22,16 @@ _V1 = re.compile(r"/kubepods(?:/[^/]+)?/pod([a-f0-9-]+)/([a-f0-9]+)")
 _V2 = re.compile(r"kubepods[^/]*/[^/]*pod([a-f0-9_-]+)\.slice/[^/]*?([a-f0-9]{12,})\.scope")
 
 
+# Relative paths. With a private cgroup namespace (observed on k3d, cgroup v2) /proc/<pid>/cgroup of ANOTHER pod is
+# relative to the reader's own cgroup, for example `0::/../../pod<uid>/<ctr>` (Guaranteed) or
+# `0::/../../../burstable/pod<uid>/<ctr>` (Burstable): no `kubepods` word. A strict uuid keeps these from matching
+# anything else.
+_UUID = r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"
+_V1_REL = re.compile(rf"(?:^|/)pod({_UUID})/([a-f0-9]{{12,}})")
+_V2_REL = re.compile(r"(?:^|/)kubepods(?:-[a-z]+)?-pod([a-f0-9]{8}(?:_[a-f0-9]{4}){3}_[a-f0-9]{12})\.slice/"
+                     r"[^/]*?([a-f0-9]{12,})\.scope")
+
+
 def parse_cgroup_line(line: str) -> Optional[Tuple[str, str]]:
     """Parse one cgroup line -> (pod_uid, container_id[:12]) or None."""
     line = line.strip()
@@ -29,6 +39,12 @@ def parse_cgroup_line(line: str) -> Optional[Tuple[str, str]]:
     if m:
         return m.group(1), m.group(2)[:12]
     m = _V2.search(line)
+    if m:
+        return m.group(1).replace("_", "-"), m.group(2)[:12]
+    m = _V1_REL.search(line)
+    if m:
+        return m.group(1), m.group(2)[:12]
+    m = _V2_REL.search(line)
     if m:
         return m.group(1).replace("_", "-"), m.group(2)[:12]
     return None
