@@ -130,6 +130,13 @@ securityAgent:
   logLevel: INFO
   resources: {}
   extraEnv: {}
+  # V5-S5: the node-local cgroup freeze of a contained pod. true mounts the host cgroup tree READ-WRITE at
+  # /host/cgroup (the only host write the agent can do; the code path is the single function
+  # agents/security_agent/containment.py write_cgroup_freeze, gated by the kill-switch mode) and sets NODE_NAME,
+  # CGROUP_ROOT and EXEC_NAMESPACES. false: no mount and no NODE_NAME, so the consumer does not start and every
+  # freeze request goes unanswered (the Executor then reports freeze_unconfirmed and a human is told).
+  cgroupFreeze:
+    enabled: true
 
 fusionAgent:
   image: {repository: kubeheal/fusion-agent}
