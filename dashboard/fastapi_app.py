@@ -13,10 +13,24 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
 from agents.common.metrics import KubeHealMetrics, add_metrics_route
 from dashboard.admin_routes import reconcile_approval_claims, redis_services, router as admin_router
+from dashboard.baseline_routes import router as baseline_router
 from dashboard.mode_admin import KubernetesModeStore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _tolerant_json(raw, default):
+    """json.loads that never raises: absent, empty, malformed or non-object values give `default`."""
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "replace")
+    if not raw or raw == "{}":
+        return default
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if isinstance(value, dict) else default
 
 
 def _normalize_v4(d: dict, kind: str) -> None:
@@ -242,14 +256,10 @@ class KubeHealDashboard:
                             assessment.model_score = risk_score
                             assessment.heuristic_score = None
                             assessment.inference_method = inference_method
-                            assessment.explainability = (
-                                json.loads(field_attr)
-                                if field_attr and field_attr != b"{}" else {}
-                            )
-                            assessment.patch_proposal = (
-                                json.loads(patch_proposal)
-                                if patch_proposal and patch_proposal != b"{}" else None
-                            )
+                            # field_attribution_json is a removed (legacy) field: optional and tolerant. A
+                            # malformed value of it or of the patch proposal must not drop the event.
+                            assessment.explainability = _tolerant_json(field_attr, {})
+                            assessment.patch_proposal = _tolerant_json(patch_proposal, None) or None
 
                             self.health_events.append(assessment)
                             if len(self.health_events) > 100:
@@ -602,6 +612,7 @@ app = FastAPI(title="KubeHeal Dashboard", lifespan=lifespan)
 METRICS = KubeHealMetrics()
 add_metrics_route(app, METRICS)
 app.include_router(admin_router)
+app.include_router(baseline_router)
 
 # Mount static files directory for CSS, JS, etc.
 import os.path

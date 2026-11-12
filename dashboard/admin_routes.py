@@ -88,6 +88,10 @@ class DashboardServices:
     # Compare-and-delete: remove a key only while its value is still the given incident id. Returns the keys
     # that were removed. Preferred over `freeze_delete` when present (older fakes only have `freeze_delete`).
     freeze_delete_if_owned: Optional[Callable[[List[str], str], Awaitable[List[str]]]] = None
+    # The dashboard's own Redis client (decode_responses=False, so it returns bytes). Used by the baseline
+    # promotion approvals (dashboard/baseline_routes.py). Optional so the older fakes keep working; those
+    # endpoints answer 503 without it.
+    get_redis: Optional[Callable[[], Any]] = None
 
 
 def redis_services(ledger: Ledger, mode_store: ModeStore, get_redis: Callable[[], Any]) -> DashboardServices:
@@ -184,7 +188,7 @@ def redis_services(ledger: Ledger, mode_store: ModeStore, get_redis: Callable[[]
 
     return DashboardServices(ledger, mode_store, enqueue_exec, claim, release, claim_set, claim_get,
                              list_claims, exec_entry_exists, fetch_event, freeze_list, freeze_delete,
-                             freeze_delete_if_owned)
+                             freeze_delete_if_owned, get_redis)
 
 
 BARE_CLAIM_PREFIX = "claimed@"
