@@ -496,6 +496,7 @@ class FusionAgentV4:
             "top_factors_json": {"health": health.get("top_factors_json"), "security": sec.get("top_factors_json")},
             "rule_path": bool(out.action_params.get("rule_path", False)),
             "rule_reasons": out.action_params.get("rule_reasons", []),
+            **self._containment_fields(out, inp),
             "patch_fields": out.action_params.get("patch_fields", []),
             "security_fresh": security_fresh,
             "security_fresh_source": security_source,
@@ -693,6 +694,23 @@ class FusionAgentV4:
             await self.redis.delete(marker)          # nothing was queued: a retry must be able to queue it
             raise
         return True
+
+    @staticmethod
+    def _containment_fields(out, inp) -> dict:
+        """The Q2 containment fields of a contain decision (automatic or human). They go into the decision record
+        so a later dashboard approval sends the SAME label, restore_after and human_followup to the Executor
+        (the Executor freezes only for the labels ransomware and exfiltration, and Fusion restores only after a
+        containment with restore_after). Empty for any other decision."""
+        if out.decision not in (Decision.AUTO_CONTAIN, Decision.HUMAN_CONTAIN):
+            return {}
+        label = str(inp.sec_label).strip().lower()
+        params = out.action_params
+        return {
+            "containment_label": label,
+            "restore_after": bool(params.get("restore_after", label == RESTORE_LABEL)),
+            "human_followup": bool(params.get("human_followup",
+                                              label in AUTO_CONTAIN_LABELS and label != RESTORE_LABEL)),
+        }
 
     async def _xadd_exec(self, incident_id, action, namespace, workload, pod, out, inp):
         params = out.action_params

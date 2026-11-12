@@ -188,15 +188,18 @@ def test_quarantine_policy_selects_only_the_labelled_pod_and_denies_both_directi
 def test_contain_quarantines_labels_snapshots_and_freezes_in_order():
     c, pod, rec, steps, redis = contain_env()
     assert do_contain(c, rec, redis) == "contained"
-    assert [e[1] for e in c.log] == ["create_policy", "patch_pod", "create_snapshot"]
+    # V5-S5 order: forensic snapshot, then quarantine (no automatic label here, so no freeze request)
+    assert [e[1] for e in c.log] == ["create_snapshot", "create_policy", "patch_pod"]
     assert c.pods[pod]["metadata"]["labels"]["kubeheal/quarantine"] == "true"
     assert c.pods[pod]["metadata"]["labels"]["kubeheal/incident"] == INC
-    snap = c.log[2][3]
+    snap = c.log[0][3]
     assert snap["metadata"]["labels"]["kubeheal/snapshot-kind"] == "forensic"
     assert snap["spec"]["source"]["persistentVolumeClaimName"] == "db-data"
     assert redis.store["kubeheal:snapfreeze:prod:db-data"] == INC            # rolling snapshots frozen
     assert not [e for e in c.log if "delete" in e[1]]                        # the pod is NOT deleted
-    assert steps[:3] == ["quarantine_policy_created", "pod_labelled", "rolling_snapshots_frozen"]
+    # the rolling snapshots are frozen right after the first gated write (V5-S5 review)
+    assert steps[:5] == ["freeze_skipped", "forensic_snapshot_created", "rolling_snapshots_frozen",
+                         "quarantine_policy_created", "pod_labelled"]
 
 
 def test_contain_dry_run_writes_nothing():
@@ -205,7 +208,7 @@ def test_contain_dry_run_writes_nothing():
     assert out.startswith("DRY RUN: would have CONTAIN prod/db-abc-1") and c.log == [] and redis.store == {}
 
 
-@pytest.mark.parametrize("allow,written", [(1, ["create_policy"]), (2, ["create_policy", "patch_pod"])])
+@pytest.mark.parametrize("allow,written", [(1, ["create_snapshot"]), (2, ["create_snapshot", "create_policy"])])
 def test_contain_stops_when_the_mode_flips_mid_action(allow, written):
     c, pod, rec, steps, redis = contain_env()
     out = do_contain(c, rec, redis, gate=fk.Gate(allow=allow))

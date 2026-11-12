@@ -32,6 +32,9 @@ subjects:
   - {kind: ServiceAccount, name: fusion-agent, namespace: {{ include "kubeheal.namespace" . }}}
   - {kind: ServiceAccount, name: executor, namespace: {{ include "kubeheal.namespace" . }}}
   - {kind: ServiceAccount, name: dashboard, namespace: {{ include "kubeheal.namespace" . }}}
+  # V5-D5 (baseline promotion is a dry run in mode test) and V5-S5 (the freeze re-checks the mode): read only
+  - {kind: ServiceAccount, name: health-agent, namespace: {{ include "kubeheal.namespace" . }}}
+  - {kind: ServiceAccount, name: security-agent, namespace: {{ include "kubeheal.namespace" . }}}
 ---
 # Only this admin Role may modify it. It is bound to the dashboard ServiceAccount, whose toggle
 # endpoint requires the admin token (P8); every other component has read access only.
