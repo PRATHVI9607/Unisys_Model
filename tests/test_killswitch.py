@@ -295,11 +295,12 @@ def test_executor_records_dry_run_step_and_result():
     }))
 
     records = [json.loads(store.objects[key]) for key in sorted(store.objects)]
+    # V5-S5 order: no automatic containment label here, so the freeze is skipped; the pod mounts no PVC, so no snapshot
     assert [record["step"] for record in records] == [
-        "request_accepted", "blocked", "result", "executor_result"
+        "request_accepted", "freeze_skipped", "forensic_snapshot_skipped", "blocked", "result", "executor_result"
     ]
-    assert records[1]["payload"]["step"] == "create_quarantine_policy"
-    assert records[2]["payload"]["outcome"].startswith("DRY RUN: would have CONTAIN")
+    assert records[3]["payload"]["step"] == "create_quarantine_policy"
+    assert records[4]["payload"]["outcome"].startswith("DRY RUN: would have CONTAIN")
 
 
 def test_executor_records_mid_action_steps_and_escalation():
@@ -313,11 +314,11 @@ def test_executor_records_mid_action_steps_and_escalation():
 
     records = [json.loads(store.objects[key]) for key in sorted(store.objects)]
     assert [record["step"] for record in records] == [
-        "request_accepted", "intent_create_quarantine_policy", "quarantine_policy_created", "blocked",
-        "result", "executor_escalation", "executor_result",
+        "request_accepted", "freeze_skipped", "forensic_snapshot_skipped", "intent_create_quarantine_policy",
+        "quarantine_policy_created", "blocked", "result", "executor_escalation", "executor_result",
     ]
-    assert records[3]["payload"]["step"] == "label_pod"
-    assert records[5]["payload"]["required"] == "human"
+    assert records[5]["payload"]["step"] == "label_pod"
+    assert records[7]["payload"]["required"] == "human"
     assert core.patched == [] and core.deleted == []
 
 
