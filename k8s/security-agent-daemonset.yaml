@@ -17,7 +17,7 @@ spec:
         prometheus.io/port: "9100"
     spec:
       serviceAccountName: security-agent
-      hostPID: true          # read /proc/<pid> of every pod (the agent never kills or writes)
+      hostPID: true          # read /proc/<pid> of every pod; the agent never writes to Kubernetes or kills a process
       containers:
         - name: agent
           image: kubeheal/security-agent:v4
@@ -41,6 +41,14 @@ spec:
               value: /proc
             - name: REDIS_URL
               value: redis://redis-master:6379
+            - name: NODE_NAME      # V5-S5: the freeze consumer reads only its own node's stream
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CGROUP_ROOT
+              value: /host/cgroup
+            - name: EXEC_NAMESPACES    # must equal the Executor's
+              value: prod,staging,dev
             - name: ENTROPY_THRESHOLD
               value: "7.2"
             - name: MMAP_ENTROPY_THRESHOLD
@@ -81,7 +89,13 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            - name: host-cgroup      # V5-S5: READ-WRITE, used only by the cgroup freeze (containment.py)
+              mountPath: /host/cgroup
       volumes:
+        - name: host-cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
         - name: sys
           hostPath:
             path: /sys
