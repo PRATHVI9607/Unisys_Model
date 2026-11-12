@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import csv
 import json
 import re
 import time
@@ -23,6 +24,18 @@ CONTEXT = harness.ALLOWED_CONTEXT
 NAMESPACE = "kubeheal"
 DEFAULT_URL = "http://kubeheal-inference:8000/v1/health/predict"
 SAFE_CHAOS_DEPLOYMENTS = frozenset({"kubeheal-inference"})
+UNMEASURED_REASONS = {
+    "P11-E3": "not measured: no disposable database-volume scenario is configured; the run must not overwrite or delete existing PVC data",
+    "P11-E4": "not measured: the current event path does not expose timestamps for each action stage",
+    "P11-E5": "not measured: controlled comparison drivers for the five baselines are not implemented or verified",
+    "  Falco rules only": "not measured: no live Falco rules-only baseline is installed; replay fixtures are hand-written",
+    "  fixed entropy threshold": "not measured: no controlled fixed-threshold detector run is available",
+    "  diff-only drift": "not measured: no controlled comparison run is available",
+    "  single replica": "not measured: no controlled single-replica comparison run is available",
+    "  pod-delete-only": "not measured: no controlled pod-delete-only ransomware comparison run is available",
+    "P11-E6": "not measured: the deployed LightGBM bundle has no paired FP32/FP16 deployment variants for a controlled comparison",
+    "V5-E1": "not measured: the scripted V5 acceptance lab scenarios have not been run; full containment is not yet live-verified",
+}
 
 
 def _now() -> str:
@@ -86,6 +99,59 @@ def _cleanup_load(name: str) -> list[str]:
     return results
 
 
+def _coverage_markdown(rows: list[dict]) -> str:
+    measured_e1 = [row for row in rows if row.get("scenario") == "E1 k6 health inference" and row.get("status") == "completed"]
+    measured_e2 = [row for row in rows if str(row.get("scenario", "")).startswith("E2 ") and row.get("status") == "measured"]
+    lines = [
+        "# P11 and V5-E1 evaluation coverage",
+        "",
+        "Values below come from files in this directory. `not measured` means no run produced that value; it is not a zero.",
+        "",
+        "| Item | Status | Evidence or reason |",
+        "|---|---|---|",
+    ]
+    if measured_e1:
+        levels = ", ".join(str(row.get("vus")) for row in measured_e1)
+        lines.append(f"| P11-E1 k6 scoring load | measured | VUs {levels}; see per-run CSV, raw k6 logs, and HPA samples below |")
+    else:
+        lines.append("| P11-E1 k6 scoring load | not measured | no completed live load run recorded yet |")
+    if measured_e2:
+        lines.append(f"| P11-E2 inference pod recovery | measured | {len(measured_e2)} completed recovery run(s); see per-run CSV |")
+    else:
+        lines.append("| P11-E2 inference pod recovery | not measured | no completed live recovery run recorded yet |")
+    lines.append("| P11-E3 RPO/RTO | not measured | " + UNMEASURED_REASONS["P11-E3"].removeprefix("not measured: ") + " |")
+    lines.append("| P11-E4 stage timing | not measured | " + UNMEASURED_REASONS["P11-E4"].removeprefix("not measured: ") + " |")
+    lines.append("| P11-E5 baseline comparisons | not measured | " + UNMEASURED_REASONS["P11-E5"].removeprefix("not measured: ") + " |")
+    for baseline in ("Falco rules only", "fixed entropy threshold", "diff-only drift", "single replica", "pod-delete-only"):
+        key = "  " + baseline
+        reason = UNMEASURED_REASONS.get(key, "not measured: no controlled comparison run is available").removeprefix("not measured: ")
+        lines.append(f"| P11-E5 {baseline} | not measured | {reason} |")
+    lines.append("| P11-E6 FP32/FP16 latency and memory | not measured | " + UNMEASURED_REASONS["P11-E6"].removeprefix("not measured: ") + " |")
+    if rows:
+        lines.append("| P11-E7 run metadata | recorded per run | machine, cluster, timestamp, and status are stored in each JSON sidecar |")
+    else:
+        lines.append("| P11-E7 run metadata | not measured | no live result sidecar exists yet |")
+    lines.append("| V5-E1 scripted lab scenarios | not measured | " + UNMEASURED_REASONS["V5-E1"].removeprefix("not measured: ") + " |")
+    lines.extend(["", "## Run files", ""])
+    if rows:
+        lines.extend(f"- `{row.get('scenario', 'scenario')}`: `{row.get('status', 'not measured')}`; elapsed `{row.get('elapsed_s', 'not measured')}` seconds." for row in rows)
+    else:
+        lines.append("No live scenario output is recorded yet.")
+    return "\n".join(lines) + "\n"
+
+
+def update_coverage_summary() -> Path:
+    rows = []
+    if RESULTS.exists():
+        for path in sorted(RESULTS.glob("*.csv")):
+            with path.open(newline="", encoding="utf-8") as fh:
+                rows.extend(csv.DictReader(fh))
+    RESULTS.mkdir(parents=True, exist_ok=True)
+    summary = RESULTS / "P11_COVERAGE.md"
+    summary.write_text(_coverage_markdown(rows), encoding="utf-8")
+    return summary
+
+
 def _deployment_counts(namespace: str, deployment: str) -> tuple[int, int]:
     raw = harness.kubectl(CONTEXT, ["get", "deployment/" + deployment, "-n", namespace, "-o", "json"])
     item = json.loads(raw)
@@ -145,6 +211,7 @@ def run_load(vus: int, duration: str, target_url: str) -> dict:
             "cleanup": " | ".join(cleanup),
         }
         harness.write_results(RESULTS, run_id, [row], cluster=CONTEXT, status="measured" if outcome == "completed" else "not measured")
+        update_coverage_summary()
         print(json.dumps(row, sort_keys=True))
     return row
 
@@ -187,6 +254,7 @@ def run_pod_chaos(namespace: str, deployment: str, action: str) -> dict:
     }
     run_id = _name("p11-chaos")
     harness.write_results(RESULTS, run_id, [row], cluster=CONTEXT, status="measured")
+    update_coverage_summary()
     print(json.dumps(row, sort_keys=True))
     return row
 

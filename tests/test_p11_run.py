@@ -40,3 +40,12 @@ def test_chaos_runner_rejects_services_outside_the_safe_allowlist():
     with pytest.raises(ValueError, match="restricted"):
         p11_run.run_pod_chaos("kubeheal", "redis", "restart")
 
+
+def test_coverage_report_lists_every_p11_item_and_v5_e1_with_reasons():
+    report = p11_run._coverage_markdown([])
+    for item in ("P11-E1", "P11-E2", "P11-E3", "P11-E4", "P11-E5", "P11-E6", "P11-E7", "V5-E1"):
+        assert f"| {item}" in report
+    assert "not measured" in report
+    assert "no disposable database-volume scenario" in report
+    assert "no live result sidecar exists yet" in report
+
