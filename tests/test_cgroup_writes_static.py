@@ -1,22 +1,30 @@
 """V5-S5a static guard: the freeze control file of a cgroup is named, and written, in exactly one place.
 
-Scans agents/, dashboard/, kubeheal/ and services/ (text files, not tests). Outside
-agents/security_agent/containment.py no file may contain the string `cgroup.freeze` (or name another cgroup
-control file that moves processes or changes limits of a group), and inside that module every file-write call
-must sit inside the function `write_cgroup_freeze`. Companion to tests/test_no_writes_outside_executor.py.
+Scans agents/, dashboard/, kubeheal/, services/, scripts/, deploy/ and k8s/ (text files; docs and tests are not
+scanned). Outside agents/security_agent/containment.py no file may name `cgroup.freeze` or another cgroup control
+file that moves processes or changes limits (also when the name is built by string concatenation, a format or a
+join, or written by a shell redirect or `tee` in a shell string, a shell script or a YAML command), and inside
+that module every file-write call must sit inside the function `write_cgroup_freeze`. In shell and YAML a `#`
+comment may name a file. Companion to tests/test_no_writes_outside_executor.py.
 """
 import ast
 import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCAN_DIRS = ["agents", "dashboard", "kubeheal", "services"]
-TEXT_SUFFIXES = {".py", ".js", ".ts", ".html", ".sh", ".yaml", ".yml", ".json", ".md", ".txt", ".lua", ".go"}
+SCAN_DIRS = ["agents", "dashboard", "kubeheal", "services", "scripts", "deploy", "k8s"]
+TEXT_SUFFIXES = {".py", ".js", ".ts", ".html", ".sh", ".bash", ".yaml", ".yml", ".json", ".lua", ".go", ".tpl", ".ps1"}
 SKIP_PARTS = {"__pycache__", ".venv", "node_modules", "_archive_v3", ".pytest-tmp"}
 OWNER = ROOT / "agents" / "security_agent" / "containment.py"
 WRITER = "write_cgroup_freeze"
 
-CONTROL_FILES = re.compile(r"cgroup\.(freeze|kill|procs|threads|subtree_control|type|max\.depth|max\.descendants)")
+CONTROL_FILES = re.compile(
+    r"(?<![\w.])(?:cgroup\.(?:freeze|kill|procs|threads|subtree_control|type|max\.depth|max\.descendants)"
+    r"|pids\.max|memory\.(?:max|high|low|min|swap\.max)|cpu\.(?:max|weight)|io\.(?:max|weight))(?![\w])")
+SHELL_WRITE = re.compile(r"(?:>>?|\btee\b(?:\s+-a)?)\s*[\"']?\S*cgroup")
+SHELL_CALLS = {"subprocess.run", "subprocess.Popen", "subprocess.call", "subprocess.check_call",
+               "subprocess.check_output", "os.system", "os.popen", "asyncio.create_subprocess_shell"}
+FRAGMENTS = re.compile(r"^\.?(?:freeze|kill|procs|threads|subtree_control|max|high|weight)$")
 WRITE_ATTRS = {"write_text", "write_bytes", "write", "writelines", "truncate", "unlink", "rename",
                "touch", "mkdir", "rmdir"}
 WRITE_FUNCS = {"os.open", "os.write", "os.truncate", "os.remove", "os.unlink", "os.rename", "os.replace",
@@ -34,8 +42,79 @@ def _files():
                 yield p
 
 
+def _strip_comments(text: str) -> str:
+    return "\n".join(line.split("#", 1)[0] for line in text.split("\n"))
+
+
 def _mentions(text: str):
     return [m.group(0) for m in CONTROL_FILES.finditer(text)]
+
+
+def fold(node):
+    """The string a constant expression builds (concatenation, %, format, join, f-string), else None."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = fold(node.left), fold(node.right)
+        return left + right if left is not None and right is not None else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        left = fold(node.left)
+        right = node.right
+        items = [fold(e) for e in right.elts] if isinstance(right, (ast.Tuple, ast.List)) else [fold(right)]
+        if left is None or None in items:
+            return None
+        try:
+            return left % tuple(items)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(node, ast.JoinedStr):
+        parts = [fold(v.value) if isinstance(v, ast.FormattedValue) else fold(v) for v in node.values]
+        return "".join(parts) if None not in parts else None
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        base = fold(node.func.value)
+        args = [fold(a) for a in node.args]
+        if base is None or None in args:
+            return None
+        if node.func.attr == "format":
+            try:
+                return base.format(*args)
+            except (IndexError, KeyError, ValueError):
+                return None
+        if node.func.attr == "join" and len(node.args) == 1 and isinstance(node.args[0], (ast.List, ast.Tuple)):
+            items = [fold(e) for e in node.args[0].elts]
+            return base.join(items) if None not in items else None
+    return None
+
+
+def python_findings(source: str):
+    """Violations a Python file hides from a plain text search: built names, shell writes, name fragments."""
+    out = []
+    tree = ast.parse(source)
+    consts = []
+    for node in ast.walk(tree):
+        folded = fold(node) if isinstance(node, (ast.BinOp, ast.JoinedStr, ast.Call, ast.Constant)) else None
+        if folded:
+            for m in _mentions(folded):
+                out.append(f"line {node.lineno}: builds {m}")
+            if isinstance(node, ast.Constant):
+                consts.append(folded)
+        if isinstance(node, ast.Call) and _dotted(node.func) in SHELL_CALLS and node.args:
+            cmd = fold(node.args[0])
+            if cmd and "cgroup" in cmd and SHELL_WRITE.search(cmd):
+                out.append(f"line {node.lineno}: shell string writes a cgroup file")
+    if any("cgroup" in c for c in consts) and any(FRAGMENTS.match(c) for c in consts):
+        out.append("a cgroup string and a control file fragment sit in one module")
+    if any(c.endswith("cgroup.") for c in consts):
+        out.append("a string ends in 'cgroup.', a control file name is built from it")
+    return out
+
+
+def text_findings(text: str, suffix: str):
+    """Violations in a non-Python file: control file names and shell redirects to cgroup paths (comments skipped)."""
+    code = _strip_comments(text)
+    out = [f"names {m}" for m in _mentions(code)]
+    out += ["shell redirect or tee to a cgroup path" for _ in SHELL_WRITE.finditer(code)]
+    return out
 
 
 def _dotted(node) -> str:
@@ -87,10 +166,14 @@ def test_no_other_file_names_a_cgroup_control_file():
     for p in _files():
         if p == OWNER:
             continue
-        hits = _mentions(p.read_text(encoding="utf-8", errors="replace"))
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if p.suffix == ".py":
+            hits = sorted(set(_mentions(text))) + python_findings(text)       # a .py file: comments count too
+        else:
+            hits = sorted(set(text_findings(text, p.suffix)))
         if hits:
-            bad.append(f"{p.relative_to(ROOT)}: {sorted(set(hits))}")
-    assert not bad, "cgroup control files are named outside containment.py:\n" + "\n".join(bad)
+            bad.append(f"{p.relative_to(ROOT)}: {hits}")
+    assert not bad, "cgroup control files are named or written outside containment.py:\n" + "\n".join(bad)
 
 
 def test_the_single_writer_is_the_only_write_in_containment_py():
@@ -118,6 +201,32 @@ def test_only_the_security_agent_module_imports_the_writer():
         if p.suffix == ".py" and p != OWNER and WRITER in p.read_text(encoding="utf-8", errors="replace"):
             bad.append(str(p.relative_to(ROOT)))
     assert not bad, f"{WRITER} referenced outside containment.py: {bad}"
+
+
+def test_the_scan_covers_the_added_directories():
+    assert {"scripts", "deploy", "k8s"} <= set(SCAN_DIRS)
+    assert any(p.parts[len(ROOT.parts)] in ("deploy", "k8s", "scripts") for p in _files())
+
+
+def test_detector_catches_built_names_shell_writes_other_control_files_and_yaml():
+    built = ["p = 'cgroup.' + 'freeze'", "p = 'cgroup%s' % '.freeze'", "p = '{}.{}'.format('cgroup', 'freeze')",
+             "p = ''.join(['cgroup', '.', 'kill'])", "p = f'cgroup.{x}'", "p = 'cgroup.' + name",
+             "p = 'pids.' + 'max'", "p = 'memory.high'"]
+    for src in built:
+        assert python_findings(src) or _mentions(src), src
+    shell = ["subprocess.run('echo 1 > /sys/fs/cgroup/x/foo', shell=True)",
+             "os.system('echo ' + '1 | tee -a /sys/fs/cgroup/x/foo')"]
+    for src in shell:
+        assert any("shell string" in f for f in python_findings(src)), src
+    for name in ("pids.max", "memory.max", "memory.high", "cpu.max", "cpu.weight", "cgroup.kill", "cgroup.procs",
+                 "cgroup.subtree_control", "cgroup.freeze"):
+        assert _mentions(f"echo 1 > /x/{name}") == [name], name
+    assert text_findings("command: ['sh', '-c', 'echo 1 > /host/cgroup/x/cgroup.freeze']", ".yaml")
+    assert text_findings("echo 100 > /sys/fs/cgroup/kubepods/foo", ".sh")                  # redirect to a cgroup path
+    assert text_findings("echo 1 | tee /sys/fs/cgroup/x/y", ".sh")
+    assert text_findings("# the Security Agent writes cgroup.freeze\nmountPath: /host/cgroup", ".yaml") == []
+    assert python_findings("p = 'cgroup.events'\nx = 'populated'\n") == []
+    assert python_findings("limits = {'memory': '1Gi'}\nprint(cgroup_root + '/io.stat')") == []
 
 
 def test_the_detector_catches_violations(tmp_path):

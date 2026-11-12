@@ -16,10 +16,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fake_redis import FakeRedis
 from agents.security_agent import containment as ct
 from agents.security_agent.proc_scanner import PodIndex
+from redis.exceptions import ResponseError
 
 NODE, OTHER_NODE = "node-a", "node-b"
 UID = "5f2c1a9e-1111-4222-8333-444455556666"
 OTHER_UID = "aaaabbbb-cccc-dddd-eeee-ffff00001111"
+AGENT_UID = "99999999-8888-4777-8666-555544443333"
 CID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 REQ_ID = "0123456789abcdef0123456789abcdef"
 NOW = 1_700_000_000.0
@@ -42,7 +44,7 @@ class Scene:
     """A fake host: /proc, a cgroup root, a pod index, a mode and a writer spy that flips cgroup.events."""
 
     def __init__(self, tmp_path, proc_line=None, mode="enforce", pod_node=NODE, flip_after_polls=0, flips=True,
-                 make_dir=True, **cfg_over):
+                 make_dir=True, protected=False, jumps=None, **cfg_over):
         self.proc, self.root = tmp_path / "proc", tmp_path / "cgroup"
         self.proc.mkdir()
         self.root.mkdir()
@@ -51,6 +53,8 @@ class Scene:
         (self.proc / "101" / "cgroup").write_text(line)
         (self.proc / "999").mkdir()                       # a host process
         (self.proc / "999" / "cgroup").write_text("0::/system.slice/sshd.service\n")
+        (self.proc / "self").mkdir()                      # the agent's own cgroup (another pod, besteffort)
+        (self.proc / "self" / "cgroup").write_text(f"0::/kubepods/besteffort/pod{AGENT_UID}/{CID}\n")
         self.pod_dir = self.root / POD_REL
         if make_dir:
             (self.pod_dir / CID).mkdir(parents=True)
@@ -64,13 +68,23 @@ class Scene:
         self.polls = 0
         self.flips, self.flip_after_polls = flips, flip_after_polls
         self.t = 0.0
+        self.now = NOW
+        self.jumps = jumps or {}                          # mode call number -> seconds the clock moves forward
+        self.protected = protected
         self.cfg = ct.ContainmentConfig(node=NODE, proc_root=str(self.proc), cgroup_root=str(self.root),
                                         consumer="c1", **cfg_over)
         self.handler = ct.ContainmentHandler(self.cfg, self.index, self._mode_for, writer=self._writer,
-                                             clock=lambda: NOW, monotonic=lambda: self.t, sleep=self._sleep)
+                                             protected_for=self._protected_for,
+                                             clock=lambda: self.now, monotonic=lambda: self.t, sleep=self._sleep)
+
+    def _protected_for(self, namespace):
+        if isinstance(self.protected, Exception):
+            raise self.protected
+        return self.protected
 
     def _mode_for(self, namespace):
         self.mode_calls.append(namespace)
+        self.now += self.jumps.get(len(self.mode_calls), 0)
         m = self.mode
         if isinstance(m, Exception):
             raise m
@@ -151,7 +165,7 @@ def assert_untouched(s, result):
     ({"namespace": "kubeheal"}, "namespace_not_allowed"),
     ({"namespace": "payments"}, "namespace_not_allowed"),
     ({"pod": "web-2"}, "pod_unknown"),
-    ({"timestamp_ms": str(int((NOW - 61) * 1000))}, "expired"),
+    ({"timestamp_ms": str(int((NOW - 31) * 1000))}, "expired"),
     ({"timestamp_ms": str(int((NOW + 3600) * 1000))}, "bad_timestamp"),
     ({"timestamp_ms": "soon"}, "bad_timestamp"),
     ({"timestamp_ms": ""}, "bad_timestamp"),
@@ -179,7 +193,7 @@ def test_pod_without_node_information_is_refused(tmp_path):
 
 def test_request_exactly_at_the_ttl_is_still_served(tmp_path):
     s = Scene(tmp_path)
-    assert s.handle(timestamp_ms=str(int((NOW - 60) * 1000)))["status"] == "frozen"
+    assert s.handle(timestamp_ms=str(int((NOW - 30) * 1000)))["status"] == "frozen"
 
 
 def test_ttl_comes_from_the_environment():
@@ -208,10 +222,44 @@ def test_mode_test_or_unreadable_is_dry_run_and_writes_nothing(tmp_path, mode):
     assert_untouched(s, result)
 
 
-def test_dry_run_also_covers_a_thaw(tmp_path):
+def test_thaw_works_in_test_mode_and_records_the_mode(tmp_path):
     s = Scene(tmp_path, mode="test")
-    assert s.handle(action="thaw", label="")["status"] == "dry_run"
+    s._set_frozen(1)
+    (s.pod_dir / "cgroup.freeze").write_text("1")
+    result = s.handle(action="thaw", label="", requested_by="operator")
+    assert result["status"] == "thawed" and result["frozen"] == "0" and result["mode_seen"] == "test"
+    assert s.writes == ["0"] and s.freeze_file() == "0"
+
+
+@pytest.mark.parametrize("mode", ["test", RuntimeError("watcher down"), None, ""])
+def test_thaw_works_when_the_mode_is_test_or_unreadable(tmp_path, mode):
+    s = Scene(tmp_path, mode=mode)
+    s._set_frozen(1)
+    result = s.handle(action="thaw", label="", requested_by="operator")
+    assert result["status"] == "thawed" and result["mode_seen"] == "test", result
+
+
+@pytest.mark.parametrize("mode", ["enforce", "test"])
+def test_thaw_by_the_executor_is_refused(tmp_path, mode):
+    s = Scene(tmp_path, mode=mode)
+    s._set_frozen(1)
+    result = s.handle(action="thaw", label="", requested_by="executor")
+    assert (result["status"], result["reason"].split(":")[0]) == ("refused", "bad_requested_by")
     assert s.writes == []
+
+
+def test_a_thaw_in_test_mode_still_passes_every_other_check(tmp_path):
+    s = Scene(tmp_path, mode="test")
+    for over, reason in (({"namespace": "kube-system"}, "namespace_not_allowed"), ({"pod_uid": OTHER_UID}, "pod_uid_mismatch"),
+                         ({"node": OTHER_NODE}, "wrong_node"), ({"timestamp_ms": str(int((NOW - 31) * 1000))}, "expired")):
+        result = s.handle(action="thaw", label="", requested_by="operator", **over)
+        assert result["status"] == "refused" and result["reason"].startswith(reason), result
+    assert s.writes == []
+
+
+def test_freeze_in_test_mode_is_still_a_dry_run(tmp_path):
+    s = Scene(tmp_path, mode="test")
+    assert s.handle()["status"] == "dry_run" and s.writes == []
 
 
 def test_mode_flipping_to_test_between_validation_and_write_writes_nothing(tmp_path):
@@ -316,12 +364,13 @@ def test_the_writer_itself_refuses_a_directory_outside_the_root(tmp_path):
         ct.write_cgroup_freeze(str(root), "1", str(root))             # the root itself
     with pytest.raises(ValueError):
         ct.write_cgroup_freeze(str(root / ".." / "outside"), "1", str(root))
-    (root / "pod").mkdir()
+    pod = root / "kubepods" / "burstable" / f"pod{UID}"
+    pod.mkdir(parents=True)
     with pytest.raises(ValueError):
-        ct.write_cgroup_freeze(str(root / "pod"), "2", str(root))     # not 0 or 1
+        ct.write_cgroup_freeze(str(pod), "2", str(root))              # not 0 or 1
     with pytest.raises(FileNotFoundError):                            # opened without create: never makes a file
-        ct.write_cgroup_freeze(str(root / "pod"), "1", str(root))
-    assert not (root / "pod" / "cgroup.freeze").exists()
+        ct.write_cgroup_freeze(str(pod), "1", str(root))
+    assert not (pod / "cgroup.freeze").exists()
     assert (outside / "cgroup.freeze").read_text() == "0"
 
 
@@ -397,16 +446,16 @@ def test_thaw(tmp_path):
 
 def test_thaw_goes_through_the_same_validation(tmp_path):
     s = Scene(tmp_path)
-    result = s.handle(action="thaw", label="", pod_uid=OTHER_UID)
+    result = s.handle(action="thaw", label="", pod_uid=OTHER_UID, requested_by="operator")
     assert result["status"] == "refused" and s.writes == []
-    result = s.handle(action="thaw", label="", namespace="kube-system")
+    result = s.handle(action="thaw", label="", namespace="kube-system", requested_by="operator")
     assert result["reason"].startswith("namespace_not_allowed") and s.writes == []
 
 
 def test_thaw_not_confirmed_is_failed(tmp_path):
     s = Scene(tmp_path, flips=False)
     s._set_frozen(1)
-    result = s.handle(action="thaw", label="")
+    result = s.handle(action="thaw", label="", requested_by="operator")
     assert result["status"] == "failed" and result["reason"].startswith("thaw_not_confirmed")
     assert result["frozen"] == "1"
 
@@ -414,6 +463,208 @@ def test_thaw_not_confirmed_is_failed(tmp_path):
 def test_exfiltration_also_freezes(tmp_path):
     s = Scene(tmp_path)
     assert s.handle(label="exfiltration")["status"] == "frozen"
+
+
+# ---------------------------------------------------------------------------------------------------------
+# review fixes: protected namespace, own pod, writer rules, surviving mutations, expired read-back, threads
+# ---------------------------------------------------------------------------------------------------------
+def test_a_freeze_in_a_protected_namespace_is_refused_but_a_thaw_is_not_blocked(tmp_path):
+    s = Scene(tmp_path, protected=True)
+    result = s.handle()
+    assert result["status"] == "refused" and result["reason"].startswith("namespace_protected")
+    assert s.writes == []
+    s._set_frozen(1)
+    assert s.handle(action="thaw", label="", requested_by="operator")["status"] == "thawed"
+
+
+def test_an_unreadable_protected_label_fails_closed_for_a_freeze(tmp_path):
+    s = Scene(tmp_path, protected=RuntimeError("labels unknown"))
+    assert s.handle()["reason"].startswith("namespace_protected") and s.writes == []
+
+
+def test_the_real_mode_watcher_protects_unknown_namespaces_and_labelled_ones():
+    from agents.common.killswitch import ModeWatcher
+    w = ModeWatcher()
+    assert w.protected_for("prod") is True                # never loaded: fail closed
+    w.ns_readable = True
+    w.apply_namespace(NS(metadata=NS(name="prod", labels={})))
+    w.apply_namespace(NS(metadata=NS(name="dev", labels={"kubeheal/protected": "true"})))
+    assert (w.protected_for("prod"), w.protected_for("dev"), w.protected_for("nope")) == (False, True, True)
+
+
+def test_the_service_hands_the_watchers_protected_check_to_the_handler():
+    svc = ct.ContainmentService.from_env(FakeRedis(), PodIndex(), env={"NODE_NAME": NODE})
+    assert svc.consumer.handler._protected_for == svc.mode.protected_for
+    assert svc.consumer.handler._protected("prod") is True          # no data yet: protected
+
+
+def test_a_freeze_of_the_agents_own_pod_is_refused(tmp_path):
+    s = Scene(tmp_path)
+    (s.proc / "self" / "cgroup").write_text(f"0::/{POD_REL}/{CID}\n")      # the agent runs in the target pod
+    result = s.handle()
+    assert result["status"] == "refused" and result["reason"].startswith("self_pod")
+    assert s.writes == []
+
+
+def test_refuse_own_pod_equal_ancestor_unreadable_and_unplaceable(tmp_path):
+    s = Scene(tmp_path)
+    root = str(s.root)
+    target = os.path.realpath(s.root / "kubepods" / "burstable" / f"pod{UID}")
+    own = lambda path: (s.proc / "self" / "cgroup").write_text(path + chr(10))    # noqa: E731
+    own(f"0::/kubepods/burstable/pod{UID}")                                       # equal
+    with pytest.raises(ct._Refuse) as e:
+        ct.refuse_own_pod(target, "x" * 36, str(s.proc), root)
+    assert e.value.reason.startswith("self_pod")
+    own(f"0::/kubepods/burstable/pod{UID}/{CID}/agent")                           # the target contains the agent
+    with pytest.raises(ct._Refuse):
+        ct.refuse_own_pod(target, "x" * 36, str(s.proc), root)
+    ancestor = os.path.realpath(s.root / "kubepods" / "burstable")                # an ancestor of the agent
+    own(f"0::/kubepods/burstable/pod{OTHER_UID}/{CID}")
+    with pytest.raises(ct._Refuse):
+        ct.refuse_own_pod(ancestor, OTHER_UID.replace("a", "b"), str(s.proc), root)
+    own(f"0::/kubepods/besteffort/pod{AGENT_UID}/{CID}")                          # a sibling pod is fine
+    ct.refuse_own_pod(target, UID, str(s.proc), root)
+    own("0::/../../kubepods/besteffort/podx")                                     # cannot be placed
+    with pytest.raises(ct._Refuse):
+        ct.refuse_own_pod(target, UID, str(s.proc), root)
+    own("12:memory:/kubepods/besteffort/podx")                                    # no cgroup v2 line
+    with pytest.raises(ct._Refuse):
+        ct.refuse_own_pod(target, UID, str(s.proc), root)
+    (s.proc / "self" / "cgroup").unlink()                                         # unreadable: fail closed
+    with pytest.raises(ct._Refuse):
+        ct.refuse_own_pod(target, UID, str(s.proc), root)
+
+
+def test_a_thaw_does_not_need_the_own_pod_check(tmp_path):
+    s = Scene(tmp_path)
+    (s.proc / "self" / "cgroup").unlink()
+    s._set_frozen(1)
+    assert s.handle(action="thaw", label="", requested_by="operator")["status"] == "thawed"
+
+
+def _tree(root, *parts):
+    d = root.joinpath(*parts)
+    d.mkdir(parents=True)
+    (d / "cgroup.freeze").write_text("0")
+    return d
+
+
+def test_the_writer_refuses_qos_slices_kubepods_itself_and_paths_without_a_pod_uid(tmp_path):
+    root = tmp_path / "root"
+    uid_us = UID.replace("-", "_")
+    bad = [
+        _tree(root, "kubepods.slice", "kubepods-burstable.slice"),           # a QoS slice
+        _tree(root, "kubepods", "burstable"),                                # a QoS directory
+        _tree(root, "kubepods", "besteffort"),
+        _tree(root, "kubepods", "guaranteed"),
+        root / "kubepods.slice",                                             # kubepods itself
+        root / "kubepods",
+        _tree(root, f"pod{UID}"),                                            # a pod uid but no kubepods above it
+        _tree(root, "system.slice", f"pod{UID}"),
+        _tree(root, "kubepods", "burstable", "not-a-pod"),                   # below kubepods but no uid
+        _tree(root, f"kubepods.slice-pod{UID}"),                             # looks similar, is not kubepods
+    ]
+    (root / "kubepods.slice" / "cgroup.freeze").write_text("0")
+    (root / "kubepods" / "cgroup.freeze").write_text("0")
+    for d in bad:
+        with pytest.raises(ValueError):
+            ct.write_cgroup_freeze(str(d), "1", str(root))
+        assert (d / "cgroup.freeze").read_text() == "0", d
+    outside = _tree(tmp_path, "elsewhere", "kubepods", f"pod{UID}")
+    with pytest.raises(ValueError):
+        ct.write_cgroup_freeze(str(outside), "1", str(root))                 # a pod path, but outside the root
+    assert (outside / "cgroup.freeze").read_text() == "0"
+    for good in (_tree(root, "kubepods", "burstable", f"pod{UID}"),
+                 _tree(root, "kubepods.slice", "kubepods-burstable.slice", f"kubepods-burstable-pod{uid_us}.slice")):
+        ct.write_cgroup_freeze(str(good), "1", str(root))
+        assert (good / "cgroup.freeze").read_text() == "1"
+
+
+def test_the_handler_turns_a_writer_refusal_into_a_refused_result(tmp_path):
+    s = Scene(tmp_path)
+
+    def refusing(directory, value, root):
+        raise ValueError("not a pod directory")
+    s.handler._writer = refusing
+    result = s.handle()
+    assert result["status"] == "refused" and result["reason"].startswith("cgroup_path_mismatch: writer refused")
+
+
+def test_the_ttl_is_checked_again_right_before_the_write(tmp_path):
+    s = Scene(tmp_path, jumps={2: 31})                    # the clock passes the 30 s TTL while the pod is looked up
+    result = s.handle()
+    assert result["status"] == "refused" and result["reason"] == "expired"
+    assert result["cgroup"] == POD_REL and s.writes == [] and s.freeze_file() == "0"
+
+
+def test_only_the_pids_of_the_requested_pod_are_used(tmp_path):
+    s = Scene(tmp_path)
+    (s.proc / "101" / "cgroup").write_text("0::/system.slice/sshd.service" + chr(10))       # web-1 has no pid now
+    (s.proc / "102").mkdir()
+    (s.proc / "102" / "cgroup").write_text(f"0::/kubepods/besteffort/pod{OTHER_UID}/{CID}" + chr(10))
+    s.index.update_from([make_pod("prod", "web-1", UID, NODE), make_pod("prod", "web-2", OTHER_UID, NODE)], {})
+    result = s.handle()                                   # web-2's pid must not be taken for web-1's
+    assert (result["status"], result["reason"].split(":")[0]) == ("failed", "pod_pids_not_found")
+    assert s.writes == []
+    other = s.handle(pod="web-2", pod_uid=OTHER_UID)
+    assert other["reason"].startswith("cgroup_dir_missing")           # its own pid was found, its directory is not
+
+
+def test_resolve_refuses_a_directory_that_normalises_outside_the_root(tmp_path, monkeypatch):
+    s = Scene(tmp_path)
+    monkeypatch.setattr(ct, "pod_cgroup_components", lambda path, uid: ["..", "outside", f"pod{UID}"])
+    with pytest.raises(ct._Refuse) as e:
+        ct.resolve_pod_cgroup(s.index, "prod", "web-1", UID, str(s.proc), str(s.root))
+    assert e.value.status == "refused" and "outside the cgroup root" in e.value.reason
+    monkeypatch.setattr(ct, "pod_cgroup_components", lambda path, uid: [])               # the root itself
+    with pytest.raises(ct._Refuse) as e:
+        ct.resolve_pod_cgroup(s.index, "prod", "web-1", UID, str(s.proc), str(s.root))
+    assert "outside the cgroup root" in e.value.reason
+
+
+def test_an_expired_freeze_of_a_frozen_cgroup_is_failed_expired_but_frozen(tmp_path):
+    s = Scene(tmp_path)
+    s._set_frozen(1)                                      # an earlier attempt wrote the freeze, then the agent died
+    result = s.handle(timestamp_ms=str(int((NOW - 31) * 1000)))
+    assert (result["status"], result["reason"], result["frozen"]) == ("failed", "expired_but_frozen", "1")
+    assert result["cgroup"] == POD_REL and s.writes == []
+
+
+def test_an_expired_freeze_of_a_cgroup_that_is_not_frozen_stays_refused_expired(tmp_path):
+    s = Scene(tmp_path)
+    result = s.handle(timestamp_ms=str(int((NOW - 31) * 1000)))
+    assert (result["status"], result["reason"], result["frozen"]) == ("refused", "expired", "0")
+
+
+@pytest.mark.parametrize("over", [{"namespace": "kube-system"}, {"pod_uid": OTHER_UID}, {"label": "suspicious"},
+                                  {"action": "thaw", "label": "", "requested_by": "operator"}])
+def test_the_expired_read_back_only_happens_for_an_otherwise_valid_freeze(tmp_path, over):
+    s = Scene(tmp_path)
+    s._set_frozen(1)
+    result = s.handle(timestamp_ms=str(int((NOW - 31) * 1000)), **over)
+    assert result["status"] == "refused" and result["reason"] != "expired_but_frozen"
+    assert result["frozen"] == "0"
+
+
+def test_an_expired_freeze_with_an_unresolvable_cgroup_is_refused_expired(tmp_path):
+    s = Scene(tmp_path, make_dir=False)
+    result = s.handle(timestamp_ms=str(int((NOW - 31) * 1000)))
+    assert (result["status"], result["reason"]) == ("refused", "expired")
+
+
+def test_the_proc_scan_runs_in_a_worker_thread(tmp_path, monkeypatch):
+    import threading
+    s = Scene(tmp_path)
+    seen = []
+    real = ct.resolve_pod_cgroup
+    monkeypatch.setattr(ct, "resolve_pod_cgroup", lambda *a, **k: (seen.append(threading.get_ident()), real(*a, **k))[1])
+    main = []
+
+    async def go():
+        main.append(threading.get_ident())
+        return await s.handler.handle(req())
+    assert run(go())["status"] == "frozen"
+    assert seen and seen[0] != main[0]
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -426,6 +677,12 @@ class Redis(FakeRedis):
         super().__init__()
         self.read_streams, self.consumer, self.stop_after_acks, self.hset_fail = [], None, 1, None
         self.reads = 0
+        self.hget_fail, self.hset_fail_keys, self.xack_fail_ids = {}, {}, set()   # key or id -> exception or flag
+
+    async def hget(self, key, field):
+        if key in self.hget_fail:
+            raise self.hget_fail[key]
+        return await super().hget(key, field)
 
     async def xreadgroup(self, group, consumer, streams, count=None, block=None):
         self.reads += 1
@@ -434,12 +691,16 @@ class Redis(FakeRedis):
         return await super().xreadgroup(group, consumer, streams, count=count, block=block)
 
     async def hset(self, key, field=None, value=None, mapping=None):
+        if key in self.hset_fail_keys:
+            raise self.hset_fail_keys[key]
         if self.hset_fail is not None:
             exc, self.hset_fail = self.hset_fail, None
             raise exc
         return await super().hset(key, field, value, mapping)
 
     async def xack(self, stream, group, *ids):
+        if self.xack_fail_ids & set(ids):
+            raise ResponseError("NOGROUP injected")
         n = await super().xack(stream, group, *ids)
         if len(self.acked) >= self.stop_after_acks and self.consumer is not None:
             self.consumer.running = False
@@ -601,6 +862,120 @@ def test_a_message_left_pending_by_a_dead_consumer_is_reclaimed_and_answered_exp
     res = r.hashes[ct.RESULT_KEY_PREFIX + REQ_ID]
     assert (res["status"], res["reason"]) == ("refused", "expired") and s.writes == []
     assert r.pending_ids(s.cfg.stream, s.cfg.group) == [] and len(r.acked) == 1
+
+
+POISON_ID = "b" * 32
+
+
+def poison_key():
+    return ct.RESULT_KEY_PREFIX + POISON_ID
+
+
+def test_a_wrongtype_poison_message_does_not_block_the_request_behind_it(tmp_path):
+    s = Scene(tmp_path)
+    r, c = make_consumer(s)
+    r.stop_after_acks = 2
+    r.hget_fail[poison_key()] = ResponseError("WRONGTYPE Operation against a key holding the wrong kind of value")
+    run(publish(r, request_id=POISON_ID))
+    run(publish(r))
+    drain(r, c)
+    res = r.hashes[poison_key()]
+    assert (res["status"], res["reason"]) == ("failed", "poison") and RESULT_FIELDS <= set(res)
+    assert r.hashes[ct.RESULT_KEY_PREFIX + REQ_ID]["status"] == "frozen" and len(r.acked) == 2
+    assert r.pending_ids(s.cfg.stream, s.cfg.group) == [] and s.writes == ["1"]     # the poison one never froze
+
+
+def test_a_poison_message_whose_result_key_cannot_be_written_is_still_acked(tmp_path):
+    s = Scene(tmp_path)
+    r, c = make_consumer(s)
+    r.stop_after_acks = 2
+    r.hget_fail[poison_key()] = ResponseError("WRONGTYPE")
+    r.hset_fail_keys[poison_key()] = ResponseError("WRONGTYPE")
+    run(publish(r, request_id=POISON_ID))
+    run(publish(r))
+    drain(r, c)
+    assert poison_key() not in r.hashes and len(r.acked) == 2
+    assert r.hashes[ct.RESULT_KEY_PREFIX + REQ_ID]["status"] == "frozen"
+
+
+def test_a_message_that_keeps_raising_becomes_poison_after_the_chosen_number_of_attempts(tmp_path):
+    s = Scene(tmp_path)
+    r, c = make_consumer(s)
+    r.stop_after_acks = 2
+    calls = []
+
+    real_hget = r.hget
+
+    async def hget(key, field):
+        if key == poison_key() and field == "status":
+            calls.append(key)
+            if len(calls) <= ct.MAX_DELIVERIES:                  # the three attempts of `process` all raise
+                raise ConnectionError("always the same failure")
+        return await real_hget(key, field)
+    r.hget = hget
+    run(publish(r, request_id=POISON_ID))
+    run(publish(r))
+    drain(r, c)
+    assert r.hashes[poison_key()]["reason"] == "poison"
+    assert len(r.sleeps) == ct.MAX_DELIVERIES                      # one back-off per failed attempt
+    assert r.hashes[ct.RESULT_KEY_PREFIX + REQ_ID]["status"] == "frozen" and len(r.acked) == 2
+
+
+def test_a_message_delivered_too_often_is_poison_without_being_handled(tmp_path):
+    s = Scene(tmp_path)
+    r, c = make_consumer(s)
+    run(r.xgroup_create(s.cfg.stream, s.cfg.group, id="0", mkstream=True))
+    run(publish(r))
+    run(r.xreadgroup(s.cfg.group, s.cfg.consumer, {s.cfg.stream: ">"}, count=10))
+    for meta in r.groups[(s.cfg.stream, s.cfg.group)]["pending"].values():
+        meta["times"] = ct.MAX_DELIVERIES + 1
+    drain(r, c)
+    assert r.hashes[ct.RESULT_KEY_PREFIX + REQ_ID]["reason"] == "poison"
+    assert s.writes == [] and len(r.acked) == 1
+
+
+def test_a_failing_reclaim_never_blocks_new_requests(tmp_path):
+    s = Scene(tmp_path)
+    r, c = make_consumer(s)
+    r.fail["xautoclaim"] = RuntimeError("xautoclaim not supported here")
+    run(publish(r))
+    drain(r, c)
+    assert r.hashes[ct.RESULT_KEY_PREFIX + REQ_ID]["status"] == "frozen" and r.sleeps == []
+
+
+def test_an_entry_that_cannot_be_acked_is_not_read_again_and_again(tmp_path):
+    s = Scene(tmp_path)
+    r, c = make_consumer(s)
+    run(r.xgroup_create(s.cfg.stream, s.cfg.group, id="0", mkstream=True))
+    entry_id = run(publish(r, request_id=POISON_ID))
+    run(r.xreadgroup(s.cfg.group, s.cfg.consumer, {s.cfg.stream: ">"}, count=10))   # ours, pending, never acked
+    r.hget_fail[poison_key()] = ResponseError("WRONGTYPE")
+    r.xack_fail_ids.add(entry_id)
+    run(publish(r))                                                                 # new, behind the stuck one
+    drain(r, c)                                                                     # (the read guard in Redis stops a loop)
+    assert r.hashes[ct.RESULT_KEY_PREFIX + REQ_ID]["status"] == "frozen"
+    assert r.pending_ids(s.cfg.stream, s.cfg.group) == [entry_id]
+
+
+def test_a_reclaimed_expired_freeze_of_a_frozen_pod_is_failed_expired_but_frozen(tmp_path):
+    s = Scene(tmp_path)
+    s._set_frozen(1)
+    r, c = make_consumer(s)
+    run(r.xgroup_create(s.cfg.stream, s.cfg.group, id="0", mkstream=True))
+    run(publish(r, timestamp_ms=str(int((NOW - 120) * 1000))))
+    run(r.xreadgroup(s.cfg.group, "dead-consumer", {s.cfg.stream: ">"}, count=10))
+    r.advance(120)
+    drain(r, c)
+    res = r.hashes[ct.RESULT_KEY_PREFIX + REQ_ID]
+    assert (res["status"], res["reason"], res["frozen"]) == ("failed", "expired_but_frozen", "1")
+    assert s.writes == [] and len(r.acked) == 1
+
+
+def test_the_default_ttl_is_30_seconds_and_the_docstring_explains_why():
+    assert ct.DEFAULT_REQUEST_TTL_S == 30.0
+    cfg = ct.ContainmentConfig.from_env({"NODE_NAME": NODE})
+    assert cfg.request_ttl_s == 30.0
+    assert "CONTAIN_FREEZE_TIMEOUT_S" in ct.__doc__ and "expired_but_frozen" in ct.__doc__
 
 
 # ---------------------------------------------------------------------------------------------------------
