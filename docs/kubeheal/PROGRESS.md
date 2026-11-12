@@ -42,7 +42,8 @@ Real usage is measured later and recorded under `docs/kubeheal/results/`.
 | P8 Dashboard | done, merged (218029c) |
 | P9 Platform | done, merged (see merge commit); helm lint and template pass with lab example overlay; nothing run on a cluster yet |
 | P10 | in progress (U4, D6, D8, V1-V3 verified; the LightGBM stack is installed on k3d since 2026-11-12, Helm revision 6; the D-5 replay with the new trace, the freeze check and U6 full acceptance remain) |
-| P11, P13 | not started (the P11 harness is merged; no run has produced data; P13 documentation waits for the code to be verified) |
+| P11 | in progress (bounded E1/E2 runner and narrow k6 ingress policy implemented; full suite on 2026-11-12: 2,101 passed, 11 skipped; first E1 attempt failed all requests and is recorded but has no valid latency measurement; E3-E6 and V5-E1 remain not measured) |
+| P13 | not started (documentation waits for the code and live workflows to be verified) |
 | P12 Model hardening | NOT started; P12-H (retraining on live cluster data) is not approved |
 
 ## Task checklist
@@ -178,14 +179,15 @@ Ransomware:
 - `wave/P11` and `wip/docs-p6d2` were reviewed, fixed and merged on 2026-11-11 (see the review section below).
 
 ### P11 Evaluation harness (touches `eval/`, `docs/kubeheal/results/`; cluster owner runs)
-- [ ] P11-H size: S. Harness `eval/p11_harness.py` (offline builders, k3d-kubeheal and namespace allow-lists, injectable runner, no silent overwrite): reviewed, fixed and merged 2026-11-11 (`a1590d1`). Nothing in it has been run against a cluster; every result file it writes says "not measured" until a run produces data.
-- [ ] P11-E1 size: M. k6 load test 10 to 200 simulated pods, p50 and p95 vs replicas. Also tune the queue-depth HPA target (a CHOSEN DEFAULT in the chart values, not a measurement) from the measured replicas-versus-load data.
-- [ ] P11-E2 size: M. Chaos runs (Chaos Mesh or kubectl): detection continuity, fail-closed rate.
+- [x] P11-H size: S. Offline harness `eval/p11_harness.py` (`a1590d1`) remains context/namespace allow-listed, injectable, and non-overwriting. Added `eval/p11_run.py` for bounded E1 scoring load and E2 inference-pod recovery; safety review fixes include 30 s kubectl call timeouts, create-only Job/ConfigMap setup, full UUID resource names, owner-label-checked best-effort cleanup, fixed inference target, UID-preconditioned Pod DELETE, and k6 outcome validation. Focused tests: 41 passed. Full suite after integrating the P11 NetworkPolicy: 2,101 passed, 11 skipped, 262 warnings in 164.59 s on 2026-11-12.
+- [ ] P11-E1 size: M. k6 scoring load 10 to 200 VUs, p50 and p95 against HPA samples. First 32 VU/90 s attempt failed: 297/297 requests refused, 0 checks passed, latencies `not measured`; Job and ConfigMap cleanup succeeded and HPA remained 2/2. A narrowly scoped allow policy now admits only `app=kubeheal-p11-k6` to inference on `.Values.inference.port`; chart regression also covers a custom inference port. The policy is not deployed; wait for full-suite clearance and orchestrator authorization before rerun. Attempt details: `docs/kubeheal/results/p11/P11_E1_ATTEMPT_2026-11-12.md`. Tune the queue-depth HPA target only from measured replicas-versus-load data.
+- [ ] P11-E2 size: M. Inference pod recovery under mode test; deletion is pinned to the Deployment selector and owner chain, with a UID precondition. Results not measured pending the authorized cluster run.
 - [ ] P11-E3 size: M. RPO and RTO runs against a database volume. Needs: P7.
 - [ ] P11-E4 size: M. End-to-end time-to-action per stage.
 - [ ] P11-E5 size: M. Baselines (Falco rules only, fixed entropy threshold, diff-only drift, single replica, pod delete only).
 - [ ] P11-E6 size: S. FP32 vs FP16 latency and memory.
 - [ ] P11-E7 size: S. Each results file states machine, cluster and date. Verify: scripts produce CSV plus markdown.
+- P11 coverage table: `docs/kubeheal/results/p11/P11_COVERAGE.md` lists E1-E7 and V5-E1. E3 RPO/RTO, E4 stage timing, E5 comparative baselines, E6 FP32/FP16, and V5-E1 remain `not measured` with reasons. Do not run E3 or V5-E1 against existing volumes or before the full containment flow is verified.
 
 ## P0 log
 
@@ -445,20 +447,13 @@ Review method: the `kubeheal-reviewer` agent type was not registered in this ses
 - Open from this session: operator thaws are not in the ledger; result and request are not authenticated against a Redis password holder (HMAC with V5-P3); the hostPath is not narrowed to `kubepods`; the freeze is unverified on a real node.
 - Follow-up the same day: after `2d5d221` the Security Agent image was rebuilt (`b20261112150442`) and `helm upgrade` gave revision 8 `deployed` (15:04 IST), mode `test`. Final suites: work 2059 passed, 11 skipped, 1 deselected; demo 2064 passed, 10 skipped, 1 deselected. Zero-write second-layer check in mode `test`: a freeze request published straight on `kubeheal.contain.req:k3d-kubeheal-agent-0` (requested_by executor, scratch pod in `dev`, deleted afterwards) was answered `status=dry_run reason="mode_test: nothing was written" frozen=0 mode_seen=test`; no node readback was taken for this run (the command had a typo), so the evidence is the agent's own answer.
 
-### Codex resume 2026-11-12 continued
+### Resume status, 2026-11-12
 
-- F1 default-off live test safety and F3/F4 containment HMAC were independently reviewed and merged into `work` as `62426c0`. The integration branch full suite before merge passed: 2064 passed, 12 skipped in 61.93 s. F1 focused run: 34 passed, 2 skipped. Containment focused run: 299 passed, 3 skipped.
-- HMAC authenticates freeze requests, Security Agent results, and operator thaw requests/results. `CONTAIN_HMAC_KEY` currently reuses the Redis password Secret. This meets the Secret-backed signature requirement, but any component that reads the Redis credential can forge messages; a dedicated key Secret is not implemented.
-- The merged S5c and CH4 worktrees were clean and explicitly identified as merged; removed them and pruned worktree metadata. Verified `dev/freeze-scratch` is NotFound. The unrelated metric-query worktree remains because it holds `work`.
-- Fresh HPA run on 2026-11-12 failed: `demo/scripts/hpa_load.ps1` flattened the JavaScript ConfigMap body via `Out-String -NoNewline`, so k6 reported no exported functions. Its `finally` deleted the temporary Job, NetworkPolicy, and ConfigMap; a follow-up list found none. The fix and runbook changes are in isolated branches for review and integration.
-- Current cluster state observed during the session: `k3d-kubeheal` components Running, kill switch mode `test`, inference HPA present at 2/2 idle. No live containment, replay, drift, or mode-toggle demo ran in this session.
-## Resume status, 2026-11-12
-
-- U6 reset constraint: `demo/k3d/down.ps1` deletes PVCs holding MinIO/Redis data. Do not run it. Use a clean workload baseline with volumes preserved; fresh-cluster baseline is not measured.
-- Candidate branch `wave/codex-demo-candidate` combines current `work`, HPA cleanup, and F11 measured run. D5/F4 and P11/NetworkPolicy are being integrated for combined verification; this is staging, not the official `demo` merge.
-- F11 measured on `k3d-kubeheal`, mode `test`, machine `LAPTOP-74N9LTFA`: 32 VUs/90 s; 121,088/121,088 checks; request rate 1,269.57/s; median 22.86 ms; p95 38.45 ms; average 25.12 ms; max 1.76 s; HPA 2 -> 7 -> 2; elapsed 7m14s. The temporary Job, NetworkPolicy, and ConfigMap were removed. Evidence summary: `docs/kubeheal/demo-evidence/F11/hpa-run-2026-11-12.md`; transcript/screenshots remain to capture.
-- P11/NetworkPolicy branch full suite: 2101 passed, 11 skipped. D5/F4 branch full suite: 2101 passed, 12 skipped. The combined candidate suite is pending.
-- P11 E1 first attempt: 297 requests, 0/297 checks passed, 297/297 failed. HPA stayed 2/2 and temporary Job/ConfigMap were deleted. The request path was blocked because default-deny ingress excluded the k6 Job. This is a failed run, with p50/p95 `not measured`; artifacts are under `docs/kubeheal/results/p11/`. A narrow same-namespace k6-to-inference TCP port rule is implemented in the P11 branch but not deployed. E2 remains paused.
-- D5/F4 hardening is on `wave/Codex-D5-Replay` commit `b516a0d`, focused 253 passed and full suite 2101 passed, 12 skipped. It adds replay dry-run enforcement, non-target Falco auto fallback, bounded cleanup, and the dedicated upgrade-stable HMAC Secret. It has not been deployed or run against k3d.
-- Runbook updates are on `wave/demo-runbook` through `c3f6dcb`; live flows without safe triggers remain marked `NOT VERIFIED`. F2-F11 evidence and screenshots are still incomplete.
-- Next: finish candidate merges, run its full suite, deploy only the combined candidate chart on `k3d-kubeheal`, then retry bounded P11 E1 and E2. Do not change mode except in a scripted, logged enforce window. Complete remaining live features, U6 twice, rehearsal, final work/demo suites, README/AGENTS/PUSH_PLAN, secret scan, and commit. Never push or set `ALLOW_PUSH`.
+- U6 reset constraint: `demo/k3d/down.ps1` deletes PVCs holding MinIO/Redis data. Do not run it. Use a clean workload baseline with volumes preserved; a fresh-cluster baseline remains not measured.
+- Candidate `wave/codex-demo-candidate` now integrates current work, HPA, D5/F4, and P11/NetworkPolicy for staging. It is not the official `demo` merge. Combined full suite is pending.
+- Separate full suites: P11/NetworkPolicy 2101 passed, 11 skipped; D5/F4 2101 passed, 12 skipped; the prior HPA candidate 2073 passed, 11 skipped.
+- F11 measured on `k3d-kubeheal`, mode `test`, machine `LAPTOP-74N9LTFA`: 32 VUs/90 s; 121,088/121,088 checks; request rate 1,269.57/s; median 22.86 ms; p95 38.45 ms; average 25.12 ms; max 1.76 s; HPA 2 -> 7 -> 2; elapsed 7m14s. Temporary resources were removed. Summary: `docs/kubeheal/demo-evidence/F11/hpa-run-2026-11-12.md`; rehearsal transcript/screenshots remain to capture.
+- P11 E1 first attempt: 297 requests, 0/297 checks passed, 297/297 failed because default-deny ingress excluded the k6 Job. HPA stayed 2/2 and temporary Job/ConfigMap were deleted. p50/p95 are `not measured`; raw artifacts are under `docs/kubeheal/results/p11/`. A narrow same-namespace k6-to-inference ingress policy follows `.Values.inference.port`; it is integrated in candidate but not deployed. E2 remains paused.
+- D5/F4 commit `b516a0d` passed 253 focused tests and 2101 full-suite tests with 12 skipped. It adds replay dry-run enforcement, non-target Falco auto fallback, bounded cleanup, and dedicated upgrade-stable HMAC Secret. No k3d deployment or replay yet.
+- The runbook is committed on `wave/demo-runbook` through `c3f6dcb`. Missing safe live triggers remain `NOT VERIFIED`; evidence and screenshots are incomplete.
+- Next: full candidate suite, review, then deploy only the combined candidate chart on `k3d-kubeheal` and retry bounded P11 E1/E2. Then complete F2-F10 live evidence, U6 twice, rehearsal, final work/demo suites, README/AGENTS/PUSH_PLAN, secret scan, and commits. Mode remains `test` except scripted logged enforce windows. Never push or set `ALLOW_PUSH`.
