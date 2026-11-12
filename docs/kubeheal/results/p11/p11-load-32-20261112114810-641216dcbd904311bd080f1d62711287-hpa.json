@@ -1,0 +1,472 @@
+{
+  "before": {
+    "time_utc": "2026-11-12T11:48:10+00:00",
+    "current_replicas": 2,
+    "desired_replicas": 2,
+    "current_metrics": [
+      {
+        "pods": {
+          "current": {
+            "averageValue": "0"
+          },
+          "metric": {
+            "name": "kubeheal_model_inflight_requests"
+          }
+        },
+        "type": "Pods"
+      }
+    ]
+  },
+  "samples": [
+    {
+      "time_utc": "2026-11-12T11:48:10+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:48:15+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:48:20+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:48:26+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:48:31+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:48:36+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:48:41+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:48:46+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:48:51+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:48:57+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:49:02+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:49:07+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:49:12+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:49:17+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:49:23+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:49:28+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:49:33+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:49:38+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:49:43+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:49:48+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:49:54+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:49:59+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:50:04+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:50:09+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "500m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-12T11:50:14+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "500m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    }
+  ]
+}

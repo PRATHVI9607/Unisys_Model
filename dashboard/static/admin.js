@@ -48,6 +48,11 @@
            { candidate_id: b.getAttribute("data-candidate"), reason: reason ? reason.value : "" });
     } else if (action === "approve" || action === "reject") {
       call("/api/approvals/" + encodeURIComponent(b.getAttribute("data-incident")) + "/" + action, {});
+    } else if (action === "snapshot-freeze-release") {
+      var reason = document.getElementById("snapshot-freeze-reason");
+      var force = document.getElementById("snapshot-freeze-force");
+      call("/api/incidents/" + encodeURIComponent(b.getAttribute("data-incident")) + "/release-snapshot-freeze",
+           { reason: reason ? reason.value : "", force: !!(force && force.checked) });
     }
   });
 })();

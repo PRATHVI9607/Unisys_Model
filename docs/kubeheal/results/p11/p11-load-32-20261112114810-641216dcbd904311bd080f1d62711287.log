@@ -1,0 +1,650 @@
+
+         /\      Grafana   /â€¾â€¾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   â€¾â€¾\ 
+  /          \   |   (  |  (â€¾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /scripts/load.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 32 max VUs, 2m0s max duration (incl. graceful stop):
+              * default: 32 looping VUs for 1m30s (gracefulStop: 30s)
+
+time="2026-11-12T11:48:12Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:12Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:12Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:12Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:12Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:12Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:12Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:12Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:12Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:12Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:12Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:12Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m01.0s), 32/32 VUs, 12 complete and 0 interrupted iterations
+default   [   1% ] 32 VUs  0m01.0s/1m30s
+time="2026-11-12T11:48:13Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:13Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m02.0s), 32/32 VUs, 14 complete and 0 interrupted iterations
+default   [   2% ] 32 VUs  0m02.0s/1m30s
+time="2026-11-12T11:48:14Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:14Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m03.0s), 32/32 VUs, 16 complete and 0 interrupted iterations
+default   [   3% ] 32 VUs  0m03.0s/1m30s
+time="2026-11-12T11:48:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m04.0s), 32/32 VUs, 18 complete and 0 interrupted iterations
+default   [   4% ] 32 VUs  0m04.0s/1m30s
+time="2026-11-12T11:48:16Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:16Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m05.0s), 32/32 VUs, 20 complete and 0 interrupted iterations
+default   [   6% ] 32 VUs  0m05.0s/1m30s
+time="2026-11-12T11:48:17Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:17Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m06.0s), 32/32 VUs, 22 complete and 0 interrupted iterations
+default   [   7% ] 32 VUs  0m06.0s/1m30s
+time="2026-11-12T11:48:18Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:18Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:18Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m08.8s), 32/32 VUs, 25 complete and 0 interrupted iterations
+default   [   8% ] 32 VUs  0m07.0s/1m30s
+time="2026-11-12T11:48:21Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:21Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m09.8s), 32/32 VUs, 27 complete and 0 interrupted iterations
+default   [   9% ] 32 VUs  0m08.0s/1m30s
+time="2026-11-12T11:48:22Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:22Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m10.8s), 32/32 VUs, 29 complete and 0 interrupted iterations
+default   [  10% ] 32 VUs  0m09.0s/1m30s
+time="2026-11-12T11:48:23Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:23Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m11.8s), 32/32 VUs, 31 complete and 0 interrupted iterations
+default   [  11% ] 32 VUs  0m10.0s/1m30s
+time="2026-11-12T11:48:24Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:24Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m12.8s), 32/32 VUs, 33 complete and 0 interrupted iterations
+default   [  12% ] 32 VUs  0m11.0s/1m30s
+time="2026-11-12T11:48:25Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:25Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m13.8s), 32/32 VUs, 35 complete and 0 interrupted iterations
+default   [  13% ] 32 VUs  0m12.0s/1m30s
+time="2026-11-12T11:48:26Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:26Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m14.8s), 32/32 VUs, 37 complete and 0 interrupted iterations
+default   [  14% ] 32 VUs  0m13.0s/1m30s
+time="2026-11-12T11:48:27Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:27Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m15.8s), 32/32 VUs, 39 complete and 0 interrupted iterations
+default   [  16% ] 32 VUs  0m14.0s/1m30s
+time="2026-11-12T11:48:28Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:28Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m16.8s), 32/32 VUs, 41 complete and 0 interrupted iterations
+default   [  17% ] 32 VUs  0m15.0s/1m30s
+time="2026-11-12T11:48:29Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:29Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m17.8s), 32/32 VUs, 43 complete and 0 interrupted iterations
+default   [  18% ] 32 VUs  0m16.0s/1m30s
+time="2026-11-12T11:48:30Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:30Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m18.8s), 32/32 VUs, 45 complete and 0 interrupted iterations
+default   [  19% ] 32 VUs  0m17.0s/1m30s
+time="2026-11-12T11:48:31Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:31Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:31Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m19.8s), 32/32 VUs, 48 complete and 0 interrupted iterations
+default   [  20% ] 32 VUs  0m18.0s/1m30s
+time="2026-11-12T11:48:32Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:32Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m20.8s), 32/32 VUs, 50 complete and 0 interrupted iterations
+default   [  21% ] 32 VUs  0m19.0s/1m30s
+time="2026-11-12T11:48:33Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:33Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:33Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m21.8s), 32/32 VUs, 53 complete and 0 interrupted iterations
+default   [  22% ] 32 VUs  0m20.0s/1m30s
+time="2026-11-12T11:48:34Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:34Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m22.8s), 32/32 VUs, 55 complete and 0 interrupted iterations
+default   [  23% ] 32 VUs  0m21.0s/1m30s
+time="2026-11-12T11:48:35Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:35Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m23.8s), 32/32 VUs, 57 complete and 0 interrupted iterations
+default   [  24% ] 32 VUs  0m22.0s/1m30s
+time="2026-11-12T11:48:36Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:36Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m24.8s), 32/32 VUs, 59 complete and 0 interrupted iterations
+default   [  26% ] 32 VUs  0m23.0s/1m30s
+time="2026-11-12T11:48:37Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:37Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m25.8s), 32/32 VUs, 61 complete and 0 interrupted iterations
+default   [  27% ] 32 VUs  0m24.0s/1m30s
+time="2026-11-12T11:48:38Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:38Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m26.8s), 32/32 VUs, 63 complete and 0 interrupted iterations
+default   [  28% ] 32 VUs  0m25.0s/1m30s
+time="2026-11-12T11:48:39Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:39Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m27.8s), 32/32 VUs, 65 complete and 0 interrupted iterations
+default   [  29% ] 32 VUs  0m26.0s/1m30s
+time="2026-11-12T11:48:40Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:40Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m28.8s), 32/32 VUs, 67 complete and 0 interrupted iterations
+default   [  30% ] 32 VUs  0m27.0s/1m30s
+time="2026-11-12T11:48:41Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:41Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m29.8s), 32/32 VUs, 69 complete and 0 interrupted iterations
+default   [  31% ] 32 VUs  0m28.0s/1m30s
+time="2026-11-12T11:48:42Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:42Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m30.8s), 32/32 VUs, 71 complete and 0 interrupted iterations
+default   [  32% ] 32 VUs  0m29.0s/1m30s
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m31.8s), 32/32 VUs, 74 complete and 0 interrupted iterations
+default   [  33% ] 32 VUs  0m30.0s/1m30s
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (0m32.8s), 32/32 VUs, 94 complete and 0 interrupted iterations
+default   [  34% ] 32 VUs  0m31.0s/1m30s
+time="2026-11-12T11:48:44Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:44Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:44Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m33.8s), 32/32 VUs, 97 complete and 0 interrupted iterations
+default   [  36% ] 32 VUs  0m32.0s/1m30s
+time="2026-11-12T11:48:45Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:45Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m34.8s), 32/32 VUs, 99 complete and 0 interrupted iterations
+default   [  37% ] 32 VUs  0m33.0s/1m30s
+time="2026-11-12T11:48:47Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:47Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m35.8s), 32/32 VUs, 101 complete and 0 interrupted iterations
+default   [  38% ] 32 VUs  0m34.0s/1m30s
+time="2026-11-12T11:48:48Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:48Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:48Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m36.8s), 32/32 VUs, 104 complete and 0 interrupted iterations
+default   [  39% ] 32 VUs  0m35.0s/1m30s
+time="2026-11-12T11:48:49Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:49Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:49Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (0m37.8s), 32/32 VUs, 107 complete and 0 interrupted iterations
+default   [  40% ] 32 VUs  0m36.0s/1m30s
+time="2026-11-12T11:48:50Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:50Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:50Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:48:50Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (0m40.7s), 32/32 VUs, 111 complete and 0 interrupted iterations
+default   [  41% ] 32 VUs  0m37.0s/1m30s
+time="2026-11-12T11:48:52Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:52Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m41.7s), 32/32 VUs, 113 complete and 0 interrupted iterations
+default   [  42% ] 32 VUs  0m38.0s/1m30s
+time="2026-11-12T11:48:53Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:53Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:53Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m42.7s), 32/32 VUs, 116 complete and 0 interrupted iterations
+default   [  43% ] 32 VUs  0m39.0s/1m30s
+time="2026-11-12T11:48:54Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:54Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:54Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m43.7s), 32/32 VUs, 119 complete and 0 interrupted iterations
+default   [  44% ] 32 VUs  0m40.0s/1m30s
+time="2026-11-12T11:48:56Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:56Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m44.7s), 32/32 VUs, 121 complete and 0 interrupted iterations
+default   [  46% ] 32 VUs  0m41.0s/1m30s
+time="2026-11-12T11:48:56Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:56Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:57Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (0m45.7s), 32/32 VUs, 124 complete and 0 interrupted iterations
+default   [  47% ] 32 VUs  0m42.0s/1m30s
+time="2026-11-12T11:48:57Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:58Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m46.7s), 32/32 VUs, 126 complete and 0 interrupted iterations
+default   [  48% ] 32 VUs  0m43.0s/1m30s
+time="2026-11-12T11:48:59Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:48:59Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m47.7s), 32/32 VUs, 128 complete and 0 interrupted iterations
+default   [  49% ] 32 VUs  0m44.0s/1m30s
+time="2026-11-12T11:49:00Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:00Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m48.7s), 32/32 VUs, 130 complete and 0 interrupted iterations
+default   [  50% ] 32 VUs  0m45.0s/1m30s
+time="2026-11-12T11:49:01Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:01Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:01Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m49.7s), 32/32 VUs, 133 complete and 0 interrupted iterations
+default   [  51% ] 32 VUs  0m46.0s/1m30s
+time="2026-11-12T11:49:01Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:02Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m50.7s), 32/32 VUs, 135 complete and 0 interrupted iterations
+default   [  52% ] 32 VUs  0m47.0s/1m30s
+time="2026-11-12T11:49:02Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:02Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m51.7s), 32/32 VUs, 137 complete and 0 interrupted iterations
+default   [  53% ] 32 VUs  0m48.0s/1m30s
+time="2026-11-12T11:49:03Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:04Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m52.7s), 32/32 VUs, 139 complete and 0 interrupted iterations
+default   [  54% ] 32 VUs  0m49.0s/1m30s
+time="2026-11-12T11:49:04Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:04Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:05Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:05Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (0m53.7s), 32/32 VUs, 143 complete and 0 interrupted iterations
+default   [  56% ] 32 VUs  0m50.0s/1m30s
+time="2026-11-12T11:49:05Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:05Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m54.7s), 32/32 VUs, 145 complete and 0 interrupted iterations
+default   [  57% ] 32 VUs  0m51.0s/1m30s
+time="2026-11-12T11:49:06Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:07Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:07Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:07Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (0m55.7s), 32/32 VUs, 149 complete and 0 interrupted iterations
+default   [  58% ] 32 VUs  0m52.0s/1m30s
+time="2026-11-12T11:49:07Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:08Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m56.7s), 32/32 VUs, 151 complete and 0 interrupted iterations
+default   [  59% ] 32 VUs  0m53.0s/1m30s
+time="2026-11-12T11:49:09Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:09Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:09Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:09Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (0m57.7s), 32/32 VUs, 155 complete and 0 interrupted iterations
+default   [  60% ] 32 VUs  0m54.0s/1m30s
+time="2026-11-12T11:49:10Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:10Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m58.7s), 32/32 VUs, 157 complete and 0 interrupted iterations
+default   [  61% ] 32 VUs  0m55.0s/1m30s
+time="2026-11-12T11:49:11Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:11Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (0m59.7s), 32/32 VUs, 159 complete and 0 interrupted iterations
+default   [  62% ] 32 VUs  0m56.0s/1m30s
+time="2026-11-12T11:49:12Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:12Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m00.7s), 32/32 VUs, 161 complete and 0 interrupted iterations
+default   [  63% ] 32 VUs  0m57.0s/1m30s
+time="2026-11-12T11:49:13Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:13Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:13Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m01.7s), 32/32 VUs, 164 complete and 0 interrupted iterations
+default   [  64% ] 32 VUs  0m58.0s/1m30s
+time="2026-11-12T11:49:14Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:14Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m02.7s), 32/32 VUs, 166 complete and 0 interrupted iterations
+default   [  66% ] 32 VUs  0m59.0s/1m30s
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m03.7s), 32/32 VUs, 170 complete and 0 interrupted iterations
+default   [  67% ] 32 VUs  1m00.0s/1m30s
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:15Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m04.7s), 32/32 VUs, 186 complete and 0 interrupted iterations
+default   [  68% ] 32 VUs  1m01.0s/1m30s
+time="2026-11-12T11:49:16Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:16Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m05.7s), 32/32 VUs, 188 complete and 0 interrupted iterations
+default   [  69% ] 32 VUs  1m02.0s/1m30s
+time="2026-11-12T11:49:17Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:17Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m06.7s), 32/32 VUs, 190 complete and 0 interrupted iterations
+default   [  70% ] 32 VUs  1m03.0s/1m30s
+time="2026-11-12T11:49:18Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:18Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:18Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m07.7s), 32/32 VUs, 193 complete and 0 interrupted iterations
+default   [  71% ] 32 VUs  1m04.0s/1m30s
+time="2026-11-12T11:49:19Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:19Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m08.7s), 32/32 VUs, 195 complete and 0 interrupted iterations
+default   [  72% ] 32 VUs  1m05.0s/1m30s
+time="2026-11-12T11:49:20Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:20Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:20Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m09.7s), 32/32 VUs, 198 complete and 0 interrupted iterations
+default   [  73% ] 32 VUs  1m06.0s/1m30s
+time="2026-11-12T11:49:21Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:21Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:21Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m11.4s), 32/32 VUs, 201 complete and 0 interrupted iterations
+default   [  74% ] 32 VUs  1m07.0s/1m30s
+time="2026-11-12T11:49:23Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:23Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m12.4s), 32/32 VUs, 203 complete and 0 interrupted iterations
+default   [  76% ] 32 VUs  1m08.0s/1m30s
+time="2026-11-12T11:49:24Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:24Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m13.4s), 32/32 VUs, 205 complete and 0 interrupted iterations
+default   [  77% ] 32 VUs  1m09.0s/1m30s
+time="2026-11-12T11:49:25Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:25Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:25Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:25Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m14.4s), 32/32 VUs, 209 complete and 0 interrupted iterations
+default   [  78% ] 32 VUs  1m10.0s/1m30s
+time="2026-11-12T11:49:26Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:26Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:26Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m15.4s), 32/32 VUs, 212 complete and 0 interrupted iterations
+default   [  79% ] 32 VUs  1m11.0s/1m30s
+time="2026-11-12T11:49:27Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:27Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m16.4s), 32/32 VUs, 214 complete and 0 interrupted iterations
+default   [  80% ] 32 VUs  1m12.0s/1m30s
+time="2026-11-12T11:49:28Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:28Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:28Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m17.4s), 32/32 VUs, 217 complete and 0 interrupted iterations
+default   [  81% ] 32 VUs  1m13.0s/1m30s
+time="2026-11-12T11:49:29Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:29Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m18.4s), 32/32 VUs, 219 complete and 0 interrupted iterations
+default   [  82% ] 32 VUs  1m14.0s/1m30s
+time="2026-11-12T11:49:30Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:30Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:30Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:30Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m19.4s), 32/32 VUs, 223 complete and 0 interrupted iterations
+default   [  83% ] 32 VUs  1m15.0s/1m30s
+time="2026-11-12T11:49:31Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:31Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:31Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m20.4s), 32/32 VUs, 226 complete and 0 interrupted iterations
+default   [  84% ] 32 VUs  1m16.0s/1m30s
+time="2026-11-12T11:49:32Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:32Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m21.4s), 32/32 VUs, 228 complete and 0 interrupted iterations
+default   [  86% ] 32 VUs  1m17.0s/1m30s
+time="2026-11-12T11:49:33Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:33Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m22.4s), 32/32 VUs, 230 complete and 0 interrupted iterations
+default   [  87% ] 32 VUs  1m18.0s/1m30s
+time="2026-11-12T11:49:34Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:34Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m23.4s), 32/32 VUs, 232 complete and 0 interrupted iterations
+default   [  88% ] 32 VUs  1m19.0s/1m30s
+time="2026-11-12T11:49:35Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:35Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m24.4s), 32/32 VUs, 234 complete and 0 interrupted iterations
+default   [  89% ] 32 VUs  1m20.0s/1m30s
+time="2026-11-12T11:49:36Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:36Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m25.4s), 32/32 VUs, 236 complete and 0 interrupted iterations
+default   [  90% ] 32 VUs  1m21.0s/1m30s
+time="2026-11-12T11:49:37Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:37Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:37Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:37Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:38Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m28.3s), 32/32 VUs, 241 complete and 0 interrupted iterations
+default   [  91% ] 32 VUs  1m22.0s/1m30s
+time="2026-11-12T11:49:40Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:40Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:40Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m29.3s), 32/32 VUs, 244 complete and 0 interrupted iterations
+default   [  92% ] 32 VUs  1m23.0s/1m30s
+time="2026-11-12T11:49:41Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:41Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:41Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:41Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:41Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m30.3s), 32/32 VUs, 249 complete and 0 interrupted iterations
+default   [  93% ] 32 VUs  1m24.0s/1m30s
+time="2026-11-12T11:49:42Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:42Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m31.3s), 32/32 VUs, 251 complete and 0 interrupted iterations
+default   [  94% ] 32 VUs  1m25.0s/1m30s
+time="2026-11-12T11:49:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:43Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m32.3s), 32/32 VUs, 253 complete and 0 interrupted iterations
+default   [  96% ] 32 VUs  1m26.0s/1m30s
+time="2026-11-12T11:49:44Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:44Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:44Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m33.3s), 32/32 VUs, 256 complete and 0 interrupted iterations
+default   [  97% ] 32 VUs  1m27.0s/1m30s
+time="2026-11-12T11:49:45Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:45Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:45Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m34.3s), 32/32 VUs, 259 complete and 0 interrupted iterations
+default   [  98% ] 32 VUs  1m28.0s/1m30s
+time="2026-11-12T11:49:46Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:46Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m35.3s), 32/32 VUs, 261 complete and 0 interrupted iterations
+default   [  99% ] 32 VUs  1m29.0s/1m30s
+time="2026-11-12T11:49:47Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:47Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:47Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:48Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m36.3s), 32/32 VUs, 265 complete and 0 interrupted iterations
+default   [ 100% ] 32 VUs  1m30.0s/1m30s
+time="2026-11-12T11:49:48Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:48Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:48Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:48Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:48Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:49Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:49Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m37.3s), 25/32 VUs, 272 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+time="2026-11-12T11:49:49Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m38.3s), 24/32 VUs, 273 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+time="2026-11-12T11:49:50Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:50Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:51Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:51Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:51Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m39.3s), 19/32 VUs, 278 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+time="2026-11-12T11:49:51Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:51Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:49:51Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:52Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m40.3s), 15/32 VUs, 282 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+time="2026-11-12T11:49:53Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-12T11:49:53Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m41.3s), 13/32 VUs, 284 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+time="2026-11-12T11:49:53Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m42.3s), 12/32 VUs, 285 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+time="2026-11-12T11:49:54Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m44.2s), 11/32 VUs, 286 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+
+running (1m45.2s), 11/32 VUs, 286 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+time="2026-11-12T11:49:57Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m46.2s), 10/32 VUs, 287 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+
+running (1m47.2s), 10/32 VUs, 287 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+time="2026-11-12T11:50:00Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m48.2s), 09/32 VUs, 288 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+time="2026-11-12T11:50:00Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m49.2s), 08/32 VUs, 289 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+time="2026-11-12T11:50:01Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:50:01Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:50:02Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+
+running (1m50.2s), 05/32 VUs, 292 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+
+running (1m51.2s), 05/32 VUs, 292 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+time="2026-11-12T11:50:03Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:50:03Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:50:03Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+time="2026-11-12T11:50:03Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+running (1m52.2s), 01/32 VUs, 296 complete and 0 interrupted iterations
+default â†“ [ 100% ] 32 VUs  1m30s
+time="2026-11-12T11:50:04Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial: i/o timeout"
+
+     âœ— health prediction returned 200
+      â†³  0% â€” âœ“ 0 / âœ— 297
+
+     checks.....................: 0.00%   0 out of 297
+     data_received..............: 0 B     0 B/s
+     data_sent..................: 0 B     0 B/s
+     http_req_blocked...........: med=0s    p(95)=0s 
+     http_req_connecting........: med=0s    p(95)=0s 
+     http_req_duration..........: med=0s    p(95)=0s 
+     http_req_failed............: 100.00% 297 out of 297
+     http_req_receiving.........: med=0s    p(95)=0s 
+     http_req_sending...........: med=0s    p(95)=0s 
+     http_req_tls_handshaking...: med=0s    p(95)=0s 
+     http_req_waiting...........: med=0s    p(95)=0s 
+     http_reqs..................: 297     2.638763/s
+     iteration_duration.........: med=3.05s p(95)=30s
+     iterations.................: 297     2.638763/s
+     vus........................: 1       min=1          max=32
+     vus_max....................: 32      min=32         max=32
+
+
+running (1m52.6s), 00/32 VUs, 297 complete and 0 interrupted iterations
+default âœ“ [ 100% ] 32 VUs  1m30s
