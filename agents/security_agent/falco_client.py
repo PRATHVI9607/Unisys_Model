@@ -61,8 +61,8 @@ RANSOMWARE_SYSCALLS = {
 # real syscall name. For events from older or custom rules without it, the syscall family is taken from the
 # rule name (substring, lower case). The result is marked
 # `syscall_inferred` and is the family the rule's condition selects (the rename rule fires on
-# rename/renameat/renameat2, the write rule on write/pwrite/pwritev/ftruncate/truncate, the note rule on
-# open/openat/creat), not the exact syscall.
+# rename/renameat/renameat2, the note rule on open/openat/creat; "mass write" is the name of the previous
+# write rule and only matches older recordings), not the exact syscall.
 RULE_SYSCALL_FALLBACK = (
     ("mass rename", "rename"),
     ("mass write", "write"),

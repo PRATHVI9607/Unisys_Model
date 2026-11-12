@@ -203,3 +203,50 @@ def test_the_new_rules_trace_is_strict_about_which_rule_emits_which_field(parsed
 def test_the_rules_say_which_fields_they_emit_in_the_output_string(parsed):
     for rule in parsed["rules"].values():
         assert "%evt.type" in rule["output"] and "%proc.pid" in rule["output"]
+
+
+# ---- a rule that Falco would refuse to load ----------------------------------------------------------------
+# A rule that names an undefined macro or list, or a misspelled field, makes Falco fail at start: no events at all,
+# and the Security Agent then silently falls back to the /proc tracker. This cannot be proven without a Falco
+# binary, so these checks resolve the names offline against what the file itself defines and a known-field set.
+KNOWN_FIELDS = {
+    "evt.type", "evt.dir", "evt.arg.flags", "evt.arg.path", "evt.arg.name", "fd.name", "fs.path.name",
+    "fs.path.source", "fs.path.target", "proc.pid", "proc.name", "k8s.pod.name", "k8s.pod.uid", "k8s.ns.name",
+    "container.id", "container.name",
+}
+FIELD_RE = re.compile(r"\b((?:evt|proc|fd|fs|k8s|container)\.[a-z0-9_]+(?:\.[a-z0-9_]+)*)")
+
+
+def _identifiers(text: str) -> set[str]:
+    text = re.sub(r"\"[^\"]*\"", " ", str(text))                 # string literals are not names
+    return set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", FIELD_RE.sub(" ", text)))
+
+
+def test_every_macro_and_list_a_condition_uses_is_defined_before_use(parsed):
+    items = yaml.safe_load(RULES_FILE.read_text(encoding="utf-8"))
+    defined: set[str] = set()
+    for item in items:
+        if "list" in item:
+            defined.add(item["list"])
+        condition = item.get("condition")
+        if condition is not None:
+            used = {w for w in _identifiers(condition) if w.startswith("kh_")}
+            missing = used - defined
+            assert not missing, f"{item.get('rule') or item.get('macro')} uses {sorted(missing)} before they are defined"
+        if "macro" in item:
+            defined.add(item["macro"])
+
+
+def test_every_field_in_a_condition_or_output_is_a_known_falco_field(parsed):
+    items = yaml.safe_load(RULES_FILE.read_text(encoding="utf-8"))
+    for item in items:
+        text = " ".join(str(item.get(k, "")) for k in ("condition", "output"))
+        unknown = {f for f in FIELD_RE.findall(text) if f not in KNOWN_FIELDS}
+        assert not unknown, f"{item.get('rule') or item.get('macro')} uses unknown Falco fields {sorted(unknown)}"
+
+
+def test_the_checks_above_would_catch_a_typo(parsed, tmp_path):
+    """Self-test of the checker: a misspelled field and an undefined macro are both reported."""
+    assert {f for f in FIELD_RE.findall("fs.path.nme = x and evt.type in (open)") if f not in KNOWN_FIELDS} == \
+        {"fs.path.nme"}
+    assert {w for w in _identifiers("kh_in_podX and evt.type = open") if w.startswith("kh_")} == {"kh_in_podX"}

@@ -38,9 +38,8 @@ helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring
 # hostPath the Security Agent tails. (Optional: skip if no eBPF on the node;
 # detection still works via the /proc write-byte tracker.)
 helm install falco falcosecurity/falco -n falco --create-namespace \
-  --set driver.kind=ebpf --set json_output=true --set tty=true \
+  -f k8s/falco-values.yaml --set driver.kind=ebpf \
   --set-file customRules."kubeheal_rules\.yaml"=k8s/falco-kubeheal-rules.yaml \
-  --set 'extra.args={-o,file_output.enabled=true,-o,file_output.filename=/var/run/falco/events.jsonl,-o,file_output.keep_alive=true}' \
   2>/dev/null || echo "  (Falco install skipped — /proc tracker covers detection)"
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=redis -n kubeheal --timeout=120s || true
 
