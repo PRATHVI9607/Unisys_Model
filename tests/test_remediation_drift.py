@@ -189,6 +189,10 @@ def test_canary_rolls_back_on_a_worse_window_and_restores_the_exact_spec():
     out = s.go()
     assert out.startswith("rolled_back:window 2")
     assert s.live_spec() == s.live_before
+    bad_window = [payload for step, payload in s.records if step == "canary_window" and payload["window"] == 2][0]
+    assert bad_window["why"] == "http_p99_latency_ms worse: 300.0 > 200.0"
+    saved = run(drift.RollbackStore(s.redis).load("prod", "web"))
+    assert saved["state"] == "rolled_back" and saved["live_spec"] == s.live_before
     assert s.steps()[-1] == "rolled_back"
 
 
