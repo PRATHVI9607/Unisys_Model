@@ -1,4 +1,7 @@
-"""F2: golden baseline written once with SET NX; drift diff is live vs golden."""
+"""F2: the FIRST golden baseline is written with SET NX; drift diff is live vs golden.
+
+Later overwrites happen only by a promotion (tests/test_baseline_promotion.py) or scripts/baseline_tool.py;
+get_or_set_baseline itself never overwrites."""
 import asyncio
 import json
 import sys
@@ -39,7 +42,7 @@ def test_first_sight_creates_baseline():
     assert golden["template"]["spec"]["containers"][0]["resources"]["limits"]["cpu"] == "500m"
 
 
-def test_persistent_drift_never_overwrites_baseline():
+def test_persistent_drift_never_overwrites_baseline_through_get_or_set():
     r = FakeRedis()
     run(bl.get_or_set_baseline(r, "prod", "web", spec("500m")))
     golden, created = run(bl.get_or_set_baseline(r, "prod", "web", spec("50m")))

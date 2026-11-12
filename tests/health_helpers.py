@@ -73,6 +73,25 @@ def prediction(label="degradation", risk=0.6, pset=None, uncertain=False, versio
                       top_factors=[Factor(feature="cpu_limit_ratio", value=0.1, contribution=0.5)])
 
 
+class PromoRedis(FakeRedis):
+    """FakeRedis plus the two things the V5-D5 baseline code uses: the compare-and-set overwrite of the golden
+    baseline (a Python mirror of PROMOTE_BASELINE_LUA in agents/health_agent/baseline.py) and SCAN."""
+
+    async def eval(self, script, n, key, token, *extra):
+        if "kubeheal:promote_baseline" in script:
+            if await self.get(key) != token:
+                return 0
+            self.store[key] = extra[0]
+            return 1
+        return await super().eval(script, n, key, token, *extra)
+
+    async def scan_iter(self, match=None):
+        prefix = (match or "").rstrip("*")
+        for k in list(self.store):
+            if k.startswith(prefix):
+                yield k
+
+
 class Resp:
     def __init__(self, body):
         self.body = body
@@ -140,7 +159,7 @@ class Env:
         self.clock = Clock()
         self.agent = HealthAgent(redis_url="redis://unused", observe_base_s=60, delay_s=60,
                                  clock=self.clock.mono, wall=self.clock.wall, **kw)
-        self.redis = self.agent.redis = FakeRedis()
+        self.redis = self.agent.redis = PromoRedis()
         self.core = self.agent.core_api = FakeCore()
         self.apps = self.agent.apps_api = FakeApps()
         self.agent.autoscaling_api = FakeAutoscaling()
