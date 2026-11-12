@@ -1,0 +1,24 @@
+is_drifted: True
+changed paths: ['template.spec.containers[0].image', 'template.spec.initContainers[0].image', 'template.spec.volumes[0].persistentVolumeClaim.claimName']
+policy violations: []
+non-null features: {'cpu_limit_ratio': 1.0, 'cpu_request_ratio': 1.0, 'mem_limit_ratio': 1.0, 'mem_request_ratio': 1.0, 'replicas_ratio': 1.0, 'image_changed': 1.0, 'n_changed_fields': 3.0, 'spec_changed': 1.0}
+model (spec diff only, no metrics): critical 0.6954 ['critical'] uncertain= False
+patch plan drifted paths: ['template.spec.containers[0].image', 'template.spec.initContainers[0].image', 'template.spec.volumes[0].persistentVolumeClaim.claimName']
+validate_patch_target: REFUSED: patch_changes_volume_claim: a drift patch may not change which PVC a volume claims (after a restore the baseline still n
+forward JSON patch an auto_patch would apply:
+   test /spec/template/spec/containers/0/image -> kubeheal-registry:5000/kubeheal/victim-app@sha256:abababababababababababababababababababababababababababababababab
+   replace /spec/template/spec/containers/0/image -> kubeheal-registry:5000/kubeheal/victim-app:b20261111085903
+   test /spec/template/spec/initContainers/0/image -> kubeheal-registry:5000/kubeheal/victim-app@sha256:abababababababababababababababababababababababababababababababab
+   replace /spec/template/spec/initContainers/0/image -> kubeheal-registry:5000/kubeheal/victim-app:b20261111085903
+   test /spec/template/spec/volumes/0/persistentVolumeClaim/claimName -> victim-data-restore-inc-20261112-141554-1d76b1ed
+   replace /spec/template/spec/volumes/0/persistentVolumeClaim/claimName -> victim-data
+   test /spec/strategy/rollingUpdate/maxUnavailable -> 25%
+   replace /spec/strategy/rollingUpdate/maxUnavailable -> 0
+['health_risk', 'health_label', 'health_prediction_set', 'sec_risk', 'sec_label', 'sec_prediction_set', 'sec_syscall_top', 'correlation_score', 'compound_flag', 'namespace_tier', 'circuit_breaker_containments', 'circuit_breaker_patches', 'models_ok', 'namespace_protected', 'metric_samples_seen', 'burn_in_mode', 'nl_summary', 'rollback_reasons', 'spec_changed', 'has_baseline', 'changed_fields', 'se
+decision policy on the model's spec-only answer (risk 0.6954, label critical):
+  dev      test     -> observe (adjusted 0.487, dry_run=True)
+  dev      enforce  -> observe (adjusted 0.487, dry_run=False)
+  staging  test     -> human_patch (adjusted 0.695, dry_run=True)
+  staging  enforce  -> human_patch (adjusted 0.695, dry_run=False)
+  prod     test     -> human_patch (adjusted 0.834, dry_run=True)
+  prod     enforce  -> human_patch (adjusted 0.834, dry_run=False)
