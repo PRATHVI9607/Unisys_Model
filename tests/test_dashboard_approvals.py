@@ -488,3 +488,26 @@ def test_every_non_get_route_depends_on_require_admin():
                                           "/api/approvals/{incident_id}/reject", "/api/kill-switch"}
     unguarded = [f"{sorted(r.methods)} {r.path}" for r in mutating if not depends_on(r.dependant)]
     assert unguarded == []
+
+
+def test_approval_uses_the_recorded_candidate_fields_not_the_model_attribution(client, harness):
+    seed_incident(harness, patch_fields=["template.spec.containers[0].resources.limits.cpu",
+                                         "template.spec.containers[0].resources.limits.memory"])
+    assert post(client, f"/api/approvals/{INC}/approve", AUTH).status_code == 200
+    (req,) = harness.exec_requests
+    assert req["patch_field"] == "template.spec.containers[0].resources.limits.cpu"
+    assert json.loads(req["patch_fields"]) == ["template.spec.containers[0].resources.limits.cpu",
+                                               "template.spec.containers[0].resources.limits.memory"]
+
+
+def test_an_older_incident_without_the_key_falls_back_to_the_legacy_top_field(client, harness):
+    seed_incident(harness)                                    # no patch_fields key: a pre-V5-D9 incident
+    assert post(client, f"/api/approvals/{INC}/approve", AUTH).status_code == 200
+    (req,) = harness.exec_requests
+    assert req["patch_field"] == "resources.limits.cpu"
+
+
+def test_a_recorded_empty_candidate_list_is_final_and_the_model_attribution_is_not_used(client, harness):
+    seed_incident(harness, patch_fields=[])                   # a new incident whose spec diff named nothing
+    r = post(client, f"/api/approvals/{INC}/approve", AUTH)
+    assert r.status_code == 422 and harness.exec_requests == []

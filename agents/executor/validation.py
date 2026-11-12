@@ -59,9 +59,14 @@ def _flag(v) -> bool:
     return str(v).strip().lower() in ("true", "1")
 
 
+def _plain(item) -> bool:
+    """A short printable string (no control characters, DEL or line separators)."""
+    return isinstance(item, str) and len(item) <= MAX_ITEM_CHARS and (not item or item.isprintable())
+
+
 def _string_list(raw, what: str) -> Tuple[Optional[List[str]], str]:
-    """A JSON list of non-empty short strings (or an already parsed list); empty for a missing value.
-    (None, reason) for anything malformed: the request is then refused, never guessed."""
+    """A JSON list of non-empty short plain strings (or an already parsed list); empty for a missing value.
+    (None, reason) for anything malformed."""
     if raw in (None, ""):
         return [], ""
     value = raw
@@ -76,7 +81,7 @@ def _string_list(raw, what: str) -> Tuple[Optional[List[str]], str]:
         return None, f"{what} has more than {MAX_LIST_ITEMS} entries"
     items: List[str] = []
     for item in value:
-        if not isinstance(item, str) or len(item) > MAX_ITEM_CHARS or any(ord(c) < 32 for c in item):
+        if not _plain(item):
             return None, f"{what} holds an entry that is not a short plain string"
         if item.strip():
             items.append(item.strip())
@@ -117,23 +122,30 @@ def parse_request(f: Dict) -> Tuple[str, str, Optional[Request]]:
     if action == "patch" and kind != "Deployment":
         return "refused", "patch supports Deployments only", None
 
+    # Only the patch action depends on these fields. contain and restore are safety actions: an informational
+    # field that is malformed must never stop them, so for those it is dropped, not refused.
+    bad_patch_input = ""
     fields, why = _string_list(f.get("patch_fields"), "patch_fields")
     if fields is None:
-        return "refused", why, None
-    reasons, why = _string_list(f.get("rule_reasons"), "rule_reasons")
-    if reasons is None:
-        return "refused", why, None
+        fields, bad_patch_input = [], why
+    reasons, _why = _string_list(f.get("rule_reasons"), "rule_reasons")
+    reasons = reasons or []                                  # informational only (ledger)
     label = (f.get("containment_label") or "").strip().lower()
-    if action == "contain" and label and label not in CONTAINMENT_LABELS:
-        return "refused", f"unknown containment_label {label!r}", None
+    label = label if label in CONTAINMENT_LABELS else ""
+    single = (f.get("patch_field") or "").strip()
+    if single and not _plain(single):
+        bad_patch_input = bad_patch_input or "patch_field is not a short plain string"
+        single = ""
 
     req = Request(action=action, namespace=namespace, incident_id=incident_id, deployment=deployment,
-                  pod=pod, patch_field=(f.get("patch_field") or "").strip(), kind=kind,
+                  pod=pod, patch_field=single, kind=kind,
                   kind_given=bool(f.get("workload_kind")),
                   dry_run=str(f.get("dry_run", "false")).lower() == "true",
                   patch_fields=fields, rule_path=_flag(f.get("rule_path")), rule_reasons=reasons,
                   containment_label=label, restore_after=_flag(f.get("restore_after")),
                   human_followup=_flag(f.get("human_followup")))
+    if action == "patch" and bad_patch_input:
+        return "escalate", f"bad_patch_fields: {bad_patch_input}", req
     # Candidate fields: the list Fusion sent, or the single legacy field. "unknown" is no field.
     if not req.patch_fields and req.patch_field:
         req.patch_fields = [req.patch_field]

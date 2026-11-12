@@ -311,9 +311,10 @@ def _exec_request(incident_id: str, records: List[Dict[str, Any]], approver: str
         action = "patch"
         # Candidates are the changed fields of the spec diff that Fusion recorded with the decision (V5-D9). Older
         # incidents carried a model attribution (top_field); it is only a fallback for those.
-        recorded = step_payload(records, "decision").get("patch_fields")
+        decision_record = step_payload(records, "decision")
+        recorded = decision_record.get("patch_fields")
         patch_fields = [str(f) for f in recorded if isinstance(f, str) and f.strip()] if isinstance(recorded, list) else []
-        if not patch_fields:
+        if "patch_fields" not in decision_record:          # an older incident; a recorded empty list is final
             legacy = (step_payload(records, "scores").get("health") or {}).get("top_field") or ""
             patch_fields = [str(legacy)] if legacy and str(legacy).lower() != "unknown" else []
         field = patch_fields[0] if patch_fields else ""

@@ -159,7 +159,7 @@ def validate_patch_target(raw_live_spec: Dict, live_view: Dict, target: Dict) ->
         raise PlanError("selector_match_expressions: the Deployment selector uses matchExpressions, "
                         "the Executor cannot prove the template still matches it")
     match_labels = selector.get("matchLabels") or {}
-    if not match_labels:
+    if not isinstance(match_labels, dict) or not match_labels:
         raise PlanError("selector_missing: the Deployment has no matchLabels selector")
     template_labels = (((target.get("template") or {}).get("metadata") or {}).get("labels")) or {}
     missing = sorted(k for k, v in match_labels.items() if template_labels.get(k) != v)

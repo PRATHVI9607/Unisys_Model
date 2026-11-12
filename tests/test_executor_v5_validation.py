@@ -62,6 +62,28 @@ def test_a_match_expressions_selector_always_escalates_before_any_write():
     assert s.c.writes() == [] and "rollback_point_saved" not in s.steps()
 
 
+def test_a_selector_the_template_cannot_satisfy_escalates_before_the_rollback_point_is_saved():
+    s = Scenario()
+    s.c.workloads[("Deployment", "web")]["spec"]["selector"] = {"matchLabels": {"app": "web", "tier": "x"}}
+    out = s.go(patch_fields=[CPU])
+    assert out.startswith("escalated:selector_mismatch")
+    assert s.c.writes() == [] and "rollback_point_saved" not in s.steps()
+
+
+def test_a_candidate_that_would_weaken_the_posture_escalates_before_any_write():
+    s = Scenario()
+    golden_container = s.golden["spec"]["template"]["spec"]["containers"][0]
+    golden_container["securityContext"] = {"privileged": True}          # a baseline weaker than the live spec
+    out = s.go(patch_fields=["template.spec.containers[0].securityContext"])
+    assert out.startswith("escalated:patch_weakens_posture")
+    assert s.c.writes() == [] and "rollback_point_saved" not in s.steps()
+
+
+def test_a_match_labels_value_that_is_not_a_mapping_is_a_selector_error_not_a_crash():
+    with pytest.raises(drift.PlanError, match="selector_missing"):
+        drift.validate_patch_target({"selector": {"matchLabels": ["app"]}}, {}, {"template": {}})
+
+
 def test_a_patched_template_that_would_lose_a_selector_label_escalates():
     live_view = {"template": {"metadata": {"labels": {"app": "web", "tier": "x"}},
                               "spec": {"containers": [{"name": "a"}]}}}
@@ -122,9 +144,23 @@ def test_no_candidate_at_all_or_only_unknown_escalates():
 
 @pytest.mark.parametrize("bad", ["not json", '{"a": 1}', json.dumps([1, 2]), json.dumps(["x" * 300]),
                                  json.dumps(["ok"] * 65), json.dumps(["bad\nline"])])
-def test_malformed_patch_fields_are_refused(bad):
-    status, why, _r = req(patch_fields=bad)
-    assert status == "refused" and "patch_fields" in why
+def test_malformed_patch_fields_escalate_a_patch_to_a_human_and_never_guess(bad):
+    status, why, r = req(patch_fields=bad)
+    assert status == "escalate" and "patch_fields" in why and r is not None and r.patch_fields == []
+
+
+def test_a_malformed_informational_list_never_stops_a_safety_action():
+    base = {"action": "contain", "namespace": "prod", "deployment": "web", "pod": "web-abc-1",
+            "incident_id": "inc-1"}
+    for extra in ({"patch_fields": "not json"}, {"rule_reasons": "{"}, {"containment_label": "weird"}):
+        status, _why, r = parse_request({**base, **extra})
+        assert status == "ok" and r.action == "contain"
+    assert parse_request({**base, "containment_label": "weird"})[2].containment_label == ""
+
+
+def test_a_non_printable_or_oversized_single_patch_field_escalates():
+    assert req(patch_field="badchar")[0] == "escalate"
+    assert req(patch_field="x" * 300)[0] == "escalate"
 
 
 def test_containment_fields_are_parsed_and_an_unknown_label_is_refused():
@@ -134,8 +170,8 @@ def test_containment_fields_are_parsed_and_an_unknown_label_is_refused():
                                      "human_followup": "true"})
     assert status == "ok" and r.containment_label == "exfiltration"
     assert r.restore_after is False and r.human_followup is True
-    status, why, _r = parse_request({**base, "containment_label": "suspicious"})
-    assert status == "refused" and "containment_label" in why
+    status, _why, r = parse_request({**base, "containment_label": "suspicious"})     # not an automatic label
+    assert status == "ok" and r.containment_label == ""
 
 
 # ---- the ledger carries the new fields -----------------------------------------------------------------
