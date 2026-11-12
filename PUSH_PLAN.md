@@ -48,4 +48,26 @@ Last checked 2026-11-12 23:05 IST. Branch tips before this audit update: `work` 
 4. Refresh `docs/kubeheal/PROGRESS.md`, `.ai/handoff.md`, this plan, and mode `test`; commit each completed task.
 5. Review `git diff --check`, the full diff against origin, secret/artifact scan, and `git status`; do not include local credentials, environments, or large binaries.
 
+## Exact final verification commands
+
+Run from the demo checkout in PowerShell. The default suite is the full suite; live tests stay opt-in.
+
+```powershell
+git status
+git log --oneline -10 work
+git log --oneline -10 demo
+git diff --check origin/main...work
+git diff --check origin/main...demo
+$env:PYTHONPATH='.'
+Push-Location ..\Unisys_Model-wt-metric-query
+.\.venv\Scripts\python.exe -m pytest tests -q -p no:warnings
+Pop-Location
+Push-Location .
+.\.venv\Scripts\python.exe -m pytest tests -q -p no:warnings
+Pop-Location
+git status --short
+```
+
+After a green work suite, the authorized integration sequence is `git -C ..\Unisys_Model-wt-metric-query merge --no-ff <reviewed-branch>` followed by `git merge --no-ff work` in the demo checkout. Re-run the demo suite after the merge. Do not add `git push` to this plan; the owner pushes outside this agent session.
+
 The owner performs any eventual push. Never run `git push`, never set `ALLOW_PUSH`, and do not claim a feature or metric that is not supported by saved evidence.
