@@ -10,7 +10,7 @@ def test_scoring_load_script_uses_shipped_feature_names_and_exports_default():
     assert "http.post(endpoint, body" in script
     assert all(feature in script for feature in meta["features"])
     assert 'duration: "30s"' in script
-    assert "WARM-UP START" in script
+    assert "WARM-UP START" in script and "sleep(5)" in script
     assert "WARM-UP COMPLETE" in script
     assert "setup requests remain in aggregate metrics" in script
     assert "warm-up request ${i + 1}/${count}" in script
