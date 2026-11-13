@@ -5,7 +5,7 @@ Username: LAPTOP-74N9LTFA\PV
 RunAs User: LAPTOP-74N9LTFA\PV
 Configuration Name: 
 Machine: LAPTOP-74N9LTFA (Microsoft Windows NT 10.0.26300.0)
-Host Application: C:\Users\PV\AppData\Local\Microsoft\WindowsApps\pwsh.exe -Command try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}
+Host Application: <home>\AppData\Local\Microsoft\WindowsApps\pwsh.exe -Command try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}
 $evidence = (Join-Path (Resolve-Path 'docs/kubeheal/demo-evidence/F11').Path 'hpa-run-2026-11-13-clean-warmup.txt'); Start-Transcript -LiteralPath $evidence -Force | Out-Null; try { & .\demo\scripts\hpa_load.ps1 -Vus 32 -DurationSeconds 90 } finally { Stop-Transcript | Out-Null }
 Process ID: 26384
 PSVersion: 7.7.0

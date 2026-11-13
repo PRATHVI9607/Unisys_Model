@@ -7,4 +7,4 @@
 {"enforce_window": "END", "mode": "test", "run_id": "30de436bd53a4ceebb89b2586414bb18", "utc": "2026-11-13T14:12:54Z"}
 DEAD-MAN START run=30de436bd53a4ceebb89b2586414bb18 context=k3d-kubeheal started_utc=2026-11-13T14:10:14.0089870Z timeout_s=600
 DEAD-MAN END run=30de436bd53a4ceebb89b2586414bb18 ended_utc=2026-11-13T14:12:55.0755851Z mode=test ended_by=mode_returned_to_test
-{"capture": "C:\\My_projects_1\\cLOUD\\Unisys_Model\\docs\\kubeheal\\demo-evidence\\F10\\F10_scripted_run_30de436bd53a4ceebb89b2586414bb18.txt", "dev_resources": {"limits": {"cpu": "500m", "memory": "128Mi"}, "requests": {"cpu": "100m", "memory": "64Mi"}}, "mode_after": "test", "prod_resources_after_rollback": {"limits": {"cpu": "500m", "memory": "128Mi"}, "requests": {"cpu": "100m", "memory": "64Mi"}}}
+{"capture": "<repo>\\docs\\kubeheal\\demo-evidence\\F10\\F10_scripted_run_30de436bd53a4ceebb89b2586414bb18.txt", "dev_resources": {"limits": {"cpu": "500m", "memory": "128Mi"}, "requests": {"cpu": "100m", "memory": "64Mi"}}, "mode_after": "test", "prod_resources_after_rollback": {"limits": {"cpu": "500m", "memory": "128Mi"}, "requests": {"cpu": "100m", "memory": "64Mi"}}}
