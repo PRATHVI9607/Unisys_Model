@@ -1,0 +1,5 @@
+HMAC smoke target: dev/victim-app-7cf49c8cf4-49b5t on k3d-kubeheal-server-0; mode=test
+signed: status=dry_run reason=mode_test: nothing was written mode_seen=test result_hmac=valid
+unsigned: status=refused reason=invalid_hmac mode_seen=test result_hmac=valid
+tampered: status=refused reason=invalid_hmac mode_seen=test result_hmac=valid
+Cleanup verified: run-owned Redis messages/results removed; mode remains test
