@@ -1,6 +1,6 @@
 # F3 evidence: alert-driven ransomware containment
 
-Date: 2026-11-12 (times UTC). Machine: native Windows 11 with Docker Desktop (per `AGENTS.md`), k3d cluster `k3d-kubeheal` only. Branch `wave/claude-F3`.
+Date: 2026-11-12 (times UTC). Machine: native Windows 11 with Docker Desktop, k3d cluster `k3d-kubeheal` only. Branch `wave/claude-F3`.
 Runbook text: `RUNBOOK_F3.md`. Tooling: `f3_window.py` (prep, rehearse, window, cleanup) and `ledger_dump.py` (read-only).
 
 | Files | What |
@@ -16,7 +16,7 @@ The alert is scripted (see `RUNBOOK_F3.md`); no screenshots were taken. Nothing 
 ## Commands, in order (all with `--context k3d-kubeheal`; times UTC)
 
 1. `git worktree add ../Unisys_Model-wt-claude-F3 -b wave/claude-F3 55aefaf`; code fix, tests, commits `7871bab`, `98df6b5`.
-2. Lock line committed (`97c7fdf`, `docs/kubeheal/CLUSTER_LOCK.md`), removed in the last commit.
+2. A cluster-use lock line was committed (`97c7fdf`) and removed in the last commit; that lock file is no longer tracked.
 3. `& .\demo\k3d\images.ps1 -Only security-agent,fusion-agent` -> tag `b20261112192037`.
 4. `helm upgrade kubeheal deploy/helm/kubeheal --reuse-values --set securityAgent.image.tag=b20261112192037 --set fusionAgent.image.tag=b20261112192037 --wait` -> revision 10 (13:51Z; after a `--dry-run=server`).
 5. `.venv\Scripts\python.exe scripts/d5_replay_runner.py --timeout-s 120` (13:51:53Z, test mode) -> `10_d5_rerun.txt`.

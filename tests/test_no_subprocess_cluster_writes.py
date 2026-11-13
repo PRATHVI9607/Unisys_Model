@@ -25,7 +25,7 @@ def _py_files():
         if not base.exists():
             continue
         for p in base.rglob("*.py"):
-            if {"_archive_v3", ".venv", "__pycache__", "executor"} & set(p.parts):
+            if {".venv", "__pycache__", "executor"} & set(p.parts):
                 continue
             yield p
 

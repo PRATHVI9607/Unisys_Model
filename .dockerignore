@@ -45,9 +45,6 @@ Screenshot*
 # Logs
 *.log
 
-# Archived v3 code (30M) — not part of v4 images
-models/_archive_v3/
-
 # Training data (only needed at train time, not at serve time)
 data/
 *.csv
