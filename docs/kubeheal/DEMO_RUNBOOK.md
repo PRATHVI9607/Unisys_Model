@@ -1,6 +1,6 @@
 # KubeHeal k3d live demo runbook
 
-This runbook is for the `k3d-kubeheal` context only. Never use `hybrid-demo`. Keep `kubeheal-mode` in `test` except during explicitly scripted, logged enforce windows. F3 is live-verified from Fusion onward with scripted Sense input because Falco is absent. Do not run the F3 prefix-based cleanup helper; it must be made run-ID-safe first.
+This runbook is for the `k3d-kubeheal` context only. Never use `hybrid-demo`. Keep `kubeheal-mode` in `test` except during explicitly scripted, logged enforce windows. F3 is live-verified from Fusion onward with scripted Sense input because Falco is absent. The F3 cleanup helper selects only resources carrying its unique run label or incident IDs found in its own action stream; review its printed targets before relying on the cleanup result.
 
 ## Common preflight
 
@@ -97,9 +97,9 @@ Ledger (`81_attempt3_ledger.jsonl`, 42 entries, UTC): alert accepted 14:15:55.1;
 
 ### Cleanup and state left behind
 
-Do not run `f3_window.py cleanup` until its prefix-based deletion is replaced by run-ID label selection. It can delete unrelated `f3-*` or `kubeheal-*` resources. The successful run left four stale SnapshotFreeze keys and two fail-safe escalations from deleted scratch objects; show the dashboard ledger/status honestly.
+The F3 cleanup helper now deletes only resources carrying the unique `kubeheal.io/f3-run` label for the selected `F3_NAME`, plus resources labelled with incident IDs found in that run's action or escalation stream. It prints the exact targets before deletion and refuses if no run-owned resources are found. Review that list before cleanup. Historical runs left four orphan SnapshotFreeze keys and two fail-safe escalations from deleted scratch objects; those are separate operator records and are handled as such below.
 
-`cleanup` aborts if `staging` holds anything whose name does not start with `f3-` or `kubeheal-`; otherwise it deletes everything in `staging` (the scratch objects, the forensic and rolling snapshots, the old PVC and the restored PVC). SnapshotFreeze keys are NOT removed and have no TTL: `kubeheal:snapfreeze:staging:f3-scratch-data`, `...f3-scratch-b-data`, `...f3-scratch-c-data`, `...f3-scratch-b-data-restore-inc-20261112-140632-c8ed65b8`. They are harmless for deleted PVCs; release them from the dashboard (F8) or leave them.
+After confirming the selected `F3_NAME` resources and associated incident-labelled objects are scratch artifacts, run cleanup in mode `test`. It does not remove SnapshotFreeze keys. Those keys must be released separately only after confirming their PVCs are absent and recording the operator action.
 
 ### Defects this found (fixed on `wave/claude-F3`)
 

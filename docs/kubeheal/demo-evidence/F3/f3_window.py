@@ -34,6 +34,7 @@ CTX, KH = "k3d-kubeheal", "kubeheal"
 NS = "staging"
 NAME = os.environ.get("F3_NAME", "f3-scratch")      # a new name per attempt: stale SnapshotFreeze keys are per PVC
 PVC = f"{NAME}-data"
+RUN_LABEL = "kubeheal.io/f3-run"
 SNAP_CLASS = "csi-hostpath-snapclass"
 IMAGE_SRC = ("dev", "victim-app")                 # reuse the image already pulled from the cluster registry
 SOURCE_EVENT = "sec-20261112-135158-892771-victim-app-b4b79986f-rcfvq"     # real, model-scored, D-5 rerun
@@ -84,13 +85,13 @@ def prep():
     assert mode() == "test", "prep runs in test mode"
     image = kc("get", "deploy", IMAGE_SRC[1], "-o", "jsonpath={.spec.template.spec.containers[0].image}", ns=IMAGE_SRC[0])
     pvc = {"apiVersion": "v1", "kind": "PersistentVolumeClaim",
-           "metadata": {"name": PVC, "namespace": NS, "labels": {"app": NAME}},
+           "metadata": {"name": PVC, "namespace": NS, "labels": {"app": NAME, RUN_LABEL: NAME}},
            "spec": {"accessModes": ["ReadWriteOnce"], "storageClassName": "csi-hostpath-sc",
                     "resources": {"requests": {"storage": "64Mi"}}}}
     dep = {"apiVersion": "apps/v1", "kind": "Deployment",
-           "metadata": {"name": NAME, "namespace": NS, "labels": {"app": NAME}},
+           "metadata": {"name": NAME, "namespace": NS, "labels": {"app": NAME, RUN_LABEL: NAME}},
            "spec": {"replicas": 1, "selector": {"matchLabels": {"app": NAME}},
-                    "template": {"metadata": {"labels": {"app": NAME}},
+                    "template": {"metadata": {"labels": {"app": NAME, RUN_LABEL: NAME}},
                                  "spec": {"securityContext": {"runAsUser": 10001, "runAsGroup": 10001,
                                                               "fsGroup": 10001, "runAsNonRoot": True},
                                           "containers": [{
@@ -112,7 +113,8 @@ def prep():
     kc("exec", pod, "--", "sh", "-c",
        "for i in 1 2 3 4 5; do echo \"clean file $i\" > /data/clean_$i.txt; done; sync; ls -l /data", ns=NS)
     snap = f"kubeheal-roll-{PVC}-{int(time.time())}"
-    say(kc("apply", "-f", "-", inp=json.dumps(volume_snapshot(snap, NS, PVC, SNAP_CLASS, KIND_ROLLING))))
+    say(kc("apply", "-f", "-", inp=json.dumps(volume_snapshot(
+        snap, NS, PVC, SNAP_CLASS, KIND_ROLLING, {RUN_LABEL: NAME}))))
     for _ in range(60):
         if kc("get", "volumesnapshot", snap, "-o", "jsonpath={.status.readyToUse}", ns=NS, check=False) == "true":
             break
@@ -258,22 +260,50 @@ def window():
 
 
 def cleanup():
-    """Deletes the scratch objects in `staging` only. Staging held nothing but these before the run
-    (30_pre_window_state.txt), so the namespace-wide listing below is the scratch set; it is printed first."""
+    """Delete only this run's labelled objects and resources owned by its incident IDs.
+
+    Every selected object is inspected for its unique run or incident label before deletion. No namespace-wide
+    prefix cleanup is allowed; resources with unrelated labels or names are left alone.
+    """
     assert mode() == "test"
-    listing = kc("get", "all,pvc,volumesnapshot,networkpolicy,job", "-o", "name", ns=NS)
-    say(listing)
-    foreign = [n for n in listing.split() if not n.split("/", 1)[1].startswith(("f3-", "kubeheal-"))]
-    if foreign:
-        raise SystemExit(f"ABORT: staging holds objects that are not F3 scratch objects: {foreign}")
-    say(kc("delete", "deployment", NAME, "--ignore-not-found", ns=NS))
-    for kind in ("job", "networkpolicy"):
-        for n in kc("get", kind, "-o", "name", ns=NS).split():
-            say(kc("delete", n, "--ignore-not-found", ns=NS))
-    for kind in ("pvc", "volumesnapshot"):
-        for n in kc("get", kind, "-o", "name", ns=NS).split():
-            say(kc("delete", n, "--ignore-not-found", ns=NS))
-    say("after cleanup: " + kc("get", "all,pvc,volumesnapshot,networkpolicy,job", ns=NS))
+    rows = json.loads(redis("--json", "XRANGE", STREAM_ACTIONS, "-", "+") or "[]")
+    incident_ids = set()
+    for _stream_id, flat in rows:
+        fields = dict(zip(flat[0::2], flat[1::2]))
+        if NAME in fields.get("target", "") or NAME in fields.get("incident_id", ""):
+            if fields.get("incident_id"):
+                incident_ids.add(fields["incident_id"])
+    rows = json.loads(redis("--json", "XRANGE", STREAM_ESC, "-", "+") or "[]")
+    for _stream_id, flat in rows:
+        fields = dict(zip(flat[0::2], flat[1::2]))
+        if fields.get("deployment") == NAME and fields.get("namespace") == NS and fields.get("incident_id"):
+            incident_ids.add(fields["incident_id"])
+
+    def labelled_names(kind, selector):
+        raw = kc("get", kind, "-l", selector, "-o", "json", ns=NS)
+        items = json.loads(raw).get("items", [])
+        names = []
+        for item in items:
+            meta = item.get("metadata") or {}
+            labels = meta.get("labels") or {}
+            if labels.get(RUN_LABEL) == NAME or labels.get("kubeheal/incident") in incident_ids:
+                names.append(meta["name"])
+        return names
+
+    targets = []
+    for kind in ("deployment", "pvc", "volumesnapshot"):
+        targets.extend((kind, name) for name in labelled_names(kind, f"{RUN_LABEL}={NAME}"))
+    for incident_id in sorted(incident_ids):
+        selector = f"kubeheal/incident={incident_id}"
+        for kind in ("job", "networkpolicy", "pvc", "volumesnapshot"):
+            targets.extend((kind, name) for name in labelled_names(kind, selector))
+    targets = sorted(set(targets))
+    if not targets:
+        raise SystemExit(f"ABORT: no resources carry this run's ownership labels ({RUN_LABEL}={NAME})")
+    say("verified run-owned cleanup targets: " + json.dumps(targets))
+    for kind, name in targets:
+        say(kc("delete", kind, name, "--ignore-not-found", ns=NS))
+    say("after cleanup: " + kc("get", "deployment,pod,job,pvc,volumesnapshot,networkpolicy", "-o", "wide", ns=NS))
 
 
 if __name__ == "__main__":
