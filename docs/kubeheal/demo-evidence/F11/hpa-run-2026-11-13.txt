@@ -1,0 +1,11 @@
+F11 demo-image rerun, 2026-11-13, cluster k3d-kubeheal, mode test
+Command: pwsh -ExecutionPolicy Bypass -File .\demo\scripts\hpa_load.ps1 -Vus 32 -DurationSeconds 90 -SampleSeconds 10 -ScaleDownWaitSeconds 330
+
+Preflight: HPA baseline 2/2, queue metric 0; two Ready inference endpoints were listed before Job creation.
+Under load: HPA observed 2/2 -> 2/4 -> 4/8 -> 8/8.
+k6: 32 VUs for 90 seconds; 72,328 requests; 72,316 checks passed and 12 failed. All 12 connection-refused warnings were at the initial timestamp, to Service VIP 10.43.219.57:8000. Median 37.49 ms; p95 61.87 ms. This run is not a clean result.
+Scale-down: queue metric returned to 0; HPA observed current 8/desired 2, then 2/2. The run-owned Job, NetworkPolicy, and ConfigMap were deleted by the script.
+
+Diagnosis: the result is consistent with a brief first-second Service/data-plane readiness race even though Ready endpoints existed at preflight. The captured output does not establish whether kube-proxy, CNI policy programming, or another component caused the RST. No change was made to hide or discard the failures.
+
+Grafana screenshot: not captured. Browser surface was unavailable in this session and the cluster's Grafana renderer is not installed. Existing API/panel-definition evidence remains in grafana-hpa-api-2026-11-12.json; it is not a screenshot.

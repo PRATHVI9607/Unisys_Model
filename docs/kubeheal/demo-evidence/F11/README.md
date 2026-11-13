@@ -4,3 +4,4 @@
 - The staging fix is in `6f97f88`; the later successful run is recorded in [hpa-run-2026-11-12.md](hpa-run-2026-11-12.md).
 - The earlier successful run is in `hpa-run-2026-11-12.md`. A post-merge repeat scaled 2 -> 8 -> 2 but had 12/99,431 connection refusals; its full output and Grafana dashboard/Prometheus API evidence are in that report and `grafana-hpa-api-2026-11-12.json`.
 - Grafana has no image renderer installed and browser access was unavailable, so a visual dashboard screenshot is still pending for runbook rehearsal.
+- The 2026-11-13 demo-image rerun also scaled 2 -> 8 -> 2 but had 12 first-timestamp connection refusals out of 72,328 requests; median 37.49 ms and p95 61.87 ms are observed only on this failed run. See [rerun transcript](hpa-run-2026-11-13.txt). It is not accepted as a clean result; exact refusal cause remains unproven.
