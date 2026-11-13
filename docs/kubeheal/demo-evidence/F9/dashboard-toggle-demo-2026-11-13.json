@@ -1,0 +1,34 @@
+[
+  {
+    "stage": "before",
+    "mode": "test",
+    "readable": true,
+    "dry_run": true
+  },
+  {
+    "stage": "dashboard_post_enforce",
+    "response": {
+      "status": "changed",
+      "mode": "enforce",
+      "changed": true,
+      "actor": "admin:dashboard-admin",
+      "ledger_id": "mode-c9705fc1d8d34dbbb6d8fd9e805b999f"
+    }
+  },
+  {
+    "stage": "dashboard_post_test",
+    "response": {
+      "status": "changed",
+      "mode": "test",
+      "changed": true,
+      "actor": "admin:dashboard-admin",
+      "ledger_id": "mode-35d2eee216f64c8c897656024b66ca8d"
+    }
+  },
+  {
+    "stage": "final",
+    "mode": "test",
+    "readable": true,
+    "dry_run": true
+  }
+]
