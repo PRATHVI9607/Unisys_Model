@@ -228,7 +228,7 @@ Do not combine F11's clean HPA run with P11 E1. **P11 E1 is not an accepted benc
 
 ## F12. U6 repeat acceptance
 
-Two `up.ps1 -Stage all -SkipImages` attempts stopped at the monitoring step because DNS could not resolve `prometheus-community.github.io`. The installed monitoring release was healthy; standalone install, adapter, and victim stages completed on the second attempt, then `demo.ps1 -Action reset` verified 100m/500m CPU settings. The three PVCs stayed Bound and mode remained `test`. **U6 is not complete:** neither full install run passed and the two complete `up + scenario + reset` runs were not achieved. Do not run `down.ps1`; it deletes MinIO, Redis, ledger, and victim PVC data. See `demo-evidence/F12/U6_status_2026-11-13.md`.
+U6 passed twice on a separately created `kubeheal-rehearsal` cluster. Both `up.ps1 -Stage all -SkipImages` runs used vendored `kube-prometheus-stack` and `prometheus-adapter` archives without Helm repository DNS. Images were supplied from the local image cache, so a populated local cache remains a prerequisite. Each install was followed by the scripted drift scenario: 15/15 metric queries returned samples, Fusion recorded `human_patch` with `dry_run=true` in mode `test`, and the script restored CPU request/limit to 100m/500m. The separate cluster was then deleted as authorized. The original `k3d-kubeheal` and its PVCs remain untouched. See `demo-evidence/F12/U6_offline_rehearsal.md` and the raw transcripts alongside it.
 
 ## Evidence checklist
 
