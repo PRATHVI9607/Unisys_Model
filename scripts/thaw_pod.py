@@ -13,8 +13,9 @@ Usage:
   REDIS_URL=redis://:<password>@127.0.0.1:6379 CONTAIN_HMAC_KEY=<secret-value> python scripts/thaw_pod.py \\
       --namespace prod --pod web-abc-1 --pod-uid <uid> --node <node> --incident-id <incident>
 
-`CONTAIN_HMAC_KEY` is read from the same Kubernetes Secret key as the Redis password; do not put it in a command
-history or commit it. The script rejects missing or invalid result signatures.
+`CONTAIN_HMAC_KEY` must come from key `key` in the dedicated Kubernetes Secret `kubeheal-containment-hmac`;
+it is separate from the Redis password Secret. Retrieve it through the approved secret-management process, and do
+not put it in command history or commit it. The script rejects missing or invalid result signatures.
 
 Exit codes: 0 only when the answer says status `thawed` with frozen 0; 1 when it does not (refused, failed, no
 answer in time; the reason is printed); 2 when REDIS_URL is not set; 3 when Redis cannot be reached.
