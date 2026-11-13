@@ -1,0 +1,33 @@
+NAMES`tSTATUS
+k3d-kubeheal-tools`tUp 7 hours
+k3d-kubeheal-serverlb`tUp 23 hours
+k3d-kubeheal-agent-1`tUp 23 hours
+k3d-kubeheal-agent-0`tUp 23 hours
+k3d-kubeheal-server-0`tUp 23 hours
+kubeheal-registry`tUp 23 hours
+NAME                    STATUS   ROLES           AGE     VERSION        INTERNAL-IP   EXTERNAL-IP   OS-IMAGE           KERNEL-VERSION                      CONTAINER-RUNTIME
+k3d-kubeheal-agent-0    Ready    <none>          2d13h   v1.35.5+k3s1   172.24.0.7    <none>        K3s v1.35.5+k3s1   6.18.33.2-microsoft-standard-WSL2   containerd://2.2.3-k3s1
+k3d-kubeheal-agent-1    Ready    <none>          2d13h   v1.35.5+k3s1   172.24.0.5    <none>        K3s v1.35.5+k3s1   6.18.33.2-microsoft-standard-WSL2   containerd://2.2.3-k3s1
+k3d-kubeheal-server-0   Ready    control-plane   2d13h   v1.35.5+k3s1   172.24.0.3    <none>        K3s v1.35.5+k3s1   6.18.33.2-microsoft-standard-WSL2   containerd://2.2.3-k3s1
+NAME                                  READY   STATUS      RESTARTS   AGE     IP            NODE                    NOMINATED NODE   READINESS GATES
+executor-7fc9b466c8-cmgrr             1/1     Running     0          15h     10.42.1.116   k3d-kubeheal-server-0   <none>           <none>
+fusion-agent-78ddf5d7f-5qmcx          1/1     Running     0          15h     10.42.1.115   k3d-kubeheal-server-0   <none>           <none>
+fusion-agent-78ddf5d7f-l9tnk          1/1     Running     0          15h     10.42.0.144   k3d-kubeheal-agent-0    <none>           <none>
+health-agent-6b4b89d785-ln57d         1/1     Running     0          15h     10.42.1.114   k3d-kubeheal-server-0   <none>           <none>
+kubeheal-dashboard-868d7c7844-fp4lb   1/1     Running     0          15h     10.42.1.117   k3d-kubeheal-server-0   <none>           <none>
+kubeheal-inference-6d65d9d89-7kxpw    1/1     Running     0          114m    10.42.1.153   k3d-kubeheal-server-0   <none>           <none>
+kubeheal-inference-6d65d9d89-xzv7l    1/1     Running     0          15h     10.42.0.143   k3d-kubeheal-agent-0    <none>           <none>
+minio-bootstrap-h9n92                 0/1     Completed   1          8h      10.42.1.126   k3d-kubeheal-server-0   <none>           <none>
+minio-c7999f4cb-57k88                 1/1     Running     0          22h     10.42.1.105   k3d-kubeheal-server-0   <none>           <none>
+redis-0                               1/1     Running     0          22h     10.42.1.104   k3d-kubeheal-server-0   <none>           <none>
+security-agent-4lzkf                  1/1     Running     0          5m42s   10.42.0.179   k3d-kubeheal-agent-0    <none>           <none>
+security-agent-5snvr                  1/1     Running     0          5m40s   10.42.1.155   k3d-kubeheal-server-0   <none>           <none>
+security-agent-p44zf                  1/1     Running     0          5m41s   10.42.2.164   k3d-kubeheal-agent-1    <none>           <none>
+test
+
+NAME    	NAMESPACE	REVISION	UPDATED                              	STATUS  	CHART         	APP VERSION
+kubeheal	kubeheal 	17      	2026-11-13 13:49:02.5736025 +0530 IST	deployed	kubeheal-0.1.0	v4         
+NAMESPACE   NAME           STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS      VOLUMEATTRIBUTESCLASS   AGE     VOLUMEMODE
+kubeheal    data-redis-0   Bound    pvc-5b9e679e-7736-4ae0-bbd7-045d5760cb3c   1Gi        RWO            local-path        <unset>                 2d13h   Filesystem
+kubeheal    minio-data     Bound    pvc-48037ba2-8c2e-4072-afea-5b23668bdfd2   2Gi        RWO            local-path        <unset>                 2d13h   Filesystem
+prod        victim-data    Bound    pvc-5e24ca73-6dbf-49a5-a247-373e28f75a69   1Gi        RWO            csi-hostpath-sc   <unset>                 2d12h   Filesystem

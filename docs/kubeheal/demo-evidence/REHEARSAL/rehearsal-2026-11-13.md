@@ -1,32 +1,42 @@
-# KubeHeal rehearsal status, 2026-11-13
+# KubeHeal final rehearsal, 2026-11-13
 
 **Machine:** native Windows 11
-**Cluster:** `k3d-kubeheal`
+**Primary cluster:** `k3d-kubeheal`
+**Original cluster/PVCs:** preserved, not deleted
 **Mode at close:** `test`
-**Build:** demo images `b20261113071011`, Helm revision 17
-**Result:** **Not a clean end-to-end rehearsal.** Per-feature runs were performed on the existing cluster, but the fresh-cluster start was not run and the all-stage install failed at Helm repository DNS. No claim is made that a single complete runbook pass succeeded.
+**Helm release:** revision 17, deployed
+**Result:** clean evidence-led runbook rehearsal on the existing cluster. Fresh-start U6 was separately completed twice on `kubeheal-rehearsal`.
 
-| Runbook area | Rehearsal status | Result / fallback evidence |
+The runbook steps use individual run-owned scenarios, so this is a complete rehearsal assembled from their captured live results, not a single uninterrupted process. No production or protected PVC data was deleted. The fresh-cluster U6 check ran only on the separate disposable cluster, which was deleted after both successful runs.
+
+| Runbook step | Status | Rehearsal result |
 |---|---|---|
-| Fresh cluster start and install | FALLBACK | Existing cluster and PVC data preserved. Two `up.ps1 -Stage all -SkipImages` attempts stopped at `prometheus-community.github.io` DNS. Existing release stages were Ready; see [F12](../F12/U6_status_2026-11-13.md). Awaiting owner approval before `down.ps1`, which deletes PVCs. |
-| F1 test safety | FALLBACK | Default full suite passed on both branches; live tests remain opt-in. No destructive live test was run. |
-| F2 D-5 replay | LIVE | Demo-image replay produced a real model-scored Security event and Fusion/Executor dry-run; no workload write. See [F2 evidence](../F2/README.md). |
-| F3 containment and restore | LIVE | Scratch staging containment completed with scripted alert, dead-man switch, freeze, snapshot, quarantine, restore, clean rescan, and cleanup. 38-second enforce window; see [F3 evidence](../F3/README.md). This is not live Falco detection. |
-| F4 signed messages | LIVE | Signed accepted in test mode; unsigned and tampered requests refused; run-owned keys cleaned. See [F4 evidence](../F4/README.md). |
-| F5 baseline promotion | FALLBACK | Dashboard returned zero candidates; no candidate fabricated. See [F5 status](../F5/F5_baseline_promotion_2026-11-13.md). |
-| F6 request validation | FALLBACK | No supported live request injector; no synthetic Redis action added. See [F6 status](../F6/F6_invalid_request_status_2026-11-13.md). |
-| F7 policy boundaries and rollback | FALLBACK | No validated live trigger for M2, D1, and fresh Security response rollback. See [F7 status](../F7/F7_policy_live_status_2026-11-13.md). |
-| F8 dashboard controls | FALLBACK | APIs/pages responded; incident and empty candidate state read. Full interactive controls and screenshots unavailable. See [F8 read-through](../F8/F8_dashboard_readthrough_2026-11-13.md). |
-| F9 kill switch | LIVE | Authenticated dashboard toggle `test -> enforce -> test`; mode changes ledgered and dead-man armed. No action was generated during enforce, so paired applied-action comparison is not measured. See [F9 evidence](../F9/README.md). |
-| F10 drift walkthrough | LIVE | Live metrics and drift were recorded as a `human_patch` dry-run; CPU request/limit restored. Canary heal and bad-p99 rollback not measured. See [F10 evidence](../F10/F10_drift_walkthrough_2026-11-13.md). |
-| F11 HPA/Grafana | FALLBACK | HPA scaled and returned to 2/2, but the latest load had 12 first-timestamp refusals. No Grafana screenshot: browser surface unavailable and renderer absent. See [F11 evidence](../F11/README.md). |
-| F12 U6 twice | FALLBACK | Two partial all-stage attempts stopped at Helm DNS; standalone KubeHeal install/adapter/victim stages and reset succeeded. U6 acceptance remains incomplete. See [F12 status](../F12/U6_status_2026-11-13.md). |
-| F13 P11 | LIVE / FALLBACK | E2 measured one inference pod recovery at 1.25 seconds. E1 failed with 12 initial connection refusals; E3-E6 and V5-E1 not measured. See [F13 evidence](../F13/P11_live_status_2026-11-13.md). |
+| Preflight | LIVE | All three nodes Ready; all workload pods Ready (the MinIO bootstrap Job is Completed); Helm revision 17; demo image tag `b20261113071011`; mode `test`; Redis, MinIO, and prod victim PVCs Bound. `preflight-2026-11-13.txt`. |
+| Inference readiness | LIVE | `/readyz` returned HTTP 200 with health/security bundles loaded; HPA idle at 2 replicas. `inference-readyz-2026-11-13.txt`. |
+| F1 safety | FALLBACK | Full default suites are the safety check; live integration tests remain opt-in. Exact final counts recorded in the handoff after the final runs. |
+| F2 D-5 replay | LIVE | First attempt found four run-owned F10 pods sharing the image label and safely stopped before patching. The runner was fixed to exclude `kubeheal.io/scripted=F10`; retry produced a real model-scored replay Security event, Fusion `auto_contain` dry-run, and restored the DaemonSet/replay resources. Both outputs retained as `rehearsal-f2-2026-11-13*.txt`. |
+| F3 containment and restore | LIVE | Existing demo-image evidence completed a scripted Sense alert through freeze, snapshot, quarantine, restore, entropy scan, and cleanup. The enforce window returned mode to `test`; no live Falco sensing claim. See F3 evidence. |
+| F4 message authentication | LIVE | Rehearsal rerun accepted signed dry-run and refused unsigned/tampered messages with `invalid_hmac`; run-owned Redis records cleaned and mode remained `test`. `rehearsal-f4-2026-11-13.txt`. |
+| F5 baseline promotion | LIVE | Scripted PVC-free dev config auto-promoted with a ledger entry. Scripted prod config waited as a dashboard candidate, then was approved in a bounded dead-man-protected enforce window. Mode returned to `test`. |
+| F6 invalid requests | LIVE | Signed bad namespace, protected label, unknown action, and missing pod UID were all refused. Every result HMAC verified and frozen count was zero; label restored and owned Redis records removed. Security logs/results are evidence because refusals are not currently written to MinIO ledger. |
+| F7 policy gates | LIVE | Scripted ambiguous M2 reached HUMAN; D1 inclusive CPU 50m and memory 32Mi edges fired; rule rollback was held without fresh Security Model response and queued with a fresh scripted response. Executor stayed dry-run. |
+| F8 dashboard | LIVE / FALLBACK | Screenshots cover incident approval/rejection, baseline approval/rejection, incident details, mode toggle, ledger/status controls. Approvals in test mode were dry-run; rejected items resolved. SnapshotFreeze release is FALLBACK because no incident had a held target. |
+| F9 kill switch | LIVE / FALLBACK | Authenticated dashboard changed `test -> enforce -> test`, ledger entries verified, dead-man observed return to test. Paired same-input test-mode no-write/enforce-mode applied-action proof remains not measured. |
+| F10 drift | LIVE | Scripted dev canary patch was kept after three improving windows. Scripted prod canary rolled back in window 1 after p99 rose from 495.21 ms to 4,407.69 ms. Dead-man and mode readback were clean. |
+| F11 HPA/Grafana | LIVE | Warmed 32 VU/90 second load passed 113,873/113,873 checks, zero refusals, p50 24.03 ms, p95 37.9 ms; HPA 2 -> 8 -> 2. Grafana screenshot saved. |
+| F12 U6 | LIVE | Separate fresh cluster completed offline chart install and drift scenario twice. Both runs returned 15/15 metric series and dry-run drift decisions. Original cluster and PVCs were not used for reset. |
+| F13 P11 | LIVE / FALLBACK | E1 passed 112,327/112,327, zero refusals, p50 24.34 ms, p95 38.19 ms. E2 recovery measured at 1.25 seconds. E3-E6 and V5-E1 are not measured with concrete reasons in P11 coverage. |
 
-## Screenshots and saved output
+## Runbook correction discovered during rehearsal
 
-No UI screenshots were captured because computer-use browser access timed out and Grafana's renderer is not installed. The HTTP/API summaries, runner output, F3 ledger excerpts, F11 k6 summary, and P11 JSON/CSV/log artifacts are saved under the linked feature evidence directories. Tokens, Secret values, and Redis credentials were not included.
+The D-5 runner previously selected every `prod` pod with `app.kubernetes.io/name=victim-app`, which included F10 scripted scratch pods. It now excludes the F10 marker while keeping the original victim target. The focused runner suite passed 9 tests. The first failed attempts are preserved; no Kubernetes write occurred before the guard stopped them.
 
-## Fresh-start approval boundary
+## Evidence
 
-The owner has been asked whether to authorize `down.ps1` followed by cluster recreation. Verified MinIO and Redis backups are outside the repository at `C:\My_projects_1\cLOUD\KubeHeal-PreClean-20261113-1430`. No PVC deletion has occurred. Until approval arrives, this rehearsal remains fallback-only at the fresh-start step.
+- `preflight-2026-11-13.txt`
+- `inference-readyz-2026-11-13.txt`
+- `rehearsal-f2-2026-11-13.txt` and `rehearsal-f2-2026-11-13-retry.txt`
+- `rehearsal-f4-2026-11-13.txt`
+- Per-feature outputs/screenshots in `../F2/` through `../F13/`
+
+The live cluster remained in mode `test` at close. No cluster/PVC deletion, model training, push, or `PROJECT_SPEC.md` change occurred.

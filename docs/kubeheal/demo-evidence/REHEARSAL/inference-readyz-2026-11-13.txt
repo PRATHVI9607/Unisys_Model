@@ -1,0 +1,2 @@
+HTTP 200
+{"ready":true,"models":{"health":"health-5.0.0-a374e498","security":"security-5.0.0-c6fa12d8"}}

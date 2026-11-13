@@ -2,6 +2,29 @@
 
 This runbook is for the `k3d-kubeheal` context only. Never use `hybrid-demo`. Keep `kubeheal-mode` in `test` except during explicitly scripted, logged enforce windows. F3 is live-verified from Fusion onward with scripted Sense input because Falco is absent. The F3 cleanup helper selects only resources carrying its unique run label or incident IDs found in its own action stream; review its printed targets before relying on the cleanup result.
 
+## Rehearsal status, 2026-11-13
+
+The acceptance pass used the existing `k3d-kubeheal` cluster and preserved its PVCs. U6 was separately proven twice from fresh state on the disposable `kubeheal-rehearsal` cluster using vendored charts. A live scripted input is not a claim about model quality or an unscripted signal.
+
+| Step | Status | Evidence / limit |
+|---|---|---|
+| Preflight | LIVE | Nodes, Ready pods, Helm revision 17, image tags, mode `test`, and all three protected PVCs read back. |
+| F1 | FALLBACK | Full suites are the safety evidence; live-test integrations remain opt-in. |
+| F2 | LIVE | D-5 replay rerun during rehearsal; model-scored Security event, Fusion/Executor dry-run, run-owned cleanup. |
+| F3 | LIVE | Scripted alert through containment and restore; not live Falco sensing. |
+| F4 | LIVE | Rehearsal rerun: signed accepted as dry-run, unsigned/tampered refused, run-owned Redis records cleaned. |
+| F5 | LIVE | Scripted dev auto-promotion with ledger; scripted prod candidate waits for dashboard approval and promotion in a dead-man-protected window. |
+| F6 | LIVE | Four signed invalid requests refused before freeze; frozen count zero; temporary label restored. |
+| F7 | LIVE | Scripted M2 HUMAN gate, D1 CPU/memory inclusive edges, rollback withheld without fresh Security response and queued with one. |
+| F8 | LIVE / FALLBACK | Incident, approval/rejection, baseline, kill-switch, ledger and status controls have screenshots/results. SnapshotFreeze release is FALLBACK because no held target exists. |
+| F9 | LIVE / FALLBACK | Dashboard test/enforce/test and ledger changes verified with dead-man. Paired same-input dry-run versus applied-action comparison remains FALLBACK. |
+| F10 | LIVE | Scripted canary patch kept after three improving windows; separate scripted prod canary rolled back on bad p99. |
+| F11 | LIVE | Warmed 32-VU/90-second run passed 113,873/113,873 checks, 0 refusals, p50 24.03 ms, p95 37.9 ms; HPA 2 -> 8 -> 2 and Grafana screenshot saved. |
+| F12 / U6 | LIVE | Two full offline chart installs plus scripted drift on a separate fresh cluster; original cluster/PVCs preserved. Local image cache is required. |
+| F13 / P11 | LIVE / FALLBACK | E1 passed 112,327/112,327, 0 refusals, p50 24.34 ms, p95 38.19 ms; E2 recovery 1.25 s. E3-E6 and V5-E1 are not measured for documented reasons. |
+
+The D-5 rehearsal initially exposed that F10 scratch pods shared the victim image label. The runner was tightened to exclude pods labelled `kubeheal.io/scripted=F10`; focused tests passed 9/9, and the rehearsal retry passed. Both failed initial attempts are retained in the REHEARSAL folder.
+
 ## Common preflight
 
 **Planned time (estimate):** 5 minutes. **Show:** running cluster, workloads, mode, and Helm release. **Expected:** context reachable, workloads ready, release deployed, mode `test`.
@@ -140,7 +163,7 @@ kubectl --context k3d-kubeheal -n kubeheal port-forward svc/kubeheal-dashboard 8
 kubectl --context k3d-kubeheal -n kubeheal get configmap kubeheal-mode -o jsonpath='{.data.mode}'
 ```
 
-Open `http://127.0.0.1:8500/baseline-candidates` and `http://127.0.0.1:8500/approvals`. Approval and rejection are `POST /api/baseline-candidates/{namespace}/{deployment}/approve` and `/reject`, with JSON `{"candidate_id":"...","reason":"..."}` and an admin bearer token. Use the interactive dashboard token field; never put a real token in a transcript. Expected: a candidate status change and a corresponding ledger record. The dashboard now checks the target namespace's `kubeheal/mode` label and fails closed if it cannot read it. **NOT VERIFIED live:** the 2026-11-13 API/page read returned zero baseline candidates; there is no safe candidate-generation trigger, so do not approve a fabricated candidate. See `demo-evidence/F5/F5_baseline_promotion_2026-11-13.md`. Safe fallback: `.\.venv\Scripts\python.exe -m pytest tests/test_baseline_promotion.py tests/test_dashboard_baseline.py -q`; unit/UI evidence is not a live promotion.
+Open `http://127.0.0.1:8500/baseline-candidates` and `http://127.0.0.1:8500/approvals`. Approval and rejection are `POST /api/baseline-candidates/{namespace}/{deployment}/approve` and `/reject`, with JSON `{"candidate_id":"...","reason":"..."}` and an admin bearer token. Use the interactive dashboard token field; never put a real token in a transcript. The dashboard checks target namespace mode and fails closed if unreadable. **LIVE-VERIFIED with scripted, PVC-free targets:** dev config change auto-promoted and wrote its baseline ledger entry; prod config change created a candidate and the dashboard approved it in a bounded, dead-man-protected enforce window. Mode returned to `test`. This validates the promotion path, not Health Agent model quality. See `demo-evidence/F5/F5_scripted_run_2026-11-13.txt` and `README.md`.
 
 ## F6. Executor request validation
 
@@ -152,7 +175,7 @@ kubectl --context k3d-kubeheal -n kubeheal logs deployment/executor --since=5m
 kubectl --context k3d-kubeheal -n dev get deployment,pod,networkpolicy -o wide
 ```
 
-Expected for the eventual live trigger: Executor validation outcomes show accepted/refused reasons, and the rejected cases leave workload state unchanged. **NOT VERIFIED live:** no supported live request injector is available. Do not write directly to Redis or patch a workload to fabricate an Executor request. See `demo-evidence/F6/F6_invalid_request_status_2026-11-13.md`. Safe fallback: `.\.venv\Scripts\python.exe -m pytest tests/test_remediation_validation.py tests/test_executor_containment_v5.py -q`; this is validation-test evidence, not live Executor intake.
+Expected: Executor validation outcomes show accepted/refused reasons, and rejected cases leave workload state unchanged. **LIVE-VERIFIED using a run-owned signed protocol input:** four signed requests (bad namespace, protected label, unknown action, missing pod UID) were refused; each signed result verified, each reported `frozen=0`, the temporary label was restored, and owned Redis entries were removed. No freeze occurred. Security Agent refusal logs and signed result hashes are the proof; the current implementation does not append these refusals to MinIO ledger. See `demo-evidence/F6/F6_signed_invalid_run_2026-11-13.txt`.
 
 ## F7. Conformal, D1, and rollback policy
 
@@ -163,7 +186,7 @@ kubectl --context k3d-kubeheal -n kubeheal get deployment,service | Select-Strin
 kubectl --context k3d-kubeheal -n kubeheal logs deployment/fusion-agent --since=5m
 ```
 
-Expected live output must include the prediction set and policy decision for each boundary case; the rollback must cite a fresh Security response. **NOT VERIFIED live:** there is no validated scenario command for these inputs and outcomes. Do not present generic logs as proof. See `demo-evidence/F7/F7_policy_live_status_2026-11-13.md`. Safe fallback: `.\.venv\Scripts\python.exe -m pytest tests/test_policy_rules.py tests/test_decision_policy.py -q`; label live behavior not verified.
+Expected live output must include the prediction set and policy decision for each boundary case; the rollback must cite a fresh Security response. **LIVE-VERIFIED with scripted inputs in mode `test`:** M2 `{degraded, benign}` reached `human_pending`; D1 emitted CPU 500m to 50m and memory 320Mi to 32Mi policy cases at inclusive thresholds; rule rollback was held without a fresh Security model response and queued with one. The queued Executor action remained dry-run; no Kubernetes write occurred. See `demo-evidence/F7/F7_scripted_run_2026-11-13.txt`.
 
 ## F8. Dashboard operations
 
@@ -174,7 +197,7 @@ kubectl --context k3d-kubeheal -n kubeheal port-forward svc/kubeheal-dashboard 8
 kubectl --context k3d-kubeheal -n kubeheal get configmap kubeheal-mode -o jsonpath='{.data.mode}'
 ```
 
-Open `http://127.0.0.1:8500/approvals` for incidents/actions, `http://127.0.0.1:8500/baseline-candidates` for candidates, and `http://127.0.0.1:8500/incidents/{incident_id}` for the timeline, containment details, and SnapshotFreeze card. The kill switch route is `GET/POST /api/kill-switch`; POST JSON is `{"mode":"test"}` or `{"mode":"enforce"}` with an admin bearer token. Do not put that token in a command transcript. For rehearsal, return mode to `test` immediately after any authorized toggle. Baseline approval/rejection endpoints are listed in F5. On the incident page, a held freeze displays namespace/PVC and the release form; enter a reason of at least ten characters and use `force` only when intentionally releasing an open incident. The API is `POST /api/incidents/{incident_id}/release-snapshot-freeze`. In mode `test`, expected outcome is a dry-run ledger entry and no release. The 2026-11-13 read-through returned 61 incidents and 16 pending items; the F3 incident had no held SnapshotFreeze and the baseline API had zero candidates. Page/API reads and F9's authenticated kill-switch toggle are recorded in F8/F9 evidence, but the complete interactive control set was not exercised and no screenshot was captured. Do not claim approve/reject/release effects. See `demo-evidence/F8/F8_dashboard_readthrough_2026-11-13.md`.
+Open `http://127.0.0.1:8500/approvals` for incidents/actions, `http://127.0.0.1:8500/baseline-candidates` for candidates, and `http://127.0.0.1:8500/incidents/{incident_id}` for the timeline, containment details, and SnapshotFreeze card. The kill switch route is `GET/POST /api/kill-switch`; POST JSON is `{"mode":"test"}` or `{"mode":"enforce"}` with an admin bearer token. Do not put that token in a command transcript. For rehearsal, return mode to `test` immediately after any authorized toggle. Baseline approval/rejection endpoints are listed in F5. The F8 walkthrough captured screenshots of incident approval/rejection, baseline approval/rejection, incident details, ledger/status views, and kill-switch test/enforce state. Scripted incident and baseline controls were exercised in test mode; approval was a dry-run and rejection resolved the items. **SnapshotFreeze release is FALLBACK:** no incident had a held freeze target, so the release control could not safely be submitted. Evidence: `demo-evidence/F8/F8_dashboard_walkthrough_2026-11-13.md` and `screenshots-2026-11-13/`.
 
 Before and after any authorized scripted window, verify:
 
@@ -194,7 +217,7 @@ kubectl --context k3d-kubeheal -n kubeheal logs deployment/fusion-agent --since=
 kubectl --context k3d-kubeheal -n kubeheal logs deployment/executor --since=5m
 ```
 
-The dashboard toggle is **verified on 2026-11-13**: the authenticated API switched `test -> enforce -> test`, both changes were written to the ledger, a dead-man switch was armed, and final readback was `test`/dry-run. No remediation event was generated during the short enforce interval, so the paired test-mode zero-write versus enforce-mode applied-action comparison remains **not measured**. Test-mode dry-run evidence is recorded in F2/F3/F4. See `demo-evidence/F9/README.md` and `dashboard-toggle-demo-2026-11-13.json`. Do not claim an enforce-mode workload action from the toggle alone. Safe fallback: `.\.venv\Scripts\python.exe -m pytest tests/test_killswitch.py tests/test_dashboard_killswitch.py -q`.
+The authenticated dashboard toggle is **LIVE-VERIFIED**: `test -> enforce -> test`, both changes ledgered, dead-man armed, final mode readback `test`. F8 captured screenshots of the dashboard toggle itself. F5 and F10 separately prove bounded scripted enforce actions under a dead-man; F9's exact paired same-input dry-run versus applied-action comparison remains **not measured**. See `demo-evidence/F9/README.md`, `dashboard-toggle-demo-2026-11-13.json`, and F8 screenshots.
 
 ## F10. Drift healing and rollback
 
@@ -206,11 +229,11 @@ pwsh -ExecutionPolicy Bypass -File .\demo\scripts\demo.ps1 -Action drift -Observ
 pwsh -ExecutionPolicy Bypass -File .\demo\scripts\demo.ps1 -Action status
 ```
 
-The script asserts mode `test`, temporarily changes only `prod/victim-app` CPU request/limit to 50m/50m, waits for a new action, and restores 100m/500m in `finally`. On 2026-11-13, live Prometheus queries returned 15/15 series; Fusion recorded a `human_patch` dry-run (confidence 0.7316), and the workload returned to request 100m/limit 500m. See `demo-evidence/F10/F10_drift_walkthrough_2026-11-13.md`. This did not apply a canary patch. **Live drift sensing and dry-run are verified; canary healing and bad-p99 rollback are not measured.** Do not claim p99 rollback without a live record.
+The basic script asserts mode `test`, temporarily changes only `prod/victim-app` CPU request/limit to 50m/50m, waits for a new action, and restores 100m/500m in `finally`. It verifies drift sensing and dry-run. **Canary and rollback are also LIVE-VERIFIED using scripted, PVC-free run-owned targets** in a separate bounded window: dev canary patch kept after three windows; prod scratch canary rolled back in window 1 when real p99 rose from 495.21 ms to 4,407.69 ms. The script read back restored CPU resources and mode `test`; dead-man logged start/end. See `demo-evidence/F10/README.md`, `F10_scripted_run_30de436bd53a4ceebb89b2586414bb18.txt`, and ledger metrics.
 
 ## F11. Queue-depth HPA and Grafana
 
-**Measured run duration:** 7m14s in the successful run; plan 8 minutes for load, baseline check, and Grafana view. **Show:** queue metric increasing under k6 load, HPA scaling, then the queue-depth and replicas panels. A post-merge repeat scaled 2 -> 8 -> 2 but had 12 connection refusals during scale-up, so do not present it as a clean load result.
+**Measured run:** 32 VUs for 90 seconds; reserve about 13 minutes including scale-down and Grafana review. **Show:** queue metric increasing under k6 load, HPA scaling, then the queue-depth and replicas panels. The accepted 2026-11-13 rerun passed 113,873/113,873 checks with no refusals and scaled 2 -> 8 -> 2. Earlier failed runs remain retained but are not acceptance evidence.
 
 ```powershell
 pwsh -ExecutionPolicy Bypass -File .\demo\scripts\hpa_load.ps1 -Vus 32 -DurationSeconds 90 -SampleSeconds 10 -ScaleDownWaitSeconds 330
@@ -218,18 +241,22 @@ kubectl --context k3d-kubeheal -n kubeheal get hpa kubeheal-inference -o wide
 kubectl --context k3d-kubeheal -n monitoring port-forward svc/monitoring-grafana 3000:80
 ```
 
-Open `http://127.0.0.1:3000` and select the KubeHeal overview dashboard. The script checks mode `test`, waits for the HPA baseline, creates a bounded k6 job plus scoped NetworkPolicy/ConfigMap, emits samples and k6 summary, and cleans only its run-owned resources in `finally`. The earlier successful run on 2026-11-12 measured 32 VUs for 90 seconds; 121,088/121,088 checks passed; median 22.86 ms, p95 38.45 ms; HPA 2 -> 7 -> 2; duration 7m14s. A post-merge repeat scaled 2 -> 8 -> 2 but had 12 connection refusals out of 99,431 checks and is not a clean load result. Dashboard panel definitions and Prometheus samples for the repeat are in [Grafana API evidence](demo-evidence/F11/grafana-hpa-api-2026-11-12.json). The Grafana image renderer is not installed, so no screenshot was captured; save a visual screenshot during rehearsal if the browser is available. The earlier script attempt failed because `Out-String -NoNewline` flattened the JS file; cleanup succeeded, and the fix is `6f97f88`. These synthetic scoring-load runs do not measure the full incident pipeline or establish a performance guarantee.
+Open `http://127.0.0.1:3000` and select the KubeHeal overview dashboard. The script checks mode `test`, waits for the HPA baseline, creates a bounded k6 job plus scoped NetworkPolicy/ConfigMap, emits samples and k6 summary, and cleans only its run-owned resources in `finally`. The accepted 2026-11-13 rerun measured 32 VUs for 90 seconds; 113,873/113,873 checks passed; median 24.03 ms, p95 37.9 ms; HPA 2 -> 8 -> 2. Five successful sequential warm-up requests are excluded from the measured stage and disclosed in the raw output. The screenshot is `demo-evidence/F11/grafana-f11-2026-11-13.png`. Earlier failed runs remain in the evidence folder and are not clean load results. These synthetic scoring-load runs do not measure the full incident pipeline or establish a performance guarantee.
 
 ### Separate P11 evaluation status
 
-The 2026-11-13 F11 demo-image rerun had 12 first-timestamp connection refusals out of 72,328 checks (32 VUs, 90 seconds), with observed median 37.49 ms and p95 61.87 ms on that failed run. HPA scaled 2 -> 8 -> 2 and the script cleaned its run-owned resources. No Grafana screenshot was captured because the browser surface was unavailable and the renderer is not installed. See `demo-evidence/F11/hpa-run-2026-11-13.txt`.
+The earlier 2026-11-13 F11 run had 12 first-timestamp connection refusals out of 72,328 checks and is retained as failed evidence. The clean warmed rerun used 32 VUs for 90 seconds: 113,873/113,873 checks passed, zero request failures, median 24.03 ms, p95 37.9 ms, HPA 2 -> 8 -> 2. Readiness waited for both inference endpoints; the script waited five seconds after its scoped NetworkPolicy and k6 performed a five-second settle plus five sequential HTTP 200 warmups. These warm-ups are disclosed and excluded from the measured stage. A Grafana screenshot is saved at `demo-evidence/F11/grafana-f11-2026-11-13.png`.
 
-Do not combine F11's clean HPA run with P11 E1. **P11 E1 is not an accepted benchmark:** the two 2026-11-12 attempts and the 2026-11-13 attempt failed. The latest used 32 VUs/90s, 66,807/66,819 checks passed, with 12 first-timestamp connection refusals to `10.43.219.57:8000`. It observed median 40.01 ms and p95 71.16 ms on the failed run; latency status remains `not measured`. The same pattern occurred in F11. Current evidence is consistent with a first-second Service/data-plane race, but does not identify the refusing component. The P11 runner cleaned its Job and ConfigMap, HPA returned to baseline, and mode remained `test`. **P11 E2 was measured:** deleting one inference pod from a 2/2 baseline returned to 2 Ready replicas in 1.25 seconds. E3-E6 and V5-E1 remain not measured for the reasons in [`F13 evidence`](demo-evidence/F13/P11_live_status_2026-11-13.md) and [`P11 coverage`](results/p11/P11_COVERAGE.md).
+Do not combine F11 with P11 E1. A P11 run with the same readiness gate, five-second settle, and five successful HTTP 200 warm-ups passed 112,327/112,327 checks at 32 VUs/90s, with zero refusals, p50 24.34 ms and p95 38.19 ms. E2 recovery remains 1.25 seconds. E3-E6 and V5-E1 are **not measured** for the specific reasons in [`F13 evidence`](demo-evidence/F13/P11_live_status_2026-11-13.md) and [`P11 coverage`](results/p11/P11_COVERAGE.md). Do not reuse failed-run latency as accepted data.
 
 ## F12. U6 repeat acceptance
 
 U6 passed twice on a separately created `kubeheal-rehearsal` cluster. Both `up.ps1 -Stage all -SkipImages` runs used vendored `kube-prometheus-stack` and `prometheus-adapter` archives without Helm repository DNS. Images were supplied from the local image cache, so a populated local cache remains a prerequisite. Each install was followed by the scripted drift scenario: 15/15 metric queries returned samples, Fusion recorded `human_patch` with `dry_run=true` in mode `test`, and the script restored CPU request/limit to 100m/500m. The separate cluster was then deleted as authorized. The original `k3d-kubeheal` and its PVCs remain untouched. See `demo-evidence/F12/U6_offline_rehearsal.md` and the raw transcripts alongside it.
 
+## F13. P11 coverage
+
+E1 and E2 are live measured as listed above. **E3-E6 and V5-E1 are FALLBACK / not measured**, with concrete scenario and safety reasons in `results/p11/P11_COVERAGE.md`; the old V5-E1 runner is not context-pinned and can restart services or remove `khe-*` namespaces, so it was not run against the original cluster.
+
 ## Evidence checklist
 
-After each rehearsal, save raw terminal output and screenshots in `docs/kubeheal/demo-evidence/F1/` through `F13/`, with a README or report containing date, machine, cluster, exact command, result, duration, and deviations. Redact credentials, tokens, Secret data, and customer data. If a feature is not exercised successfully, mark it `not verified` or `not measured` and use the evidence fallback; do not present a unit test as live evidence. The 2026-11-13 rehearsal work used the existing cluster and did not constitute a fresh-cluster end-to-end rehearsal.
+After each rehearsal, save raw terminal output and screenshots in `docs/kubeheal/demo-evidence/F1/` through `F13/`, with a README or report containing date, machine, cluster, exact command, result, duration, and deviations. Redact credentials, tokens, Secret data, and customer data. If a feature is not exercised successfully, mark it `not verified` or `not measured` and use the evidence fallback; do not present a unit test as live evidence. The 2026-11-13 rehearsal used the existing original cluster without deleting it or its PVCs; fresh-start U6 was separately rehearsed twice on the disposable cluster.
