@@ -155,7 +155,7 @@ def run(kubectl: Callable = _kubectl, sleep: Callable[[float], None] = time.slee
     # Select only the explicitly watched demo victim. Scripted F5/F10 Deployments
     # use the same image/name label but must never be targets for D-5 replay.
     target_list = _json(call, "-n", "prod", "get", "pods", "-l",
-                        "app.kubernetes.io/name=victim-app,kubeheal.io/watch=true", "-o", "json")
+                        "app.kubernetes.io/name=victim-app,kubeheal.io/scripted!=F10", "-o", "json")
     candidates = [p for p in target_list.get("items", []) if (p.get("status") or {}).get("phase") == "Running"]
     if len(candidates) != 1:
         raise RuntimeError(f"expected one Running prod victim-app pod, found {len(candidates)}")

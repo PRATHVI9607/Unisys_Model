@@ -96,7 +96,7 @@ def test_runner_emits_fusion_evidence_and_restores_daemonset_without_changing_mo
     assert result["fusion_action"]["dry_run"] == "true"
     target_query = next(args for args, _, _ in fake.calls if args[:4] == ("-n", "prod", "get", "pods"))
     assert target_query[target_query.index("-l") + 1] == (
-        "app.kubernetes.io/name=victim-app,kubeheal.io/watch=true"
+        "app.kubernetes.io/name=victim-app,kubeheal.io/scripted!=F10"
     )
     patches = [json.loads(args[args.index("-p") + 1]) for args, _, _ in fake.calls if "patch" in args]
     assert patches[0]["spec"]["template"]["spec"]["containers"][0]["env"][-1] == {
