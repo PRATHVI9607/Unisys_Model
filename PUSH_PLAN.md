@@ -34,7 +34,7 @@
 
 The high-confidence diff scan found zero AWS access keys, GitHub/Slack tokens, private-key headers, or URL credentials. The broader credential-assignment scan produced 13 candidates across demo configuration, environment/Secret references, scripted dashboard helpers, docs, an existing model source, and a test fixture. The fixture candidate is a nonfunctional test placeholder; no credential value is reported. `gitleaks` is not installed in this environment. Re-run the secret scan after any later change.
 
-The targeted `git diff --check` on README, AGENTS, PUSH_PLAN, NEXT_FOR_CODEX, DEMO_RUNBOOK, PROGRESS, the final rehearsal report, and the updated F5-F7 status notes passed. The full `git diff --check origin/main` reports 1,817 findings across the large base-to-head diff, including captured terminal output and pre-existing whitespace in other changed files. Per instruction, captured output was left unchanged; the new source/docs in this acceptance pass were checked separately. Review the full output before pushing if whitespace normalization is required.
+The targeted `git diff --check` on README, AGENTS, PUSH_PLAN, NEXT_FOR_CODEX, DEMO_RUNBOOK, PROGRESS, the final rehearsal report, and the updated F5-F7 status notes passed. The full `git diff --check origin/main` reports 1,803 findings across the large base-to-head diff, including captured terminal output and pre-existing whitespace in other changed files. Per instruction, captured output was left unchanged; the new source/docs in this acceptance pass were checked separately. Review the full output before pushing if whitespace normalization is required.
 
 ## Remaining limits for owner review
 
