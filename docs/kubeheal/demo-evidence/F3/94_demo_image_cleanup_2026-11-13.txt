@@ -1,0 +1,7 @@
+[2026-11-13T01:50:58Z] verified run-owned cleanup targets: [["deployment", "f3-demo-20261113"], ["pvc", "f3-demo-20261113-data"], ["pvc", "f3-demo-20261113-data-restore-inc-20261113-014943-d861ddaa"], ["volumesnapshot", "kubeheal-forensic-f3-demo-20261113-data-inc-20261113-014943-d861ddaa"], ["volumesnapshot", "kubeheal-roll-f3-demo-20261113-data-1794534541"]]
+[2026-11-13T01:50:58Z] deployment.apps "f3-demo-20261113" deleted from staging namespace
+[2026-11-13T01:50:59Z] persistentvolumeclaim "f3-demo-20261113-data" deleted from staging namespace
+[2026-11-13T01:51:31Z] persistentvolumeclaim "f3-demo-20261113-data-restore-inc-20261113-014943-d861ddaa" deleted from staging namespace
+[2026-11-13T01:51:31Z] volumesnapshot.snapshot.storage.k8s.io "kubeheal-forensic-f3-demo-20261113-data-inc-20261113-014943-d861ddaa" deleted from staging namespace
+[2026-11-13T01:51:32Z] volumesnapshot.snapshot.storage.k8s.io "kubeheal-roll-f3-demo-20261113-data-1794534541" deleted from staging namespace
+[2026-11-13T01:51:33Z] after cleanup: 

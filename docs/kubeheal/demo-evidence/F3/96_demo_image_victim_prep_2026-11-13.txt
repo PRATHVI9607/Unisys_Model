@@ -1,0 +1,16 @@
+[2026-11-13T01:54:54Z] persistentvolumeclaim/f3-demo-victim-20261113-data created
+[2026-11-13T01:54:54Z] deployment.apps/f3-demo-victim-20261113 created
+[2026-11-13T01:54:58Z] scratch pod f3-demo-victim-20261113-76fb66fd4-2n2w7 uid 5b442797-3af9-49b6-ae37-2eb7eb36547f
+[2026-11-13T01:54:58Z] volumesnapshot.snapshot.storage.k8s.io/kubeheal-roll-f3-demo-victim-20261113-data-1794534898 created
+[2026-11-13T01:55:01Z] snapshot kubeheal-roll-f3-demo-victim-20261113-data-1794534898 readyToUse; creationTime 2026-11-13T01:54:58Z
+[2026-11-13T01:55:01Z] NAME                                      READY   UP-TO-DATE   AVAILABLE   AGE   CONTAINERS   IMAGES                                                       SELECTOR
+deployment.apps/f3-demo-victim-20261113   1/1     1            1           7s    app          kubeheal-registry:5000/kubeheal/victim-app:b20261113071011   app=f3-demo-victim-20261113
+
+NAME                                          READY   STATUS    RESTARTS   AGE   IP            NODE                   NOMINATED NODE   READINESS GATES
+pod/f3-demo-victim-20261113-76fb66fd4-2n2w7   1/1     Running   0          7s    10.42.0.152   k3d-kubeheal-agent-0   <none>           <none>
+
+NAME                                                 STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS      VOLUMEATTRIBUTESCLASS   AGE   VOLUMEMODE
+persistentvolumeclaim/f3-demo-victim-20261113-data   Bound    pvc-d639bfda-983a-4118-8f84-72da5d91bbc3   64Mi       RWO            csi-hostpath-sc   <unset>                 7s    Filesystem
+
+NAME                                                                                           READYTOUSE   SOURCEPVC                      SOURCESNAPSHOTCONTENT   RESTORESIZE   SNAPSHOTCLASS            SNAPSHOTCONTENT                                    CREATIONTIME   AGE
+volumesnapshot.snapshot.storage.k8s.io/kubeheal-roll-f3-demo-victim-20261113-data-1794534898   true         f3-demo-victim-20261113-data                           64Mi          csi-hostpath-snapclass   snapcontent-e3617e6e-3bd3-44c6-a40e-1271c1ecd0a9   2s             2s

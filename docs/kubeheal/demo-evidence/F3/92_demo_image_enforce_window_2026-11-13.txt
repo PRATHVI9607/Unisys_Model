@@ -1,0 +1,32 @@
+[2026-11-13T01:49:38Z] === ENFORCE WINDOW START 2026-11-13T01:49:38Z ===
+[2026-11-13T01:49:39Z] kubeheal-mode patched to enforce; read back: enforce
+[2026-11-13T01:49:40Z] mode switch seen in executor-7fc9b466c8-cmgrr
+[2026-11-13T01:49:40Z] mode switch seen in fusion-agent-78ddf5d7f-5qmcx
+[2026-11-13T01:49:40Z] mode switch seen in fusion-agent-78ddf5d7f-l9tnk
+[2026-11-13T01:49:41Z] mode switch seen in security-agent-k8qmr
+[2026-11-13T01:49:43Z] T0 (attack onset) 1794534583043: writing high-entropy .locked files into /data of f3-demo-20261113-9f756657d-gm244
+[2026-11-13T01:49:43Z] total 280
+-rw-r--r-- 1 10001 10001    25 Nov 13 01:49 README_RANSOM.txt
+-rw-r--r-- 1 10001 10001    13 Nov 13 01:49 clean_1.txt
+-rw-r--r-- 1 10001 10001    13 Nov 13 01:49 clean_2.txt
+-rw-r--r-- 1 10001 10001    13 Nov 13 01:49 clean_3.txt
+-rw-r--r-- 1 10001 10001    13 Nov 13 01:49 clean_4.txt
+-rw-r--r-- 1 10001 10001    13 Nov 13 01:49 clean_5.txt
+-rw-r--r-- 1 10001 10001 32768 Nov 13 01:49 doc_1.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 13 01:49 doc_2.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 13 01:49 doc_3.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 13 01:49 doc_4.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 13 01:49 doc_5.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 13 01:49 doc_6.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 13 01:49 doc_7.locked
+-rw-r--r-- 1 10001 10001 32768 Nov 13 01:49 doc_8.locked
+[2026-11-13T01:49:43Z] publishing scripted alert sec-f3-1794534583800-f3-demo-20261113 for staging/f3-demo-20261113-9f756657d-gm244 (T0 1794534583043, risk 0.9500, set ["ransomware"], source model security-5.0.0-c6fa12d8)
+[2026-11-13T01:49:44Z] XADD id 1794534583294-0
+[2026-11-13T01:49:44Z] action stream: auto_contain incident=inc-20261113-014943-d861ddaa outcome=queued_for_executor dry_run=false
+[2026-11-13T01:49:48Z] action stream: executed_contain incident=inc-20261113-014943-d861ddaa outcome=contained dry_run=
+[2026-11-13T01:49:48Z] action stream: restore_requested incident=inc-20261113-014943-d861ddaa outcome=queued_for_executor dry_run=false
+[2026-11-13T01:50:11Z] action stream: executed_restore incident=inc-20261113-014943-d861ddaa outcome=restored dry_run=
+[2026-11-13T01:50:11Z] chain wait ended: executed_restore: restored
+[2026-11-13T01:50:16Z] kubeheal-mode patched to test; read back: test
+[2026-11-13T01:50:16Z] === ENFORCE WINDOW END 2026-11-13T01:50:16Z; mode now test ===
+[2026-11-13T01:50:16Z] WINDOW 2026-11-13T01:49:38Z -> 2026-11-13T01:50:16Z

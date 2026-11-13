@@ -28,3 +28,17 @@ The alert is scripted (see `RUNBOOK_F3.md`); no screenshots were taken. Nothing 
 11. `F3_NAME=f3-scratch-c` `prep`, `rehearse`, `window` (window 3, 14:15Z), `ledger_dump.py inc-20261112-141554-1d76b1ed`, `ledger_dump.py --list-since 2026-11-12T14:15:40Z`, state before and after, `cleanup`.
 12. `88_hmac_requests_and_breaker.txt`: the freeze request entries (window 1 unsigned, windows 2 and 3 signed) and the staging containment breaker.
 13. Full suite on the final commit, see the reply.
+
+## Demo-image reruns (2026-11-13)
+
+The complete scripted Fusion-to-Executor containment and restore chain ran twice after rebuilding the demo images. The first scratch Deployment reused the older victim image; the second rerun below used the freshly rebuilt `victim-app:b20261113071011` image. Both enforced windows completed and returned global mode to `test`.
+
+- Helm revision: 15. KubeHeal agent images: `b20261113071011`.
+- Second run: `f3-demo-victim-20261113`, incident `inc-20261113-015540-cff4eea6`.
+- Enforce window: 2026-11-13 01:55:35Z to 01:56:13Z (38 seconds). The script confirmed mode propagation to Executor, both Fusion replicas, and the Security Agent on the scratch pod's node. An independent 400-second dead-man process was armed and stopped after the script restored `test`.
+- The scripted alert led to `auto_contain`, confirmed freeze, forensic snapshot, quarantine, scale to zero, restore from the pre-T0 rolling snapshot, digest-pinned image, entropy scan, clean quarantine lift, and final `restored` result. Ledger has 42 ordered entries. The restored volume scan found 5 files, 0 high-entropy files, and 0 unreadable paths. The restored pod contained only `clean_1.txt` through `clean_5.txt`; the original encrypted files and ransom note were absent.
+- Sense remains scripted: model fields were copied from the real Security Agent-scored hand-written D-5 replay. This is k3d evidence, not a live Falco capture or real-node validation.
+- Both scratch runs were cleaned by the updated run-label/incident-label helper. It printed only the exact run-owned Deployment, PVCs, and snapshots before deleting them. `staging` has no remaining pods, Deployments, PVCs, Jobs, VolumeSnapshots, or NetworkPolicies from these runs.
+- Five staging SnapshotFreeze keys were removed only after verifying `staging` had no PVCs. Each key was deleted with an atomic compare-and-delete against its expected incident ID. Two historical fail-safe escalations were resolved with append-only `human_resolution` ledger entries; the original escalation stream records remain intact.
+
+Raw records: `90_demo_image_prep_2026-11-13.txt` through `100_demo_image_victim_cleanup_2026-11-13.txt`. The 42-entry read-only ledger dump is `99_demo_image_victim_ledger_2026-11-13.jsonl`.

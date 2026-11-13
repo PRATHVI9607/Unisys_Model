@@ -1,0 +1,6 @@
+[2026-11-13T01:55:11Z] publishing scripted alert sec-f3-1794534911315-f3-demo-victim-20261113 for staging/f3-demo-victim-20261113-76fb66fd4-2n2w7 (T0 1794534910883, risk 0.9500, set ["ransomware"], source model security-5.0.0-c6fa12d8)
+[2026-11-13T01:55:11Z] XADD id 1794534912029-0
+[2026-11-13T01:55:11Z] action stream: auto_contain incident=inc-20261113-015511-be75a733 outcome=queued_for_executor dry_run=true
+[2026-11-13T01:55:11Z] action stream: executed_contain incident=inc-20261113-015511-be75a733 outcome=DRY RUN: would have CONTAIN staging/f3-demo-victim-20261113-76fb66fd4-2n2w7 (request_freeze, forensic_snapshot, create_quarantine_policy, label_pod) dry_run=
+[2026-11-13T01:55:11Z] rehearsal ended: executed_contain dry run
+[2026-11-13T01:55:11Z] mode after rehearsal: test
