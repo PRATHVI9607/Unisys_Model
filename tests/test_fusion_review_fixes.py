@@ -38,6 +38,33 @@ async def groups(r):
         await r.xgroup_create(s, fusion.GROUP, id="0", mkstream=True)
 
 
+def test_stream_groups_retry_when_redis_is_unavailable_during_fusion_startup():
+    async def go():
+        a = make_agent(enforce=False)
+        redis = a.redis
+        original = redis.xgroup_create
+        attempts = 0
+        queued_id = await redis.xadd(fusion.HEALTH_STREAM, {"event_id": "queued-before-groups"})
+
+        async def fail_once(stream_name, group, id="$", mkstream=False):
+            nonlocal attempts
+            if attempts == 0:
+                attempts += 1
+                raise ConnectionError("temporary Redis startup race")
+            return await original(stream_name, group, id=id, mkstream=mkstream)
+
+        redis.xgroup_create = fail_once
+        await a._ensure_stream_groups(retry_delay_s=0)
+
+        assert attempts == 1
+        assert all((name, fusion.GROUP) in redis.groups for name in
+                   (fusion.HEALTH_STREAM, fusion.SEC_STREAM, fusion.ACTIONS_STREAM))
+        queued = await redis.xreadgroup(fusion.GROUP, "fusion-after-retry", {fusion.HEALTH_STREAM: ">"})
+        assert queued[0][1][0] == (queued_id, {"event_id": "queued-before-groups"})
+
+    run(go())
+
+
 # ---- A: a busy lock does not drop the automatic action --------------------------------------------------
 def test_busy_lock_leaves_the_entry_pending_writes_a_ledger_line_and_retries_after_release():
     async def go():

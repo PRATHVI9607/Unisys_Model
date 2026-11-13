@@ -65,6 +65,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 import aiohttp
 import kubernetes_asyncio
@@ -98,6 +99,18 @@ def namespace_tier(namespace: str) -> str:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 METRICS = KubeHealMetrics()
+
+
+def _redis_endpoint_for_log(redis_url: str) -> str:
+    """Return a credential-free Redis endpoint for startup diagnostics."""
+    try:
+        parsed = urlsplit(redis_url)
+        if not parsed.scheme or not parsed.hostname:
+            return "<configured>"
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        return f"{parsed.scheme}://{parsed.hostname}{port}"
+    except ValueError:
+        return "<configured>"
 ASSESSMENTS = Counter("kubeheal_health_assessments_total", "Health assessments by outcome", ["outcome"],
                       registry=METRICS.registry)
 PROMOTIONS = Counter("kubeheal_health_baseline_promotions_total", "Baseline promotion attempts by outcome",
@@ -361,7 +374,7 @@ class HealthAgent:
     # ── lifecycle ────────────────────────────────────────────────────────────
     async def start(self) -> None:
         logger.info("Starting Health Agent (V5-D4)...")
-        logger.info(f"Redis URL: {self.redis_url}")
+        logger.info("Redis endpoint: %s", _redis_endpoint_for_log(self.redis_url))
         logger.info(f"Inference URL: {self.inference_url}")
         logger.info(f"Prometheus URL: {self.prometheus_url}")
         self.log_promotion_config()

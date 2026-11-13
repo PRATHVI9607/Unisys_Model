@@ -177,17 +177,34 @@ class FusionAgentV4:
         except Exception as e:
             logger.warning(f"kill switch watcher not started ({e}); mode stays 'test'")
         self.redis = aioredis.from_url(self.redis_url, decode_responses=True)
-        for stream, start in ((HEALTH_STREAM, "0"), (SEC_STREAM, "0"),
-                              # only results from now on: history must not trigger restores
-                              (ACTIONS_STREAM, "$")):
-            try:
-                await self.redis.xgroup_create(stream, GROUP, id=start, mkstream=True)
-            except Exception as e:
-                if "BUSYGROUP" not in str(e):
-                    logger.warning(f"xgroup_create {stream}: {e}")
+        await self._ensure_stream_groups()
         logger.info(f"Fusion Agent v4 started (consumer={self.consumer}, burn_in_forced={self.burn_in})")
         self.running = True
         await self._consume()
+
+    async def _ensure_stream_groups(self, retry_delay_s: float = 1.0) -> None:
+        """Create consumer groups before consuming, retrying if Redis is not ready yet.
+
+        Health events may be published while this agent starts. Creating the health and security
+        groups at id 0 after a transient Redis outage lets Fusion consume queued events instead of
+        spinning forever on NOGROUP. Action results start at "$" so stale results never trigger
+        restores after a restart.
+        """
+        groups = ((HEALTH_STREAM, "0"), (SEC_STREAM, "0"), (ACTIONS_STREAM, "$"))
+        while True:
+            failed_stream = None
+            for stream, start in groups:
+                try:
+                    await self.redis.xgroup_create(stream, GROUP, id=start, mkstream=True)
+                except Exception as exc:
+                    if "BUSYGROUP" in str(exc):
+                        continue
+                    failed_stream = stream
+                    logger.warning("Redis group setup failed for %s; retrying", stream)
+                    break
+            if failed_stream is None:
+                return
+            await asyncio.sleep(retry_delay_s)
 
     async def _start_mode_watcher(self, core_api):
         """Start the read-only watcher; a failure must leave enforcement disabled."""
