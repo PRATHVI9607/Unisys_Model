@@ -1,14 +1,19 @@
 # Remove the KubeHeal demo cluster (demo branch only). Deletes ONLY the cluster named `kubeheal` and its registry.
-#   .\demo\k3d\down.ps1          asks you to type the cluster name first
-#   .\demo\k3d\down.ps1 -Yes     no prompt (scripts)
+#   .\demo\k3d\down.ps1 -TargetCluster kubeheal          asks you to type the cluster name first
+#   .\demo\k3d\down.ps1 -TargetCluster kubeheal-rehearsal -Yes
 # This destroys every volume in the cluster: the victim PVCs, MinIO and the audit ledger, Redis.
 param(
     [switch]$Yes,
+    [Parameter(Mandatory = $true)]
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,39}$')]
-    [string]$TargetCluster = "kubeheal",
+    [string]$TargetCluster,
     [ValidateRange(0, 65535)]
     [int]$TargetRegistryPort = 0
 )
+
+if ([string]::IsNullOrWhiteSpace($TargetCluster)) {
+    throw "TargetCluster is required; refusing to select a k3d cluster implicitly."
+}
 
 . "$PSScriptRoot\lib.ps1"
 if ($TargetRegistryPort -eq 0) { $TargetRegistryPort = if ($TargetCluster -eq "kubeheal") { 5150 } else { 5151 } }

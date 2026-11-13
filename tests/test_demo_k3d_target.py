@@ -8,6 +8,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 UP = ROOT / "demo" / "k3d" / "up.ps1"
+DOWN = ROOT / "demo" / "k3d" / "down.ps1"
 
 
 def test_up_requires_a_cluster_name_and_threads_that_name_to_every_cluster_target():
@@ -41,6 +42,33 @@ def test_up_without_target_fails_during_parameter_binding_before_script_body():
     assert "TargetCluster" in output
     assert "creating cluster" not in output
     assert "cluster start" not in output
+
+
+def test_down_requires_a_cluster_name_and_never_defaults_to_kubeheal():
+    source = DOWN.read_text(encoding="utf-8")
+    assert "[Parameter(Mandatory = $true)]" in source
+    assert "[string]$TargetCluster," in source
+    assert '[string]$TargetCluster = "kubeheal"' not in source
+    assert "TargetCluster is required; refusing to select a k3d cluster implicitly." in source
+    assert "cluster delete $TargetCluster" in source
+    assert "cluster delete kubeheal" not in source
+
+
+def test_down_without_target_fails_before_any_cluster_command():
+    pwsh = shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("PowerShell 7 is unavailable; static target-routing assertions still run")
+    result = subprocess.run(
+        [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(DOWN)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "TargetCluster" in output
+    assert "deleting cluster" not in output
 
 
 def test_deadman_is_pinned_to_original_context_and_only_sets_test_mode():
