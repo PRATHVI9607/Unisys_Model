@@ -1,0 +1,1 @@
+{"deployment": "f5-scripted-prod-2a87df12", "golden_changed": false, "mode": "test", "namespace": "prod", "result": {"candidate_id": "615ced73618ee8c1aeac037c", "status": "stored"}, "run_id": "214ff6c9d8f94841874ad40e7a797bd6", "scripted": true}

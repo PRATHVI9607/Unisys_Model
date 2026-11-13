@@ -1,0 +1,47 @@
+{
+  "date": "2026-11-13",
+  "cluster": "k3d-kubeheal",
+  "mode": "test",
+  "pending_approvals": 0,
+  "scripted": true,
+  "controls": [
+    {
+      "incident_id": "inc-20261113-150422-bff7eeac",
+      "final_status": "rejected",
+      "timeline": [
+        {
+          "step": "dry_run_approved",
+          "payload": {
+            "action": "patch",
+            "approved_by": "admin:dashboard-admin",
+            "dry_run": true,
+            "exec_stream_id": "1794582489464-0",
+            "mode": "test",
+            "mode_readable": true,
+            "note": null
+          }
+        },
+        {
+          "step": "rejected",
+          "payload": {
+            "note": null,
+            "rejected_by": "admin:dashboard-admin"
+          }
+        }
+      ]
+    },
+    {
+      "incident_id": "inc-20261113-150422-02343a8d",
+      "final_status": "rejected",
+      "timeline": [
+        {
+          "step": "rejected",
+          "payload": {
+            "note": null,
+            "rejected_by": "admin:dashboard-admin"
+          }
+        }
+      ]
+    }
+  ]
+}

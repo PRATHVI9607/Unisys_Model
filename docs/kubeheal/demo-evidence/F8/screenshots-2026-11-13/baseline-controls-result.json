@@ -1,0 +1,10 @@
+{
+  "mode": "test",
+  "scripted": true,
+  "candidate_id": "615ced73618ee8c1aeac037c",
+  "approve_status": "dry_run",
+  "approve_applied": false,
+  "reject_status": "rejected",
+  "pending_candidates_after": 0,
+  "golden_changed": false
+}

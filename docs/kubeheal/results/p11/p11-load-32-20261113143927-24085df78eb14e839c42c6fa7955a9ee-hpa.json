@@ -1,0 +1,436 @@
+{
+  "before": {
+    "time_utc": "2026-11-13T14:39:27+00:00",
+    "current_replicas": 2,
+    "desired_replicas": 2,
+    "current_metrics": [
+      {
+        "pods": {
+          "current": {
+            "averageValue": "0"
+          },
+          "metric": {
+            "name": "kubeheal_model_inflight_requests"
+          }
+        },
+        "type": "Pods"
+      }
+    ]
+  },
+  "samples": [
+    {
+      "time_utc": "2026-11-13T14:39:27+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:39:32+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:39:38+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 2,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:39:43+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 4,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "12"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:39:48+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 4,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "12"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:39:53+00:00",
+      "current_replicas": 2,
+      "desired_replicas": 4,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "12"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:39:58+00:00",
+      "current_replicas": 4,
+      "desired_replicas": 7,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "6250m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:40:04+00:00",
+      "current_replicas": 4,
+      "desired_replicas": 7,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "6250m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:40:09+00:00",
+      "current_replicas": 4,
+      "desired_replicas": 7,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "6250m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:40:14+00:00",
+      "current_replicas": 7,
+      "desired_replicas": 7,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "4285m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:40:19+00:00",
+      "current_replicas": 7,
+      "desired_replicas": 7,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "4285m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:40:24+00:00",
+      "current_replicas": 7,
+      "desired_replicas": 7,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "4285m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:40:30+00:00",
+      "current_replicas": 7,
+      "desired_replicas": 7,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "2428m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:40:35+00:00",
+      "current_replicas": 7,
+      "desired_replicas": 7,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "2428m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:40:40+00:00",
+      "current_replicas": 7,
+      "desired_replicas": 7,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "2428m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:40:45+00:00",
+      "current_replicas": 7,
+      "desired_replicas": 8,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "4428m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:40:51+00:00",
+      "current_replicas": 7,
+      "desired_replicas": 8,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "4428m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:40:56+00:00",
+      "current_replicas": 7,
+      "desired_replicas": 8,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "4428m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:41:01+00:00",
+      "current_replicas": 8,
+      "desired_replicas": 8,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "3875m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:41:06+00:00",
+      "current_replicas": 8,
+      "desired_replicas": 8,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "3875m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:41:12+00:00",
+      "current_replicas": 8,
+      "desired_replicas": 8,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "3875m"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:41:17+00:00",
+      "current_replicas": 8,
+      "desired_replicas": 8,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    },
+    {
+      "time_utc": "2026-11-13T14:41:22+00:00",
+      "current_replicas": 8,
+      "desired_replicas": 8,
+      "current_metrics": [
+        {
+          "pods": {
+            "current": {
+              "averageValue": "0"
+            },
+            "metric": {
+              "name": "kubeheal_model_inflight_requests"
+            }
+          },
+          "type": "Pods"
+        }
+      ]
+    }
+  ]
+}

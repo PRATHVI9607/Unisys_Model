@@ -1,0 +1,2 @@
+DEAD-MAN START run=7f967133fbe1439a8c69b9841d8d4507 context=k3d-kubeheal started_utc=2026-11-13T16:30:05.0196761Z timeout_s=60
+DEAD-MAN END run=7f967133fbe1439a8c69b9841d8d4507 ended_utc=2026-11-13T16:30:15.5379231Z mode=test ended_by=mode_returned_to_test

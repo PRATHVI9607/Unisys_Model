@@ -1,0 +1,17 @@
+{
+  "before": "test",
+  "changes": [
+    {
+      "mode": "enforce",
+      "ledger_id": "mode-eb88c3e9a88c4cb588578dfcef1f6f59",
+      "status": "changed"
+    },
+    {
+      "mode": "test",
+      "ledger_id": "mode-d80d72cc81e445b693046d7e1ff0d4b6",
+      "status": "changed"
+    }
+  ],
+  "final": "test",
+  "scripted_window": true
+}

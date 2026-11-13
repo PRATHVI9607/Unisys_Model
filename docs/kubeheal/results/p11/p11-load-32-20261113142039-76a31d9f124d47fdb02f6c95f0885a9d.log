@@ -1,0 +1,40 @@
+
+         /\      Grafana   /â€¾â€¾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   â€¾â€¾\ 
+  /          \   |   (  |  (â€¾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /scripts/load.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 32 max VUs, 2m0s max duration (incl. graceful stop):
+              * default: 32 looping VUs for 1m30s (gracefulStop: 30s)
+
+time="2026-11-13T14:20:42Z" level=info msg="WARM-UP START: 5 sequential requests before the measured VU stage" source=console
+time="2026-11-13T14:20:42Z" level=warning msg="Request Failed" error="Post \"http://kubeheal-inference:8000/v1/health/predict\": dial tcp 10.43.219.57:8000: connect: connection refused"
+time="2026-11-13T14:20:42Z" level=info msg="WARM-UP FAILED: 0/5 returned 200; request 1 returned 0" source=console
+
+     â–ˆ setup
+
+       âœ— warm-up inference returned 200
+        â†³  0% â€” âœ“ 0 / âœ— 1
+
+     checks.....................: 0.00%   0 out of 1
+     data_received..............: 0 B     0 B/s
+     data_sent..................: 0 B     0 B/s
+     http_req_blocked...........: med=0s p(95)=0s
+     http_req_connecting........: med=0s p(95)=0s
+     http_req_duration..........: med=0s p(95)=0s
+     http_req_failed............: 100.00% 1 out of 1
+     http_req_receiving.........: med=0s p(95)=0s
+     http_req_sending...........: med=0s p(95)=0s
+     http_req_tls_handshaking...: med=0s p(95)=0s
+     http_req_waiting...........: med=0s p(95)=0s
+     http_reqs..................: 1       263.642233/s
+
+
+Run       [ 100% ] setup()
+default   [   0% ]
+time="2026-11-13T14:20:42Z" level=error msg="Error: warm-up request 1/5 returned 0\n\tat setup (file:///scripts/load.js:15:13(86))\n" hint="script exception"
