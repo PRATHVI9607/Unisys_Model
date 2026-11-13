@@ -2,7 +2,7 @@
 
 **Prepared:** 2026-11-13. **Decision:** NOT READY TO PUSH. Nothing was pushed and `ALLOW_PUSH` was not set. No training or `PROJECT_SPEC.md` changes were made.
 
-Current local heads are `work` **32101ab** and `demo` **48f515c**; `work` is an ancestor of `demo`. `origin/main` is locally `48a59aa`. No push was attempted.
+Current local `work` head is **32101ab**; `demo` contains this final push-prep documentation and includes `work`. `origin/main` is locally `48a59aa`. No push was attempted.
 
 ## Change summary versus `origin/main`
 
