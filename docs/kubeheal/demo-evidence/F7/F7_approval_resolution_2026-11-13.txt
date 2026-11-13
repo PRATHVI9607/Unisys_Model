@@ -1,0 +1,1 @@
+{"method": "dashboard rejection; history retained", "resolved": [{"incident_id": "inc-20261113-130451-48edc975", "status": "rejected"}, {"incident_id": "inc-20261113-130613-179e8288", "status": "rejected"}, {"incident_id": "inc-20261113-130613-765a3169", "status": "rejected"}]}
