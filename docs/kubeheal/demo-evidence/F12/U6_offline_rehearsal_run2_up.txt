@@ -1,0 +1,11 @@
+[kubeheal-demo] cluster kubeheal-rehearsal already exists
+[kubeheal-demo] VolumeSnapshot CRDs and snapshot-controller (external-snapshotter v8.2.0)
+[kubeheal-demo] CSI hostpath driver v1.15.0
+[kubeheal-demo] snapshot class present: volumesnapshotclass.snapshot.storage.k8s.io/csi-hostpath-snapclass
+[kubeheal-demo] kube-prometheus-stack 65.5.1 in namespace monitoring
+[kubeheal-demo] Prometheus: prometheus-operated.monitoring.svc.cluster.local:9090
+MinIO credentials already exist in k3d-kubeheal-rehearsal/kubeheal.
+[kubeheal-demo] helm install kubeheal (values-k3d-demo.yaml + generated image values)
+[kubeheal-demo] prometheus-adapter 4.11.0
+[kubeheal-demo] victim apps from kubeheal-rehearsal-registry:5000/kubeheal/victim-app:b20261113071011
+[kubeheal-demo] stage 'all' finished in 71 s

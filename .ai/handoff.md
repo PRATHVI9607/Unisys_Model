@@ -3,8 +3,8 @@
 - **Agent:** Codex
 - **Date:** 2026-11-13
 - **Branch:** demo
-- **Goal:** Complete KubeHeal acceptance and owner push preparation. Nothing pushed; no training or `PROJECT_SPEC.md` edits.
-- **What changed and why:** Final push review completed. `work` is `32101ab`; `demo` contains the final push-prep docs and includes `work`. The cluster lock is released, and the cluster was last read in test mode. The final added-line scan found one test-placeholder pattern and no AWS, GitHub, Slack, private-key, or URL-credential pattern.
-- **Files touched:** `PUSH_PLAN.md`, `.ai/handoff.md`
-- **Open issues:** Push is not ready. Fresh-cluster rehearsal awaits owner approval because `down.ps1` deletes the cluster and PVC data. U6 failed twice at Helm repository DNS; F5-F8 interactions, F10 rollback, clean F11 load/Grafana screenshot, and accepted P11 E1 remain incomplete.
-- **Next step:** If approval arrives, back up/check the existing data and acquire a new cluster lock before starting the fresh-cluster rehearsal. Otherwise preserve the cluster and report push blockers. Never push.
+- **Goal:** Continue KubeHeal live acceptance and push preparation. Nothing pushed; no training or `PROJECT_SPEC.md` edits.
+- **What changed and why:** Completed two offline-chart U6 setup and drift-scenario runs on isolated `kubeheal-rehearsal`. Both produced a dry-run Fusion action in test mode and restored victim CPU settings. Recorded install, scenario, Redis action-stream, and state evidence. Core Redis stream-group retry and URL-log sanitization fix is on work (`c714fe3`) and merged into demo (`85f8660`).
+- **Files touched:** `docs/kubeheal/demo-evidence/F12/U6_offline_rehearsal*.txt`, `docs/kubeheal/demo-evidence/F12/U6_offline_rehearsal.md`
+- **Open issues:** Delete only the authorized rehearsal cluster after recording evidence. Original cluster remains untouched. F5-F8 walkthroughs, F10 enforce canary/rollback, clean F11/P11 runs, original-cluster runbook rehearsal, and final push prep remain outstanding. The accidental earlier start command briefly restarted the existing original cluster; it did not change pods, PVCs, releases, or data. Original mode remains test.
+- **Next step:** Commit U6 evidence, remove only `kubeheal-rehearsal`, then continue the remaining requested acceptance work without modifying the original cluster until asking the owner.

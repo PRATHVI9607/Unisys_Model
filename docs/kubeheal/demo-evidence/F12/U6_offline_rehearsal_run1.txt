@@ -1,0 +1,22 @@
+KubeHeal mode: test (Executor writes are blocked).
+Priming the victim metrics so each channel has live samples.
+sending traffic to prod/victim-app for 30s
+cpu_throttle_percent         series= 2 returned=yes sample=37.72773072747014
+cpu_usage_millicores         series= 1 returned=yes sample=277.89684409561056
+memory_rss_bytes             series= 1 returned=yes sample=72441856.0
+memory_working_set_bytes     series= 1 returned=yes sample=97841152.0
+memory_limit_bytes           series= 1 returned=yes sample=268435456.0
+cpu_limit_millicores         series= 1 returned=yes sample=500.0
+http_request_rate            series= 1 returned=yes sample=10.104016014451153
+http_error_rate              series= 1 returned=yes sample=1.6212355726360475
+http_p50_latency_ms          series= 6 returned=yes sample=184.49367088607593
+http_p99_latency_ms          series= 6 returned=yes sample=477.75
+http_p999_latency_ms         series= 6 returned=yes sample=497.775
+pod_restarts_total           series= 1 returned=yes sample=0.0
+network_receive_bytes        series= 1 returned=yes sample=5190.142399019774
+network_transmit_bytes       series= 1 returned=yes sample=4565.640924924417
+disk_io_bytes                series= 1 returned=yes sample=44.37989453860641
+15/15 queries returned data (2026-11-13 15:53)
+Injecting prod/victim-app CPU request=50m and limit=50m.
+No new Fusion action appeared within 30 seconds. Check Health Agent and Fusion logs.
+Resetting victim CPU request and limit.

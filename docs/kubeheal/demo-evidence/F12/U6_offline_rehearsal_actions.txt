@@ -1,0 +1,46 @@
+1794566499178-0
+incident_id
+inc-20261113-104139-9b67779c
+action_type
+human_patch
+target
+{"namespace": "prod", "deployment": "victim-app", "pod": ""}
+confidence
+0.7026
+rationale
+Medium confidence. health_adj=0.70, sec_adj=0.54. Human approval.
+compound
+False
+nl_summary
+Health signal: label degradation, risk 0.59. top health factors cpu_limit_ratio, latency_p99_mean_s, cpu_throttle_mean.
+causal_chain
+[]
+outcome
+logged
+dry_run
+true
+timestamp_ms
+1794566499178
+1794566352843-0
+incident_id
+inc-20261113-103912-9e7bf253
+action_type
+human_patch
+target
+{"namespace": "prod", "deployment": "victim-app", "pod": ""}
+confidence
+0.7087
+rationale
+Medium confidence. health_adj=0.71, sec_adj=0.54. Human approval.
+compound
+False
+nl_summary
+Health signal: label degradation, risk 0.59. top health factors cpu_throttle_mean, latency_p99_mean_s, cpu_limit_ratio.
+causal_chain
+[]
+outcome
+logged
+dry_run
+true
+timestamp_ms
+1794566352843

@@ -1,0 +1,2 @@
+KubeHeal mode: test (Executor writes are blocked).
+Restored prod/victim-app to request=100m, limit=500m.
