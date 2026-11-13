@@ -78,13 +78,14 @@ def _load_script(url: str, vus: int, duration: str) -> str:
     body = json.dumps({"features": features}, separators=(",", ":"))
     return "\n".join((
         'import http from "k6/http";',
-        'import { check } from "k6";',
+        'import { check, sleep } from "k6";',
         f"const endpoint = {json.dumps(url)};",
         f"const body = {json.dumps(body)};",
         f"export const options = {{ vus: {vus}, duration: {json.dumps(duration)}, summaryTrendStats: ['med', 'p(95)'] }};",
         "export function setup() {",
         "  const count = 5;",
-        '  console.log(`WARM-UP START: ${count} sequential requests before the measured VU stage`);',
+        '  console.log(`WARM-UP START: 5s network settling delay, then ${count} sequential requests before the measured VU stage`);',
+        "  sleep(5);",
         "  let passed = 0;",
         "  for (let i = 0; i < count; i++) {",
         "    const response = http.post(endpoint, body, { headers: { 'Content-Type': 'application/json' }, timeout: '10s' });",
