@@ -4,7 +4,7 @@
 - **Date:** 2026-11-13
 - **Branch:** demo
 - **Goal:** Finish KubeHeal acceptance, rehearsal, and push preparation. Nothing pushed; no training or PROJECT_SPEC.md edits.
-- **What changed and why:** Updated DEMO_RUNBOOK with current F3 escalation resolution, F5-F10 evidence limits, F11 failed rerun, P11 E1/E2 results, and U6 DNS failure.
-- **Files touched:** docs/kubeheal/DEMO_RUNBOOK.md, .ai/handoff.md
-- **Open issues:** F5-F7 live scenarios; F8 every-control walkthrough/screenshots; F10 canary rollback; F11 clean rerun/Grafana screenshot; U6 twice; fresh-cluster rehearsal; final docs, secret scan, PUSH_PLAN, and final suites remain.
-- **Next step:** Complete push-prep status docs and run full suites sequentially on work and demo. Preserve data and never push.
+- **What changed and why:** Saved a rehearsal matrix with each runbook area marked LIVE/FALLBACK. The full rehearsal is not clean because a fresh-cluster start and screenshot walkthrough remain incomplete.
+- **Files touched:** docs/kubeheal/demo-evidence/REHEARSAL/rehearsal-2026-11-13.md, .ai/handoff.md
+- **Open issues:** Awaiting approval before `down.ps1` deletes PVC data. U6, F5-F8 completeness, F10 full rollback, clean F11/screenshot, and accepted P11 E1 remain incomplete. Both full suites passed; `work` is already merged into `demo`.
+- **Next step:** Continue README/AGENTS/PROGRESS/NEXT/PUSH_PLAN updates, secret scan, mode/lock finalization, and commit. Never push.
