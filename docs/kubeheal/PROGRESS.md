@@ -41,8 +41,8 @@ Real usage is measured later and recorded under `docs/kubeheal/results/`.
 | P7 Remediation paths | code done and merged (5bd3558), proven with fakes only; P7-RR-9 implementation complete on `work` (cluster/image check pending); open items P7-RR-10 to RR-11, RR-7 needs P10 |
 | P8 Dashboard | done, merged (218029c) |
 | P9 Platform | done, merged (see merge commit); helm lint and template pass with lab example overlay; nothing run on a cluster yet |
-| P10 | in progress (U4, D6, D8, V1-V3 verified; the LightGBM stack is installed on k3d since 2026-11-12, Helm revision 6; the D-5 replay with the new trace, the freeze check and U6 full acceptance remain) |
-| P11, P13 | not started (the P11 harness is merged; no run has produced data; P13 documentation waits for the code to be verified) |
+| P10 | demo acceptance pass recorded 2026-11-13; see the current acceptance checkpoint and per-feature rehearsal matrix below. Remaining live-model/Falco and explicitly unmeasured scenarios are listed as limits. |
+| P11, P13 | partially measured: P11 E1 and E2 live results recorded; E3-E6 and V5-E1 not measured with reasons in `results/p11/P11_COVERAGE.md`. |
 | P12 Model hardening | NOT started; P12-H (retraining on live cluster data) is not approved |
 
 ## Task checklist
@@ -547,3 +547,12 @@ Focused verification on the isolated branch, 2026-11-12: `tests/test_containment
 - F11 2026-11-13 rerun had 12 first-timestamp connection refusals out of 72,328 checks. Observed median 37.49 ms and p95 61.87 ms are from a failed run, not accepted figures. No Grafana screenshot.
 - F12 U6 incomplete: two up.ps1 -Stage all attempts stopped at Helm chart repository DNS. Local install/adapter/victim stages and reset succeeded; no PVC data was removed. F13 E1 failed with 12 initial refusals out of 66,819 requests; E2 recovery measured 1.25 seconds; E3-E6 and V5-E1 remain not measured.
 - Verified MinIO and Redis backups are outside the repo at C:\My_projects_1\cLOUD\KubeHeal-PreClean-20261113-1430. Fresh-cluster rehearsal has not run; down.ps1 requires owner approval because it deletes PVCs. See demo-evidence/REHEARSAL/rehearsal-2026-11-13.md.
+
+## Final acceptance checkpoint (2026-11-13)
+
+- Final full suites: `work` 2,169 passed, 11 skipped in 82.92s; `demo` 2,178 passed, 11 skipped in 89.30s. Reviewed `work` was merged into `demo`; no push occurred.
+- Original `k3d-kubeheal` readback: all three nodes Ready; active workload pods Ready (MinIO bootstrap is a Completed one-shot Job); Helm revision 17; demo image tag `b20261113071011`; inference `/readyz` returned HTTP 200 with both shipped bundles; HPA idle at 2 replicas; Redis, MinIO, and prod victim PVCs Bound; kill switch `test`. No original cluster or PVC deletion.
+- The runbook replay initially stopped before mutation because F10 scratch pods shared the victim image label. D-5 selection was made explicit by excluding `kubeheal.io/scripted=F10`; focused tests passed 9/9 and the runbook retry produced the expected model-scored replay event and dry-run Fusion/Executor action. F4 HMAC smoke also passed again with run-owned cleanup.
+- F5-F10 scripted live results, F11 clean warmed load and screenshot, F12 two offline U6 runs on the separate fresh cluster, and F13 P11 E1/E2 results are summarized in `DEMO_RUNBOOK.md`, `PUSH_PLAN.md`, and `demo-evidence/REHEARSAL/rehearsal-2026-11-13.md`.
+- Limits: Falco sensing/real-node behavior not verified; F8 SnapshotFreeze release and F9 same-input paired enforcement comparison not measured; P11 E3-E6 and V5-E1 not measured with reasons in `results/p11/P11_COVERAGE.md`; P12 training remains unapproved and was not run.
+- No changes were made to `PROJECT_SPEC.md`. No push was performed and `ALLOW_PUSH` was not set.

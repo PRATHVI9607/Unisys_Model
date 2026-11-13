@@ -1,44 +1,52 @@
 # Push plan (owner-only, do not push)
 
-**Prepared:** 2026-11-13. **Decision:** NOT READY TO PUSH. Nothing was pushed and `ALLOW_PUSH` was not set. No training or `PROJECT_SPEC.md` changes were made.
+**Prepared:** 2026-11-13. **Status:** READY TO PUSH, pending owner review/approval. Nothing was pushed; `ALLOW_PUSH` was not set. No training or `PROJECT_SPEC.md` edits were made. The owner performs any eventual push.
 
-Current local `work` head is **32101ab**; `demo` contains this final push-prep documentation and includes `work`. `origin/main` is locally `48a59aa`. No push was attempted.
+## Branches and verification
 
-## Change summary versus `origin/main`
+- `origin/main` fetched at `48a59aa7195ea14f8366a4338293f095c8803daf`.
+- `work` full suite: **2,169 passed, 11 skipped in 82.92s**.
+- `demo` full suite after merging `work`: **2,178 passed, 11 skipped in 89.30s**.
+- `work` is an ancestor of `demo`. Full suites used Python 3.11 and separate temporary directories.
+- Original `k3d-kubeheal`: all three nodes Ready; workload pods Ready (MinIO bootstrap Job Completed); Helm revision 17 deployed; demo image tag `b20261113071011`; inference `/readyz` HTTP 200 with health/security bundles; HPA 2 replicas; Redis, MinIO, and prod victim PVCs Bound; mode `test`.
+- U6 passed twice on a separate fresh `kubeheal-rehearsal` cluster using vendored `kube-prometheus-stack` and `prometheus-adapter` charts, no Helm repository DNS, and locally cached images. The separate cluster was deleted after both runs. Original cluster and PVCs were preserved.
+- Final runbook rehearsal is recorded in `docs/kubeheal/demo-evidence/REHEARSAL/rehearsal-2026-11-13.md`. Original cluster remained in test mode; no original cluster/PVC deletion occurred.
 
-1. Uses the shipped LightGBM Health and Security bundles with split-conformal prediction sets and TreeSHAP factors.
-2. Requires an exactly one-label conformal set and other gates before automatic actions; D1's 10x threshold is inclusive.
-3. Uses deterministic Fusion correlation and a replay path for Security events.
-4. Defaults to fail-closed test mode, records would-have actions, and gates Kubernetes writes.
-5. Restricts remediation writes to the Executor and validates requests before writes.
-6. Authenticates containment requests/results and operator thaw messages with the dedicated HMAC Secret.
-7. Provides baseline candidates, dashboard approval, incident operations, and append-only MinIO ledger records.
-8. Provides freeze, snapshots, quarantine, scale-to-zero, restore, entropy rescan, and quarantine release.
-9. Adds the dashboard, queue-depth HPA, Grafana panel definitions, and k3d deployment assets.
-10. Adds safety tests, replay/load scripts, P11 evaluation scaffolding, runbook documentation, and evidence.
+## Feature readiness
 
-## Verification
-
-- Full suites passed: work **2,166 passed, 11 skipped, 94.20s**; demo **2,166 passed, 11 skipped, 79.92s**. Suites were sequential and used isolated temp directories.
-- Latest k3d read: mode `test`; Helm revision 17; demo image tag `b20261113071011`; inference `/readyz` HTTP 200 with both bundles loaded; KubeHeal/monitoring/victim pods Ready; HPA 2/2; Redis, MinIO, and prod victim PVCs Bound.
-- F3's 2026-11-13 scripted-alert containment completed in staging with a 38-second enforce window, five restored files scanned, and zero high-entropy files. Falco sensing and real-node behavior are not verified.
-- F4 test-mode HMAC smoke accepted signed and refused unsigned/tampered messages. F9 authenticated mode toggle wrote `test -> enforce -> test` ledger entries; no enforce-mode remediation action occurred. F10 verified live drift sensing and a `human_patch` dry-run; canary healing and p99 rollback remain unmeasured.
-- F5 candidate promotion, F6 live invalid-request intake, F7 live policy boundaries/rollback, and F8 complete interactive controls are not fully live-verified. F11's 2026-11-13 run had 12 first-timestamp refusals out of 72,328 checks; its observed 37.49 ms median and 61.87 ms p95 are from a failed run. No Grafana screenshot was captured.
-- U6 did not pass twice: both full `up.ps1 -Stage all` attempts failed at chart-repository DNS. P11 E1 is not accepted (latest: 66,807/66,819 checks, 12 initial refusals); E2 measured 1.25 seconds to recover one deleted inference pod; E3-E6 and V5-E1 are not measured.
-- A full fresh-cluster rehearsal is not complete. Two verified data backups are outside the repo at `C:\My_projects_1\cLOUD\KubeHeal-PreClean-20261113-1430`; running `down.ps1` still requires owner approval because it deletes PVCs.
+| Feature | Status | Evidence / limit |
+|---|---|---|
+| F1 safety | PASS | Full default suites pass; live integrations remain opt-in. |
+| F2 replay | LIVE | Model-scored replay event and Fusion/Executor dry-run. Hand-written replay, not live Falco capture. |
+| F3 containment | LIVE | Scripted Sense alert through freeze, snapshot, quarantine, restore, entropy rescan and ledger; 5 files scanned, 0 high entropy in the accepted run. Not live Falco sensing or real-node validation. |
+| F4 HMAC | LIVE | Signed accepted in test mode; unsigned/tampered refused; run-owned records cleaned. |
+| F5 baseline promotion | LIVE | Scripted PVC-free dev auto-promotion with ledger, plus prod dashboard approval in logged dead-man-protected enforce window. Does not establish model quality. |
+| F6 request validation | LIVE | Four signed invalid requests refused, response HMACs valid, frozen count zero, namespace label restored. Refusal logs/results are proof; the current implementation does not append these refusals to MinIO ledger. |
+| F7 policy gates | LIVE | Scripted M2 HUMAN, D1 inclusive CPU/memory boundaries, and rule rollback held without fresh Security response then queued with one. Executor request remained dry-run. |
+| F8 dashboard | PARTIAL | Screenshots and UI results cover the walkthrough. SnapshotFreeze release is not measured because no held target existed. |
+| F9 kill switch | PARTIAL | Authenticated dashboard test/enforce/test and ledger verified with dead-man. Same-input paired applied-action comparison is not measured. |
+| F10 drift | LIVE | Scripted dev canary patch kept after three windows; prod canary rolled back on bad p99 from 495.21 ms to 4,407.69 ms. Mode/test and resource restoration verified. |
+| F11 HPA/Grafana | LIVE | 32 VUs/90 s, 113,873/113,873 checks, 0 refusals, p50 24.03 ms, p95 37.9 ms, HPA 2 -> 8 -> 2; five-call warm-up disclosed and included in F11 aggregate count; screenshot saved. |
+| F12 U6 | LIVE | Two fresh-cluster offline installs and scripted drift runs on the separate rehearsal cluster. Local image cache is required. |
+| F13 P11 | PARTIAL | E1: 112,327/112,327, 0 refusals, p50 24.34 ms, p95 38.19 ms. E2 recovery 1.25 s. E3-E6 and V5-E1 are not measured with concrete reasons in `docs/kubeheal/results/p11/P11_COVERAGE.md`. |
 
 ## Diff and secret review
 
-The diff from `origin/main` currently contains 416 paths. The final added-line scan covered 228,086 lines on `work` and 229,268 on `demo`. Each found one high-risk credential-assignment pattern: a 21-character test placeholder in `tests/test_dashboard_seed.py` containing the word `test`; no credential value was printed. No AWS, GitHub, Slack token, private-key, or URL-credential pattern was found. Re-run the scan after any later change.
+The high-confidence diff scan found zero AWS access keys, GitHub/Slack tokens, private-key headers, or URL credentials. The broader credential-assignment scan produced 13 candidates across demo configuration, environment/Secret references, scripted dashboard helpers, docs, an existing model source, and a test fixture. The fixture candidate is a nonfunctional test placeholder; no credential value is reported. `gitleaks` is not installed in this environment. Re-run the secret scan after any later change.
 
-`git diff --check origin/main...work` reports 97 findings and `git diff --check origin/main...demo` reports 131 findings, chiefly captured terminal whitespace, CSI comment trailing spaces, and blank lines at EOF. These checks are not clean. Do not remove whitespace from raw run transcripts if doing so changes the recorded output.
+The targeted `git diff --check` on README, AGENTS, PUSH_PLAN, NEXT_FOR_CODEX, DEMO_RUNBOOK, PROGRESS, the final rehearsal report, and the updated F5-F7 status notes passed. The full `git diff --check origin/main` reports 1,817 findings across the large base-to-head diff, including captured terminal output and pre-existing whitespace in other changed files. Per instruction, captured output was left unchanged; the new source/docs in this acceptance pass were checked separately. Review the full output before pushing if whitespace normalization is required.
 
-## Before the owner pushes
+## Remaining limits for owner review
 
-1. Obtain approval before deleting/recreating the cluster; complete the fresh-start rehearsal only after that approval.
-2. Resolve the Helm repository DNS failure and complete two full U6 runs, or leave U6 explicitly incomplete.
-3. Capture browser/Grafana screenshots when available; do not claim screenshots from API output.
-4. Keep F5-F8, F10 rollback, P11 E1 accepted load, E3-E6, and V5-E1 marked not measured until valid live evidence exists.
-5. Re-run full suites after any code merge, repeat diff and secret scans, confirm test mode and released lock, and review the final diff.
+1. F3 used scripted Sense input because Falco is absent; this is not live detection or real-node validation.
+2. F8 SnapshotFreeze release and F9 same-input paired enforcement comparison remain not measured.
+3. P11 E3-E6 and V5-E1 remain not measured with reasons documented.
+4. U6 requires local images to be available; the chart setup itself is network-free.
+5. No original cluster or PVC was deleted. Do not run cluster teardown as part of push preparation.
 
-Do not add `git push` to this plan. The owner performs any eventual push outside this agent session. Never push or set `ALLOW_PUSH` here.
+## Final owner checklist
+
+1. Review the final `work` and `demo` diffs and this feature table.
+2. Confirm mode `test`, Helm revision/tag/readiness, and that `docs/kubeheal/CLUSTER_LOCK.md` has been released.
+3. Confirm the repository is clean and no secret scan finding is unresolved.
+4. Push only from the owner's environment and approval. This agent did not push and will not set `ALLOW_PUSH`.

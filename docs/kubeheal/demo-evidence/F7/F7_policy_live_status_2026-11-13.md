@@ -1,9 +1,12 @@
-# F7 policy live status
+# F7 scripted Fusion policy evidence
 
-**Date:** 2026-11-13  
-**Cluster:** `k3d-kubeheal`  
+**Date:** 2026-11-13
+**Cluster:** `k3d-kubeheal`
 **Mode:** `test`
+**Inputs:** scripted policy/model events using a PVC-free run-owned target
 
-This pass did not drive the M2 exactly-one-label gate, the D1 inclusive 10x threshold, or a rollback that consumes a fresh Security Model response through the live Fusion-to-Executor path.
+- M2: the ambiguous prediction set `{degraded, benign}` reached `human_pending`.
+- D1: inclusive boundary examples emitted `policy:cpu_cut_10x` for 500m to 50m and `policy:memory_cut_10x` for 320Mi to 32Mi.
+- Rule rollback: without a fresh Security Model response, Fusion held for human review. With a fresh scripted Security Model response, Fusion queued the rule-path Executor request as dry-run.
 
-**Status:** these three scenarios are **not measured live**. The repository has unit-tested policy logic, but there is no validated live scenario command that supplies controlled model responses and proves the corresponding decision and rollback. Replaying hand-authored model fields or a stale Security response would not establish this behavior. No such input was sent and no policy behavior is claimed from this pass.
+No Kubernetes workload write was made. Three run-owned HUMAN approvals were resolved through the dashboard; the append-only ledger and stream history remain. The Security response was scripted and does not verify live Security Model scoring. Exact outcomes are in `F7_scripted_run_2026-11-13.txt` and `F7_approval_resolution_2026-11-13.txt`.

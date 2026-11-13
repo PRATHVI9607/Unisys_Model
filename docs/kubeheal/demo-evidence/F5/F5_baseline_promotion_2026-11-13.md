@@ -1,9 +1,9 @@
 # F5 baseline promotion status
 
-**Date:** 2026-11-13  
-**Cluster:** `k3d-kubeheal`  
-**Mode:** `test`
+**Date:** 2026-11-13
+**Cluster:** `k3d-kubeheal`
+**Inputs:** scripted, PVC-free, run-owned dev and prod Deployments
 
-The live dashboard baseline API returned HTTP 200 with `count=0`; the baseline-candidates page also returned HTTP 200. There was no candidate to approve, reject, or promote, and no live promotion ledger entry was produced in this pass.
+The dev config change auto-promoted, and its `baseline_promoted` ledger record points to the new golden baseline. The prod config change created a pending dashboard candidate. Dashboard approval promoted it and wrote a second ledger record during a bounded enforce window with a dead-man switch. The mode returned to `test` and was read back. Exact run ID, candidate ID, ledger keys, and outcomes are in `F5_scripted_run_2026-11-13.txt`.
 
-**Status:** baseline promotion is **not measured live**. A safe candidate-generation trigger is not available in the current demo flow. Creating or fabricating a candidate would not verify the Health Agent's promotion path. The dashboard page and empty-state API are verified only.
+**Status:** live promotion workflow verified with explicitly scripted benign/certain assessments. The scores were not produced by the model, so this does not verify Health Agent model quality or its live assessment path.

@@ -89,43 +89,15 @@ Never print or log Secret values.
 
 ## Verified on k3d (evidence through 2026-11-13)
 
-- The F3 scratch Deployment chain completed in `staging`. The final enforce window was 45 seconds; 5 restored
-  files were scanned and 0 were high entropy. The alert was scripted, so this verifies the Fusion-to-Executor
-  chain, not live Falco sensing. This run does not establish real-node behavior. See
-  `docs/kubeheal/demo-evidence/F3/RUNBOOK_F3.md`.
-- The D-5 hand-written replay produced a model-scored Security event and Fusion dry-run on k3d. It is not a
-  live Falco capture or Executor containment. See `docs/kubeheal/demo-evidence/F3/10_d5_rerun.txt` and
-  `docs/kubeheal/demo-evidence/F3/11_d5_rerun_ledger.jsonl`.
-- One F11 synthetic scoring-load run used 32 VUs for 90 seconds, passed 121,088/121,088 checks, measured
-  median 22.86 ms and p95 38.45 ms, and scaled HPA replicas 2 -> 7 -> 2 in 7m14s. This is one run, not a
-  performance guarantee. See `docs/kubeheal/demo-evidence/F11/hpa-run-2026-11-12.md`.
-- A post-merge repeat scaled 2 -> 8 -> 2 but had 12 connection refusals out of 99,431 checks, so it is not a
-  clean load result. Grafana's queue-depth and available-replica panels and Prometheus samples are recorded in
-  `docs/kubeheal/demo-evidence/F11/grafana-hpa-api-2026-11-12.json`; no Grafana screenshot was captured because
-  the renderer is not installed.
-- P11 E1 has no accepted benchmark: both runs failed. U6's full acceptance run twice is **not measured**.
-  Do not reuse F11 numbers as P11 or U6 results. See `docs/kubeheal/results/p11/P11_COVERAGE.md`.
-- F3 was rerun on demo images on 2026-11-13 in `staging`: scripted alert, 38-second enforce window,
-  five restored files scanned, zero high-entropy files, and run-owned cleanup. Falco was absent, so this
-  still does not verify live sensing. See `docs/kubeheal/demo-evidence/F3/README.md`.
-- F4 HMAC smoke again passed in mode `test`: signed accepted, unsigned and tampered refused, cleanup
-  verified. F9's authenticated dashboard toggle recorded `test -> enforce -> test`; no remediation action
-  occurred during the enforce interval. See the F4 and F9 evidence directories.
-- F10's 2026-11-13 live drift walkthrough queried 15/15 metric series and recorded a `human_patch`
-  dry-run; the victim returned to 100m request / 500m limit. Canary healing and bad-p99 rollback are not
-  measured. F5 promotion, F6 live invalid-request intake, F7 live policy sequence, and F8 full dashboard
-  control walkthrough remain unverified for lack of safe live targets/triggers.
-- The 2026-11-13 F11 demo-image rerun had 12 first-timestamp connection refusals out of 72,328 checks;
-  observed median 37.49 ms and p95 61.87 ms are from a failed run and are not accepted results. No
-  Grafana screenshot was captured. Do not claim a clean rerun from these observations.
-- U6 is incomplete: two `up.ps1 -Stage all` attempts stopped at the monitoring chart repository because
-  DNS could not resolve `prometheus-community.github.io`. Standalone local stages succeeded; no PVC data
-  was deleted. The full fresh-cluster rehearsal remains pending.
-- P11 E1's third attempt also failed: 66,807/66,819 checks passed, with 12 initial connection refusals;
-  no accepted benchmark. P11 E2 measured one inference pod recovery at 1.25 seconds. E3-E6 and V5-E1
-  remain `not measured` with reasons in `docs/kubeheal/results/p11/P11_COVERAGE.md`. The repeated
-  first-second refusals are consistent with a short Service/data-plane startup race, but the refusing
-  component is not proven.
+- F2 D-5 replay produced a real model-scored Security event and Fusion/Executor dry-run. The replay is hand-written, not a live Falco capture.
+- F3's demo-image scratch chain completed from Fusion through restore with a scripted alert. The 2026-11-13 enforce window lasted 38 seconds; five restored files were scanned and zero were high entropy. This is k3d-only and does not verify live Falco sensing or real-node behavior.
+- F4 accepted the signed test-mode message and refused unsigned/tampered messages. F5 scripted config changes showed dev baseline auto-promotion with a ledger entry and prod dashboard approval in a logged enforce window. F6 four signed invalid requests were refused with valid response HMACs and `frozen=0`. F7 scripted M2 ambiguity went to HUMAN, D1 inclusive CPU/memory edges fired, and rule rollback required a fresh scripted Security response.
+- F8 dashboard screenshots cover incident approval/rejection, baseline approval/rejection, details/status/ledger, and kill-switch controls. SnapshotFreeze release was not measured because no held target existed. F9 authenticated toggle recorded `test -> enforce -> test` with a dead-man; same-input paired applied-action behavior was not measured.
+- F10 scripted dev canary patch was kept after three windows. A separate prod canary rolled back in window 1 after p99 rose from 495.21 ms to 4,407.69 ms; mode returned to `test`.
+- F11 warmed 32-VU/90-second run: 113,873/113,873 checks, zero refusals, p50 24.03 ms, p95 37.9 ms, HPA 2 -> 8 -> 2. Five sequential warm-up requests were successful and are disclosed; the aggregate count includes them. Grafana screenshot: `docs/kubeheal/demo-evidence/F11/grafana-f11-2026-11-13.png`.
+- P11 E1 separately passed 112,327/112,327 checks, zero refusals, p50 24.34 ms, p95 38.19 ms; E2 inference pod recovery measured 1.25 seconds. E3-E6 and V5-E1 remain not measured with concrete reasons in `docs/kubeheal/results/p11/P11_COVERAGE.md`.
+- U6 passed twice on a fresh separate `kubeheal-rehearsal` cluster using vendored chart archives and locally cached images. The original `k3d-kubeheal` and its PVCs were preserved. See `docs/kubeheal/demo-evidence/F12/U6_offline_rehearsal.md`.
+- Final rehearsal on the original cluster read all nodes/pods, mode `test`, Helm revision 17, inference `/readyz` HTTP 200, and all three protected PVCs Bound. Full evidence and LIVE/FALLBACK labels are in `docs/kubeheal/demo-evidence/REHEARSAL/rehearsal-2026-11-13.md` and `docs/kubeheal/DEMO_RUNBOOK.md`.
 
 ## Working rules (all agents)
 
