@@ -1,0 +1,15 @@
+{"pre_canary_metrics": {"dev": {"deployment": "f5-scripted-dev-2a87df12", "metrics": {"cpu_throttle_percent": 94.91882130824939, "http_p99_latency_ms": 802.4999999999974}, "namespace": "dev", "window_s": 30}, "prod": {"deployment": "f5-scripted-prod-2a87df12", "metrics": {"cpu_throttle_percent": 100.0, "http_p99_latency_ms": 498.66564417177915}, "namespace": "prod", "window_s": 30}}, "run_id": "819663274dd24da882678f198e9562b1", "scripted": true}
+{"run_id": "819663274dd24da882678f198e9562b1", "enforce_window": "START", "utc": "2026-11-13T13:52:40Z", "deadman_timeout_s": 600}
+{"case": "canary_heal", "queue": {"deployment": "f5-scripted-dev-2a87df12", "incident_id": "f10-good-819663274dd24da8", "namespace": "dev", "queued": true, "stream_id": "1794577966421-0"}, "scripted_drift": "CPU 10m/50m", "target_resources": {"limits": {"cpu": "200m", "memory": "128Mi"}, "requests": {"cpu": "50m", "memory": "64Mi"}}}
+{"case": "canary_heal", "executor_result": {"action_type": "executed_patch", "incident_id": "f10-good-819663274dd24da8", "outcome": "rolled_back:window 1: cpu_throttle_percent worse: 100.0 > 91.30434782608694", "timestamp_ms": "1794578028717"}}
+{"enforce_window": "END", "mode": "test", "run_id": "819663274dd24da882678f198e9562b1", "utc": "2026-11-13T13:53:50Z"}
+DEAD-MAN START run=819663274dd24da882678f198e9562b1 context=k3d-kubeheal started_utc=2026-11-13T13:52:40.5994461Z timeout_s=600
+DEAD-MAN END run=819663274dd24da882678f198e9562b1 ended_utc=2026-11-13T13:53:50.8907110Z mode=test ended_by=mode_returned_to_test
+{"capture": "C:\\My_projects_1\\cLOUD\\Unisys_Model\\docs\\kubeheal\\demo-evidence\\F10\\F10_scripted_run_2026-11-13.txt", "dev_resources": {"limits": {"cpu": "50m", "memory": "128Mi"}, "requests": {"cpu": "10m", "memory": "64Mi"}}, "mode_after": "test", "prod_resources_after_rollback": {"limits": {"cpu": "500m", "memory": "128Mi"}, "requests": {"cpu": "100m", "memory": "64Mi"}}}
+Traceback (most recent call last):
+  File "C:\My_projects_1\cLOUD\Unisys_Model\docs\kubeheal\demo-evidence\F10\scripted_canary_run.py", line 227, in <module>
+    if __name__ == "__main__": main()
+                               ^^^^^^
+  File "C:\My_projects_1\cLOUD\Unisys_Model\docs\kubeheal\demo-evidence\F10\scripted_canary_run.py", line 187, in main
+    raise RuntimeError(f"F10 good canary did not keep patch: {good.get('outcome')}")
+RuntimeError: F10 good canary did not keep patch: rolled_back:window 1: cpu_throttle_percent worse: 100.0 > 91.30434782608694

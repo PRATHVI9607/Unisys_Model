@@ -1,0 +1,55 @@
+{
+  "run_id": "30de436bd53a4ceebb89b2586414bb18",
+  "source": "MinIO ledger records queried from the deployed Executor",
+  "scripted_inputs": true,
+  "mode": "test outside the logged enforce window",
+  "canary_heal": {
+    "incident_id": "f10-good-30de436bd53a4cee",
+    "metrics_before": {
+      "cpu_throttle_percent": 100.0,
+      "http_p99_latency_ms": 778.2345488835508
+    },
+    "windows": [
+      {
+        "window": 1,
+        "cpu_throttle_percent": 84.19597688546722,
+        "http_p99_latency_ms": 496.113863163777,
+        "improved": true
+      },
+      {
+        "window": 2,
+        "cpu_throttle_percent": 85.16980115026743,
+        "http_p99_latency_ms": 497.6869293457352,
+        "improved": true
+      },
+      {
+        "window": 3,
+        "cpu_throttle_percent": 96.73124669198243,
+        "http_p99_latency_ms": 496.08579293824914,
+        "improved": true
+      }
+    ],
+    "outcome": "patched_kept"
+  },
+  "bad_p99_rollback": {
+    "incident_id": "f10-bad-30de436bd53a4cee",
+    "metrics_before": {
+      "cpu_throttle_percent": 97.97050162507234,
+      "http_p99_latency_ms": 495.2149812739342
+    },
+    "windows": [
+      {
+        "window": 1,
+        "cpu_throttle_percent": 49.93139456663557,
+        "http_p99_latency_ms": 4407.688293090404,
+        "improved": false,
+        "why": "http_p99_latency_ms worse: 4407.688293090404 > 495.2149812739342"
+      }
+    ],
+    "outcome": "rolled_back:window 1: http_p99_latency_ms worse: 4407.688293090404 > 495.2149812739342",
+    "restored_resources": {
+      "requests": {"cpu": "100m", "memory": "64Mi"},
+      "limits": {"cpu": "500m", "memory": "128Mi"}
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{"pre_canary_metrics": {"dev": {"deployment": "f10-scripted-dev-76471490", "metrics": {"cpu_throttle_percent": 96.89239815525879, "http_p99_latency_ms": null}, "namespace": "dev", "window_s": 30}, "prod": {"deployment": "f10-scripted-prod-76471490", "metrics": {"cpu_throttle_percent": 89.47368421052632, "http_p99_latency_ms": null}, "namespace": "prod", "window_s": 30}}, "run_id": "7647149038024b2eacde4d220562aa04", "scripted": true}
+Traceback (most recent call last):
+  File "C:\My_projects_1\cLOUD\Unisys_Model\docs\kubeheal\demo-evidence\F10\scripted_canary_run.py", line 279, in <module>
+    if __name__ == "__main__": main()
+                               ^^^^^^
+  File "C:\My_projects_1\cLOUD\Unisys_Model\docs\kubeheal\demo-evidence\F10\scripted_canary_run.py", line 219, in main
+    raise RuntimeError(f"Prometheus has no HTTP p99 series for {name}")
+RuntimeError: Prometheus has no HTTP p99 series for f10-scripted-dev-76471490
