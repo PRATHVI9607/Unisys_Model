@@ -3,9 +3,8 @@
 - **Agent:** Codex
 - **Date:** 2026-11-13
 - **Branch:** demo
-- **Goal:** Complete KubeHeal live acceptance and push preparation. Nothing pushed; no training or `PROJECT_SPEC.md` edits.
-- **Last commits:** work `e1f7791` adds the P11 readiness/warm-up gate; demo merge `4d88143`; demo F11 readiness and warm-up `a3204b6`.
-- **What changed and why:** U6 passed twice on isolated `kubeheal-rehearsal` using vendored Helm charts and local cached images; evidence is committed. P11 and F11 now wait for Deployment/ready Service endpoints; F11 records inference pod Ready timestamps. Both k6 paths issue five sequential warm-up requests and report that stage. Focused P11 and safety tests passed (work 42 passed); demo script tests passed (48 passed).
-- **Files touched:** U6 evidence under `docs/kubeheal/demo-evidence/F12/`; `eval/p11_harness.py`, `tests/test_eval_p11_harness.py`, `demo/scripts/hpa_load.ps1`, `demo/scripts/k6_health_model.js`, `tests/test_demo_hpa_staging.py`, `docs/kubeheal/PROGRESS.md`.
-- **Open issues:** Owner authorization is pending before any further access to original `k3d-kubeheal`; its cluster and PVCs remain in place. F5-F8, F10 enforce canary/rollback, clean F11/P11 runs, original-cluster runbook rehearsal, and push prep remain. Existing refusal traces suggest startup timing but do not prove the component that refused. Earlier accidental command briefly restarted the original cluster, but changed no pods, releases, PVCs, or data; its mode remained test.
-- **Next step:** After authorization, diagnose endpoint/policy/pod timing, rerun E1/F11, then continue live feature checks and rehearsal. Never push.
+- **Goal:** Complete authorized KubeHeal live acceptance and push preparation. Nothing pushed; no training or `PROJECT_SPEC.md` edits.
+- **What changed and why:** Hardened `demo/k3d/up.ps1`: it now requires an explicit `TargetCluster`, refuses missing/blank targets before loading shared helpers, and routes cluster start/create, kube context, and storage-node labeling through that exact target. Added static routing and no-argument PowerShell regression tests. Targeted checks passed: 2 tests and PowerShell parser.
+- **Files touched:** `demo/k3d/up.ps1`, `tests/test_demo_k3d_target.py`, `.ai/handoff.md`.
+- **Open issues:** User has authorized original `k3d-kubeheal` live checks but prohibited deletion of it and its PVCs. Need acquire lock before live writes; mode remains test except scripted enforce windows with dead-man switches. F5-F8, F10 canary/rollback, clean F11/P11, original-cluster rehearsal, full suites, and push prep remain. Never push.
+- **Next step:** Commit this safety task, then run the complete suites on work and demo before live work.

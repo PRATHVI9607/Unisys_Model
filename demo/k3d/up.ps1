@@ -1,13 +1,14 @@
 # Create (or complete) the KubeHeal demo environment on k3d. Demo branch only. Safe to run again.
-#   .\demo\k3d\up.ps1                 everything
-#   .\demo\k3d\up.ps1 -SkipImages     reuse the images from the last images.ps1 run
+#   .\demo\k3d\up.ps1 -TargetCluster kubeheal                 everything
+#   .\demo\k3d\up.ps1 -TargetCluster kubeheal -SkipImages     reuse the images from the last images.ps1 run
 #   .\demo\k3d\up.ps1 -TargetCluster kubeheal-rehearsal -TargetRegistryPort 5151 -TargetHttpPort 8081
 #   .\demo\k3d\up.ps1 -Stage csi      run one stage: cluster, csi, monitoring, images, install, adapter, victim, falco
 # Defaults to `kubeheal`; an explicit name allows an isolated rehearsal cluster.
 param(
     [switch]$SkipImages,
+    [Parameter(Mandatory = $true)]
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,39}$')]
-    [string]$TargetCluster = "kubeheal",
+    [string]$TargetCluster,
     [ValidateRange(0, 65535)]
     [int]$TargetRegistryPort = 0,
     [ValidateRange(0, 65535)]
@@ -15,6 +16,10 @@ param(
     [ValidateSet("all", "cluster", "csi", "monitoring", "images", "install", "adapter", "victim")]
     [string]$Stage = "all"
 )
+
+if ([string]::IsNullOrWhiteSpace($TargetCluster)) {
+    throw "TargetCluster is required; refusing to select a k3d cluster implicitly."
+}
 
 . "$PSScriptRoot\lib.ps1"
 if ($TargetRegistryPort -eq 0) { $TargetRegistryPort = if ($TargetCluster -eq "kubeheal") { 5150 } else { 5151 } }
