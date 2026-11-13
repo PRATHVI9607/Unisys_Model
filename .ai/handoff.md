@@ -3,8 +3,8 @@
 - **Agent:** Codex
 - **Date:** 2026-11-13
 - **Branch:** work
-- **Goal:** Diagnose and improve P11/F11 startup refusals before accepting load results.
-- **What changed and why:** P11 now has an explicit five-second network settling delay followed by five fail-fast k6 setup requests, as well as the Deployment/Service-endpoint readiness wait. The run logs the warm-up openly and leaves warm-up requests in aggregate metrics; it does not retry or discard measured VU failures. A live attempt still had the first request refused at 14:20:42Z despite both endpoints Ready for hours. Focused runner tests pass: 18. Full suite before this last runner fix: 2169 passed, 11 skipped.
-- **Files touched:** `eval/p11_run.py`, `tests/test_p11_run.py`, `.ai/handoff.md`.
-- **Open issues:** Need a live rerun with the settling delay and readiness/NetworkPolicy/pod timestamps. F11 demo load also needs its run after readiness/warm-up; dashboard screenshot browser access is unavailable.
-- **Next step:** Commit and merge the delay, then rerun P11 E1 and F11.
+- **Goal:** Finish authorized KubeHeal live acceptance and push preparation.
+- **What changed and why:** P11 now waits for inference readiness, then uses a visible five-second network settling delay and five fail-fast warm-up requests. A clean live P11 E1 run passed 112,327/112,327 checks at 32 VUs for 90 seconds, median 24.34 ms, p95 38.19 ms; HPA was 2 before and 8 at completion. The first Grafana screenshot showed errors because dashboard panels referenced `${DS_PROMETHEUS}` while the provisioned datasource UID is `prometheus`; the dashboard source now uses the actual UID and its focused test passes.
+- **Files touched:** `eval/p11_run.py`, `tests/test_p11_run.py`, `deploy/grafana/kubeheal-overview.json`, `tests/test_grafana_dashboard.py`, `.ai/handoff.md`.
+- **Open issues:** The Grafana source fix needs merge to demo and live ConfigMap refresh. F11 clean run and screenshot, E3-E6/V5-E1 not-measured reasons, F8 walkthrough, rehearsal, final suites and push preparation remain.
+- **Next step:** Commit and merge the Grafana datasource fix, update the live dashboard ConfigMap, recapture the screenshot, then finish the remaining evidence.
