@@ -4,7 +4,7 @@
 - **Date:** 2026-11-13
 - **Branch:** demo
 - **Goal:** Complete KubeHeal acceptance and owner push preparation. Nothing pushed; no training or `PROJECT_SPEC.md` edits.
-- **What changed and why:** Released the exclusive cluster lock after final readback showed mode `test`, HPA 2/2, all pods Running/Completed, and three PVCs Bound. All task-created port-forwards are closed.
-- **Files touched:** docs/kubeheal/CLUSTER_LOCK.md (removed), .ai/handoff.md
-- **Open issues:** Awaiting owner decision on deleting/recreating k3d for a fresh-cluster rehearsal. U6 remains incomplete from Helm DNS; F5-F8 full interactions, F10 rollback, F11 clean load/Grafana screenshot, and accepted P11 E1 remain incomplete.
-- **Next step:** Finish final diff/secret scan and exact PUSH_PLAN update. If fresh-start approval arrives, acquire a new lock before any cluster mutation. Never push.
+- **What changed and why:** Final push review completed. `work` is `32101ab`, `demo` is `48f515c`, work is included in demo, the cluster lock is released, and the cluster was last read in test mode. The final added-line scan found one test-placeholder pattern and no AWS, GitHub, Slack, private-key, or URL-credential pattern.
+- **Files touched:** `PUSH_PLAN.md`, `.ai/handoff.md`
+- **Open issues:** Push is not ready. Fresh-cluster rehearsal awaits owner approval because `down.ps1` deletes the cluster and PVC data. U6 failed twice at Helm repository DNS; F5-F8 interactions, F10 rollback, clean F11 load/Grafana screenshot, and accepted P11 E1 remain incomplete.
+- **Next step:** If approval arrives, back up/check the existing data and acquire a new cluster lock before starting the fresh-cluster rehearsal. Otherwise preserve the cluster and report push blockers. Never push.

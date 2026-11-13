@@ -2,7 +2,7 @@
 
 **Prepared:** 2026-11-13. **Decision:** NOT READY TO PUSH. Nothing was pushed and `ALLOW_PUSH` was not set. No training or `PROJECT_SPEC.md` changes were made.
 
-At the start of this documentation checkpoint, `work` was `32101ab` and `demo` was `a9c3086`; `work` was already an ancestor of `demo`. The final preparation commit advances `demo` after that recorded tip. `origin/main` is locally `48a59aa`.
+Current local heads are `work` **32101ab** and `demo` **48f515c**; `work` is an ancestor of `demo`. `origin/main` is locally `48a59aa`. No push was attempted.
 
 ## Change summary versus `origin/main`
 
@@ -29,9 +29,9 @@ At the start of this documentation checkpoint, `work` was `32101ab` and `demo` w
 
 ## Diff and secret review
 
-The diff from `origin/main` currently contains 416 paths. The added-line scan found one high-risk credential-assignment pattern: a 21-character test placeholder in `tests/test_dashboard_seed.py` containing the word `test`; no credential value was printed. No AWS, GitHub, Slack token, private-key, or URL-credential pattern was found. Re-run the scan after any later change.
+The diff from `origin/main` currently contains 416 paths. The final added-line scan covered 228,086 lines on `work` and 229,268 on `demo`. Each found one high-risk credential-assignment pattern: a 21-character test placeholder in `tests/test_dashboard_seed.py` containing the word `test`; no credential value was printed. No AWS, GitHub, Slack token, private-key, or URL-credential pattern was found. Re-run the scan after any later change.
 
-`git diff --check origin/main...work` reported 97 lines and `git diff --check origin/main...demo` reported 155 lines, chiefly captured terminal whitespace, CSI comment trailing spaces, and blank lines at EOF. These checks are not clean. Do not remove whitespace from raw run transcripts if doing so changes the recorded output.
+`git diff --check origin/main...work` reports 97 findings and `git diff --check origin/main...demo` reports 131 findings, chiefly captured terminal whitespace, CSI comment trailing spaces, and blank lines at EOF. These checks are not clean. Do not remove whitespace from raw run transcripts if doing so changes the recorded output.
 
 ## Before the owner pushes
 
