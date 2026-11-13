@@ -16,6 +16,7 @@ from eval.p11_harness import (
     model_precision_rows,
     result_metadata,
     write_results,
+    wait_for_inference_ready,
 )
 
 
@@ -30,10 +31,18 @@ class FakeRunner:
         return subprocess.CompletedProcess(command, 0, output, "")
 
 
+READY_DEPLOYMENT = json.dumps({"metadata": {"generation": 1}, "spec": {"replicas": 2},
+                              "status": {"observedGeneration": 1, "readyReplicas": 2}})
+READY_ENDPOINTS = json.dumps({"subsets": [{"addresses": [{"ip": "10.0.0.1"}, {"ip": "10.0.0.2"}]}]})
+
+
 def test_k6_enforces_range_and_has_bounded_scenario():
     script = k6_script("http://victim.prod.svc/", 10)
     assert "vus: 10" in script
     assert 'duration: "2m"' in script
+    assert 'WARM-UP: starting 5 sequential requests' in script
+    assert 'WARM-UP: completed 5/5' in script
+    assert 'throw new Error(`warm-up request' in script
     with pytest.raises(ValueError):
         k6_script("http://victim/", 9)
 
@@ -59,14 +68,16 @@ def test_k6_job_is_pinned_limited_and_uses_pinned_image():
 
 
 def test_apply_k6_job_uses_fake_runner_and_explicit_context():
-    fake = FakeRunner(["applied", "Complete", "k6 summary"])
+    fake = FakeRunner([READY_DEPLOYMENT, READY_ENDPOINTS, "applied", "Complete", "k6 summary"])
     out = apply_k6_job("k3d-kubeheal", k6_job_manifest("load-10", "kubeheal", "http://victim/", 10),
                        runner=fake, sleep=lambda _s: None)
     assert out == "k6 summary"
-    assert len(fake.calls) == 3
+    assert len(fake.calls) == 5
     assert all(call[0][1:3] == ["--context", "k3d-kubeheal"] for call in fake.calls)
-    assert fake.calls[0][0][3] == "create"  # create-only; do not adopt existing objects
-    rendered = fake.calls[0][1]["input"]
+    assert fake.calls[0][0][3:5] == ["get", "deployment/kubeheal-inference"]
+    assert fake.calls[1][0][3:5] == ["get", "endpoints/kubeheal-inference"]
+    assert fake.calls[2][0][3] == "create"  # create-only; do not adopt existing objects
+    rendered = fake.calls[2][1]["input"]
     assert "load.js" in rendered
     assert "_script" not in rendered
     assert "preferredDuringSchedulingIgnoredDuringExecution" in rendered
@@ -74,27 +85,38 @@ def test_apply_k6_job_uses_fake_runner_and_explicit_context():
 
 
 def test_apply_k6_job_failed_job_ends_wait_immediately():
-    fake = FakeRunner(["applied", "Failed"])
+    fake = FakeRunner([READY_DEPLOYMENT, READY_ENDPOINTS, "applied", "Failed"])
     sleeps = []
     with pytest.raises(RuntimeError):
         apply_k6_job("k3d-kubeheal", k6_job_manifest("load-10", "kubeheal", "http://victim/", 10),
                      runner=fake, sleep=sleeps.append)
     assert sleeps == []
-    assert len(fake.calls) == 2
+    assert len(fake.calls) == 4
 
 
 def test_apply_k6_job_polls_until_complete_and_times_out():
-    fake = FakeRunner(["applied", "", "", "Complete", "logs"])
+    fake = FakeRunner([READY_DEPLOYMENT, READY_ENDPOINTS, "applied", "", "", "Complete", "logs"])
     sleeps = []
     out = apply_k6_job("k3d-kubeheal", k6_job_manifest("load-10", "kubeheal", "http://victim/", 10),
                        runner=fake, sleep=sleeps.append, poll_seconds=5)
     assert out == "logs"
     assert sleeps == [5, 5]
     ticks = iter([0, 1, 100, 100])
-    fake2 = FakeRunner(["applied", "", ""])
+    fake2 = FakeRunner([READY_DEPLOYMENT, READY_ENDPOINTS, "applied", "", ""])
     with pytest.raises(TimeoutError):
         apply_k6_job("k3d-kubeheal", k6_job_manifest("load-10", "kubeheal", "http://victim/", 10),
                      runner=fake2, sleep=lambda _s: None, clock=lambda: next(ticks), wait_seconds=60)
+
+
+def test_readiness_wait_retries_until_ready_endpoints_exist():
+    not_ready = json.dumps({"metadata": {"generation": 2}, "spec": {"replicas": 2},
+                            "status": {"observedGeneration": 2, "readyReplicas": 1}})
+    fake = FakeRunner([not_ready, json.dumps({"subsets": []}), READY_DEPLOYMENT, READY_ENDPOINTS])
+    sleeps = []
+    addresses = wait_for_inference_ready("k3d-kubeheal", runner=fake, sleep=sleeps.append,
+                                         clock=iter([0, 0, 0, 0]).__next__)
+    assert addresses == ["10.0.0.1", "10.0.0.2"]
+    assert sleeps == [3]
 
 
 def test_k6_job_namespace_is_allow_listed():

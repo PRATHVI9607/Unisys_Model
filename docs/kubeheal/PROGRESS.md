@@ -1,4 +1,4 @@
-﻿# KubeHeal build progress
+# KubeHeal build progress
 
 Resume state for the autonomous build. Plan: `IMPLEMENTATION_PLAN.md`. Target: `PROJECT_SPEC.md`.
 Branch: `work` (created from local `main` at 88ce586). `demo` is created from `work` in P10.
@@ -179,7 +179,7 @@ Ransomware:
 
 ### P11 Evaluation harness (touches `eval/`, `docs/kubeheal/results/`; cluster owner runs)
 - [ ] P11-H size: S. Harness `eval/p11_harness.py` (offline builders, k3d-kubeheal and namespace allow-lists, injectable runner, no silent overwrite): reviewed, fixed and merged 2026-11-11 (`a1590d1`). Nothing in it has been run against a cluster; every result file it writes says "not measured" until a run produces data.
-- [ ] P11-E1 size: M. k6 load test 10 to 200 simulated pods, p50 and p95 vs replicas. Also tune the queue-depth HPA target (a CHOSEN DEFAULT in the chart values, not a measurement) from the measured replicas-versus-load data.
+- [~] P11-E1 Codex. Historical F11/P11 runs repeatedly showed 12 connection refusals in the first timestamp, despite Ready inference endpoints at preflight. Added an explicit Deployment/Service-endpoint readiness wait and five sequential, separately reported k6 setup warm-up requests that fail the run if any is refused; measured VU requests remain unchanged and are not retried. Focused harness tests: 20 passed. Live rerun and cause attribution remain pending owner authorization for the original cluster.
 - [ ] P11-E2 size: M. Chaos runs (Chaos Mesh or kubectl): detection continuity, fail-closed rate.
 - [ ] P11-E3 size: M. RPO and RTO runs against a database volume. Needs: P7.
 - [ ] P11-E4 size: M. End-to-end time-to-action per stage.
