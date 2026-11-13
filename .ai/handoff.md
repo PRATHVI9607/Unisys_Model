@@ -1,10 +1,9 @@
 ﻿# Handoff
 
 - **Agent:** Codex
-- **Date:** 2026-11-13 06:30 IST
-- **Goal:** Resume KubeHeal acceptance on `work` then `demo`; nothing pushed, no training or `PROJECT_SPEC.md` changes.
-- **What changed and why:** Confirmed `wave/claude-F3` (`d0ed188`) is merged into both branches. F8/F4/P11 offline reviews passed their focused suites; combined F5-F10 focused tests passed 371, 1 skipped; no essential branch fixes. Recorded current access and P11 evidence in `docs/kubeheal/PROGRESS.md`.
-- **Files touched:** `docs/kubeheal/PROGRESS.md`, `.ai/handoff.md`
-- **Open issues:** Cluster read-only commands are blocked because the sandbox cannot read the user's kubeconfig; Helm is unavailable on PATH, and the full suite fails during test collection while probing a protected Winget Helm path. Existing `CLUSTER_LOCK.md` says `Codex 2026-11-13 06:17 IST`; leave active. Cluster mode/revision/tags/pods/readyz are not freshly verified. F1-F13 gaps remain as listed in `NEXT_FOR_CODEX.md`.
-- **Next step:** Restore authorized read access to `k3d-kubeheal` and Helm. Recheck cluster readiness under the lock, then continue acceptance in the user's order. Before checkpoint: `work` `84b3c25`, `demo` `c132c3f`.
-
+- **Date:** 2026-11-13 06:38 IST
+- **Goal:** Finish KubeHeal F1-F13 acceptance on `work` then `demo`; nothing pushed, no training or `PROJECT_SPEC.md` changes.
+- **What changed and why:** Reviewed F3b PVC guard, F4 HMAC, F8 dashboard, P11, k6 policy, thaw HMAC docs, and demo-runbook branches. Focused suites passed. Updated `NEXT_FOR_CODEX.md` and `PROGRESS.md` with findings and the access blockers.
+- **Files touched:** `docs/kubeheal/NEXT_FOR_CODEX.md`, `docs/kubeheal/PROGRESS.md`, `.ai/handoff.md`
+- **Open issues:** Fresh cluster reads are blocked because sandbox access to `C:\Users\PV\.kube\config` is denied. Helm is absent from PATH and the test collector cannot stat its protected Winget path, so full suites on work and demo produce no counts. `CLUSTER_LOCK.md` still says `Codex 2026-11-13 06:17 IST`; mode/revision/tags/readiness/readyz are not freshly verified. F3b PVC guard and the thaw-doc correction remain unmerged pending a full suite. F5-F10 live acceptance, F12 U6, F13 P11, fresh F2/F3/F4 checks, demo rebuild, rehearsal, and push prep remain open.
+- **Next step:** Restore authorized access to the configured `k3d-kubeheal` context and Helm, recheck cluster readiness under the existing lock, then resume the user's acceptance order. Pre-checkpoint: `work` `0dbd37e`; `demo` had merged the focused test checkpoint.
