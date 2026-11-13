@@ -9,7 +9,7 @@ This is a code review against `PROJECT_SPEC.md`, not a claim of production valid
 | S-HA-1 | Implemented | `agents/health_agent/agent.py`, `HealthAgent.watch_deployments`; reconnects and resumes by resource version. `tests/test_sense_health_window.py`; live Watch test in `tests/test_killswitch.py` covers ConfigMap watch, not all Deployment reconnect cases. |
 | S-HA-2 | Implemented | `agents/health_agent/baseline.py`, `get_or_set_baseline`; Redis SET NX. `tests/test_golden_baseline.py`. |
 | S-HA-3 | Implemented | `baseline.is_drifted` and `drift_view`; Health Agent compares live spec to stored golden spec. `tests/test_golden_baseline.py`, `tests/test_sense_health_window.py`. |
-| S-HA-4 | Implemented | `agents/health_agent/prometheus_client.py`, `wait_for_fresh_metric_window`; 60 steps and 15 configured metrics. `tests/test_sense_health_window.py`. Live query check is recorded in `PROGRESS.md` under P10-V2. |
+| S-HA-4 | Implemented | `agents/health_agent/prometheus_client.py`, `wait_for_fresh_metric_window`; 60 steps and 15 configured metrics. `tests/test_sense_health_window.py`. Live query check is recorded in `docs/dev-notes/PROGRESS.md` under P10-V2. |
 | S-HA-5 | Implemented | `agents/health_agent/prometheus_client.py` has a shared Redis cache for windows; `tests/test_prometheus_cache.py`. |
 | S-HA-6 | Implemented | `deploy/helm/kubeheal/templates/rbac.yaml`, `k8s/rbac/rbac.yaml`; `tests/test_no_writes_outside_executor.py`, `tests/test_rbac_k3d.py`. The latter needs the configured cluster for live verification. |
 | S-SA-1 | Implemented | `agents/security_agent/proc_scanner.py`; `tests/test_cgroups_compatibility.py`, `tests/test_proc_scanner_index.py`. |
@@ -30,7 +30,7 @@ This is a code review against `PROJECT_SPEC.md`, not a claim of production valid
 | S-DCM-3 | Implemented | DCM response and `models/dcm/causal_chain_builder.py`; DCM and interpretation tests. Content quality is not independently validated. |
 | S-DCM-4 | Partial | Training and checkpoint artifacts/scripts exist under `models/`; evidence does not establish that the checked-in DCM checkpoint was trained with frozen base models as specified. |
 | S-INT-1 | Implemented | `models/interpretation/field_name_mapper.py`; `tests/test_fusion_interpretation.py`. |
-| S-INT-2 | Partial | SHAP helper exists in `models/interpretation/shap_explainer.py`; real KernelExplainer is not wired through the running scoring path and may fall back. See P6-D6 in `PROGRESS.md`. |
+| S-INT-2 | Partial | SHAP helper exists in `models/interpretation/shap_explainer.py`; real KernelExplainer is not wired through the running scoring path and may fall back. See P6-D6 in `docs/dev-notes/PROGRESS.md`. |
 | S-INT-3 | Implemented | `models/dcm/causal_chain_builder.py` and Fusion interpretation client carry T0 where available; `tests/test_fusion_interpretation.py`, `tests/test_sense_falco_replay.py`. |
 | S-INT-4 | Partial | Template summary exists in `models/interpretation/nl_summary_generator.py`. Optional LLM redaction and namespace restriction are not established as an active deployed path. |
 | S-MQ-1 | Implemented | Redis streams connect agents and Fusion; `agents/fusion_agent/agent.py`; `tests/test_fusion_streams.py`, `tests/test_integration_full_pipeline.py`. |
@@ -41,13 +41,13 @@ This is a code review against `PROJECT_SPEC.md`, not a claim of production valid
 | S-FA-2 | Implemented | Fusion calls DCM and interpretation client; `tests/test_fusion_interpretation.py`, `tests/test_fusion_decide.py`. |
 | S-FA-3 | Implemented | `agents/fusion_agent/decision_policy.py`; pure policy tests in `tests/test_decision_policy.py` and `tests/test_policy_rules.py`. |
 | S-FA-4 | Implemented | `agents/fusion_agent/incident_lock.py`; lease and heartbeat tests in `tests/test_incident_lock.py`. |
-| S-EX-1 | Implemented | Executor service account and namespace-scoped RBAC in `k8s/rbac/rbac.yaml` and Helm template; `tests/test_remediation_static.py`, `tests/test_rbac_k3d.py`. Live RBAC evidence is recorded in `PROGRESS.md`. |
+| S-EX-1 | Implemented | Executor service account and namespace-scoped RBAC in `k8s/rbac/rbac.yaml` and Helm template; `tests/test_remediation_static.py`, `tests/test_rbac_k3d.py`. Live RBAC evidence is recorded in `docs/dev-notes/PROGRESS.md`. |
 | S-EX-2 | Implemented | `agents/executor/drift.py`; rollback point, guarded patch and canary checks. `tests/test_remediation_drift.py`. Real cluster patch behavior is demo-specific and remains limited by current model scores and kill-switch mode. |
 | S-EX-3 | Partial | Quarantine, snapshots, restore and entropy probe code in `agents/executor/`; `tests/test_remediation_ransomware.py`, `tests/test_restore_entropy_probe.py`. Full CSI snapshot/restore path is not verified end to end. |
-| S-EX-4 | Implemented | Executor records gated actions through the shared ledger; `tests/test_executor_ledger_policy.py`, `tests/test_record_pipeline.py`. MinIO transient startup failure and pending-stream drain are tracked in `PROGRESS.md`. |
+| S-EX-4 | Implemented | Executor records gated actions through the shared ledger; `tests/test_executor_ledger_policy.py`, `tests/test_record_pipeline.py`. MinIO transient startup failure and pending-stream drain are tracked in `docs/dev-notes/PROGRESS.md`. |
 | S-DB-1 | Partial | FastAPI dashboard and Helm Ingress resources exist (`dashboard/fastapi_app.py`, Helm templates). External TLS and production ingress behavior are not verified. |
 | S-DB-2 | Partial | Approval and incident ledger views exist in `dashboard/`; dashboard tests cover routes and claims. A full SHAP review view and production authentication posture are not established. |
-| S-REC-1 | Implemented | `agents/common/ledger.py` and `k8s/minio.yaml` configure append-only, object-lock writes. `tests/test_ledger.py`, `tests/test_ledger_guard.py`; see live check in `PROGRESS.md`. |
+| S-REC-1 | Implemented | `agents/common/ledger.py` and `k8s/minio.yaml` configure append-only, object-lock writes. `tests/test_ledger.py`, `tests/test_ledger_guard.py`; see live check in `docs/dev-notes/PROGRESS.md`. |
 | S-REC-2 | Implemented | Metrics in `agents/common/metrics.py`, Prometheus config and Grafana dashboard in `deploy/`; `tests/test_metrics.py`, `tests/test_grafana_dashboard.py`. |
 | S-REC-3 | Partial | Checkpoint loading and validation helpers exist in `services/ckpt.py` and registry upload code in `models/upload_to_registry.py`; registry lifecycle and promotion policy are not demonstrated. |
 
@@ -61,7 +61,7 @@ This is a code review against `PROJECT_SPEC.md`, not a claim of production valid
 | S-POL-4 | Implemented | Patch candidate threshold and tests in `decision_policy.py`, `tests/test_decision_policy.py`. |
 | S-POL-5 | Implemented | HUMAN/OBSERVE/BENIGN thresholds in `decision_policy.py`; policy tests. OBSERVE requests are bounded by Redis TTL; Health Agent rescheduling is configurable with a documented default in `agents/health_agent/agent.py`. |
 | S-POL-6 | Implemented | CI, breaker, protected namespace and mode guards are in policy/Fusion; tests in `tests/test_decision_policy.py`, `tests/test_policy_rules.py`, `tests/test_fusion_decide.py`. |
-| S-POL-7 | Implemented | Burn-in counter and thresholds in Fusion/policy; `tests/test_fusion_decide.py`, `tests/test_decision_policy.py`. The sample-count interpretation is a chosen assumption documented in `PROGRESS.md`. |
+| S-POL-7 | Implemented | Burn-in counter and thresholds in Fusion/policy; `tests/test_fusion_decide.py`, `tests/test_decision_policy.py`. The sample-count interpretation is a chosen assumption documented in `docs/dev-notes/PROGRESS.md`. |
 
 ## Remediation
 

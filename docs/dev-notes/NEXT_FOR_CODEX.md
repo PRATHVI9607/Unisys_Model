@@ -19,4 +19,4 @@
 
 ## Owner push review
 
-See `PUSH_PLAN.md` for feature status, full-suite counts, diff summary, and secret scan result. Nothing has been pushed, and `ALLOW_PUSH` remains unset. Review the final diff and decide whether to push from the owner's environment. Do not perform cluster teardown as part of push preparation; the original cluster and PVCs are preserved.
+See `docs/dev-notes/PUSH_PLAN.md` for feature status, full-suite counts, diff summary, and secret scan result. Nothing has been pushed, and `ALLOW_PUSH` remains unset. Review the final diff and decide whether to push from the owner's environment. Do not perform cluster teardown as part of push preparation; the original cluster and PVCs are preserved.

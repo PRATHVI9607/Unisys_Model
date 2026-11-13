@@ -2,17 +2,17 @@
 
 Goal: implement everything in `docs/kubeheal/PROJECT_SPEC.md` (sections 1 to 5) on branch `work`, then
 build a `demo` branch that shows the **entire** system running on k3d on this machine (native Windows,
-Docker Desktop, PowerShell). Starting point: `docs/kubeheal/SCAN_REPORT.md`.
+Docker Desktop, PowerShell). Starting point: `docs/dev-notes/SCAN_REPORT.md`.
 
-Progress is tracked in `docs/kubeheal/PROGRESS.md` (create it in phase P0). Every phase ends with:
-all tests green, a commit (or several), and a PROGRESS.md entry. A new session resumes from PROGRESS.md.
+Progress is tracked in `docs/dev-notes/PROGRESS.md` (create it in phase P0). Every phase ends with:
+all tests green, a commit (or several), and a docs/dev-notes/PROGRESS.md entry. A new session resumes from docs/dev-notes/PROGRESS.md.
 
 Kill switch semantics (decided): `test` = dry run. Sense, Score, Decide and Record run; no Kubernetes
 write call happens anywhere (Fusion Agent, Executor, Security Agent); the ledger records
 "DRY RUN: would have ...". `enforce` = normal.
 
 Acceptance criteria are written so they can be checked by a test or a command. A phase is not done
-until every criterion is met or explicitly recorded in PROGRESS.md as deferred with a reason.
+until every criterion is met or explicitly recorded in docs/dev-notes/PROGRESS.md as deferred with a reason.
 
 ---
 
@@ -27,7 +27,7 @@ until every criterion is met or explicitly recorded in PROGRESS.md as deferred w
   Verify by attempting `git push --dry-run` and confirming it is blocked.
 - Untrack `.claude/settings.local.json` and gitignore it.
 - Create branch `work` from local `main` (which contains commit 88ce586).
-- Create `docs/kubeheal/PROGRESS.md`.
+- Create `docs/dev-notes/PROGRESS.md`.
 
 Acceptance: all 44 tests pass in the venv (including the two torch_geometric tests); Health Model
 server starts locally and `/health` reports the checkpoint loaded; push is blocked.
@@ -229,12 +229,12 @@ Wave structure (current; P0 to P3 are done):
 - Wave 3 (parallel): P6 (decide), P8 (dashboard).
 - Wave 4 (sequential, the orchestrator owns the k3d cluster): P10, then P11.
 - Agents without subagents run the same tasks sequentially, one worktree or branch at a time, following the
-  "Task checklist" in `PROGRESS.md` and the handoff protocol in `AGENTS.md`.
+  "Task checklist" in `docs/dev-notes/PROGRESS.md` and the handoff protocol in `AGENTS.md`.
 
 Run P0 to P11 in order (waves above). P12 starts only after the user says go. Stop and ask the user only for:
 - anything that needs a password, account, payment, or cloud credentials;
 - running training (P12);
 - deleting data the user created, or anything outside this repo and the `kubeheal` k3d cluster;
-- a phase that would change the spec itself (record the proposed change in PROGRESS.md and continue
+- a phase that would change the spec itself (record the proposed change in docs/dev-notes/PROGRESS.md and continue
   with the rest if possible).
 Never push. The user pushes manually after reviewing.

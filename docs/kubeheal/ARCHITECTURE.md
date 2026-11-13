@@ -45,4 +45,4 @@ flowchart LR
 
 ## Planned or not fully verified
 
-The full production topology in `PROJECT_SPEC.md` is not yet demonstrated. In particular, scheduled volume snapshots and restore need live validation; the local k3d storage driver has platform constraints. The dashboard is not an authenticated general-purpose operations console. Multi-replica failover semantics, production security, cloud-provider validation, workload-scale behavior, and end-to-end action latency remain unverified. See [SPEC_VS_CODE.md](SPEC_VS_CODE.md) and [PROGRESS.md](PROGRESS.md).
+The full production topology in `PROJECT_SPEC.md` is not yet demonstrated. In particular, scheduled volume snapshots and restore need live validation; the local k3d storage driver has platform constraints. The dashboard is not an authenticated general-purpose operations console. Multi-replica failover semantics, production security, cloud-provider validation, workload-scale behavior, and end-to-end action latency remain unverified. See [SPEC_VS_CODE.md](SPEC_VS_CODE.md) and [docs/dev-notes/PROGRESS.md](../dev-notes/PROGRESS.md).

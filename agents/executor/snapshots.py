@@ -33,8 +33,8 @@ GROUP, VERSION, PLURAL = "snapshot.storage.k8s.io", "v1", "volumesnapshots"
 LABEL_KIND = "kubeheal/snapshot-kind"
 LABEL_PVC = "kubeheal/source-pvc"
 KIND_ROLLING, KIND_FORENSIC = "rolling", "forensic"
-INTERVAL_S = 300      # every 5 minutes (IMPLEMENTATION_PLAN P7)
-KEEP = 12             # keep 12 (IMPLEMENTATION_PLAN P7)
+INTERVAL_S = 300      # every 5 minutes (docs/dev-notes/IMPLEMENTATION_PLAN.md P7)
+KEEP = 12             # keep 12 (docs/dev-notes/IMPLEMENTATION_PLAN.md P7)
 FREEZE_PREFIX = "kubeheal:snapfreeze"
 
 

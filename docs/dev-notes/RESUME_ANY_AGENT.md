@@ -5,8 +5,8 @@ Paste this into Claude Code, Codex CLI, OpenCode or any other agent working in t
 ```
 You are continuing the KubeHeal build in this git repository (branch work). Do not ask me to re-explain.
 
-1. Read, in order: AGENTS.md, docs/kubeheal/PROJECT_SPEC.md, docs/kubeheal/IMPLEMENTATION_PLAN.md,
-   docs/kubeheal/PROGRESS.md (section "Task checklist"), .ai/handoff.md.
+1. Read, in order: AGENTS.md, docs/kubeheal/PROJECT_SPEC.md, docs/dev-notes/IMPLEMENTATION_PLAN.md,
+   docs/dev-notes/PROGRESS.md (section "Task checklist"), .ai/handoff.md.
 2. Run: git status, git log --oneline -15, git branch. Confirm the branch and
    whether the tree is clean. If there is a wip/<task-id> branch, continue it.
 3. Claim the next unchecked task whose dependencies are done by changing its line to "[~] <your agent name>".
