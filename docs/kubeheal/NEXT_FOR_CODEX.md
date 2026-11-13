@@ -21,16 +21,14 @@ Worktrees were clean at handoff after preserving the unfinished cherry-pick as W
 
 | Branch | Tip | What remains |
 |---|---:|---|
-| wave/claude-F3b | 207ad87 | Reviewed: PVC claim guard protects a restore from drift reverting to the old claim. Focused tests 8 passed. Keep unmerged until the required full suite can run. |
-| wave/Codex-F4-HMAC-smoke | 520c8f8 | Reviewed: implementation is already represented on work; focused tests 203 passed, 3 skipped. Live evidence exists, with a mode-change race requiring the exclusive lock and test mode. |
-| wave/Codex-ThawHmac-docs | f730a7a | Reviewed: one operator docstring correction for the dedicated HMAC Secret is not on work. Focused tests 5 passed; integrate only after full suite is available. |
-| wave/demo-runbook | b1eb497 | Reviewed: do not merge wholesale; its HPA script snapshot has fixed names and unconditional cleanup. Current work has safer run-owned cleanup. Branch adds historical F2 evidence only. |
-| wave/Codex-F8-freeze-ui | 656ed87 | Reviewed: controls/API are represented on work; focused dashboard suite 275 passed. Still needs populated live walkthrough. |
-| wave/Codex-NP-k6 | d2c6cde | Reviewed: redundant with current work. Narrow k6 inference ingress allowance and chart assertions are already present; 35 offline tests passed. |
-| wave/p11-safe-runner | a2ba42a | Reviewed: no runner fix needed; focused tests 41 passed. Attempt 2 refusal cause unproven; E1 not accepted and remaining runs not measured. |
-| wip/f4-hmac-smoke | fad3518 | WIP preservation of a conflicted F4 cherry-pick. Do not merge blindly. |
-
-The branch refs listed here are not ancestors of demo; review found several changes already represented elsewhere. Compare diffs before cherry-picking.
+| wave/claude-F3b | 207ad87 (`e6c5aa6`) | PVC-claim guard reviewed; focused 8 tests pass. Run full suites, then merge green change into work and demo. |
+| wave/Codex-ThawHmac-docs | f730a7a | Dedicated HMAC Secret doc fix reviewed; focused 5 tests pass. Run full suites, then integrate into work and demo. |
+| wave/demo-runbook | b1eb497 (`1f6dffb`) | Do not merge wholesale: HPA snapshot uses fixed names and unconditional cleanup. Current work has safer run-owned cleanup. Consider only nonduplicated F2 evidence after diff review. |
+| wave/Codex-F4-HMAC-smoke | 520c8f8 | Reviewed; implementation already represented on work. No merge needed. Keep the exclusive lock and test mode for a live smoke. |
+| wave/Codex-F8-freeze-ui | 656ed87 | Reviewed; implementation represented on work. Focused dashboard tests 275 passed; live walkthrough remains. |
+| wave/Codex-NP-k6 | d2c6cde | Redundant with work; narrow inference ingress rule and tests are already present. |
+| wave/p11-safe-runner | a2ba42a | Reviewed; no runner fix needed. E1 remains unaccepted; E2-E6 and V5-E1 not measured. |
+| wip/f4-hmac-smoke | fad3518 | Preserve as WIP; do not merge blindly. |
 ## Feature checklist
 
 | Feature | Status | Where it stopped |
@@ -49,15 +47,24 @@ The branch refs listed here are not ancestors of demo; review found several chan
 | F12 U6 acceptance | NOT DONE | up.ps1 has not passed twice from a clean baseline. down.ps1 was not run because it deletes MinIO, Redis, ledger, and victim PVC data. |
 | F13 P11 evaluation | NOT DONE | No accepted E1 benchmark; both attempts failed. E2-E6 and V5-E1 remain not measured. |
 
-## Ordered work for tomorrow
+## Handoff snapshot (2026-11-13)
 
-1. F3 `d0ed188` is confirmed as an ancestor of work and demo. Fresh read-only cluster verification is blocked: this sandbox cannot read the user kubeconfig. Once authorized access is available, verify mode, revision, image tags, pod readiness, and `/readyz` before any write. Do not rerun Claude-owned D-5 or containment work.
-2. Recheck the cluster after stop/start and wait for needed pods to become Ready. Keep mode test. Do not run down.ps1 unless the owner explicitly authorizes deletion of cluster volumes.
-3. F3b, F4, F8, P11, k6, and runbook branches have been reviewed; see the table. F3b and the thaw-doc correction remain unmerged pending the full suite. The full suite currently fails collection because the sandbox cannot access Helm. Do not bypass or deselect chart tests.
-4. Rehearse docs/kubeheal/DEMO_RUNBOOK.md once from a fresh cluster start. Use saved F2/F3 evidence where rerunning crosses Claude ownership. Capture actual output/screenshots under docs/kubeheal/demo-evidence/; skip unsupported live steps and state why.
-5. Run U6 twice from a clean baseline only if reset does not delete user data; otherwise keep NOT DONE. No model training.
-6. Finish push prep: exact full-suite counts, full diff/secret scan against origin/main, no .env/tokens/kubeconfig/venvs/large binary changes, correct .gitignore, README/AGENTS verified design, measured numbers only, updated PUSH_PLAN.md, PROGRESS.md, and handoff. Never push or set ALLOW_PUSH.
+- Audit baseline heads before the handoff checkpoint: `work` `8b6461a`, `demo` `8b85048`. `d0ed188` is already merged into both.
+- Last known cluster state: Helm revision 13, image tag `b20261112215116`, six pods Pending after the prior stop/start. Mode is currently unverified; its last prior read was `test`. This session could not read `C:\Users\PV\.kube\config`, so no fresh API read was made.
+- `CLUSTER_LOCK.md` remains `CLUSTER LOCK Codex 2026-11-13 06:17 +05:30 IST`. Keep it until cluster state is freshly verified and the active window is safely released.
+- Full suites on work and demo stopped at collection in `tests/test_platform_chart.py` because `helm` is not on PATH and the protected Winget Helm path raises `PermissionError`. No suite counts are available.
 
+## Ordered remaining work
+
+1. Verify the cluster read-only using only `--context k3d-kubeheal`: mode, revision, images, pod status, inference `/readyz`.
+2. Diagnose the six Pending pods; wait for required pods to become Ready and record the actual cause. Keep mode test.
+3. Run full suites on work and demo; do not skip the chart suite.
+4. Merge the reviewed F3b PVC-claim guard into work, then demo, only after green suites.
+5. Rebuild all images from demo and redeploy under the cluster lock. Record revision and tags; smoke-check Ready pods, `/readyz` 200, and mode test.
+6. Resolve leftover open escalations and remove only confirmed orphan SnapshotFreeze keys for deleted scratch PVCs; record each action.
+7. Complete F1-F13 live evidence in `docs/kubeheal/demo-evidence/<F>/`, including F5-F10; rerun F2/F3/F4 as requested. Run U6 twice without losing MinIO/Redis/ledger data. Diagnose P11 refusals; run E1-E6 and V5-E1 with actual numbers, marking unmeasured items honestly.
+8. Rehearse `DEMO_RUNBOOK.md` end to end from a fresh cluster start. Ask before any data deletion; save screenshots/output and mark each step LIVE or FALLBACK.
+9. Run final suites, update README and AGENTS without changing PROJECT_SPEC, secret-scan the diff, update PUSH_PLAN, verify test mode and released lock, and commit. Never push or set ALLOW_PUSH.
 ## Verification commands
 
 Run from the demo checkout in PowerShell using Python 3.11. Do not deselect the default suite.
@@ -75,4 +82,5 @@ Pop-Location
 Push-Location .
 .\.venv\Scripts\python.exe -m pytest tests -q -p no:warnings
 Pop-Location
+
 
