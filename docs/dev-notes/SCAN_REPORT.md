@@ -9,7 +9,7 @@ a file in the repo or from a run made during this scan. Everything else is "not 
 
 ## 1. Git state
 
-- Repo root: `C:/My_projects_1/cLOUD/Unisys_Model`. This is a nested clone inside a separate local
+- Repo root: `<repo>`. This is a nested clone inside a separate local
   repo (`cLOUD`) that has unrelated history.
 - Current branch: `main`, tracking `origin/main`. Default branch on the remote: `main`.
 - Local branches: `main` only.
@@ -17,7 +17,7 @@ a file in the repo or from a run made during this scan. Everything else is "not 
 - `work` and `demo` do not exist, locally or on the remote.
 - Local commit `88ce586 docs: add CLAUDE.md and KubeHeal project spec` is 1 ahead of `origin/main`.
   It contains exactly `CLAUDE.md` and `docs/kubeheal/PROJECT_SPEC.md`. Not pushed.
-- Working tree: clean before this report. `SCAN_REPORT.md` is the only uncommitted file.
+- Working tree: clean before this report. `docs/dev-notes/SCAN_REPORT.md` is the only uncommitted file.
 
 | Branch | Ahead / behind `origin/main` | Notes |
 |---|---|---|

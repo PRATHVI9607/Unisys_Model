@@ -50,7 +50,7 @@ Worktrees were clean at handoff after preserving the unfinished cherry-pick as W
 ## Handoff snapshot (2026-11-13)
 
 - Audit baseline heads before the handoff checkpoint: `work` `8b6461a`, `demo` `8b85048`. `d0ed188` is already merged into both.
-- Last known cluster state: Helm revision 13, image tag `b20261112215116`, six pods Pending after the prior stop/start. Mode is currently unverified; its last prior read was `test`. This session could not read `C:\Users\PV\.kube\config`, so no fresh API read was made.
+- Last known cluster state: Helm revision 13, image tag `b20261112215116`, six pods Pending after the prior stop/start. Mode is currently unverified; its last prior read was `test`. This session could not read `<home>\.kube\config`, so no fresh API read was made.
 - `CLUSTER_LOCK.md` remains `CLUSTER LOCK Codex 2026-11-13 06:17 +05:30 IST`. Keep it until cluster state is freshly verified and the active window is safely released.
 - Full suites on work and demo stopped at collection in `tests/test_platform_chart.py` because `helm` is not on PATH and the protected Winget Helm path raises `PermissionError`. No suite counts are available.
 
@@ -64,7 +64,7 @@ Worktrees were clean at handoff after preserving the unfinished cherry-pick as W
 6. Resolve leftover open escalations and remove only confirmed orphan SnapshotFreeze keys for deleted scratch PVCs; record each action.
 7. Complete F1-F13 live evidence in `docs/kubeheal/demo-evidence/<F>/`, including F5-F10; rerun F2/F3/F4 as requested. Run U6 twice without losing MinIO/Redis/ledger data. Diagnose P11 refusals; run E1-E6 and V5-E1 with actual numbers, marking unmeasured items honestly.
 8. Rehearse `DEMO_RUNBOOK.md` end to end from a fresh cluster start. Ask before any data deletion; save screenshots/output and mark each step LIVE or FALLBACK.
-9. Run final suites, update README and AGENTS without changing PROJECT_SPEC, secret-scan the diff, update PUSH_PLAN, verify test mode and released lock, and commit. Never push or set ALLOW_PUSH.
+9. Run final suites, update README and AGENTS without changing PROJECT_SPEC, secret-scan the diff, update docs/dev-notes/PUSH_PLAN.md, verify test mode and released lock, and commit. Never push or set ALLOW_PUSH.
 ## Verification commands
 
 Run from the demo checkout in PowerShell using Python 3.11. Do not deselect the default suite.

@@ -20,3 +20,11 @@ data/*.jsonl
 demo/k3d/.generated-values.yaml
 demo/k3d/.image-tags.json
 demo/k3d/.admin-token
+
+# AI-assisted development tooling and agent bookkeeping (kept locally, not tracked)
+.ai/
+.claude/
+CLAUDE.md
+AGENTS.md
+prompts/
+.githooks/

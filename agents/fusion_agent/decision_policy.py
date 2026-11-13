@@ -7,7 +7,7 @@ whether the models answered in time) are computed by the caller and come in as i
 
 Fail closed: every input that is missing, unknown or invalid leads to HUMAN, never to an automatic action.
 
-V5-D3 (owner decisions M2, D2, Q1, Q2 in docs/kubeheal/V5_INTEGRATION_PLAN.md section 11):
+V5-D3 (owner decisions M2, D2, Q1, Q2 in docs/dev-notes/V5_INTEGRATION_PLAN.md section 11):
   * M2: an automatic action needs a conformal prediction set of exactly ONE label on each side that has an event
     (replaces the old CI-width guard). The trigger side must have a set; a side with no event passes `None`.
   * D2/Q1: a rule-based rollback (the Health Agent's failure_reasons or a posture violation) skips only the set

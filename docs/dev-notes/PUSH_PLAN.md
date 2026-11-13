@@ -45,7 +45,7 @@ Last checked 2026-11-12 23:05 IST. Branch tips before this audit update: `work` 
 1. After the 23:30 IST merge cutoff, rehearse `docs/kubeheal/DEMO_RUNBOOK.md` once from a fresh cluster start. Capture output/screenshots under `docs/kubeheal/demo-evidence/`; use only verified features as live steps and record explicit skips for the rest.
 2. If any code changes, rerun the full suite on work, merge only green work into demo, then rerun the full suite on demo and record exact counts.
 3. Update README.md and AGENTS.md with final verified design and measured figures only; retain the `Verified on k3d` qualification.
-4. Refresh `docs/kubeheal/PROGRESS.md`, `.ai/handoff.md`, this plan, and mode `test`; commit each completed task.
+4. Refresh `docs/dev-notes/PROGRESS.md`, `.ai/handoff.md`, this plan, and mode `test`; commit each completed task.
 5. Review `git diff --check`, the full diff against origin, secret/artifact scan, and `git status`; do not include local credentials, environments, or large binaries.
 
 ## Exact final verification commands
