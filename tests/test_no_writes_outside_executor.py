@@ -38,7 +38,7 @@ def _py_files():
         if not base.exists():
             continue
         for p in base.rglob("*.py"):
-            if "_archive_v3" in p.parts or ".venv" in p.parts or "__pycache__" in p.parts:
+            if ".venv" in p.parts or "__pycache__" in p.parts:
                 continue
             yield p
 

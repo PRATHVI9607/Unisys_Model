@@ -42,14 +42,13 @@ probably should not be.
 - `models/security_model/checkpoints/best_security_model.pt` 2.2 MB
 - `models/dcm/checkpoints/best_dcm.pt` 0.8 MB
 - `models/health_model/dit-merged-complete.csv` 19.4 MB (training data)
-- `models/_archive_v3/` includes a second 19.4 MB CSV and two v3 `.pt` files (8.2 MB and 1.8 MB)
-- `docs/architecture-flow.png` 0.4 MB, two screenshots at repo root
+- `docs/architecture-flow.png` 0.4 MB
 
 | Folder | Contents |
 |---|---|
 | `agents/` | `health_agent` (Watch API + Prometheus), `security_agent` (/proc, entropy, Falco), `fusion_agent` (decision policy, incident lock, executes actions). No separate executor. |
 | `services/` | FastAPI servers: `health_model_server` (8001), `security_model_server` (8002), `dcm_server` (8003). |
-| `models/` | Model code (GATv2+BiLSTM, Transformer+Conv1D-SE, DCM, interpretation), train/export/calibrate scripts, checkpoints, training CSV, `_archive_v3`. |
+| `models/` | Model code (GATv2+BiLSTM, Transformer+Conv1D-SE, DCM, interpretation), train/export/calibrate scripts, checkpoints, training CSV. |
 | `dashboard/` | FastAPI dashboard, static JS, template. |
 | `k8s/` | Plain manifests, RBAC, CRDs, Falco config and rules, Prometheus config. |
 | `dockerfiles/` | One per component plus a shared ML base. |
@@ -59,7 +58,7 @@ probably should not be.
 | `kernel/` | eBPF probe file and a kernel monitor script. |
 | `tests/` | 7 test files, 44 tests. |
 | `docs/` | Architecture flow (md, mmd, png) and the new `docs/kubeheal/` folder. |
-| Root | `KUBEHEAL_V4_PRD.md`, `KubeHeal_PRD_v3.docx`, `DASHBOARD.md`, `README.md`, `requirements.txt`, `pytest.ini`, `CLAUDE.md`. |
+| Root | `README.md`, `requirements.txt`, `pytest.ini`, `CLAUDE.md`. |
 
 No Helm chart in the repo. No ONNX files are tracked (export scripts exist).
 

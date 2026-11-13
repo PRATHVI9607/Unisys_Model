@@ -70,7 +70,7 @@ Say this out loud in the demo. It is the honest scope of the claim.
 ### Preflight (estimate: 1 minute)
 
 0. Containment circuit breaker: a real (non dry-run) automatic containment in a namespace is limited to 3 per hour (`CB_CONTAIN_LIMIT_PER_HOUR`, per namespace). The three windows of 2026-11-12 used the staging allowance (`88_hmac_requests_and_breaker.txt`); a fourth staging window before 15:01:33Z on that day would have been human-gated, not automatic. Check `kubectl --context k3d-kubeheal -n kubeheal exec redis-0 -- redis-cli ZRANGE kubeheal:cbw:contain:staging 0 -1 WITHSCORES` before a window; rehearsals in `test` do not count.
-1. Read `docs/kubeheal/CLUSTER_LOCK.md`. If another agent holds the lock, wait. Add your line, commit, remove it afterwards.
+1. Check that nobody else is using the cluster; if someone is, wait. Note your use in a local, untracked note and remove it afterwards.
 2. Mode must be `test`, all pods Ready, and the Executor image must contain the HMAC code:
 
 ```powershell

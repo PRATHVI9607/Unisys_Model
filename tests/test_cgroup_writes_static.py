@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCAN_DIRS = ["agents", "dashboard", "kubeheal", "services", "scripts", "deploy", "k8s"]
 TEXT_SUFFIXES = {".py", ".js", ".ts", ".html", ".sh", ".bash", ".yaml", ".yml", ".json", ".lua", ".go", ".tpl", ".ps1"}
-SKIP_PARTS = {"__pycache__", ".venv", "node_modules", "_archive_v3", ".pytest-tmp"}
+SKIP_PARTS = {"__pycache__", ".venv", "node_modules", ".pytest-tmp"}
 OWNER = ROOT / "agents" / "security_agent" / "containment.py"
 WRITER = "write_cgroup_freeze"
 
