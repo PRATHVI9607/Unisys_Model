@@ -3,8 +3,8 @@
 - **Agent:** Codex
 - **Date:** 2026-11-13
 - **Branch:** demo
-- **Goal:** Continue KubeHeal live acceptance, then rehearsal and push preparation. Nothing pushed; no training or PROJECT_SPEC.md edits.
-- **What changed and why:** Refreshed the exclusive cluster lock before the U6 Helm/reinstall pass. U6 will preserve all PVC-backed MinIO/Redis/ledger data; no cluster teardown is planned.
-- **Files touched:** docs/kubeheal/CLUSTER_LOCK.md, .ai/handoff.md
-- **Open issues:** F5-F7 live scenarios, F8 complete interactive controls, F10 canary rollback, F11 clean run/screenshot, P11 E1/E2, U6 two runs, full rehearsal, and final prep remain incomplete.
-- **Next step:** Run U6 twice through `up.ps1 -Stage all -SkipImages` with a reversible workload reset and verify test mode, readiness, and persistent PVCs after each pass. Never push or delete data.
+- **Goal:** Continue KubeHeal acceptance, rehearsal, and push preparation. Nothing pushed; no training or PROJECT_SPEC.md edits.
+- **What changed and why:** Recorded two partial U6 attempts. Full `up.ps1 -Stage all` stopped at Helm repository DNS; local install/adapter/victim stages and workload reset succeeded. No PVC or ledger data was deleted.
+- **Files touched:** docs/kubeheal/demo-evidence/F12/U6_status_2026-11-13.md, .ai/handoff.md
+- **Open issues:** U6 remains incomplete; F5-F7 live scenarios, F8 complete interactive controls, F10 canary rollback, F11 clean run/screenshot, P11 E1/E2, runbook rehearsal, and final prep remain.
+- **Next step:** Run supported P11 E1 and E2 under test mode, diagnose first-second refusals, then resume rehearsal and final docs. Never push or delete data.
