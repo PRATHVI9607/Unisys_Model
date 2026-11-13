@@ -50,4 +50,6 @@ def test_deadman_is_pinned_to_original_context_and_only_sets_test_mode():
     assert "--context $context" in source
     assert '"mode":"test"' in source
     assert '"mode":"enforce"' not in source
-    assert "Start-Sleep -Seconds $AfterSeconds" in source
+    assert "$seenEnforce = $false" in source
+    assert "while ([DateTime]::UtcNow -lt $deadline)" in source
+    assert "mode_returned_to_test" in source
