@@ -3,8 +3,8 @@
 - **Agent:** Codex
 - **Date:** 2026-11-13
 - **Branch:** demo
-- **Goal:** Finish KubeHeal acceptance, rehearsal, and push preparation. Nothing pushed; no training or PROJECT_SPEC.md edits.
-- **What changed and why:** Saved a rehearsal matrix with each runbook area marked LIVE/FALLBACK. The full rehearsal is not clean because a fresh-cluster start and screenshot walkthrough remain incomplete.
-- **Files touched:** docs/kubeheal/demo-evidence/REHEARSAL/rehearsal-2026-11-13.md, .ai/handoff.md
-- **Open issues:** Awaiting approval before `down.ps1` deletes PVC data. U6, F5-F8 completeness, F10 full rollback, clean F11/screenshot, and accepted P11 E1 remain incomplete. Both full suites passed; `work` is already merged into `demo`.
-- **Next step:** Continue README/AGENTS/PROGRESS/NEXT/PUSH_PLAN updates, secret scan, mode/lock finalization, and commit. Never push.
+- **Goal:** Complete KubeHeal acceptance and push preparation without pushing or deleting data.
+- **What changed and why:** Added F1 suite-safety evidence, distinguishing offline coverage from opt-in live integration tests. Full suites passed on both branches.
+- **Files touched:** docs/kubeheal/demo-evidence/F1/F1_safety_status_2026-11-13.md, .ai/handoff.md
+- **Open issues:** Fresh-cluster rehearsal awaits approval before `down.ps1`; U6 incomplete from Helm DNS. F5-F8, F10 rollback, F11 clean load/screenshot, and accepted P11 E1 are not complete. README, AGENTS, PROGRESS, NEXT, and PUSH_PLAN are updated but need final audit/commit and final lock release.
+- **Next step:** Finish final secret scan, verify mode `test`, release the cluster lock, commit the push-prep docs, and report readiness honestly. Never push.
