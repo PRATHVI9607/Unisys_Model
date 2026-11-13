@@ -1,9 +1,9 @@
 # KubeHeal rehearsal status, 2026-11-13
 
-**Machine:** native Windows 11  
-**Cluster:** `k3d-kubeheal`  
-**Mode at close:** `test`  
-**Build:** demo images `b20261113071011`, Helm revision 17  
+**Machine:** native Windows 11
+**Cluster:** `k3d-kubeheal`
+**Mode at close:** `test`
+**Build:** demo images `b20261113071011`, Helm revision 17
 **Result:** **Not a clean end-to-end rehearsal.** Per-feature runs were performed on the existing cluster, but the fresh-cluster start was not run and the all-stage install failed at Helm repository DNS. No claim is made that a single complete runbook pass succeeded.
 
 | Runbook area | Rehearsal status | Result / fallback evidence |

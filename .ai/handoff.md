@@ -3,8 +3,8 @@
 - **Agent:** Codex
 - **Date:** 2026-11-13
 - **Branch:** demo
-- **Goal:** Complete KubeHeal acceptance and push preparation without pushing or deleting data.
-- **What changed and why:** Added F1 suite-safety evidence, distinguishing offline coverage from opt-in live integration tests. Full suites passed on both branches.
-- **Files touched:** docs/kubeheal/demo-evidence/F1/F1_safety_status_2026-11-13.md, .ai/handoff.md
-- **Open issues:** Fresh-cluster rehearsal awaits approval before `down.ps1`; U6 incomplete from Helm DNS. F5-F8, F10 rollback, F11 clean load/screenshot, and accepted P11 E1 are not complete. README, AGENTS, PROGRESS, NEXT, and PUSH_PLAN are updated but need final audit/commit and final lock release.
-- **Next step:** Finish final secret scan, verify mode `test`, release the cluster lock, commit the push-prep docs, and report readiness honestly. Never push.
+- **Goal:** Complete KubeHeal acceptance and owner push preparation. Nothing pushed; no training or `PROJECT_SPEC.md` edits.
+- **What changed and why:** README, AGENTS, PROGRESS, NEXT, DEMO_RUNBOOK, and PUSH_PLAN now reflect the live evidence, exact suite counts, and remaining acceptance gaps. F1 evidence distinguishes full-suite safety coverage from opt-in live tests.
+- **Files touched:** README.md, AGENTS.md, PUSH_PLAN.md, docs/kubeheal/PROGRESS.md, docs/kubeheal/NEXT_FOR_CODEX.md, docs/kubeheal/DEMO_RUNBOOK.md, F1/F10/F12/F13/REHEARSAL evidence, .ai/handoff.md
+- **Open issues:** Fresh-cluster rehearsal awaits owner approval before `down.ps1`; U6 incomplete from Helm DNS. F5-F8 completeness, F10 rollback, clean F11/Grafana screenshot, and accepted P11 E1 remain. Cluster lock is still held pending final release.
+- **Next step:** Commit these docs, release the cluster lock after confirming mode `test` and no active port-forwards, rerun the final diff/secret audit, update PUSH_PLAN and handoff. Never push.

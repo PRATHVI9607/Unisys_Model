@@ -87,7 +87,7 @@ through secure operator secret handling. Redis authentication uses a separate Se
 alone cannot sign containment messages. A Kubernetes operator who can read the HMAC Secret can sign them.
 Never print or log Secret values.
 
-## Verified on k3d (2026-11-12)
+## Verified on k3d (evidence through 2026-11-13)
 
 - The F3 scratch Deployment chain completed in `staging`. The final enforce window was 45 seconds; 5 restored
   files were scanned and 0 were high entropy. The alert was scripted, so this verifies the Fusion-to-Executor
@@ -105,6 +105,27 @@ Never print or log Secret values.
   the renderer is not installed.
 - P11 E1 has no accepted benchmark: both runs failed. U6's full acceptance run twice is **not measured**.
   Do not reuse F11 numbers as P11 or U6 results. See `docs/kubeheal/results/p11/P11_COVERAGE.md`.
+- F3 was rerun on demo images on 2026-11-13 in `staging`: scripted alert, 38-second enforce window,
+  five restored files scanned, zero high-entropy files, and run-owned cleanup. Falco was absent, so this
+  still does not verify live sensing. See `docs/kubeheal/demo-evidence/F3/README.md`.
+- F4 HMAC smoke again passed in mode `test`: signed accepted, unsigned and tampered refused, cleanup
+  verified. F9's authenticated dashboard toggle recorded `test -> enforce -> test`; no remediation action
+  occurred during the enforce interval. See the F4 and F9 evidence directories.
+- F10's 2026-11-13 live drift walkthrough queried 15/15 metric series and recorded a `human_patch`
+  dry-run; the victim returned to 100m request / 500m limit. Canary healing and bad-p99 rollback are not
+  measured. F5 promotion, F6 live invalid-request intake, F7 live policy sequence, and F8 full dashboard
+  control walkthrough remain unverified for lack of safe live targets/triggers.
+- The 2026-11-13 F11 demo-image rerun had 12 first-timestamp connection refusals out of 72,328 checks;
+  observed median 37.49 ms and p95 61.87 ms are from a failed run and are not accepted results. No
+  Grafana screenshot was captured. Do not claim a clean rerun from these observations.
+- U6 is incomplete: two `up.ps1 -Stage all` attempts stopped at the monitoring chart repository because
+  DNS could not resolve `prometheus-community.github.io`. Standalone local stages succeeded; no PVC data
+  was deleted. The full fresh-cluster rehearsal remains pending.
+- P11 E1's third attempt also failed: 66,807/66,819 checks passed, with 12 initial connection refusals;
+  no accepted benchmark. P11 E2 measured one inference pod recovery at 1.25 seconds. E3-E6 and V5-E1
+  remain `not measured` with reasons in `docs/kubeheal/results/p11/P11_COVERAGE.md`. The repeated
+  first-second refusals are consistent with a short Service/data-plane startup race, but the refusing
+  component is not proven.
 
 ## Working rules (all agents)
 

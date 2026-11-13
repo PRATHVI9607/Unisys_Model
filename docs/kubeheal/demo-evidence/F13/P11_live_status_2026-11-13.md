@@ -1,7 +1,7 @@
 # F13 P11 live status
 
-**Date:** 2026-11-13  
-**Cluster:** `k3d-kubeheal`  
+**Date:** 2026-11-13
+**Cluster:** `k3d-kubeheal`
 **Mode:** `test`
 
 ## E1 load and refused-request diagnosis

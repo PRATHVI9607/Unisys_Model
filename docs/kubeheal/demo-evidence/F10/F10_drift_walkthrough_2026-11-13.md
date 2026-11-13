@@ -1,7 +1,7 @@
 # F10 drift walkthrough on demo images
 
-**Date:** 2026-11-13 (local time, Asia/Calcutta)  
-**Cluster:** `k3d-kubeheal`  
+**Date:** 2026-11-13 (local time, Asia/Calcutta)
+**Cluster:** `k3d-kubeheal`
 **Mode:** `test` before and after the walkthrough
 
 The bounded `demo.ps1 -Action drift -ObserveSeconds 30 -ProbeSeconds 30` scenario completed successfully. It primed live Prometheus samples, then reported 15/15 configured queries with data. The displayed sample values included CPU limit 500m, HTTP p99 latency 485.95 ms, and HTTP error rate 1.38 requests/s. These are samples from this walkthrough, not a performance baseline.

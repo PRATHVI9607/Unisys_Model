@@ -233,4 +233,3 @@ Two `up.ps1 -Stage all -SkipImages` attempts stopped at the monitoring step beca
 ## Evidence checklist
 
 After each rehearsal, save raw terminal output and screenshots in `docs/kubeheal/demo-evidence/F1/` through `F13/`, with a README or report containing date, machine, cluster, exact command, result, duration, and deviations. Redact credentials, tokens, Secret data, and customer data. If a feature is not exercised successfully, mark it `not verified` or `not measured` and use the evidence fallback; do not present a unit test as live evidence. The 2026-11-13 rehearsal work used the existing cluster and did not constitute a fresh-cluster end-to-end rehearsal.
-
