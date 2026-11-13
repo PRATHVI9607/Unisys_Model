@@ -1,11 +1,11 @@
-﻿# P11 and V5-E1 evaluation coverage
+# P11 and V5-E1 evaluation coverage
 
-Values below come from files in this directory. A failed run can produce observed values without being an accepted P11 result. `not measured` is never a zero.
+Values below come from files in this directory. `not measured` means no run produced that value; it is not a zero.
 
 | Item | Status | Evidence or reason |
 |---|---|---|
-| P11-E1 k6 scoring load | not measured (attempts failed) | attempt 1: 0/297 checks, latency not measured; attempt 2: 111,564/111,576 checks passed, 12 refused, observed median 24.02 ms and p95 40.33 ms on the failed run. Neither is an accepted benchmark; see the attempt reports and raw logs. |
-| P11-E2 inference pod recovery | not measured | no completed live recovery run recorded yet |
+| P11-E1 k6 scoring load | not measured | no run with passing checks and successful HTTP requests recorded yet |
+| P11-E2 inference pod recovery | measured | 1 completed recovery run(s); see per-run CSV |
 | P11-E3 RPO/RTO | not measured | no disposable database-volume scenario is configured; the run must not overwrite or delete existing PVC data |
 | P11-E4 stage timing | not measured | the current event path does not expose timestamps for each action stage |
 | P11-E5 baseline comparisons | not measured | controlled comparison drivers for the five baselines are not implemented or verified |
@@ -20,5 +20,7 @@ Values below come from files in this directory. A failed run can produce observe
 
 ## Run files
 
-- `E1 k6 health inference`, attempt 1: `failed`; elapsed `125.047` seconds; no latency measured.
-- `E1 k6 health inference`, attempt 2: `failed`; elapsed `105.141` seconds; observed median 24.02 ms and p95 40.33 ms, not accepted as a clean benchmark.
+- `E2 pod delete/recreate`: `measured`; elapsed `1.25` seconds.
+- `E1 k6 health inference`: `failed`; elapsed `125.047` seconds.
+- `E1 k6 health inference`: `failed`; elapsed `105.141` seconds.
+- `E1 k6 health inference`: `failed`; elapsed `108.344` seconds.

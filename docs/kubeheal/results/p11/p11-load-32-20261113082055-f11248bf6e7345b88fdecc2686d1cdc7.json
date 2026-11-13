@@ -1,0 +1,8 @@
+{
+  "machine": "LAPTOP-74N9LTFA",
+  "cluster": "k3d-kubeheal",
+  "date_utc": "2026-11-13T08:22:44+00:00",
+  "scenario": "p11-load-32-20261113082055-f11248bf6e7345b88fdecc2686d1cdc7",
+  "status": "not measured",
+  "rows": 1
+}
