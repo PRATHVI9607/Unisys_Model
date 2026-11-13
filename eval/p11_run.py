@@ -37,7 +37,11 @@ UNMEASURED_REASONS = {
     "  single replica": "not measured: no controlled single-replica comparison run is available",
     "  pod-delete-only": "not measured: no controlled pod-delete-only ransomware comparison run is available",
     "P11-E6": "not measured: the deployed LightGBM bundle has no paired FP32/FP16 deployment variants for a controlled comparison",
-    "V5-E1": "not measured: the scripted V5 acceptance lab scenarios have not been run; full containment is not yet live-verified",
+    "V5-E1": ("not measured: the V5-E1 scenario runner is not ported to the context-pinned P11 harness. The legacy "
+              "driver is documented as Minikube-specific and can restart Redis/Falco/Health Agent and create or "
+              "delete khe-* namespaces. The live cluster has only the production victim, MinIO, and Redis PVCs; "
+              "there is no disposable scenario volume, and existing PVC data must remain untouched. F3 is a "
+              "narrower scripted containment run and does not cover the V5-E1 matrix."),
 }
 
 

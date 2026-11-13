@@ -79,6 +79,7 @@ def test_coverage_report_lists_every_p11_item_and_v5_e1_with_reasons():
     assert "not measured" in report
     assert "no disposable database-volume scenario" in report
     assert "no live result sidecar exists yet" in report
+    assert "V5-E1 scenario runner is not ported" in report
 
 
 def test_load_target_is_fixed_before_any_cluster_call(monkeypatch):

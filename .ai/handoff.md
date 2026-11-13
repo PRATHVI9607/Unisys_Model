@@ -1,10 +1,11 @@
-# Handoff
+# KubeHeal acceptance handoff, 2026-11-13
 
 - **Agent:** Codex
-- **Date:** 2026-11-13
-- **Branch:** demo
-- **Goal:** Finish authorized KubeHeal live acceptance and push preparation. Nothing pushed; no training or `PROJECT_SPEC.md` edits.
-- **What changed and why:** P11 E1 is clean at 32 VUs for 90 seconds: 112,327/112,327 checks, 0 refusals, p50 24.34 ms, p95 38.19 ms. F11 is clean at 113,873/113,873 checks, 0 refusals, p50 24.03 ms, p95 37.9 ms, HPA 2 -> 8 -> 2; its fixed Grafana dashboard screenshot is saved. F8 browser walkthrough exercised kill switch, incident approve/reject, and baseline approve/reject. Dashboard approval in test mode was dry-run and left baseline unchanged. The dead-man observed the F8 UI toggle return mode to test. SnapshotFreeze release had no held target and is documented as not measured. P11 E3-E6 and V5-E1 reasons are concrete; original PVC data remains untouched.
-- **Files touched:** F8/F11/F13 evidence and screenshots, P11 results and coverage, `eval/p11_run.py`, Grafana dashboard, and tests.
-- **Open issues:** Runbook rehearsal, merge all reviewed work into demo, final suites, README/AGENTS updates, secret scan, PUSH_PLAN, lock release and final handoff remain. F8 SnapshotFreeze release has no live target.
-- **Next step:** Commit F8/F11/P11 evidence, then rehearse `DEMO_RUNBOOK.md` on the existing cluster and complete push preparation without pushing.
+- **Branch:** demo, integrating reviewed work
+- **Goal:** finish live acceptance and push preparation; nothing pushed, no training or PROJECT_SPEC.md edits.
+- **What changed and why:** Final rehearsal is recorded in docs/kubeheal/demo-evidence/REHEARSAL. D-5 replay now excludes scripted F10 pods sharing the victim image label; the focused suite passed 9 tests and the rehearsal retry passed. F2 and F4 were rerun. F5-F8 and F10 have scripted live evidence; F11 and P11 E1 have clean warmed load results; F12 U6 passed twice offline on a separate cluster. P11 E3-E6 and V5-E1 remain not measured with concrete reasons.
+- **Files touched:** D-5 runner/tests, DEMO_RUNBOOK.md, rehearsal/F2/F4 outputs, current evidence and acceptance docs.
+- **Open issues:** Finish the merge and demo suite, update README.md/AGENTS.md/PUSH_PLAN.md, secret-scan diff against origin, verify mode test and release cluster lock. F8 SnapshotFreeze release and F9 same-input paired action remain not measured; P11 E3-E6/V5-E1 remain not measured.
+- **Test status:** work full suite 2,169 passed, 11 skipped in 82.92s. Demo full suite pending merge completion.
+- **Cluster:** only context k3d-kubeheal; Helm revision 17, mode test, inference /readyz HTTP 200, protected PVCs Bound. Lock held by Codex during final rehearsal.
+- **Next step:** complete final push-prep checks on demo. Never push or set ALLOW_PUSH.
