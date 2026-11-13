@@ -32,6 +32,10 @@ ALLOWED_NAMESPACES = frozenset({"prod", "staging", "dev", "kubeheal"})
 K6_ACTIVE_DEADLINE_SECONDS = 900
 K6_WAIT_SECONDS = 960
 K6_POLL_INTERVAL_SECONDS = 10
+INFERENCE_READY_WAIT_SECONDS = 180
+INFERENCE_READY_POLL_SECONDS = 3
+K6_WARMUP_REQUESTS = 5
+K6_WARMUP_DELAY_SECONDS = 1
 
 
 def _check_namespace(namespace: str) -> None:
@@ -65,7 +69,9 @@ def assert_test_mode(context: str, *, runner: Runner = subprocess.run) -> None:
         raise RuntimeError(f"refusing to act: kubeheal-mode is {mode!r}, expected 'test'")
 
 
-def k6_script(target_url: str, pod_count: int, duration: str = "2m") -> str:
+def k6_script(target_url: str, pod_count: int, duration: str = "2m",
+              warmup_requests: int = K6_WARMUP_REQUESTS,
+              warmup_delay_seconds: int = K6_WARMUP_DELAY_SECONDS) -> str:
     """Build the k6 script. The harness maps k6 virtual users to simulated monitored pods as a
     stand-in (a VU is not a pod). The default duration 2m is a chosen default, not measured."""
     if not target_url.startswith(("http://", "https://")):
@@ -74,9 +80,22 @@ def k6_script(target_url: str, pod_count: int, duration: str = "2m") -> str:
         raise ValueError("pod_count must be between 10 and 200")
     if not duration:
         raise ValueError("duration is required")
+    if not 1 <= warmup_requests <= 30 or not 0 <= warmup_delay_seconds <= 10:
+        raise ValueError("warm-up must use 1 to 30 requests and a 0 to 10 second delay")
     return f'''import http from "k6/http";
-import {{ check }} from "k6";
+import {{ check, sleep }} from "k6";
 export const options = {{ vus: {pod_count}, duration: "{duration}", summaryTrendStats: ["med", "p(95)"] }};
+export function setup() {{
+  console.log("WARM-UP: starting {warmup_requests} sequential requests before measured VU load");
+  for (let i = 0; i < {warmup_requests}; i++) {{
+    const response = http.get("{target_url}");
+    if (!check(response, {{ "warm-up status 200": r => r.status === 200 }})) {{
+      throw new Error(`warm-up request ${{i + 1}}/{warmup_requests} failed with status ${{response.status}}`);
+    }}
+    if ({warmup_delay_seconds} > 0) {{ sleep({warmup_delay_seconds}); }}
+  }}
+  console.log("WARM-UP: completed {warmup_requests}/{warmup_requests}; failures stop the run; measured VU load starts next");
+}}
 export default function () {{ const r = http.get("{target_url}"); check(r, {{ "status 200": x => x.status === 200 }}); }}
 '''
 
@@ -138,6 +157,46 @@ def _job_state(context: str, name: str, namespace: str, runner: Runner) -> str:
     return "running"
 
 
+def wait_for_inference_ready(context: str, *, namespace: str = "kubeheal",
+                             deployment: str = "kubeheal-inference",
+                             service: str = "kubeheal-inference",
+                             timeout_s: float = INFERENCE_READY_WAIT_SECONDS,
+                             poll_seconds: float = INFERENCE_READY_POLL_SECONDS,
+                             runner: Runner = subprocess.run,
+                             sleep: Callable[[float], None] = time.sleep,
+                             clock: Callable[[], float] = time.monotonic) -> list[str]:
+    """Wait for the inference Deployment's desired pods and ready Service endpoints.
+
+    This checks Kubernetes readiness immediately before load creation. The k6 setup() warm-up then
+    probes the actual Service path; it is reported separately and is not included in the measured
+    VU stage. Neither gate drops failed measured requests.
+    """
+    if timeout_s <= 0 or poll_seconds <= 0:
+        raise ValueError("readiness timeout and poll interval must be positive")
+    deadline = clock() + timeout_s
+    last_state = "deployment or Service not ready"
+    while True:
+        dep = json.loads(kubectl(context, ["get", "deployment/" + deployment, "-n", namespace, "-o", "json"],
+                                 runner=runner))
+        spec = dep.get("spec") or {}
+        status = dep.get("status") or {}
+        desired = int(spec.get("replicas", 1) or 0)
+        ready = int(status.get("readyReplicas", 0) or 0)
+        observed = int(status.get("observedGeneration", 0) or 0)
+        generation = int((dep.get("metadata") or {}).get("generation", 0) or 0)
+        endpoints_obj = json.loads(kubectl(
+            context, ["get", "endpoints/" + service, "-n", namespace, "-o", "json"], runner=runner))
+        addresses = [address.get("ip") for subset in endpoints_obj.get("subsets") or []
+                     for address in subset.get("addresses") or [] if address.get("ip")]
+        if desired > 0 and ready >= desired and observed >= generation and len(addresses) >= desired:
+            return addresses
+        last_state = (f"deployment ready={ready}/{desired} observedGeneration={observed}/{generation}; "
+                      f"ready service endpoints={len(addresses)}")
+        if clock() >= deadline:
+            raise TimeoutError(f"inference did not become ready within {timeout_s}s: {last_state}")
+        sleep(poll_seconds)
+
+
 def apply_k6_job(context: str, manifest: Mapping, *, runner: Runner = subprocess.run,
                  wait_seconds: float = K6_WAIT_SECONDS, poll_seconds: float = K6_POLL_INTERVAL_SECONDS,
                  sleep: Callable[[float], None] = time.sleep,
@@ -158,6 +217,8 @@ def apply_k6_job(context: str, manifest: Mapping, *, runner: Runner = subprocess
     ns = job["metadata"]["namespace"]
     _check_namespace(ns)
     rendered = "---\n".join(yaml.safe_dump(item, sort_keys=False) for item in objects)
+    endpoints = wait_for_inference_ready(context, namespace=ns, runner=runner, sleep=sleep, clock=clock)
+    print(f"READINESS: inference Deployment and Service endpoints ready ({len(endpoints)}); k6 warm-up follows")
     # create refuses to adopt or modify an object that already exists.
     kubectl(context, ["create", "-f", "-"], runner=runner, input_text=rendered)
     deadline = clock() + wait_seconds
