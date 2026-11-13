@@ -41,3 +41,13 @@ def test_up_without_target_fails_during_parameter_binding_before_script_body():
     assert "TargetCluster" in output
     assert "creating cluster" not in output
     assert "cluster start" not in output
+
+
+def test_deadman_is_pinned_to_original_context_and_only_sets_test_mode():
+    source = (ROOT / "demo" / "scripts" / "deadman_test_mode.ps1").read_text(encoding="utf-8")
+    assert "$context = 'k3d-kubeheal'" in source
+    assert "DEAD-MAN START" in source and "DEAD-MAN END" in source
+    assert "--context $context" in source
+    assert '"mode":"test"' in source
+    assert '"mode":"enforce"' not in source
+    assert "Start-Sleep -Seconds $AfterSeconds" in source
