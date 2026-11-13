@@ -460,6 +460,16 @@ def test_followup_window_is_configurable(monkeypatch):
         ha.HealthAgent(redis_url="redis://unused")
 
 
+def test_redis_startup_diagnostic_redacts_credentials_and_query_values():
+    endpoint = ha._redis_endpoint_for_log(
+        "redis://user:sample-password@redis-master:6379/0?token=sample-token"
+    )
+
+    assert endpoint == "redis://redis-master:6379"
+    assert "sample-password" not in endpoint
+    assert "sample-token" not in endpoint
+
+
 # ---- concurrency cap ----------------------------------------------------------------------------------------
 @scenario
 async def test_at_most_eight_assessments_run_at_the_same_time(env):
