@@ -57,6 +57,8 @@ def test_hpa_load_waits_for_ready_deployment_and_service_endpoints():
     assert "status.readyReplicas" in source and "status.observedGeneration" in source
     assert "endpointObject.subsets" in source and "readyEndpointCount -ge $desired" in source
     assert "Inference pod readiness:" in source and "lastTransitionTime" in source
+    assert source.index("K create -f $policyPath") < source.index("NETWORKPOLICY SETTLING")
+    assert source.index("NETWORKPOLICY SETTLING") < source.index("K create -f $jobPath")
 
 
 def test_hpa_k6_setup_warmup_is_explicit_and_does_not_retry():
@@ -65,4 +67,5 @@ def test_hpa_k6_setup_warmup_is_explicit_and_does_not_retry():
     assert "WARM-UP FAILED" in source and "throw new Error" in source
     assert "retry" not in source.lower()
     assert "aggregate k6 metrics" in source
+    assert "5s network settling delay" in source and "sleep(5)" in source
 

@@ -166,6 +166,8 @@ spec:
     # distinguish these resources from anything created by another invocation or operator.
     K create -f $cmPath | Out-Host
     K create -f $policyPath | Out-Host
+    Write-Host 'NETWORKPOLICY SETTLING: waiting 5 seconds before creating the k6 pod.'
+    Start-Sleep -Seconds 5
     $endpointDeadline = [DateTime]::UtcNow.AddSeconds(180)
     $readyEndpointCount = 0
     $deploymentReady = $false

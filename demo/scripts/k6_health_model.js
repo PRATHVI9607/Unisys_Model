@@ -1,5 +1,5 @@
 import http from 'k6/http';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 
 // V5-I2: load on the LightGBM inference service, POST /v1/health/predict.
 const endpoint = __ENV.INFERENCE_URL || 'http://kubeheal-inference:8000/v1/health/predict';
@@ -33,7 +33,8 @@ export const options = {
 // aggregate request/check metrics include setup requests, so the raw summary includes them.
 export function setup() {
   const count = 5;
-  console.log(`WARM-UP START: ${count} sequential inference requests before the measured VU stage`);
+  console.log(`WARM-UP START: 5s network settling delay, then ${count} sequential inference requests before the measured VU stage`);
+  sleep(5);
   let passed = 0;
   for (let i = 0; i < count; i++) {
     const response = http.post(endpoint, body, {
