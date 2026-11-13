@@ -179,7 +179,6 @@ def run() -> dict:
             raise RuntimeError("incomplete F6 result set")
         if mode() != "test":
             raise RuntimeError("global mode changed during F6 validation")
-        return evidence
     finally:
         if label_changed:
             if old_label is None:
@@ -188,6 +187,12 @@ def run() -> dict:
                 kubectl("label", "namespace", TARGET_NS, f"kubeheal/protected={old_label}", "--overwrite")
         if mode() != "test":
             raise RuntimeError("global mode is not test after F6 validation")
+    restored = json.loads(kubectl("get", "namespace", TARGET_NS, "-o", "json"))
+    restored_label = (restored.get("metadata", {}).get("labels") or {}).get("kubeheal/protected")
+    if restored_label != old_label:
+        raise RuntimeError("dev namespace protected label did not return to its exact prior value")
+    evidence["protected_label_restored"] = True
+    return evidence
 
 
 def _send(agent: str, payload: dict) -> dict:
