@@ -151,6 +151,13 @@ def _normalise_fields(fields, strip_spec: bool = True) -> List[str]:
     return out
 
 
+def _claims(spec: Dict) -> Dict[str, Any]:
+    """{volume name: claimName} for the PVC volumes of a Deployment spec (the drift view or a patch target)."""
+    volumes = (((spec or {}).get("template") or {}).get("spec") or {}).get("volumes") or []
+    return {(v or {}).get("name"): ((v or {}).get("persistentVolumeClaim") or {}).get("claimName")
+            for v in volumes if isinstance(v, dict) and "persistentVolumeClaim" in v}
+
+
 def validate_patch_target(raw_live_spec: Dict, live_view: Dict, target: Dict) -> None:
     """V5-D6. Raises PlanError (the request escalates, nothing is written) unless the patched template still
     matches the Deployment selector and does not weaken the live security posture."""
@@ -165,6 +172,12 @@ def validate_patch_target(raw_live_spec: Dict, live_view: Dict, target: Dict) ->
     missing = sorted(k for k, v in match_labels.items() if template_labels.get(k) != v)
     if missing:
         raise PlanError(f"selector_mismatch: the patched template would not carry the selector labels {missing}")
+    # F3b: after a restore the live Deployment claims the restored PVC while the golden baseline still names the old
+    # (encrypted, forensic) one, so a baseline-restoring patch would put the old volume back. A drift patch never
+    # changes, adds or drops a PVC claim: it escalates and a human decides (and re-baselines).
+    if _claims(target) != _claims(live_view):
+        raise PlanError("patch_changes_volume_claim: a drift patch may not change which PVC a volume claims "
+                        "(after a restore the baseline still names the old volume); escalated to a human")
     try:
         weakened = weakens_posture(target, live_view)
     except PostureError as e:
