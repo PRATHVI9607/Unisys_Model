@@ -23,6 +23,7 @@ def test_dashboard_is_valid_and_queries_defined_metrics():
             if name.startswith(("kubeheal_", "kube_deployment_"))}
 
     assert dashboard["title"] == "KubeHeal Overview"
+    assert all(panel["datasource"]["uid"] == "prometheus" for panel in dashboard["panels"])
     assert used <= metric_names
     assert {"kubeheal_decisions_total", "kubeheal_actions_total", "kubeheal_model_latency_seconds_bucket",
             "kubeheal_queue_depth", "kubeheal_model_inflight_requests",
