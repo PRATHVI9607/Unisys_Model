@@ -1,0 +1,49 @@
+{
+  "cases": [
+    {
+      "case": "bad_namespace",
+      "frozen": "0",
+      "reason": "bad_namespace",
+      "request_id": "20abea252f194939b14c92ff281cb465",
+      "response_hmac": "valid",
+      "status": "refused"
+    },
+    {
+      "case": "unknown_action",
+      "frozen": "0",
+      "reason": "bad_action: 'wipe'",
+      "request_id": "8ca7a66da3b4445294c573cd764434f8",
+      "response_hmac": "valid",
+      "status": "refused"
+    },
+    {
+      "case": "missing_field",
+      "frozen": "0",
+      "reason": "bad_pod_uid",
+      "request_id": "6162099d099b4e79be8ddae6dffc63da",
+      "response_hmac": "valid",
+      "status": "refused"
+    },
+    {
+      "case": "protected_label",
+      "frozen": "0",
+      "reason": "namespace_protected: the namespace carries kubeheal/protected or is unknown",
+      "request_id": "b2bd055d71634734abdfbedb23aa1a19",
+      "response_hmac": "valid",
+      "status": "refused"
+    }
+  ],
+  "cleanup": "run-owned Redis messages/results removed",
+  "mode": "test",
+  "node": "k3d-kubeheal-server-0",
+  "protected_label_restored": true,
+  "run_id": "624c5722160f4d5a8a789e828527105b",
+  "scripted": true,
+  "security_agent_log": [
+    "INFO:agents.security_agent.containment:containment freeze bad_namespace/victim-app-7cf49c8cf4-49b5t -> refused bad_namespace",
+    "INFO:agents.security_agent.containment:containment wipe dev/victim-app-7cf49c8cf4-49b5t -> refused bad_action: 'wipe'",
+    "INFO:agents.security_agent.containment:containment freeze dev/victim-app-7cf49c8cf4-49b5t -> refused bad_pod_uid",
+    "INFO:agents.security_agent.containment:containment freeze dev/victim-app-7cf49c8cf4-49b5t -> refused namespace_protected: the namespace carries kubeheal/protected or is unknown"
+  ],
+  "target": "dev/victim-app-7cf49c8cf4-49b5t"
+}
