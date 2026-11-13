@@ -166,15 +166,31 @@ spec:
     # distinguish these resources from anything created by another invocation or operator.
     K create -f $cmPath | Out-Host
     K create -f $policyPath | Out-Host
-    $endpointDeadline = [DateTime]::UtcNow.AddSeconds(120)
+    $endpointDeadline = [DateTime]::UtcNow.AddSeconds(180)
+    $readyEndpointCount = 0
+    $deploymentReady = $false
     do {
-        $endpoints = KText @('-n', 'kubeheal', 'get', 'endpoints', 'kubeheal-inference',
-            '-o', 'jsonpath={.subsets[*].addresses[*].ip}')
-        if ($endpoints) { break }
+        $deployment = (KText @('-n', 'kubeheal', 'get', 'deployment', 'kubeheal-inference', '-o', 'json')) | ConvertFrom-Json
+        $desired = [int]$deployment.spec.replicas
+        $ready = [int]$deployment.status.readyReplicas
+        $observedGeneration = [int]$deployment.status.observedGeneration
+        $generation = [int]$deployment.metadata.generation
+        $deploymentReady = ($desired -gt 0 -and $ready -ge $desired -and $observedGeneration -ge $generation)
+        $endpointObject = (KText @('-n', 'kubeheal', 'get', 'endpoints', 'kubeheal-inference', '-o', 'json')) | ConvertFrom-Json
+        $readyEndpointCount = @($endpointObject.subsets | ForEach-Object { $_.addresses } | Where-Object { $_.ip }).Count
+        if ($deploymentReady -and $readyEndpointCount -ge $desired) { break }
         Start-Sleep -Seconds 3
     } while ([DateTime]::UtcNow -lt $endpointDeadline)
-    if (-not $endpoints) { throw 'Inference Service has no ready endpoints; refusing to start k6.' }
-    Write-Host "Inference ready endpoints: $endpoints"
+    if (-not $deploymentReady -or $readyEndpointCount -lt $desired) {
+        throw "Inference readiness timed out: Deployment ready=$ready/$desired observedGeneration=$observedGeneration/$generation; Service ready endpoints=$readyEndpointCount."
+    }
+    Write-Host "READINESS: inference Deployment ready=$ready/$desired and Service ready endpoints=$readyEndpointCount at $(Get-Date -Format o)"
+    $inferencePods = (KText @('-n', 'kubeheal', 'get', 'pods', '-l', 'app=kubeheal-inference', '-o', 'json')) | ConvertFrom-Json
+    foreach ($pod in $inferencePods.items) {
+        $readyCondition = @($pod.status.conditions | Where-Object { $_.type -eq 'Ready' } | Select-Object -First 1)
+        $readyAt = if ($readyCondition.Count -gt 0) { $readyCondition[0].lastTransitionTime } else { 'not ready' }
+        Write-Host "Inference pod readiness: $($pod.metadata.name) readyAt=$readyAt"
+    }
     K create -f $jobPath | Out-Host
     Write-Host 'HPA before load:'
     Read-Hpa

@@ -51,3 +51,18 @@ def test_hpa_load_cleanup_continues_after_api_failures_and_removes_temp_files():
     assert "Remove-Item -LiteralPath $cmPath, $policyPath, $jobPath" in cleanup
     assert "Could not remove local k6 staging files" in cleanup
 
+
+def test_hpa_load_waits_for_ready_deployment_and_service_endpoints():
+    source = (ROOT / "demo" / "scripts" / "hpa_load.ps1").read_text(encoding="utf-8")
+    assert "status.readyReplicas" in source and "status.observedGeneration" in source
+    assert "endpointObject.subsets" in source and "readyEndpointCount -ge $desired" in source
+    assert "Inference pod readiness:" in source and "lastTransitionTime" in source
+
+
+def test_hpa_k6_setup_warmup_is_explicit_and_does_not_retry():
+    source = (ROOT / "demo" / "scripts" / "k6_health_model.js").read_text(encoding="utf-8")
+    assert "WARM-UP START" in source and "WARM-UP COMPLETE" in source
+    assert "WARM-UP FAILED" in source and "throw new Error" in source
+    assert "retry" not in source.lower()
+    assert "aggregate k6 metrics" in source
+

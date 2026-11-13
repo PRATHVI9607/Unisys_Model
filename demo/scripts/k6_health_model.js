@@ -28,6 +28,28 @@ export const options = {
   thresholds: { checks: ['rate>0.995'] },
 };
 
+// The startup investigation found first-timestamp refusals in previous runs. These five
+// sequential setup requests are reported as warm-up and are never retried or discarded. k6's
+// aggregate request/check metrics include setup requests, so the raw summary includes them.
+export function setup() {
+  const count = 5;
+  console.log(`WARM-UP START: ${count} sequential inference requests before the measured VU stage`);
+  let passed = 0;
+  for (let i = 0; i < count; i++) {
+    const response = http.post(endpoint, body, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: '10s',
+    });
+    if (check(response, { 'warm-up inference returned 200': (r) => r.status === 200 })) passed++;
+    if (response.status !== 200) {
+      console.log(`WARM-UP FAILED: ${passed}/${count} returned 200; request ${i + 1} returned ${response.status}`);
+      throw new Error(`warm-up request ${i + 1}/${count} returned ${response.status}`);
+    }
+  }
+  console.log(`WARM-UP COMPLETE: ${passed}/${count} returned 200; all requests remain in aggregate k6 metrics`);
+  return { warmupRequests: count, warmupSucceeded: passed };
+}
+
 export default function () {
   const response = http.post(endpoint, body, {
     headers: { 'Content-Type': 'application/json' },
