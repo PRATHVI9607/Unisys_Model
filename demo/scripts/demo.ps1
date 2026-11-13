@@ -7,19 +7,19 @@ param(
     [ValidateRange(5, 120)]
     [int]$ProbeSeconds = 30,
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,39}$')]
-    [string]$ClusterName = "kubeheal",
+    [string]$TargetCluster = "kubeheal",
     [ValidateRange(0, 65535)]
-    [int]$RegistryHostPort = 0
+    [int]$TargetRegistryPort = 0
 )
 
 # P10 drift walkthrough. KubeHeal remains in test mode, so its Executor cannot write.
 # The script's only workload mutation is the reversible prod/victim-app CPU drift below.
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\..\k3d\lib.ps1"
-$script:ClusterName = $ClusterName
-$script:Context = "k3d-$ClusterName"
-$script:RegistryName = "$ClusterName-registry"
-$script:RegistryHostPort = if ($RegistryHostPort -eq 0) { if ($ClusterName -eq "kubeheal") { 5150 } else { 5151 } } else { $RegistryHostPort }
+$script:ClusterName = $TargetCluster
+$script:Context = "k3d-$TargetCluster"
+$script:RegistryName = "$TargetCluster-registry"
+$script:RegistryHostPort = if ($TargetRegistryPort -eq 0) { if ($TargetCluster -eq "kubeheal") { 5150 } else { 5151 } } else { $TargetRegistryPort }
 $script:RegistryHost = "localhost:$($script:RegistryHostPort)"
 $script:RegistryInCluster = "$($script:RegistryName):5000"
 Initialize-Tools -SkipK3d -SkipHelm -SkipDocker

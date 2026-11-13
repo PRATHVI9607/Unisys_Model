@@ -12,18 +12,18 @@
 param(
     [string[]]$Only = @(),
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,39}$')]
-    [string]$ClusterName = "kubeheal",
+    [string]$TargetCluster = "kubeheal",
     [ValidateRange(0, 65535)]
-    [int]$RegistryHostPort = 0
+    [int]$TargetRegistryPort = 0
 )
 
 . "$PSScriptRoot\lib.ps1"
-if ($RegistryHostPort -eq 0) { $RegistryHostPort = if ($ClusterName -eq "kubeheal") { 5150 } else { 5151 } }
-$script:ClusterName = $ClusterName
-$script:Context = "k3d-$ClusterName"
-$script:RegistryName = "$ClusterName-registry"
-$script:RegistryHostPort = $RegistryHostPort
-$script:RegistryHost = "localhost:$RegistryHostPort"
+if ($TargetRegistryPort -eq 0) { $TargetRegistryPort = if ($TargetCluster -eq "kubeheal") { 5150 } else { 5151 } }
+$script:ClusterName = $TargetCluster
+$script:Context = "k3d-$TargetCluster"
+$script:RegistryName = "$TargetCluster-registry"
+$script:RegistryHostPort = $TargetRegistryPort
+$script:RegistryHost = "localhost:$TargetRegistryPort"
 $script:RegistryInCluster = "$($script:RegistryName):5000"
 Initialize-Tools -SkipK3d -SkipHelm
 Set-Location $RepoRoot
@@ -85,7 +85,7 @@ if ($Only.Count -eq 0 -or $Only -contains "ransomware-sim") {
 }
 
 # Values for Helm: each KubeHeal image from the in-cluster registry name, with the tag it was last built with.
-$tagFile = if ($ClusterName -eq "kubeheal") { Join-Path $PSScriptRoot ".image-tags.json" } else { Join-Path $PSScriptRoot ".image-tags-$ClusterName.json" }
+$tagFile = if ($TargetCluster -eq "kubeheal") { Join-Path $PSScriptRoot ".image-tags.json" } else { Join-Path $PSScriptRoot ".image-tags-$TargetCluster.json" }
 $tags = @{}
 if (Test-Path $tagFile) { (Get-Content $tagFile -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $tags[$_.Name] = $_.Value } }
 foreach ($b in $built) { $tags[$b] = $tag }
@@ -110,6 +110,6 @@ modelServers:
   security: {image: {repository: $prefix/security-model-server, tag: $(T 'security-model-server')}}
   dcm: {image: {repository: $prefix/dcm-server, tag: $(T 'dcm-server')}}
 "@
-$generatedValues = if ($ClusterName -eq "kubeheal") { Join-Path $PSScriptRoot ".generated-values.yaml" } else { Join-Path $PSScriptRoot ".generated-values-$ClusterName.yaml" }
+$generatedValues = if ($TargetCluster -eq "kubeheal") { Join-Path $PSScriptRoot ".generated-values.yaml" } else { Join-Path $PSScriptRoot ".generated-values-$TargetCluster.yaml" }
 Set-Content -Path $generatedValues -Value $yaml -Encoding utf8
 Say "pushed: $($built -join ', ') with tag $tag"

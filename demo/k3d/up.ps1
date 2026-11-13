@@ -1,30 +1,30 @@
 # Create (or complete) the KubeHeal demo environment on k3d. Demo branch only. Safe to run again.
 #   .\demo\k3d\up.ps1                 everything
 #   .\demo\k3d\up.ps1 -SkipImages     reuse the images from the last images.ps1 run
-#   .\demo\k3d\up.ps1 -ClusterName kubeheal-rehearsal -RegistryHostPort 5151 -HttpPort 8081
+#   .\demo\k3d\up.ps1 -TargetCluster kubeheal-rehearsal -TargetRegistryPort 5151 -TargetHttpPort 8081
 #   .\demo\k3d\up.ps1 -Stage csi      run one stage: cluster, csi, monitoring, images, install, adapter, victim, falco
 # Defaults to `kubeheal`; an explicit name allows an isolated rehearsal cluster.
 param(
     [switch]$SkipImages,
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,39}$')]
-    [string]$ClusterName = "kubeheal",
+    [string]$TargetCluster = "kubeheal",
     [ValidateRange(0, 65535)]
-    [int]$RegistryHostPort = 0,
+    [int]$TargetRegistryPort = 0,
     [ValidateRange(0, 65535)]
-    [int]$HttpPort = 0,
+    [int]$TargetHttpPort = 0,
     [ValidateSet("all", "cluster", "csi", "monitoring", "images", "install", "adapter", "victim")]
     [string]$Stage = "all"
 )
 
 . "$PSScriptRoot\lib.ps1"
-if ($RegistryHostPort -eq 0) { $RegistryHostPort = if ($ClusterName -eq "kubeheal") { 5150 } else { 5151 } }
-if ($HttpPort -eq 0) { $HttpPort = if ($ClusterName -eq "kubeheal") { 8080 } else { 8081 } }
-$script:ClusterName = $ClusterName
-$script:Context = "k3d-$ClusterName"
-$script:RegistryName = "$ClusterName-registry"
-$script:RegistryHostPort = $RegistryHostPort
-$script:HttpPort = $HttpPort
-$script:RegistryHost = "localhost:$RegistryHostPort"
+if ($TargetRegistryPort -eq 0) { $TargetRegistryPort = if ($TargetCluster -eq "kubeheal") { 5150 } else { 5151 } }
+if ($TargetHttpPort -eq 0) { $TargetHttpPort = if ($TargetCluster -eq "kubeheal") { 8080 } else { 8081 } }
+$script:ClusterName = $TargetCluster
+$script:Context = "k3d-$TargetCluster"
+$script:RegistryName = "$TargetCluster-registry"
+$script:RegistryHostPort = $TargetRegistryPort
+$script:HttpPort = $TargetHttpPort
+$script:RegistryHost = "localhost:$TargetRegistryPort"
 $script:RegistryInCluster = "$($script:RegistryName):5000"
 Initialize-Tools `
     -SkipK3d:($Stage -notin @("all", "cluster")) `
@@ -33,26 +33,26 @@ Initialize-Tools `
 Set-Location $RepoRoot
 
 function Want([string]$s) { return ($Stage -eq "all") -or ($Stage -eq $s) }
-$tagFile = if ($ClusterName -eq "kubeheal") { Join-Path $PSScriptRoot ".image-tags.json" } else { Join-Path $PSScriptRoot ".image-tags-$ClusterName.json" }
-$gen = if ($ClusterName -eq "kubeheal") { Join-Path $PSScriptRoot ".generated-values.yaml" } else { Join-Path $PSScriptRoot ".generated-values-$ClusterName.yaml" }
+$tagFile = if ($TargetCluster -eq "kubeheal") { Join-Path $PSScriptRoot ".image-tags.json" } else { Join-Path $PSScriptRoot ".image-tags-$TargetCluster.json" }
+$gen = if ($TargetCluster -eq "kubeheal") { Join-Path $PSScriptRoot ".generated-values.yaml" } else { Join-Path $PSScriptRoot ".generated-values-$TargetCluster.yaml" }
 $sw = [Diagnostics.Stopwatch]::StartNew()
 
 # ---------------------------------------------------------------- cluster
 if (Want "cluster") {
-    $exists = (& $K3dExe cluster list -o json | ConvertFrom-Json | Where-Object { $_.name -eq $ClusterName })
+    $exists = (& $K3dExe cluster list -o json | ConvertFrom-Json | Where-Object { $_.name -eq $TargetCluster })
     if (-not $exists) {
-        Say "creating cluster $ClusterName (1 server, 2 agents, registry $RegistryHost)"
-        & $K3dExe cluster create $ClusterName --servers 1 --agents 2 -p "$($script:HttpPort):80@loadbalancer" `
-            --registry-create "$($RegistryName):0.0.0.0:$RegistryHostPort" --kubeconfig-switch-context=false --wait --timeout 240s
+        Say "creating cluster $TargetCluster (1 server, 2 agents, registry $RegistryHost)"
+        & $K3dExe cluster create $TargetCluster --servers 1 --agents 2 -p "$($script:HttpPort):80@loadbalancer" `
+            --registry-create "$($RegistryName):0.0.0.0:$TargetRegistryPort" --kubeconfig-switch-context=false --wait --timeout 240s
         if ($LASTEXITCODE -ne 0) { throw "k3d cluster create failed" }
     } else {
-        Say "cluster $ClusterName already exists"
-        & $K3dExe cluster start $ClusterName 2>&1 | Out-Null
+        Say "cluster $TargetCluster already exists"
+        & $K3dExe cluster start $TargetCluster 2>&1 | Out-Null
     }
     Fix-Kubeconfig
     K get nodes | Out-Host
     # The CSI hostpath driver is one pod: its volumes exist on one node. Mark that node and pin workloads with volumes to it.
-    K label node "k3d-$ClusterName-agent-0" kubeheal-demo/storage=true --overwrite | Out-Null
+    K label node "k3d-$TargetCluster-agent-0" kubeheal-demo/storage=true --overwrite | Out-Null
 }
 
 # ---------------------------------------------------------------- snapshots: CRDs, controller, CSI hostpath driver
@@ -95,7 +95,7 @@ if (Want "monitoring") {
 
 # ---------------------------------------------------------------- images
 if ((Want "images") -and -not $SkipImages) {
-    & "$PSScriptRoot\images.ps1" -ClusterName $ClusterName -RegistryHostPort $RegistryHostPort
+    & "$PSScriptRoot\images.ps1" -TargetCluster $TargetCluster -TargetRegistryPort $TargetRegistryPort
     if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "images.ps1 failed" }
 }
 
