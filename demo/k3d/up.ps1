@@ -1,7 +1,7 @@
 # Create (or complete) the KubeHeal demo environment on k3d. Demo branch only. Safe to run again.
 #   .\demo\k3d\up.ps1                 everything
 #   .\demo\k3d\up.ps1 -SkipImages     reuse the images from the last images.ps1 run
-#   .\demo\k3d\up.ps1 -ClusterName kubeheal-rehearsal -RegistryHostPort 5151
+#   .\demo\k3d\up.ps1 -ClusterName kubeheal-rehearsal -RegistryHostPort 5151 -HttpPort 8081
 #   .\demo\k3d\up.ps1 -Stage csi      run one stage: cluster, csi, monitoring, images, install, adapter, victim, falco
 # Defaults to `kubeheal`; an explicit name allows an isolated rehearsal cluster.
 param(
@@ -10,16 +10,20 @@ param(
     [string]$ClusterName = "kubeheal",
     [ValidateRange(0, 65535)]
     [int]$RegistryHostPort = 0,
+    [ValidateRange(0, 65535)]
+    [int]$HttpPort = 0,
     [ValidateSet("all", "cluster", "csi", "monitoring", "images", "install", "adapter", "victim")]
     [string]$Stage = "all"
 )
 
 . "$PSScriptRoot\lib.ps1"
 if ($RegistryHostPort -eq 0) { $RegistryHostPort = if ($ClusterName -eq "kubeheal") { 5150 } else { 5151 } }
+if ($HttpPort -eq 0) { $HttpPort = if ($ClusterName -eq "kubeheal") { 8080 } else { 8081 } }
 $script:ClusterName = $ClusterName
 $script:Context = "k3d-$ClusterName"
 $script:RegistryName = "$ClusterName-registry"
 $script:RegistryHostPort = $RegistryHostPort
+$script:HttpPort = $HttpPort
 $script:RegistryHost = "localhost:$RegistryHostPort"
 $script:RegistryInCluster = "$($script:RegistryName):5000"
 Initialize-Tools `
@@ -38,7 +42,7 @@ if (Want "cluster") {
     $exists = (& $K3dExe cluster list -o json | ConvertFrom-Json | Where-Object { $_.name -eq $ClusterName })
     if (-not $exists) {
         Say "creating cluster $ClusterName (1 server, 2 agents, registry $RegistryHost)"
-        & $K3dExe cluster create $ClusterName --servers 1 --agents 2 -p "8080:80@loadbalancer" `
+        & $K3dExe cluster create $ClusterName --servers 1 --agents 2 -p "$($script:HttpPort):80@loadbalancer" `
             --registry-create "$($RegistryName):0.0.0.0:$RegistryHostPort" --kubeconfig-switch-context=false --wait --timeout 240s
         if ($LASTEXITCODE -ne 0) { throw "k3d cluster create failed" }
     } else {
