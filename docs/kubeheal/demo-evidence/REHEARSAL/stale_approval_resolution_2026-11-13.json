@@ -1,0 +1,87 @@
+{
+  "method": "dashboard rejection; stream and ledger history retained",
+  "note": "Stale prior KubeHeal test escalation; rejected during authorized cleanup. No remediation approved.",
+  "remaining_reviewed_pending": [],
+  "resolved": [
+    {
+      "incident_id": "inc-20261111-044212-4a9ff674",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261111-045504-f2b0ea1a",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261111-061333-edf381aa",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261111-093001-353a4230",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261111-093001-b6696e1f",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261113-015627-84e51778",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261113-015648-4e345688",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261113-015708-9a101249",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261113-015730-0dc2271f",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261113-015752-e353b903",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261113-015812-d7adfae1",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261113-015833-6f13e4ef",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261113-015855-a8216d8c",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261113-015916-4adeb29e",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261113-080214-d4b35860",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    },
+    {
+      "incident_id": "inc-20261113-080345-43a5bae6",
+      "rejected_by": "admin:dashboard-admin",
+      "status": "rejected"
+    }
+  ]
+}
