@@ -5,13 +5,23 @@ param(
     [ValidateRange(1, 300)]
     [int]$ObserveSeconds = 30,
     [ValidateRange(5, 120)]
-    [int]$ProbeSeconds = 30
+    [int]$ProbeSeconds = 30,
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,39}$')]
+    [string]$ClusterName = "kubeheal",
+    [ValidateRange(0, 65535)]
+    [int]$RegistryHostPort = 0
 )
 
 # P10 drift walkthrough. KubeHeal remains in test mode, so its Executor cannot write.
 # The script's only workload mutation is the reversible prod/victim-app CPU drift below.
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\..\k3d\lib.ps1"
+$script:ClusterName = $ClusterName
+$script:Context = "k3d-$ClusterName"
+$script:RegistryName = "$ClusterName-registry"
+$script:RegistryHostPort = if ($RegistryHostPort -eq 0) { if ($ClusterName -eq "kubeheal") { 5150 } else { 5151 } } else { $RegistryHostPort }
+$script:RegistryHost = "localhost:$($script:RegistryHostPort)"
+$script:RegistryInCluster = "$($script:RegistryName):5000"
 Initialize-Tools -SkipK3d -SkipHelm -SkipDocker
 Set-Location $RepoRoot
 
@@ -44,7 +54,7 @@ function Prime-MetricWindow {
     $oldPythonPath = $env:PYTHONPATH
     try {
         $env:PYTHONPATH = $RepoRoot
-        & $python $verifier --namespace prod --seconds $ProbeSeconds
+        & $python $verifier --namespace prod --seconds $ProbeSeconds --context $script:Context
         if ($LASTEXITCODE -ne 0) { throw "Health-query verifier failed with exit code $LASTEXITCODE" }
     }
     finally {

@@ -2,9 +2,20 @@
 #   .\demo\k3d\down.ps1          asks you to type the cluster name first
 #   .\demo\k3d\down.ps1 -Yes     no prompt (scripts)
 # This destroys every volume in the cluster: the victim PVCs, MinIO and the audit ledger, Redis.
-param([switch]$Yes)
+param(
+    [switch]$Yes,
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,39}$')]
+    [string]$ClusterName = "kubeheal",
+    [ValidateRange(0, 65535)]
+    [int]$RegistryHostPort = 0
+)
 
 . "$PSScriptRoot\lib.ps1"
+if ($RegistryHostPort -eq 0) { $RegistryHostPort = if ($ClusterName -eq "kubeheal") { 5150 } else { 5151 } }
+$script:ClusterName = $ClusterName
+$script:Context = "k3d-$ClusterName"
+$script:RegistryName = "$ClusterName-registry"
+$script:RegistryHostPort = $RegistryHostPort
 Initialize-Tools -SkipHelm
 
 $exists = (& $K3dExe cluster list -o json | ConvertFrom-Json | Where-Object { $_.name -eq $ClusterName })

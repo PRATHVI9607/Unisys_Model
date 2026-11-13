@@ -1,16 +1,27 @@
 # Create (or complete) the KubeHeal demo environment on k3d. Demo branch only. Safe to run again.
 #   .\demo\k3d\up.ps1                 everything
 #   .\demo\k3d\up.ps1 -SkipImages     reuse the images from the last images.ps1 run
+#   .\demo\k3d\up.ps1 -ClusterName kubeheal-rehearsal -RegistryHostPort 5151
 #   .\demo\k3d\up.ps1 -Stage csi      run one stage: cluster, csi, monitoring, images, install, adapter, victim, falco
-# The cluster is always `kubeheal` and every kubectl/helm call uses --context k3d-kubeheal (see lib.ps1).
-# Nothing here touches any other cluster.
+# Defaults to `kubeheal`; an explicit name allows an isolated rehearsal cluster.
 param(
     [switch]$SkipImages,
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,39}$')]
+    [string]$ClusterName = "kubeheal",
+    [ValidateRange(0, 65535)]
+    [int]$RegistryHostPort = 0,
     [ValidateSet("all", "cluster", "csi", "monitoring", "images", "install", "adapter", "victim")]
     [string]$Stage = "all"
 )
 
 . "$PSScriptRoot\lib.ps1"
+if ($RegistryHostPort -eq 0) { $RegistryHostPort = if ($ClusterName -eq "kubeheal") { 5150 } else { 5151 } }
+$script:ClusterName = $ClusterName
+$script:Context = "k3d-$ClusterName"
+$script:RegistryName = "$ClusterName-registry"
+$script:RegistryHostPort = $RegistryHostPort
+$script:RegistryHost = "localhost:$RegistryHostPort"
+$script:RegistryInCluster = "$($script:RegistryName):5000"
 Initialize-Tools `
     -SkipK3d:($Stage -notin @("all", "cluster")) `
     -SkipHelm:($Stage -notin @("all", "monitoring", "install", "adapter")) `
@@ -18,6 +29,8 @@ Initialize-Tools `
 Set-Location $RepoRoot
 
 function Want([string]$s) { return ($Stage -eq "all") -or ($Stage -eq $s) }
+$tagFile = if ($ClusterName -eq "kubeheal") { Join-Path $PSScriptRoot ".image-tags.json" } else { Join-Path $PSScriptRoot ".image-tags-$ClusterName.json" }
+$gen = if ($ClusterName -eq "kubeheal") { Join-Path $PSScriptRoot ".generated-values.yaml" } else { Join-Path $PSScriptRoot ".generated-values-$ClusterName.yaml" }
 $sw = [Diagnostics.Stopwatch]::StartNew()
 
 # ---------------------------------------------------------------- cluster
@@ -35,7 +48,7 @@ if (Want "cluster") {
     Fix-Kubeconfig
     K get nodes | Out-Host
     # The CSI hostpath driver is one pod: its volumes exist on one node. Mark that node and pin workloads with volumes to it.
-    K label node k3d-kubeheal-agent-0 kubeheal-demo/storage=true --overwrite | Out-Null
+    K label node "k3d-$ClusterName-agent-0" kubeheal-demo/storage=true --overwrite | Out-Null
 }
 
 # ---------------------------------------------------------------- snapshots: CRDs, controller, CSI hostpath driver
@@ -65,9 +78,9 @@ if (Want "csi") {
 # ---------------------------------------------------------------- monitoring: Prometheus, Grafana
 if (Want "monitoring") {
     Say "kube-prometheus-stack $($Versions.KubePrometheusStack) in namespace monitoring"
-    Hc repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update | Out-Null
-    Hc repo update | Out-Null
-    Hc upgrade --install monitoring prometheus-community/kube-prometheus-stack --version $Versions.KubePrometheusStack `
+    $chart = Join-Path $RepoRoot "deploy\helm\vendor\kube-prometheus-stack-$($Versions.KubePrometheusStack).tgz"
+    if (-not (Test-Path $chart)) { throw "Vendored kube-prometheus-stack chart is missing: $chart" }
+    Hc upgrade --install monitoring $chart `
         -n monitoring --create-namespace -f (Join-Path $PSScriptRoot "values-monitoring.yaml") --wait --timeout 10m | Out-Null
     # Grafana dashboard from the repo (picked up by the sidecar through the label)
     $dash = Join-Path $RepoRoot "deploy\grafana\kubeheal-overview.json"
@@ -78,7 +91,7 @@ if (Want "monitoring") {
 
 # ---------------------------------------------------------------- images
 if ((Want "images") -and -not $SkipImages) {
-    & "$PSScriptRoot\images.ps1"
+    & "$PSScriptRoot\images.ps1" -ClusterName $ClusterName -RegistryHostPort $RegistryHostPort
     if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "images.ps1 failed" }
 }
 
@@ -91,14 +104,13 @@ function Ensure-Secret([string]$name, [hashtable]$literals) {
     K @args | Out-Null
 }
 if (Want "install") {
-    $gen = Join-Path $PSScriptRoot ".generated-values.yaml"
     if (-not (Test-Path $gen)) { throw "No built images: run .\demo\k3d\images.ps1 first." }
     K create namespace kubeheal --dry-run=client -o yaml | K apply -f - | Out-Null
     $tokenFile = Join-Path $PSScriptRoot ".admin-token"
     if (-not (Test-Path $tokenFile)) { Set-Content -Path $tokenFile -Value (New-UrlSafeSecret) -Encoding ascii }
     Ensure-Secret "kubeheal-dashboard-admin" @{ token = (Get-Content $tokenFile -Raw).Trim() }
     Ensure-Secret "kubeheal-redis" @{ password = (New-UrlSafeSecret) }
-    & "$RepoRoot\scripts\minio_secret.ps1"
+    & "$RepoRoot\scripts\minio_secret.ps1" -Context $script:Context
     Say "helm install kubeheal (values-k3d-demo.yaml + generated image values)"
     Hc upgrade --install kubeheal (Join-Path $RepoRoot "deploy\helm\kubeheal") -n kubeheal `
         -f (Join-Path $RepoRoot "deploy\helm\kubeheal\values-k3d-demo.yaml") -f $gen --wait --timeout 10m | Out-Null
@@ -124,7 +136,9 @@ $indented
     Set-Content -Path $vf -Value $values -Encoding utf8
     Say "prometheus-adapter $($Versions.PrometheusAdapter)"
     try {
-        Hc upgrade --install prometheus-adapter prometheus-community/prometheus-adapter --version $Versions.PrometheusAdapter `
+    $chart = Join-Path $RepoRoot "deploy\helm\vendor\prometheus-adapter-$($Versions.PrometheusAdapter).tgz"
+    if (-not (Test-Path $chart)) { throw "Vendored prometheus-adapter chart is missing: $chart" }
+    Hc upgrade --install prometheus-adapter $chart `
             -n monitoring -f $vf --wait --timeout 5m | Out-Null
     } finally {
         Remove-Item -LiteralPath $vf -Force -ErrorAction SilentlyContinue
@@ -133,7 +147,8 @@ $indented
 
 # ---------------------------------------------------------------- victim apps
 if (Want "victim") {
-    $tags = Get-Content (Join-Path $PSScriptRoot ".image-tags.json") -Raw | ConvertFrom-Json
+    if (-not (Test-Path $tagFile)) { throw "No image tags found at $tagFile; build images first." }
+    $tags = Get-Content $tagFile -Raw | ConvertFrom-Json
     $img = "$RegistryInCluster/kubeheal/victim-app:$($tags.'victim-app')"
     Say "victim apps from $img"
     (Get-Content (Join-Path $PSScriptRoot "victim.yaml") -Raw).Replace("__IMAGE__", $img) | K apply -f - | Out-Null

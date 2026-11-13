@@ -5,7 +5,8 @@ Usage (PowerShell, repo root):
 
 It sends traffic to the victim Service through the API server proxy, then asks Prometheus (also through the API
 server proxy) every query from agents/health_agent/metric_queries.py and prints one line per query.
-Only `--context k3d-kubeheal` is used. Read-only against the cluster apart from the HTTP requests to the victim.
+The context defaults to `k3d-kubeheal`; `--context` can select an explicitly named isolated rehearsal cluster.
+Read-only against the cluster apart from the HTTP requests to the victim.
 """
 import argparse
 import json
@@ -16,7 +17,6 @@ import urllib.parse
 
 from agents.health_agent.metric_queries import METRIC_SPECS, build_queries
 
-CTX = "k3d-kubeheal"
 PROM = "/api/v1/namespaces/monitoring/services/monitoring-kube-prometheus-prometheus:9090/proxy/api/v1/query"
 
 
@@ -41,7 +41,10 @@ def main() -> None:
     ap.add_argument("--namespace", default="prod")
     ap.add_argument("--pod", default="victim-app")
     ap.add_argument("--seconds", type=int, default=120)
+    ap.add_argument("--context", default="k3d-kubeheal")
     a = ap.parse_args()
+    global CTX
+    CTX = a.context
 
     stop = threading.Event()
     th = [threading.Thread(target=traffic, args=(a.namespace, stop), daemon=True) for _ in range(3)]

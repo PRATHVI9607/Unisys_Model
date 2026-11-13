@@ -1,5 +1,6 @@
+param([string]$Context = "k3d-kubeheal")
 $ErrorActionPreference = "Stop"
-$context = "k3d-kubeheal"
+$context = $Context
 $namespace = "kubeheal"
 $rootName = "kubeheal-minio-root"
 $clientName = "kubeheal-minio-client"
