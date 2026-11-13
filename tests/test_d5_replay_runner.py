@@ -94,6 +94,10 @@ def test_runner_emits_fusion_evidence_and_restores_daemonset_without_changing_mo
     result = runner.run(fake, sleep=lambda _s: None, fixture=fixture, timeout_s=20)
     assert result["security_event"]["syscall_source"] == "replay"
     assert result["fusion_action"]["dry_run"] == "true"
+    target_query = next(args for args, _, _ in fake.calls if args[:4] == ("-n", "prod", "get", "pods"))
+    assert target_query[target_query.index("-l") + 1] == (
+        "app.kubernetes.io/name=victim-app,kubeheal.io/watch=true"
+    )
     patches = [json.loads(args[args.index("-p") + 1]) for args, _, _ in fake.calls if "patch" in args]
     assert patches[0]["spec"]["template"]["spec"]["containers"][0]["env"][-1] == {
         "name": "FALCO_REPLAY_NODE", "value": "k3d-kubeheal-agent-0"}
