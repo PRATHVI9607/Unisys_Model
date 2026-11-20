@@ -10,8 +10,10 @@ import io
 import json
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -107,16 +109,33 @@ class ModelBundle:
                     x[i, j] = v
         return x
 
-    def _explained(self, x, rows, n_cls):
-        """(probs, {row: contrib (n_cls, n_features)}) from one pred_contrib pass.
+    @cached_property
+    def class_boosters(self) -> list[lgb.Booster]:
+        """One single-class booster per label holding only that class's trees (multiclass trees interleave by class).
 
-        pred_contrib for multiclass is (m, n_classes * (n_features + 1)); the last column per class is the bias, and
-        a class's contributions sum to its raw score, so softmax over them is the predicted probability.
+        A class's TreeSHAP depends on its own trees only, so explaining the predicted class on its sub-booster is
+        exact and costs 1/n_classes of a full pred_contrib pass.
         """
-        c = self.booster.predict(x[rows], pred_contrib=True, num_threads=1).reshape(rows.size, n_cls, -1)
-        raw = c.sum(2)
-        e = np.exp(raw - raw.max(1, keepdims=True))
-        return e / e.sum(1, keepdims=True), dict(zip(rows.tolist(), c[:, :, :-1], strict=True))
+        k = len(self.labels)
+        pre, rest = self.booster.model_to_string().split("\nTree=0\n", 1)
+        body, post = ("Tree=0\n" + rest).split("\n\nend of trees", 1)
+        trees = re.split(r"\n\n(?=Tree=\d+\n)", body)
+        pre = re.sub(r"\ntree_sizes=[^\n]*", "", pre).replace(f"num_class={k}", "num_class=1")
+        pre = pre.replace(f"num_tree_per_iteration={k}", "num_tree_per_iteration=1")
+        pre = pre.replace(f"objective=multiclass num_class:{k}", "objective=regression")
+        return [lgb.Booster(model_str=pre + "\n\n" + "\n\n".join(
+                    re.sub(r"^Tree=\d+", f"Tree={j}", t) for j, t in enumerate(trees[c::k])) + "\n\nend of trees" + post)
+                for c in range(k)]
+
+    def _explained(self, x, rows, probs):
+        """{row: TreeSHAP contributions (n_features,) toward that row's predicted class}."""
+        pred = probs.argmax(1)
+        out = {}
+        for c in np.unique(pred[rows]):
+            sel = rows[pred[rows] == c]
+            contrib = self.class_boosters[c].predict(x[sel], pred_contrib=True, num_threads=1)[:, :-1]   # last col = bias
+            out.update(zip(sel.tolist(), contrib, strict=True))
+        return out
 
     def predict(self, features: dict[str, float | None], explain_risk: float = 0.0) -> Prediction:
         return self.predict_batch([features], explain_risk)[0]
@@ -128,20 +147,14 @@ class ModelBundle:
         """
         t0 = time.perf_counter()
         x = self.matrix(rows)
-        n, n_cls = len(rows), len(self.labels)
+        n = len(rows)
         if n == 0:
             return []
         risk_w = np.asarray(self.meta["class_risk"])
-        contribs = {}
-        if explain_risk <= 0.0:   # every row explained: one pred_contrib pass also yields the probabilities
-            probs, contribs = self._explained(x, np.arange(n), n_cls)
-        else:
-            probs = self.booster.predict(x, num_threads=1)
-            explain = np.flatnonzero(np.clip(probs @ risk_w, 0.0, 1.0) >= explain_risk)
-            if explain.size:
-                contribs = self._explained(x, explain, n_cls)[1]
-        in_sets = prediction_sets(probs, self.meta["conformal_q"])
+        probs = self.booster.predict(x, num_threads=1)
         risks = np.clip(probs @ risk_w, 0.0, 1.0)
+        contribs = self._explained(x, np.flatnonzero(risks >= explain_risk), probs)
+        in_sets = prediction_sets(probs, self.meta["conformal_q"])
         latency_ms = (time.perf_counter() - t0) * 1000.0 / n
         out = []
         for i, p in enumerate(probs):
@@ -149,7 +162,7 @@ class ModelBundle:
             pred_set = [lbl for lbl, keep in zip(self.labels, in_sets[i], strict=True) if keep]
             factors = []
             if i in contribs:
-                contrib = contribs[i][k]
+                contrib = contribs[i]
                 top = [j for j in np.argsort(-np.abs(contrib))[:TOP_FACTORS] if contrib[j] != 0]
                 factors = [Factor(feature=self.features[j], value=None if np.isnan(x[i, j]) else float(x[i, j]),
                                   contribution=float(contrib[j])) for j in top]

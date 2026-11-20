@@ -116,13 +116,15 @@ def test_only_rows_at_or_above_explain_risk_get_factors(bundle):
     assert bundle.predict_batch(rows, explain_risk=2.0)[0].top_factors == []   # nothing explained
 
 
-def test_explained_probabilities_equal_predict(bundle):
+def test_class_booster_explain_equals_full_pred_contrib(bundle):
     rng = np.random.default_rng(3)
     rows = [dict(zip(FEATURES, r, strict=True)) for r in rng.normal(size=(64, 3)) * 3]
     x = bundle.matrix(rows)
-    probs, contribs = bundle._explained(x, np.arange(64), 3)
-    np.testing.assert_allclose(probs, bundle.booster.predict(x), atol=1e-9)
-    assert contribs[0].shape == (3, 3)
+    probs = bundle.booster.predict(x)
+    contribs = bundle._explained(x, np.arange(64), probs)
+    full = bundle.booster.predict(x, pred_contrib=True).reshape(64, 3, -1)   # all-class pass: the exact reference
+    for i, c in contribs.items():
+        np.testing.assert_allclose(c, full[i, probs[i].argmax(), :-1], atol=1e-9)
 
 
 def test_prediction_sets_floor_keeps_confident_labels_only():

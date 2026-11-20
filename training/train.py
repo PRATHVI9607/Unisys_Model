@@ -130,7 +130,7 @@ def missing_dropout(x, y, groups, families, names, seed, frac=1.0):
     return np.vstack(xs), y[i], groups[i], families[i], counts
 
 
-def heldout_families(x, y, families, names, labels, seed, rounds, orig) -> dict:
+def heldout_families(x, y, families, names, labels, seed, rounds, orig, over=None) -> dict:
     """Leave-one-scenario-family-out: no row involving the family trains; test on its real single-family rows.
 
     `families` entries are '|'-joined (collected.heldout_key): a combined change or a revert involving the family
@@ -142,7 +142,7 @@ def heldout_families(x, y, families, names, labels, seed, rounds, orig) -> dict:
     for fam in sorted(set().union(*sets)):
         inv = np.array([fam in f for f in sets])
         te = np.array([f == {fam} for f in sets]) & orig   # real rows only; copies follow their source out of training
-        probs = fit(x[~inv], y[~inv], names, k, seed, rounds).predict(x[te])
+        probs = fit(x[~inv], y[~inv], names, k, seed, rounds, over=over).predict(x[te])
         present = sorted(set(y[te]))
         per[fam] = {"n": int(te.sum()), "labels": {labels[i]: int((y[te] == i).sum()) for i in present},
                     "accuracy": round(float((probs.argmax(1) == y[te]).mean()), 4),
@@ -175,16 +175,26 @@ def class_weights(y: np.ndarray, k: int) -> np.ndarray:
     return (len(y) / (k * np.maximum(counts, 1)))[y]
 
 
-def fit(x, y, names, k, seed, rounds, valid=None) -> lgb.Booster:
+def fit(x, y, names, k, seed, rounds, valid=None, over=None) -> lgb.Booster:
+    """`over`: LightGBM param overrides (--compact grid). With `over`, early stopping watches validation macro-F1."""
     params = {"objective": "multiclass", "num_class": k, "learning_rate": 0.05, "num_leaves": 15,
               "min_data_in_leaf": 20, "feature_fraction": 0.8, "bagging_fraction": 0.8, "bagging_freq": 1,
               "lambda_l2": 1.0, "seed": seed, "deterministic": True, "force_row_wise": True, "verbose": -1,
               "num_threads": int(os.environ.get("KUBEHEAL_TRAIN_THREADS", 4))}   # more add contention on a few k rows
+    params.update(over or {})
     dtrain = lgb.Dataset(x, y, weight=class_weights(y, k), feature_name=names)
     if valid is None:
         return lgb.train(params, dtrain, num_boost_round=rounds)
     dval = lgb.Dataset(valid[0], valid[1], weight=class_weights(valid[1], k), reference=dtrain)
-    return lgb.train(params, dtrain, num_boost_round=rounds, valid_sets=[dval],
+    if over is None:
+        return lgb.train(params, dtrain, num_boost_round=rounds, valid_sets=[dval],
+                         callbacks=[lgb.early_stopping(50, verbose=False)])
+
+    def macro_f1(preds, data):   # older LightGBM passes multiclass preds flat (class-major)
+        p = preds.reshape(len(valid[1]), k) if preds.ndim == 2 else preds.reshape(k, -1).T
+        return "macro_f1", f1_score(valid[1], p.argmax(1), labels=range(k), average="macro", zero_division=0), True
+
+    return lgb.train({**params, "metric": "None"}, dtrain, num_boost_round=rounds, valid_sets=[dval], feval=macro_f1,
                      callbacks=[lgb.early_stopping(50, verbose=False)])
 
 
@@ -211,6 +221,84 @@ def scores(y: np.ndarray, probs: np.ndarray, labels: list[str], q: float | None 
     return out
 
 
+# --compact grid: tree count and depth drive predict/TreeSHAP cost, learning_rate how many rounds are needed.
+COMPACT_GRID = [{"num_leaves": nl, "min_data_in_leaf": md, "learning_rate": lr}
+                for nl in (15, 31, 63) for md in (20, 50) for lr in (0.05, 0.1)]
+
+
+def latency(bundle: ModelBundle, xs: np.ndarray, n: int = 30) -> dict:
+    """Median ms per row, num_threads=1: predict and TreeSHAP of the predicted class, batch 1 and 64."""
+    def med(f, rows):
+        f(rows)   # warm-up (also builds class_boosters)
+        t = []
+        for _ in range(n):
+            t0 = time.perf_counter()
+            f(rows)
+            t.append((time.perf_counter() - t0) * 1000 / len(rows))
+        return round(float(np.median(t)), 4)
+
+    def predict(r):
+        return bundle.booster.predict(r, num_threads=1)
+
+    def explain(r):
+        return bundle._explained(r, np.arange(len(r)), predict(r))
+
+    b1, b64 = xs[:1], xs[:64]
+    out = {"predict_ms_b1": med(predict, b1), "predict_ms_b64": med(predict, b64),
+           "explain_ms_b1": med(explain, b1), "explain_ms_b64": med(explain, b64)}
+    out["predict_explain_ms"] = round(out["predict_ms_b1"] + out["explain_ms_b1"], 4)
+    return out
+
+
+def compact_line(r: dict) -> str:
+    p = r["params"]
+    return (f"leaves={p['num_leaves']:<3} min_leaf={p['min_data_in_leaf']:<3} lr={p['learning_rate']:<5} "
+            f"iter={r['best_iteration']:<5} trees={r['trees']:<6} {r['bytes'] / 1e6:6.2f}MB "
+            f"pred b1/b64={r['predict_ms_b1']:.3f}/{r['predict_ms_b64']:.3f}ms "
+            f"shap b1/b64={r['explain_ms_b1']:.2f}/{r['explain_ms_b64']:.2f}ms f1={r['macro_f1']:.4f} "
+            f"{'PASS' if r['gates_pass'] else 'fail'}")
+
+
+def evaluate(task, x, y, groups, families, orig, m, names, labels, k, args, over=None):
+    """Fit on train with early stopping on val, then CV, conformal q and held-out families → (booster, q, report)."""
+    booster = fit(x[m["train"]], y[m["train"]], names, k, args.seed, 2000, valid=(x[m["val"]], y[m["val"]]), over=over)
+    rounds = booster.best_iteration or booster.current_iteration()
+
+    # Health is only ever asked about real spec changes (the agent skips no-op updates), so conformal
+    # calibration and the gate use that population; unchanged "pre" rows would make both look better.
+    serving = (x[:, names.index("spec_changed")] == 1 if task == "health" and "spec_changed" in names
+               else np.ones(len(y), bool))
+    real = orig & serving
+    dev = ~m["test"]
+    oof = np.zeros((len(y), k))
+    for tr, te in GroupKFold(n_splits=5).split(x[dev], y[dev], groups[dev]):
+        tr, te = np.flatnonzero(dev)[tr], np.flatnonzero(dev)[te]
+        oof[te] = fit(x[tr], y[tr], names, k, args.seed, rounds, over=over).predict(x[te])
+    q = calibrate(oof[dev & real], y[dev & real], args.alpha)
+
+    test_probs = booster.predict(x[m["test"]])
+    report = {
+        "split": {n: {"rows": int(v.sum()), "groups": len(set(groups[v]))} for n, v in m.items()},
+        "best_iteration": rounds,
+        "conformal": {"alpha": args.alpha, "q": round(q, 6),
+                      "calibrated_on": "5-fold grouped out-of-fold probabilities, non-test groups, real serving rows"},
+        "cv5_grouped": scores(y[dev & orig], oof[dev & orig], labels, q),
+        "test": scores(y[m["test"] & orig], test_probs[orig[m["test"]]], labels, q),
+    }
+    lab = np.char.startswith(groups.astype(str), "lab:")
+    if task == "security" and (dev & orig & lab).any():
+        report["cv5_grouped_lab"] = scores(y[dev & orig & lab], oof[dev & orig & lab], labels, q)
+    if families.any():
+        report["heldout_family"] = heldout_families(x, y, families, names, labels, args.seed, rounds, orig, over)
+    if task == "health":
+        report["cv5_grouped_spec_changed"] = scores(y[dev & real], oof[dev & real], labels, q)
+        report["test_spec_changed"] = scores(y[m["test"] & real], booster.predict(x[m["test"] & real]), labels, q)
+    if not orig.all():
+        report["missing_dropout_copies"] = {"note": "fit-only rows, not in calibration or the gate; own metrics",
+                                           "cv5_grouped": scores(y[dev & ~orig], oof[dev & ~orig], labels, q)}
+    return booster, q, report
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--task", choices=["health", "security"], required=True)
@@ -230,6 +318,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--regression-tol", type=float, default=0.02,
                     help="max drop of a gated metric vs the bundle being replaced")
     ap.add_argument("--allow-regression", action="store_true", help="skip the no-regression check (say why in the commit)")
+    ap.add_argument("--compact", action="store_true",
+                    help="grid over num_leaves/min_data_in_leaf/learning_rate with macro-F1 early stopping; write the "
+                         "lowest-latency candidate that passes every gate (table in meta metrics.compact)")
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args(argv)
     task = args.task
@@ -252,42 +343,32 @@ def main(argv: list[str] | None = None) -> int:
         if len(set(y[mask])) < k:
             print(f"warning: {name} split lacks some classes ({sorted(set(y[mask]))})", file=sys.stderr)
 
-    booster = fit(x[m["train"]], y[m["train"]], names, k, args.seed, 2000, valid=(x[m["val"]], y[m["val"]]))
-    rounds = booster.best_iteration or booster.current_iteration()
-
-    # Health is only ever asked about real spec changes (the agent skips no-op updates), so conformal
-    # calibration and the gate use that population; unchanged "pre" rows would make both look better.
-    serving = (x[:, names.index("spec_changed")] == 1 if task == "health" and "spec_changed" in names
-               else np.ones(len(y), bool))
-    real = orig & serving
-    dev = ~m["test"]
-    oof = np.zeros((len(y), k))
-    for tr, te in GroupKFold(n_splits=5).split(x[dev], y[dev], groups[dev]):
-        tr, te = np.flatnonzero(dev)[tr], np.flatnonzero(dev)[te]
-        oof[te] = fit(x[tr], y[tr], names, k, args.seed, rounds).predict(x[te])
-    q = calibrate(oof[dev & real], y[dev & real], args.alpha)
-
-    test_probs = booster.predict(x[m["test"]])
-    report = {
-        "split": {n: {"rows": int(v.sum()), "groups": len(set(groups[v]))} for n, v in m.items()},
-        "best_iteration": rounds,
-        "conformal": {"alpha": args.alpha, "q": round(q, 6),
-                      "calibrated_on": "5-fold grouped out-of-fold probabilities, non-test groups, real serving rows"},
-        "cv5_grouped": scores(y[dev & orig], oof[dev & orig], labels, q),
-        "test": scores(y[m["test"] & orig], test_probs[orig[m["test"]]], labels, q),
-    }
-    lab = np.char.startswith(groups.astype(str), "lab:")
-    if task == "security" and (dev & orig & lab).any():
-        report["cv5_grouped_lab"] = scores(y[dev & orig & lab], oof[dev & orig & lab], labels, q)
-    if families.any():
-        report["heldout_family"] = heldout_families(x, y, families, names, labels, args.seed, rounds, orig)
-    if task == "health":
-        report["cv5_grouped_spec_changed"] = scores(y[dev & real], oof[dev & real], labels, q)
-        report["test_spec_changed"] = scores(y[m["test"] & real], booster.predict(x[m["test"] & real]), labels, q)
-    if not orig.all():
-        report["missing_dropout_copies"] = {"note": "fit-only rows, not in calibration or the gate; own metrics",
-                                           "cv5_grouped": scores(y[dev & ~orig], oof[dev & ~orig], labels, q)}
-
+    out = Path(args.out or ROOT / "models" / task)
+    old = json.loads((out / "meta.json").read_text()) if (out / "meta.json").exists() else None
+    table, best = [], None   # best = (sort key, booster, q, report, fails, table index)
+    for over in (COMPACT_GRID if args.compact else [None]):
+        booster, q, report = evaluate(task, x, y, groups, families, orig, m, names, labels, k, args, over)
+        report["gate"], fails = gate(report, gates, old and old["metrics"], args.regression_tol, args.allow_regression)
+        report["gate"]["baseline"] = old and old["version"]
+        if blind := nan_blind(booster, LIVE_NONE[task]):
+            fails.append(f"{blind} can be None live but split with missing_type != NaN (None scored as 0)")
+        key = ()
+        if args.compact:
+            row = {"params": over, "best_iteration": report["best_iteration"], "trees": booster.num_trees(),
+                   "bytes": len(booster.model_to_string()), **latency(ModelBundle(booster, {"labels": labels}), x[m["test"]]),
+                   "macro_f1": report["cv5_grouped"]["macro_f1"], "gates_pass": not fails, "fails": fails}
+            table.append(row)
+            print(compact_line(row), flush=True)
+            key = (round(row["predict_explain_ms"], 2), -row["macro_f1"])   # fastest, then most accurate
+        if not args.compact or (not fails and (best is None or key < best[0])):
+            best = (key, booster, q, report, fails, len(table) - 1)
+    if best is None:
+        print("FAIL; bundle NOT written: no compact candidate passes every gate", file=sys.stderr)
+        return 1
+    _, booster, q, report, fails, chosen = best
+    if args.compact:
+        report["compact"] = {"rule": "lowest batch-1 predict+explain latency among candidates passing every gate; "
+                                     "tie (0.01 ms) -> higher cv5 macro-F1", "chosen": chosen, "candidates": table}
     bundle = ModelBundle(booster, {
         "task": task, "version": f"{task}-{__version__}-{data['sha256'][:8]}", "labels": labels,
         "class_risk": risk, "features": names, "alpha": args.alpha, "conformal_q": q, "metrics": report,
@@ -300,12 +381,6 @@ def main(argv: list[str] | None = None) -> int:
         lat.append((time.perf_counter() - t0) * 1000)
     report["latency_ms"] = {"p50": round(float(np.percentile(lat, 50)), 3), "p99": round(float(np.percentile(lat, 99)), 3),
                             "note": "single-row bundle.predict incl. TreeSHAP, num_threads=1"}
-    out = Path(args.out or ROOT / "models" / task)
-    old = json.loads((out / "meta.json").read_text()) if (out / "meta.json").exists() else None
-    report["gate"], fails = gate(report, gates, old and old["metrics"], args.regression_tol, args.allow_regression)
-    report["gate"]["baseline"] = old and old["version"]
-    if blind := nan_blind(booster, LIVE_NONE[task]):
-        fails.append(f"{blind} can be None live but split with missing_type != NaN (None scored as 0)")
     print(json.dumps(report, indent=2))
     if fails:
         print("FAIL; bundle NOT written:\n  " + "\n  ".join(fails), file=sys.stderr)

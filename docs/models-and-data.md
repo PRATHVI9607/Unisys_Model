@@ -117,7 +117,7 @@ match `meta.json`.
 - **Label:** the argmax class.
 - **Risk:** `risk = Σ p(class) · class_risk`, clipped to [0, 1]. Health class risks are 0.05, 0.60 and 0.95. Security class risks are 0.05, 0.45, 0.95 and 0.85.
 - **Conformal set:** `{c : 1 − p_c ≤ max(q, 0.05)}` (the floor admits any label with p ≥ 0.95). `uncertain = len(set) != 1`, so an empty set is uncertain.
-- **Top factors:** the 5 largest non-zero |TreeSHAP| contributions to the predicted class, from LightGBM `pred_contrib=True`. These are exact for trees, and the `shap` package is not needed.
+- **Top factors:** the 5 largest non-zero |TreeSHAP| contributions to the predicted class, from LightGBM `pred_contrib=True` on a per-class sub-booster (`ModelBundle.class_boosters`: only the predicted class's trees, exact, identical to the all-class pass, 1/classes of the cost). These are exact for trees, and the `shap` package is not needed.
 
 ### Split-conformal uncertainty (`kubeheal/ml/conformal.py`)
 
@@ -148,6 +148,7 @@ uv run --all-extras python -m training.train --task security --collected --drop-
 | `--gate PATH=VALUE` | `GATES` in `train.py` | Override one gate threshold (repeatable) |
 | `--regression-tol` | `0.02` | Max drop of a gated metric vs the bundle being replaced |
 | `--allow-regression` | off | Skip the no-regression check (say why in the commit) |
+| `--compact` | off | Grid of `num_leaves` 15/31/63 x `min_data_in_leaf` 20/50 x `learning_rate` 0.05/0.1, early stopping on validation macro-F1 (patience 50). Each candidate runs the full evaluation and the gates (12x the training time), and is timed single-threaded: predict and TreeSHAP per row at batch 1 and 64. Writes the candidate with the lowest batch-1 predict+explain latency among those passing every gate (tie within 0.01 ms: higher CV macro-F1); none passing writes nothing. The table is in `meta.json` `metrics.compact`. |
 | `--seed` | `7` | Seed for splits, LightGBM and the generator |
 | `--out` | `models/<task>` | Bundle directory |
 
