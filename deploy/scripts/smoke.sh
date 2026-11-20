@@ -123,7 +123,7 @@ fi
 acted() {
   rc XREVRANGE kubeheal.actions + - COUNT 300 | awk -v ns="$2" -v d="$1" '
     /^[0-9]+-[0-9]+$/ {a=0; b=0} $0=="namespace" {getline v; if (v==ns) a=1} $0=="decision" {getline v; if (v==d) b=1}
-    a && b {print "HIT"; exit}' | grep -q HIT
+    a && b {h=1} END {if (h) print "HIT"}' | grep -q HIT   # read all input: quitting early SIGPIPEs redis-cli and pipefail fails
 }
 tier_ns() { kubectl create ns "$1" >/dev/null && kubectl label ns "$1" kubeheal.io/namespace-tier=prod >/dev/null; }
 

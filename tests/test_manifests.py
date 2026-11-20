@@ -170,3 +170,10 @@ def test_grafana_dashboard_queries_only_existing_metrics():
     missing = [m for m in used if (f'"{re.sub(r"_(bucket|sum|count)$", "", m)}"' not in code if m.startswith("kubeheal_") else m not in keep)]
     assert used and not missing, f"dashboard queries metrics nothing exports: {missing}"
     assert all(p["datasource"]["uid"] == "prometheus" for p in dash["panels"])
+
+
+def test_smoke_acted_reads_whole_stream():
+    # an early awk `exit` SIGPIPEs the Redis pipe once the actions stream outgrows the pipe buffer; with pipefail
+    # `acted` then fails although the action is there (found live: smoke "kill" step timed out on a busy stream)
+    body = Path("deploy/scripts/smoke.sh").read_text().split("acted() {", 1)[1].split("\n}\n", 1)[0]
+    assert "exit" not in body
