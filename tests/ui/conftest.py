@@ -47,6 +47,9 @@ def redis_sync():
 @pytest.fixture
 def server(monkeypatch, redis_sync):
     """Live console URL; `redis_sync` writes to the same fake Redis the app reads."""
+    auth.failed_auth.reset()
+    for bucket in admin.read_limit.values():
+        bucket.reset()
     monkeypatch.setenv(auth.ADMIN_TOKEN_ENV, TOKEN)
     monkeypatch.setattr(admin, "_fetch_ready", lambda: {"ready": True, "models": {"health": "health-5.0.0-a374e498",
                                                                                  "security": "security-5.0.0-c6fa12d8"}})

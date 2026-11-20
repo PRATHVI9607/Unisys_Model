@@ -1,9 +1,9 @@
-import { api, datetime, dash, esc, pretty } from './util.js';
+import { api, datetime, dash, esc, pretty, targetHtml } from './util.js';
 
 const KINDS = ['action', 'approval_pending', 'approval', 'rejection', 'mode'];
 
 const row = e => `<tr><td class="mono muted">${esc(datetime(+e.ts_ms))}</td><td>${esc(pretty(e.kind))}</td><td>${esc(dash(e.actor))}</td>
-    <td>${e.namespace ? esc(`${e.namespace}/${e.workload}`) : '—'}${e.pod ? `<div class="sub mono">${esc(e.pod)}</div>` : ''}</td>
+    <td>${e.namespace || e.workload ? targetHtml(e) : '—'}${e.pod ? `<div class="sub mono">${esc(e.pod)}</div>` : ''}</td>
     <td>${esc(pretty(e.decision))}</td><td class="hide-sm">${esc(pretty(e.outcome))}${e.detail ? `<div class="sub clamp" title="${esc(e.detail)}">${esc(e.detail)}</div>` : ''}</td>
     <td class="hide-sm">${esc(dash(e.mode))}</td></tr>`;
 

@@ -16,7 +16,7 @@ echo "Removing chaos workloads + quarantine network policies..."
 kubectl delete deploy,pod -l kubeheal.io/chaos=true -n "$NS" --ignore-not-found --grace-period=0 --force 2>/dev/null
 # Quarantine policies are owned by their pod and GC'd with it; delete any leftovers.
 kubectl get networkpolicy -n "$NS" -o name | { grep '/kubeheal-quarantine-' || true; } \
-  | xargs -r kubectl delete -n "$NS" --ignore-not-found
+  | xargs -r kubectl --context "$KH_CTX" delete -n "$NS" --ignore-not-found
 
 echo "Recreating demo/victim-app from deploy/demo/victim-app.yaml..."
 # delete + apply: `apply` alone would keep fields set imperatively (kubectl set/patch/scale).

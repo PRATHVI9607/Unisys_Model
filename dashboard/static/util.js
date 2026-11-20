@@ -5,6 +5,8 @@ export const dash = v => (v === null || v === undefined || v === '') ? '—' : v
 export const pct = (v, d = 0) => isNum(v) ? `${(v * 100).toFixed(d)}%` : '—';
 export const pretty = s => s ? String(s).replace(/_/g, ' ') : '—';
 export const target = e => `${dash(e.namespace)}/${dash(e.workload)}`;
+// namespace/workload that can only break after the slash, never inside "kube-system".
+export const targetHtml = e => `<span class="nw">${esc(dash(e.namespace))}/</span><wbr><span class="nw">${esc(dash(e.workload))}</span>`;
 export const riskClass = v => !isNum(v) ? 'low' : v >= 0.7 ? 'high' : v >= 0.4 ? 'mid' : 'low';
 export const time = ms => isNum(ms) && ms > 0
     ? new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '—';
@@ -15,6 +17,12 @@ export const ago = ms => {
     if (!isNum(ms) || ms <= 0) return '—';
     const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
     return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`;
+};
+
+export const left = ms => {
+    if (!isNum(ms)) return '—';
+    const m = Math.round((ms - Date.now()) / 60000);
+    return m <= 0 ? 'overdue' : m < 60 ? `in ${m}m` : `in ${Math.floor(m / 60)}h ${m % 60}m`;
 };
 
 const P = {

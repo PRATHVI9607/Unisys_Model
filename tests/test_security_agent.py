@@ -841,3 +841,18 @@ async def test_embedded_bundle_scores_without_http(redis):
     a = make_agent(redis)
     a.bundle = Bundle()
     assert await a.score([{"a": 1.0, "zzz": 2.0}]) == [[{"a": 1.0}], sa.SECURITY_PUBLISH_RISK]
+
+
+async def test_embedded_failure_falls_back_to_the_inference_service(redis, monkeypatch):
+    class Broken:
+        features = ["a"]
+
+        def predict_batch(self, rows, explain_risk):
+            raise RuntimeError("bad bundle")
+
+    async def remote(session, task, rows):
+        return ["remote", task, rows]
+    monkeypatch.setattr(sa, "predict_batch", remote)
+    a = make_agent(redis)
+    a.bundle = Broken()
+    assert await a.score([{"a": 1.0}]) == ["remote", "security", [{"a": 1.0}]]

@@ -109,3 +109,14 @@ async def test_publish_event_extra_commands_share_the_transaction():
     await common.publish_event(r, "out", "action", ev, extra=[lambda p: p.set("k", "v"),
                                                               lambda p: p.xadd("led", {"a": "b"})])
     assert await r.get("k") == "v" and await r.xlen("led") == 1 and await r.xlen("out") == 1
+
+
+def test_signatures_with_non_ascii_never_raise():
+    f = {"pod_uid": "u", "namespace": "n", "pod": "p", "event_id": "e", "ts_ms": "1"}
+    assert not common.contain_verify("k", {**f, "sig": "é" * 64})
+    rec = {"state": "pending", "pod": "p", "requested": {"decision": "approve"}}
+    sig = common.approval_sign("k", rec)
+    assert common.approval_verify("k", {**rec, "sig": sig, "requested": {"decision": "reject"}})   # requested is free
+    assert not common.approval_verify("k", {**rec, "sig": sig, "pod": "q"})
+    assert not common.approval_verify("k2", {**rec, "sig": sig})
+    assert not common.approval_verify("k", {**rec, "sig": "é" * 64}) and not common.approval_verify("k", rec)

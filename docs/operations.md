@@ -30,7 +30,9 @@ minikube start --cpus=8 --memory=8g
 Deployments and delete pods and namespaces. They all run `deploy/scripts/lib/guard.sh` first: it prints
 `kubectl context: <name>` and refuses (exit 2) unless the current context is `minikube` or `k3d-kubeheal`.
 To use another lab cluster, name its context: `--force-context NAME` (NAME must equal
-`kubectl config current-context`; a different name is refused). `KUBECONFIG` is honoured as usual.
+`kubectl config current-context`; a different name is refused). `KUBECONFIG` is honoured as usual. The verified context is
+pinned (`KH_CTX`): the scripts' `kubectl` and `helm` calls pass `--context`, so a `kubectl config use-context` in another
+terminal mid-run cannot redirect them.
 
 ### k3d (local, throwaway)
 
@@ -257,22 +259,22 @@ all script and CSS come from `/static` (no inline code, no style attributes), an
 
 **Pages** (keys `1` to `5` switch between them, arrow keys walk a table):
 
-- **Overview:** mode banner, KPIs (pods killed, workloads patched, awaiting approval, guard rails hit, detection-to-kill latency p50/p95, containment requested), the live action table with a decision filter, and the health and security signals. KPIs cover the newest 200 actions. Detection-to-kill is the action time minus the end of the security window that triggered an AUTO_KILL (dry-run kills included).
+- **Overview:** mode banner (the effective mode fusion reports in `kubeheal:mode:effective`: Enforce, Observe, or "Fusion not reporting" when the key is gone; the runtime switch shows as a second line only when it differs), KPIs (pods killed, workloads patched, awaiting approval, guard rails hit, detection-to-kill latency p50/p95, containment requested), the live action table with a decision filter, and the health and security signals. KPIs cover the newest 200 actions. Detection-to-kill is the action time minus the end of the security window that triggered an AUTO_KILL (dry-run kills included, approved kills excluded: they waited for a human). The action table is sorted newest first.
 - **Incident detail** (click a row): decision, mode, outcome, containment, rationale, a decision trail with the time from detection to action, and the linked security and health events with top factors, class probabilities, changed fields and failure reasons. Missing values render as `—`.
-- **Approvals:** HUMAN decisions fusion held back, with the candidate action. Approve or reject opens an inline confirmation with a reason. State shows live: `approve requested`, `executing`, `executed`, `failed`, `rejected`.
-- **Ledger:** paged, filterable (namespace, kind, actor), read-only.
+- **Approvals:** HUMAN decisions fusion held back, with the candidate action. Approve or reject opens an inline confirmation with a reason. Listed from fusion's pending index `kubeheal:approvals:pending` (newest first), so items older than the 200-action buffer still show; a pending item shows when it expires (1 h after it was raised). State shows live: `approve requested`, `executing`, `executed`, `failed`, `rejected`, `expired`. A reason being typed survives live updates.
+- **Ledger:** paged, filterable (namespace, kind, actor), read-only. A filtered page examines at most 1000 entries.
 - **Mode:** the runtime kill switch (`observe` forces dry-run at once; `enforce` only works if the fusion manifest also says enforce). Switching asks for confirmation on the page and is ledgered.
 - **Models:** versions from the inference `/readyz`, plus training metrics when `models/<task>/meta.json` is readable (`KUBEHEAL_MODELS_DIR`, default `models`; the dashboard image does not ship them, so it shows versions only unless you mount them). Skipped quietly when inference is unreachable.
 
 Theme follows the OS (button in the sidebar cycles system, light, dark).
 
-**Admin access.** Set `KUBEHEAL_ADMIN_TOKEN` (the manifest reads it from a Secret). Unset: every write route answers 503. A write needs `Authorization: Bearer <token>`: missing is 401, wrong is 403. The page keeps the token in `sessionStorage` (gone when the tab closes) and sends it only as that header, so there are no cookies and no CSRF surface. `X-Actor` (free text, sanitized, 40 characters) becomes `admin:<name>` in the ledger. All admins share one token, so the actor is a label, not an identity. Failed guesses are not rate-limited: keep the dashboard off the public internet.
+**Admin access.** Set `KUBEHEAL_ADMIN_TOKEN` (the manifest reads it from a Secret). Unset: every write route answers 503. A write needs `Authorization: Bearer <token>`: missing is 401, wrong is 403. The page keeps the token in `sessionStorage` (gone when the tab closes) and sends it only as that header, so there are no cookies and no CSRF surface. For a real identity set `KUBEHEAL_ADMIN_TOKENS="maria:token1,li:token2"` (name before the first `:`): the matching name is the actor and `X-Actor` is ignored. With only the shared `KUBEHEAL_ADMIN_TOKEN` the actor is `admin`, or `admin:<X-Actor>` (free text, sanitized, 40 characters: a label, not an identity). Both can be set. Wrong tokens are limited to 10 per client, then about 10 a minute (429); the client is the TCP peer address, so behind a proxy or port-forward all users share one allowance. Keep the dashboard off the public internet.
 
 **Approval protocol.** Fusion writes `kubeheal:approval:<HUMAN action event id>` (JSON, 24 h TTL, `state` `pending` then `executing`, `executed`, `failed` or `rejected`). The dashboard never changes `state`. On approve or reject it runs `WATCH` on that key, then in one `MULTI`: sets `requested {decision, actor, approval_id, ts_ms}` on it (a second decision gets 409), `XADD kubeheal.approvals {approval_id, action_event_id, decision: approve|reject, actor, reason, ts_ms}` and `XADD kubeheal.ledger` (kind `approval` or `rejection`). Fusion consumes the stream and moves `state` along. A missing key is 404 (never raised, or expired).
 
-**Redis commands the dashboard uses** (for the ACL): `PING`, `XREVRANGE` and `XREAD` on the three event streams and on `kubeheal.ledger`; `HGETALL kubeheal:{kind}:{id}`; `GET kubeheal:mode`, `MGET`/`GET kubeheal:approval:*`; and, admin only, `WATCH`/`MULTI`/`EXEC`, `SET kubeheal:mode`, `SET kubeheal:approval:*` (with `KEEPTTL`), `XADD kubeheal.approvals`, `XADD kubeheal.ledger` (with `MINID ~` 90 days).
+**Redis commands the dashboard uses** (for the ACL): `PING`, `XREVRANGE` and `XREAD` on the three event streams and on `kubeheal.ledger`; `HGETALL kubeheal:{kind}:{id}`; `GET kubeheal:mode`, `GET kubeheal:mode:effective`, `ZREVRANGE kubeheal:approvals:pending`, `MGET`/`GET kubeheal:approval:*`; and, admin only, `WATCH`/`MULTI`/`EXEC`, `SET kubeheal:mode`, `SET kubeheal:approval:*` (with `KEEPTTL`), `XADD kubeheal.approvals` (`MAXLEN ~` 10000), `XADD kubeheal.ledger` (`MAXLEN ~` `LEDGER_MAXLEN`; fusion trims by age). The dashboard only adds the `requested` object to an approval record and leaves every other field as fusion wrote it.
 
-**Environment:** `REDIS_URL`, `LOG_LEVEL`, `DASHBOARD_ALLOWED_HOSTS`, `KUBEHEAL_ADMIN_TOKEN` (new), `INFERENCE_URL` (new here, same default as the agents; needs a NetworkPolicy path to inference for the Models page), `KUBEHEAL_MODELS_DIR` (new).
+**Environment:** `REDIS_URL`, `LOG_LEVEL`, `DASHBOARD_ALLOWED_HOSTS`, `KUBEHEAL_ADMIN_TOKEN` and `KUBEHEAL_ADMIN_TOKENS` (new), `INFERENCE_URL` (new here, same default as the agents; needs a NetworkPolicy path to inference for the Models page), `KUBEHEAL_MODELS_DIR` (new).
 
 **How it works:**
 
@@ -289,8 +291,8 @@ Theme follows the OS (button in the sidebar cycles system, light, dark).
 | `GET /api/events/{kind}/{event_id}` | One event: 404 if unknown, 503 if Redis is needed and down |
 | `GET /api/approvals`, `GET /api/approvals/{id}` | Queue with state; 404 if the approval key is gone |
 | `POST /api/approvals/{id}/approve\|reject` | Admin. `{reason}`. 404 / 409 as above |
-| `GET /api/mode`, `POST /api/mode` | Runtime mode; admin `{mode: observe\|enforce, reason}` |
-| `GET /api/ledger?limit&cursor&namespace&kind&actor` | Newest first, `next_cursor` for the next page |
+| `GET /api/mode`, `POST /api/mode` | `{runtime, effective, last_action_mode}`; admin `{mode: observe\|enforce, reason}` |
+| `GET /api/ledger?limit&cursor&namespace&kind&actor` | Newest first, `next_cursor` for the next page. Ledger and approvals reads are rate-limited per client (burst 20, then 2 a second; 429) |
 | `GET /api/models` | Inference versions and bundle metrics |
 | `GET /api/admin/session` | Admin. Checks the token |
 | `WS /ws` | Server to client: `stats`, `events` (oldest to newest), `resync` (after a Redis reconnect: refetch) |

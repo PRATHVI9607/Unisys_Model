@@ -6,12 +6,30 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from dashboard import admin, auth, fastapi_app
-from kubeheal.contracts import KEY_MODE, STREAM_APPROVALS, STREAM_LEDGER, key_approval
+from kubeheal.contracts import (
+    KEY_APPROVALS_PENDING,
+    KEY_MODE,
+    STREAM_ACTIONS,
+    STREAM_APPROVALS,
+    STREAM_LEDGER,
+    ActionEvent,
+    Decision,
+    key_approval,
+    now_ms,
+)
 from tests.dashboard_seed import HUMAN_DONE, HUMAN_PENDING, HUMAN_SECOND, seed
 from tests.test_dashboard import BASE, wait_for
 
 TOKEN = "s3cret-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}", "X-Actor": "Maria R"}
+
+
+@pytest.fixture(autouse=True)
+def _fresh_limits(monkeypatch):
+    monkeypatch.delenv(auth.ADMIN_TOKENS_ENV, raising=False)
+    auth.failed_auth.reset()
+    for b in admin.read_limit.values():
+        b.reset()
 
 
 @pytest.fixture
@@ -138,7 +156,7 @@ def test_reason_is_length_capped(env):
 
 def test_mode_switch_is_ledgered(env):
     sync, client = env
-    assert client.get("/api/mode").json() == {"runtime": None, "last_action_mode": "observe"}
+    assert client.get("/api/mode").json() == {"runtime": None, "effective": "observe", "last_action_mode": "observe"}
     assert client.post("/api/mode", json={"mode": "bogus"}, headers=AUTH).status_code == 422
     assert client.post("/api/mode", json={"mode": "observe", "reason": "incident 4411"}, headers=AUTH).json() == {"runtime": "observe", "previous": None}
     assert sync.get(KEY_MODE) == "observe"
@@ -201,3 +219,86 @@ def test_csp_is_strict_and_api_is_not_cached(env):
     csp = client.get("/").headers["content-security-policy"]
     assert "unsafe-inline" not in csp and "style-src 'self';" in csp
     assert client.get("/api/stats").headers["cache-control"] == "no-store"
+
+
+# ── review fixes ─────────────────────────────────────────────────────────────────────────────────
+
+def test_named_tokens_set_the_actor(env, monkeypatch):
+    _, client = env
+    monkeypatch.setenv(auth.ADMIN_TOKENS_ENV, "maria:tok-m,li:tok:with:colons")
+    who = lambda tok, **h: client.get("/api/admin/session", headers={"Authorization": f"Bearer {tok}", **h})   # noqa: E731
+    assert who("tok-m", **{"X-Actor": "someone else"}).json() == {"actor": "maria"}     # X-Actor ignored
+    assert who("tok:with:colons").json() == {"actor": "li"}                             # name = part before the first ':'
+    assert who("li:tok:with:colons").status_code == 403                                 # the name is not part of the token
+    assert who(TOKEN, **{"X-Actor": "Maria R"}).json() == {"actor": "admin:Maria R"}    # shared token keeps the label
+    assert who(TOKEN).json() == {"actor": "admin"}
+    monkeypatch.delenv(auth.ADMIN_TOKEN_ENV)
+    assert who("tok-m").json() == {"actor": "maria"} and who(TOKEN).status_code == 403
+
+
+def test_failed_auth_is_rate_limited_per_client(env):
+    _, client = env
+    codes = [client.get("/api/admin/session", headers={"Authorization": "Bearer nope"}).status_code for _ in range(12)]
+    assert codes[:10] == [403] * 10 and codes[10:] == [429, 429]
+    assert client.get("/api/admin/session", headers=AUTH).status_code == 429   # blocked until the bucket refills
+    auth.failed_auth.reset()
+    assert client.get("/api/admin/session", headers=AUTH).status_code == 200
+
+
+def test_ledger_and_approvals_reads_are_rate_limited(env):
+    _, client = env
+    for path in ("/api/ledger", "/api/approvals"):
+        codes = [client.get(path).status_code for _ in range(25)]
+        assert codes[:20] == [200] * 20 and 429 in codes[20:], path
+    assert client.get("/api/stats").status_code == 200   # other reads are not throttled
+
+
+def test_ledger_scan_is_capped(env):
+    assert admin.SCAN_MAX <= 1000
+
+
+def test_approvals_listed_from_pending_index_with_expiry(env):
+    sync, client = env
+    old = now_ms() - 40 * 60_000
+    sync.set(key_approval("act-old"), json.dumps({"state": "pending", "candidate": "AUTO_KILL", "namespace": "ns", "workload": "w",
+                                                  "created_ms": old, "score": 0.7}), ex=3600)
+    sync.set(key_approval("act-exp"), json.dumps({"state": "expired", "candidate": "AUTO_PATCH", "namespace": "ns", "workload": "e",
+                                                  "created_ms": old - 1, "score": 0.7}), ex=3600)
+    sync.zadd(KEY_APPROVALS_PENDING, {"act-old": old, "act-exp": old - 1, "act-gone": old - 2})   # act-gone: record expired from Redis
+    items = {i["action_event_id"]: i for i in client.get("/api/approvals").json()["items"]}   # none of these is in the action buffer
+    assert items["act-old"]["expires_ms"] == old + 3_600_000 and items["act-exp"]["state"] == "expired"
+    assert "act-gone" not in items
+    assert client.post("/api/approvals/act-exp/approve", headers=AUTH, json={}).status_code == 409
+
+
+def test_dashboard_only_adds_requested_to_the_record(env):
+    sync, client = env
+    sync.set(key_approval(HUMAN_PENDING), json.dumps({**state_of(sync, HUMAN_PENDING), "sig": "abc", "rev": 3}), keepttl=True)
+    before = state_of(sync, HUMAN_PENDING)
+    client.post(f"/api/approvals/{HUMAN_PENDING}/approve", headers=AUTH, json={})
+    after = state_of(sync, HUMAN_PENDING)
+    assert {k: v for k, v in after.items() if k != "requested"} == before and after["requested"]["decision"] == "approve"
+
+
+def test_ledger_and_approvals_streams_are_capped(env, monkeypatch):
+    from redis.asyncio.client import Pipeline
+
+    _, client = env
+    seen = []
+    real = Pipeline.xadd
+    monkeypatch.setattr(Pipeline, "xadd", lambda self, name, fields, *a, **kw: (seen.append((name, kw)), real(self, name, fields, *a, **kw))[1])
+    client.post("/api/mode", json={"mode": "enforce"}, headers=AUTH)
+    client.post(f"/api/approvals/{HUMAN_PENDING}/approve", headers=AUTH, json={})
+    caps = {name: kw for name, kw in seen}
+    assert caps[STREAM_LEDGER] == {"maxlen": admin.LEDGER_MAXLEN, "approximate": True}   # no MINID: fusion trims by age
+    assert caps[STREAM_APPROVALS] == {"maxlen": 10_000, "approximate": True}
+
+
+def test_detection_to_kill_ignores_approved_kills(env):
+    sync, client = env
+    sec = client.get("/api/events", params={"kind": "security"}).json()["events"][-1]
+    sync.xadd(STREAM_ACTIONS, ActionEvent(event_id="a-approved", namespace="shop-prod", workload="reports", decision=Decision.AUTO_KILL, score=0.9,
+                                          rationale="approved", mode="enforce", outcome="pod_killed", security_event_id=sec["event_id"],
+                                          approved_by="admin:maria", timestamp_ms=sec["window_end_ms"] + 600_000).to_fields())
+    assert wait_for(lambda: client.get("/api/stats").json()["kills"] == 2)
+    assert client.get("/api/stats").json()["latency_ms"]["n"] == 2   # unchanged: the approved kill waited for a human

@@ -5,7 +5,7 @@ import { api, esc, icon, pretty, session, target } from './util.js';
 const PAGES = [['overview', 'Overview'], ['approvals', 'Approvals'], ['ledger', 'Ledger'], ['mode', 'Mode'], ['models', 'Models']];
 const $ = id => document.getElementById(id);
 const main = $('main');
-let unmount = null, runtimeMode = null;
+let unmount = null, mode = { runtime: null, effective: null };
 
 // theme: system by default, then light, then dark
 const THEMES = ['system', 'light', 'dark'];
@@ -40,18 +40,19 @@ function drawWho() {
 }
 
 export async function refreshMode() {
-    try { runtimeMode = (await api('/api/mode')).runtime; } catch { /* keep the last value */ }
+    try { const d = await api('/api/mode'); mode = { runtime: d.runtime, effective: d.effective }; } catch { /* keep the last value */ }
     drawBar();
 }
 function drawBar() {
-    const last = live.action[0]?.mode;
-    const m = runtimeMode || last;
+    const { runtime, effective } = mode;
     const bar = $('modebar');
-    bar.className = `modebar ${m === 'enforce' ? 'enforce' : m === 'observe' ? 'observe' : ''}`;
+    bar.className = `modebar ${effective === 'enforce' ? 'enforce' : effective === 'observe' ? 'observe' : 'down'}`;
     const conn = !live.ws ? 'Reconnecting' : live.redis ? 'Live' : 'Redis unavailable';
-    bar.innerHTML = `<span class="mode-text">${m === 'enforce' ? '<strong>Enforce</strong> fusion acts on the cluster'
-        : m === 'observe' ? '<strong>Observe</strong> dry-run, the cluster is not changed' : '<strong>Mode unknown</strong> no runtime switch and no actions yet'}
-        ${runtimeMode ? '<span class="sub">runtime switch</span>' : m ? '<span class="sub">from the latest action</span>' : ''}</span>
+    const main = effective === 'enforce' ? '<strong>Enforce</strong> fusion acts on the cluster'
+        : effective === 'observe' ? '<strong>Observe</strong> dry-run, the cluster is not changed'
+        : '<strong>Fusion not reporting</strong> the effective mode is unknown';
+    const side = runtime && runtime !== effective ? `Runtime switch: ${runtime}` : '';
+    bar.innerHTML = `<span class="mode-text">${main}${side ? `<span class="sub">${esc(side)}</span>` : ''}</span>
         <span class="conn ${live.ws && live.redis ? 'ok' : 'bad'}"><i></i>${conn}</span>`;
 }
 
@@ -95,4 +96,5 @@ onAuth(() => { drawWho(); });
 drawWho();
 start();
 refreshMode();
+setInterval(refreshMode, 3000);   // fusion rewrites the effective mode every few seconds
 render();

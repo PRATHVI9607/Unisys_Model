@@ -83,6 +83,17 @@ def key_event_index(kind: str) -> str:
 
 
 KEY_MODE = "kubeheal:mode"
+# Fusion's effective mode (observe|enforce: manifest AND switch), rewritten on every refresh with a short TTL; what the
+# console shows. Missing = fusion not running.
+KEY_MODE_EFFECTIVE = "kubeheal:mode:effective"
+# Pending approvals index: ZSET member = HUMAN action event_id, score = created_ms (fusion adds/removes; dashboard reads).
+KEY_APPROVALS_PENDING = "kubeheal:approvals:pending"
+LEDGER_MAXLEN = 100_000  # count cap next to the age trim: Redis runs with maxmemory + noeviction
+
+
+def key_approval_dedupe(namespace: str, workload: str, candidate: str) -> str:
+    """Action event id of the open approval for this (namespace, workload, candidate): one pending per target."""
+    return f"kubeheal:dedupe:approval:{namespace}:{workload}:{candidate}"
 
 
 def key_approval(action_event_id: str) -> str:
@@ -242,6 +253,7 @@ class ActionEvent(BaseModel):
     # AUTO_KILL in enforce: "requested" once the STREAM_CONTAIN freeze command was written, "failed" if
     # that write failed (the API delete went ahead); "" when no containment was attempted.
     containment: str = ""
+    approved_by: str = ""              # admin actor when this action carried out an operator approval
     timestamp_ms: int = Field(default_factory=now_ms)
 
     to_fields = _Event.to_fields

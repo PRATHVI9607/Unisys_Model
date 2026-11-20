@@ -34,8 +34,10 @@ TASKS = ("health", "security")
 # What the agents send per task. A bundle may list fewer (trained with --drop-features: the rest is ignored) or
 # names no longer sent (served as missing, but /readyz reports the mismatch).
 SENT = {"health": frozenset(HEALTH_FEATURES), "security": frozenset(SECURITY_FEATURES)}
-# Only rows the agent can publish are explained; every health assessment is published, so all are explained.
-EXPLAIN_RISK = {"health": 0.0, "security": SECURITY_PUBLISH_RISK}
+# TreeSHAP is most of the CPU (64 health rows: ~130 ms explained vs a few ms not), so only rows worth reading are
+# explained; the rest get top_factors=[]. Security: the rows the agent can publish. Health: risk >= 0.2 (class risks
+# 0.05/0.6/0.95: any real mass on degradation/critical); a confident benign verdict needs no factors.
+EXPLAIN_RISK = {"health": 0.2, "security": SECURITY_PUBLISH_RISK}
 
 REQUESTS = Counter("kubeheal_inference_requests_total", "Prediction requests", ["task", "status"])
 LATENCY = Histogram("kubeheal_inference_latency_seconds", "Prediction latency", ["task"],

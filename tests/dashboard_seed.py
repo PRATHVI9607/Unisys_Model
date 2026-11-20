@@ -3,6 +3,8 @@
 import json
 
 from kubeheal.contracts import (
+    KEY_APPROVALS_PENDING,
+    KEY_MODE_EFFECTIVE,
     STREAM_ACTIONS,
     STREAM_HEALTH,
     STREAM_LEDGER,
@@ -83,6 +85,8 @@ def seed(r, base_ms: int | None = None) -> None:
     approval(HUMAN_SECOND, "pending", "AUTO_KILL", "shop-prod", "reports", "reports-5c-lm2ps", 0.61)
     approval(HUMAN_DONE, "executed", "AUTO_PATCH", "staging", "web", score=0.64, outcome="patched",
              requested={"decision": "approve", "actor": "admin:maria", "approval_id": "x", "ts_ms": t + 200_000})
+    r.zadd(KEY_APPROVALS_PENDING, {HUMAN_PENDING: t + 30_000, HUMAN_SECOND: t + 131_000, HUMAN_DONE: t + 140_000})
+    r.set(KEY_MODE_EFFECTIVE, "observe", ex=3600)   # fusion rewrites it every few seconds; the tests have no fusion
     for i, (kind, actor, ns, dec, out) in enumerate([
             ("action", "fusion", "shop-prod", "AUTO_PATCH", "patched"), ("action", "fusion", "shop-prod", "AUTO_KILL", "pod_killed"),
             ("approval_pending", "fusion", "shop-prod", "HUMAN", "pending"), ("mode", "admin:maria", "", "enforce", "set"),

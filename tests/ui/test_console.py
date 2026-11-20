@@ -1,3 +1,4 @@
+import json
 import os
 import re
 from pathlib import Path
@@ -5,7 +6,16 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import expect
 
-from kubeheal.contracts import STREAM_ACTIONS, STREAM_LEDGER, ActionEvent, Decision, key_approval
+from kubeheal.contracts import (
+    KEY_APPROVALS_PENDING,
+    KEY_MODE_EFFECTIVE,
+    STREAM_ACTIONS,
+    STREAM_LEDGER,
+    ActionEvent,
+    Decision,
+    key_approval,
+    now_ms,
+)
 from tests.dashboard_seed import HUMAN_PENDING
 from tests.ui.conftest import TOKEN
 
@@ -105,7 +115,10 @@ def test_mode_switch_with_inline_confirmation(app_page, redis_sync):
     assert redis_sync.get("kubeheal:mode") is None   # nothing happens before the confirmation
     page.get_by_role("button", name="Confirm switch to enforce").click()
     expect(page.get_by_text("Runtime mode is now enforce")).to_be_visible()
-    expect(page.locator("#modebar")).to_contain_text("Enforce")
+    expect(page.locator("#modebar")).to_contain_text("Observe")   # the switch is not the effective mode: fusion has not applied it
+    expect(page.locator("#modebar")).to_contain_text("Runtime switch: enforce")
+    redis_sync.set(KEY_MODE_EFFECTIVE, "enforce", ex=60)   # fusion picks it up
+    expect(page.locator("#modebar")).to_contain_text("Enforce", timeout=8000)
     assert redis_sync.get("kubeheal:mode") == "enforce"
     page.keyboard.press("3")
     page.get_by_label("Kind").select_option("mode")
@@ -187,6 +200,89 @@ def test_page_is_interactive_fast(app_page):
     assert t < 200
 
 
+def test_modebar_shows_effective_mode_not_the_switch(app_page, redis_sync):
+    page = app_page
+    bar = page.locator("#modebar")
+    expect(bar).to_contain_text("Observe")
+    expect(bar).not_to_contain_text("Runtime switch")   # nothing to add while they agree
+    redis_sync.set("kubeheal:mode", "enforce")           # operator flipped the switch, fusion still reports observe
+    redis_sync.set(KEY_MODE_EFFECTIVE, "observe", ex=60)
+    expect(bar).to_contain_text("Runtime switch: enforce", timeout=8000)
+    expect(bar).to_contain_text("Observe")
+    redis_sync.delete(KEY_MODE_EFFECTIVE)                # fusion stopped reporting
+    expect(bar).to_contain_text("Fusion not reporting", timeout=8000)
+    expect(bar).not_to_contain_text("Enforce fusion acts")
+
+
+def test_approvals_show_expiry_and_resolved_states(app_page, redis_sync):
+    created = now_ms() - 20 * 60_000
+    for aid, state, wl in (("act-x1", "expired", "stale-job"), ("act-x2", "failed", "broken-job")):
+        redis_sync.set(key_approval(aid), json.dumps({"state": state, "candidate": "AUTO_PATCH", "namespace": "ops", "workload": wl,
+                                                      "created_ms": created, "score": 0.6, "rationale": "r"}), ex=3600)
+        redis_sync.zadd(KEY_APPROVALS_PENDING, {aid: created})   # not in the action stream: listed from the index
+    page = app_page
+    page.keyboard.press("2")
+    pending = page.locator(".appr", has_text="shop-prod/search")
+    expect(pending.locator("dt", has_text="Expires")).to_be_visible()
+    expect(pending.locator("dt", has_text="Expires").locator("xpath=following-sibling::dd")).to_have_text(re.compile(r"^in (4\d|5\d)m$"))   # 1 h after raising, ~10 min ago
+    expect(page.locator(".appr", has_text="ops/stale-job").locator("[data-state]")).to_have_text("expired")
+    expect(page.locator(".appr", has_text="ops/broken-job").locator("[data-state]")).to_have_text("failed")
+    expect(page.locator(".appr", has_text="ops/stale-job").locator("dt", has_text="Expires")).to_have_count(0)
+    expect(page.locator(".appr", has_text="staging/web")).to_contain_text("Approved by")   # label map, not "approved" + "d by"
+
+
+def test_actions_table_is_newest_first(app_page):
+    page = app_page
+    expect(page.locator("#actions tr")).to_have_count(7)
+    targets = page.locator("#actions tr td:nth-child(2) a").all_inner_texts()
+    flat = [t.replace("\n", "") for t in targets]
+    # stream order puts search (t+30s) before billing (t+90s); by time billing comes first
+    assert flat.index("shop-prod/billing") < flat.index("shop-prod/search")
+    assert flat[0] == "demo/victim-app" and flat[-1] == "shop-prod/cart"
+
+
+def test_targets_do_not_wrap_inside_a_name_at_400px(app_page):
+    page = app_page
+    page.set_viewport_size({"width": 400, "height": 800})
+    page.goto(page.server + "/#/overview")
+    expect(page.locator("#actions tr")).to_have_count(7)
+    spans = page.locator("#actions .nw, #signals .nw")
+    assert spans.count() >= 14
+    bad = spans.evaluate_all("els => els.filter(e => e.getClientRects().length !== 1 || e.getBoundingClientRect().height > 24).map(e => e.textContent)")
+    assert not bad, f"names broken across lines: {bad}"
+    kube = page.locator("#actions .nw", has_text="kube-system/")
+    box = kube.bounding_box()
+    assert box and box["width"] > 60   # the whole "kube-system/" sits on one line
+    assert page.evaluate("getComputedStyle(document.querySelector('#actions .nw')).whiteSpace") == "nowrap"
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+def test_reason_text_and_caret_survive_live_updates(app_page, redis_sync):
+    page = app_page
+    page.keyboard.press("2")
+    sign_in(page)
+    item = page.locator(".appr", has_text="shop-prod/search")
+    item.get_by_role("button", name="Approve auto patch").click()
+    box = item.locator("textarea[name=reason]")
+    expect(box).to_be_focused()
+    page.keyboard.type("abc def")
+    for _ in range(3):
+        page.keyboard.press("ArrowLeft")
+    # a new human decision arrives over the WebSocket and the list is refetched and redrawn
+    now = now_ms()
+    redis_sync.set(key_approval("act-new"), json.dumps({"state": "pending", "candidate": "AUTO_KILL", "namespace": "payments", "workload": "ledger",
+                                                        "pod": "ledger-0", "created_ms": now, "score": 0.7, "rationale": "new"}), ex=3600)
+    redis_sync.zadd(KEY_APPROVALS_PENDING, {"act-new": now})
+    redis_sync.xadd(STREAM_ACTIONS, ActionEvent(event_id="act-new", namespace="payments", workload="ledger", pod="ledger-0",
+                                                decision=Decision.HUMAN, mode="enforce", outcome="escalated_no_baseline", score=0.7,
+                                                rationale="new").to_fields())
+    expect(page.locator(".appr", has_text="payments/ledger")).to_be_visible()   # the redraw happened
+    page.wait_for_timeout(3500)   # and at least one poll after it
+    expect(box).to_be_focused()
+    page.keyboard.type("X")
+    expect(box).to_have_value("abc Xdef")
+
+
 @pytest.mark.skipif(not os.environ.get("KUBEHEAL_SHOTS"), reason="set KUBEHEAL_SHOTS=<dir> to write screenshots")
 def test_screenshots(app_page):
     page, out = app_page, Path(os.environ["KUBEHEAL_SHOTS"])
@@ -203,9 +299,9 @@ def test_screenshots(app_page):
                 if page.get_by_label("Admin token").count():
                     sign_in(page)
                 page.locator(".appr", has_text="shop-prod/search").get_by_role("button", name="Approve auto patch").click()
-            page.screenshot(path=str(out / f"after-{theme}-{route.split('/')[0]}.png"), full_page=False)
+            page.screenshot(path=str(out / f"v2-{theme}-{route.split('/')[0]}.png"), full_page=False)
         page.set_viewport_size({"width": 400, "height": 800})
         page.goto(page.server + "/#/overview")
         page.wait_for_timeout(400)
-        page.screenshot(path=str(out / f"after-{theme}-overview-400.png"))
+        page.screenshot(path=str(out / f"v2-{theme}-overview-400.png"))
         page.set_viewport_size({"width": 1280, "height": 800})

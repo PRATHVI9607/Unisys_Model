@@ -115,7 +115,7 @@ spec:
           emptyDir: {medium: Memory, sizeLimit: 1Mi}
 ---
 # Creates Secret kubeheal-redis once, with random passwords and the matching per-component REDIS_URLs,
-# Secret kubeheal-admin {token} (the dashboard's admin-action bearer token) and Secret kubeheal-contain-hmac {key}
+# Secret kubeheal-admin {token} (the dashboard's admin-action bearer token) Secret kubeheal-contain-hmac {key} and Secret kubeheal-approval-hmac {key} (fusion only)
 # (signs containment requests, fusion -> security agents), each random 32 bytes.
 # Works with plain `kubectl apply -k`: pods referencing the Secret wait (CreateContainerConfigError /
 # ContainerCreating) until it exists. An existing Secret is kept (409), so re-applies never rotate.
@@ -169,6 +169,7 @@ spec:
                       await create(api, "kubeheal-redis", data)
                       await create(api, "kubeheal-admin", {"token": secrets.token_urlsafe(32)})
                       await create(api, "kubeheal-contain-hmac", {"key": secrets.token_urlsafe(32)})
+                      await create(api, "kubeheal-approval-hmac", {"key": secrets.token_urlsafe(32)})
 
               asyncio.run(main())
           securityContext:

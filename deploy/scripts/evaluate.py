@@ -44,11 +44,14 @@ def now_ms() -> int:
     return time.time_ns() // 1_000_000
 
 
+KUBECTL = ["kubectl"]   # main() pins the guard-verified context here
+
+
 def k(*a: str, inp: str | None = None, timeout: int = 300, check: bool = True) -> str:
     """kubectl stdout. check=True raises KubectlError on a non-zero exit or timeout; check=False is for polls
     where failure is an answer (pod gone, logs not ready) and returns whatever stdout there was."""
     try:
-        r = subprocess.run(["kubectl", *a], input=inp, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run([*KUBECTL, *a], input=inp, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         if check:
             raise KubectlError(f"kubectl {' '.join(a[:6])}: timeout after {timeout}s") from e
@@ -145,7 +148,7 @@ def section_a() -> None:
     m = re.findall(r"test result: (\w+)\. (\d+) passed; (\d+) failed", r.stdout)
     row("A", "cargo test", f"rc={r.returncode}", f"passed={sum(int(x[1]) for x in m)}", f"failed={sum(int(x[2]) for x in m)}")
     for p in ("deploy/k8s", "deploy/k8s/overlays/production"):
-        r = run("kustomize", ["kubectl", "kustomize", p])
+        r = run("kustomize", [*KUBECTL, "kustomize", p])
         row("A", f"kustomize {p}", f"rc={r.returncode}", f"docs={r.stdout.count(chr(10) + '---')+1}", "")
     bad = [str(p) for p in sorted(ROOT.glob("deploy/**/*.sh")) + sorted(ROOT.glob("training/**/*.sh"))
            if subprocess.run(["bash", "-n", str(p)]).returncode]
@@ -191,7 +194,7 @@ def watch_attack(ns: str, name: str, deadline_s: float, after_finish_s: float = 
     r = {"op": None, "done": None, "gone": False, "files": None}
     fin = None
     while time.time() < t_end:
-        if "NotFound" in subprocess.run(["kubectl", "get", "pod", name, "-n", ns], capture_output=True, text=True).stderr:
+        if "NotFound" in subprocess.run([*KUBECTL, "get", "pod", name, "-n", ns], capture_output=True, text=True).stderr:
             r["gone"] = True
             break
         if r["done"] is None:
@@ -533,7 +536,7 @@ def start_attack(ns: str, name: str, args: list[str]) -> tuple[threading.Thread,
 
 
 def exists(ns: str, name: str) -> bool:
-    return "NotFound" not in subprocess.run(["kubectl", "get", "pod", name, "-n", ns], capture_output=True, text=True).stderr
+    return "NotFound" not in subprocess.run([*KUBECTL, "get", "pod", name, "-n", ns], capture_output=True, text=True).stderr
 
 
 def result(t0: int, ns: str, name: str, out: dict, since: float | None = None) -> str:
@@ -666,8 +669,10 @@ def main() -> None:
     ap.add_argument("--force-context", default="", help="run on this kubectl context (must equal the current one)")
     a = ap.parse_args()
     guard = [str(ROOT / "deploy/scripts/lib/guard.sh")] + (["--force-context", a.force_context] if a.force_context else [])
-    if subprocess.run(guard).returncode:   # cluster guard (prints the context): minikube / k3d-kubeheal only
+    g = subprocess.run(guard, stdout=subprocess.PIPE, text=True)   # stdout: the verified context
+    if g.returncode:   # cluster guard (prints the context): minikube / k3d-kubeheal only
         sys.exit(2)
+    KUBECTL[:] = ["kubectl", "--context", g.stdout.strip()]
     OUT, DUR = Path(a.out), a.dur
     OUT.mkdir(parents=True, exist_ok=True)
     secs = a.sections.split(",")

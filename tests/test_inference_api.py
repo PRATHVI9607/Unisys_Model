@@ -139,10 +139,15 @@ def test_security_explains_only_publishable_rows(client):
               "cpu_util_max": 0.0581, "cpu_throttle_mean": 0.0025, "mem_util_mean": 0.1708, "mem_util_max": 0.2357,
               "latency_p99_mean_s": 0.005, "latency_p99_max_s": 0.005, "latency_trend": 0.0, "error_ratio": 0.0,
               "request_rate_log": 2.6278, "restarts_delta": 0.0, "ready_ratio": 1.0}   # a lab "meta" label change
-    health = ModelBundle.load(MODELS / "health").predict(benign_change)
-    assert health.risk < SECURITY_PUBLISH_RISK and health.top_factors                 # health: low risk still explained
-    r = client.post("/v1/health/predict_batch", json={"items": [{"features": benign_change}]}).json()
-    assert r[0]["top_factors"] == [f.model_dump() for f in health.top_factors]
+    from kubeheal.inference.app import EXPLAIN_RISK
+    hb = ModelBundle.load(MODELS / "health")
+    risky = {"cpu_limit_ratio": 0.1, "spec_changed": 1.0, "cpu_util_max": 1.4}
+    r = client.post("/v1/health/predict_batch", json={"items": [{"features": f} for f in (benign_change, risky)]}).json()
+    for row, p in zip((benign_change, risky), r, strict=True):   # health: only rows at/above EXPLAIN_RISK carry factors
+        want = hb.predict(row)
+        assert want.risk == pytest.approx(p["risk"])
+        assert p["top_factors"] == ([f.model_dump() for f in want.top_factors] if p["risk"] >= EXPLAIN_RISK["health"] else [])
+    assert r[0]["risk"] < EXPLAIN_RISK["health"] <= r[1]["risk"] and r[1]["top_factors"]
 
 
 def test_old_bundle_ignores_recent_features(client):

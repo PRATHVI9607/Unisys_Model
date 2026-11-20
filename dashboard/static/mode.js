@@ -15,7 +15,8 @@ export function mount(root, _p, ctx) {
         root.querySelector('#gate').innerHTML = authed() ? '' : gateHtml('Changing the mode');
         const cur = state?.runtime;
         const body = root.querySelector('#body');
-        body.innerHTML = `<dl class="kv"><div><dt>Runtime switch</dt><dd>${esc(cur || 'not set (fusion uses its deployment setting)')}</dd></div>
+        body.innerHTML = `<dl class="kv"><div><dt>Effective mode</dt><dd>${esc(state?.effective || 'fusion not reporting')}</dd></div>
+            <div><dt>Runtime switch</dt><dd>${esc(cur || 'not set (fusion uses its deployment setting)')}</dd></div>
             <div><dt>Last action ran in</dt><dd>${esc(state?.last_action_mode || '—')}</dd></div></dl>
             <fieldset class="modes" ${authed() ? '' : 'disabled'}><legend>Set runtime mode</legend>
             ${Object.entries(COPY).map(([m, [t, d]]) => `<label class="mode-opt"><input type="radio" name="mode" value="${m}" ${pick === m ? 'checked' : ''}>

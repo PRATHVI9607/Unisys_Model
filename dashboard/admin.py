@@ -25,9 +25,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from dashboard.auth import Admin, require_admin
+from dashboard.ratelimit import Bucket
 from kubeheal.contracts import (
+    KEY_APPROVALS_PENDING,
     KEY_MODE,
-    LEDGER_RETENTION_DAYS,
+    KEY_MODE_EFFECTIVE,
+    LEDGER_MAXLEN,
     STREAM_APPROVALS,
     STREAM_LEDGER,
     key_approval,
@@ -41,7 +44,15 @@ AdminDep = Annotated[Admin, Depends(require_admin)]
 LEDGER_KINDS = ("action", "approval_pending", "approval", "rejection", "mode")
 INFERENCE_URL = os.getenv("INFERENCE_URL", "http://kubeheal-inference.kubeheal.svc:8000").rstrip("/")
 MODELS_DIR = Path(os.getenv("KUBEHEAL_MODELS_DIR", "models"))
-SCAN_BATCH, SCAN_MAX = 500, 5000   # ledger filter: entries examined per page request
+SCAN_BATCH, SCAN_MAX = 500, 1000   # ledger filter: entries examined per page request
+APPROVAL_TTL_MS = 3_600_000        # fusion expires a pending approval after 1 h
+APPROVALS_MAXLEN = 10_000
+read_limit = {"ledger": Bucket(burst=20, per_second=2), "approvals": Bucket(burst=20, per_second=2)}   # per client
+
+
+def _throttle(request: Request, name: str) -> None:
+    if not read_limit[name].take(request.client.host if request.client else "?"):
+        raise HTTPException(429, "too many requests, slow down", headers={"Retry-After": "1"})
 
 
 def _redis(request: Request) -> aioredis.Redis:
@@ -57,8 +68,7 @@ def _ledger_entry(**f: Any) -> dict[str, str]:
 
 
 def _xadd_ledger(pipe, entry: dict[str, str]) -> None:
-    cutoff = now_ms() - LEDGER_RETENTION_DAYS * 86_400_000
-    pipe.xadd(STREAM_LEDGER, entry, minid=f"{cutoff}-0", approximate=True)
+    pipe.xadd(STREAM_LEDGER, entry, maxlen=LEDGER_MAXLEN, approximate=True)   # fusion trims by age
 
 
 # ── session / mode ──────────────────────────────────────────────────────────────────────────────
@@ -73,7 +83,9 @@ async def get_mode(request: Request):
     hub = request.app.state.hub
     raw = await hub.redis.get(KEY_MODE) if hub.redis is not None else None
     last = next(iter(reversed(hub.buffers["action"])), None)
+    eff = await hub.redis.get(KEY_MODE_EFFECTIVE) if hub.redis is not None else None   # missing = fusion down
     return {"runtime": raw if raw in ("observe", "enforce") else None,
+            "effective": eff if eff in ("observe", "enforce") else None,
             "last_action_mode": last["mode"] if last else None}
 
 
@@ -101,6 +113,8 @@ def _view(action_id: str, state: dict, action: dict | None) -> dict:
     st = state.get("state", "pending")
     shown = f"{req['decision']} requested" if st == "pending" and req.get("decision") else st
     out = {"action_event_id": action_id, "state": st, "display_state": shown, "requested": req or None}
+    created = state.get("created_ms")
+    out["expires_ms"] = created + APPROVAL_TTL_MS if isinstance(created, int) else None
     for k in ("candidate", "namespace", "workload", "pod", "pod_uid", "health_event_id", "security_event_id",
               "rationale", "score", "created_ms", "outcome"):
         out[k] = state.get(k, action.get(k) if action else None)
@@ -109,22 +123,28 @@ def _view(action_id: str, state: dict, action: dict | None) -> dict:
 
 @router.get("/api/approvals")
 async def list_approvals(request: Request, limit: int = Query(100, ge=1, le=200)):
+    """Newest first: the pending index (fusion's ZSET), then HUMAN actions still in the in-memory buffer."""
+    _throttle(request, "approvals")
     hub = request.app.state.hub
-    humans = [a for a in reversed(hub.buffers["action"]) if a["decision"] == "HUMAN"][:limit]
-    states: list[Any] = []
-    if humans and hub.redis is not None:
-        try:
-            states = await hub.redis.mget([key_approval(a["event_id"]) for a in humans])
-        except aioredis.RedisError as exc:
-            raise HTTPException(503, "redis unavailable") from exc
+    if hub.redis is None:
+        raise HTTPException(503, "redis unavailable")
+    try:
+        ids = list(await hub.redis.zrevrange(KEY_APPROVALS_PENDING, 0, limit - 1))
+        ids += [a["event_id"] for a in reversed(hub.buffers["action"])
+                if a["decision"] == "HUMAN" and a["event_id"] not in ids]
+        ids = ids[:limit]
+        states = await hub.redis.mget([key_approval(i) for i in ids]) if ids else []
+    except aioredis.RedisError as exc:
+        raise HTTPException(503, "redis unavailable") from exc
     items = []
-    for a, raw in zip(humans, states, strict=False):
+    for action_id, raw in zip(ids, states, strict=False):
         try:
             state = json.loads(raw) if raw else None
         except ValueError:
             state = None
         if isinstance(state, dict):
-            items.append(_view(a["event_id"], state, a))
+            items.append(_view(action_id, state, hub.find("action", action_id)))
+    items.sort(key=lambda i: i["created_ms"] if isinstance(i["created_ms"], int) else 0, reverse=True)
     return {"items": items, "pending": sum(i["state"] == "pending" and not i["requested"] for i in items)}
 
 
@@ -151,7 +171,7 @@ async def _decide(request: Request, action_id: str, decision: str, reason: str, 
             pipe.set(key, json.dumps(state), keepttl=True)
             pipe.xadd(STREAM_APPROVALS, {"approval_id": approval_id, "action_event_id": action_id,
                                          "decision": decision, "actor": admin.actor, "reason": reason,
-                                         "ts_ms": str(now_ms())})
+                                         "ts_ms": str(now_ms())}, maxlen=APPROVALS_MAXLEN, approximate=True)
             _xadd_ledger(pipe, _ledger_entry(
                 kind="approval" if decision == "approve" else "rejection", actor=admin.actor,
                 namespace=state.get("namespace", ""), workload=state.get("workload", ""), pod=state.get("pod", ""),
@@ -187,6 +207,7 @@ async def approval(action_event_id: str, request: Request):
 async def ledger(request: Request, limit: int = Query(50, ge=1, le=200), cursor: str | None = None,
                  namespace: str | None = None, kind: str | None = None, actor: str | None = None):
     """Newest first. `cursor` is the previous page's next_cursor (a stream id); filters are exact matches."""
+    _throttle(request, "ledger")
     r = _redis(request)
     if kind and kind not in LEDGER_KINDS:
         raise HTTPException(422, f"kind must be one of {LEDGER_KINDS}")

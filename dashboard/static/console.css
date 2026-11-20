@@ -74,7 +74,9 @@ kbd { font-size: 11px; line-height: 16px; min-width: 18px; text-align: center; p
 .modebar.enforce { box-shadow: inset 3px 0 0 var(--neg); }
 .modebar.observe { box-shadow: inset 3px 0 0 var(--accent); }
 .modebar strong { font-weight: 500; margin-right: 6px; }
-.modebar .sub { margin-left: 8px; }
+.modebar.down { box-shadow: inset 3px 0 0 var(--warn); }
+.mode-text .sub { display: block; }
+.nw { white-space: nowrap; }
 .conn { display: inline-flex; align-items: center; gap: 8px; color: var(--text-2); }
 .conn i { width: 8px; height: 8px; border-radius: 50%; background: var(--pos); }
 .conn.bad i { background: var(--warn); }

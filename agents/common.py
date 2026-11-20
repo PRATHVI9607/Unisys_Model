@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import os
 import signal
@@ -154,8 +155,31 @@ def contain_sign(key: str, fields: dict) -> str:
 def contain_verify(key: str, fields: dict) -> bool:
     """True iff fields["sig"] is the valid signature (constant-time); False when missing or malformed."""
     try:
-        return hmac.compare_digest(contain_sign(key, fields), str(fields.get("sig", "")))
+        return _same(contain_sign(key, fields), str(fields.get("sig", "")))
     except (KeyError, UnicodeError):
+        return False
+
+
+def _same(a: str, b: str) -> bool:
+    """Constant-time equality on bytes: compare_digest raises TypeError on a non-ASCII str."""
+    return hmac.compare_digest(a.encode(), b.encode())
+
+
+APPROVAL_UNSIGNED = frozenset({"sig", "requested"})   # `requested` is the dashboard's to write; everything else is fusion's
+
+
+def approval_sign(key: str, rec: dict) -> str:
+    """HMAC-SHA256 (hex) over the canonical JSON of an approval record without its mutable `requested` and `sig`."""
+    body = json.dumps({k: v for k, v in rec.items() if k not in APPROVAL_UNSIGNED}, sort_keys=True,
+                      separators=(",", ":"))
+    return hmac.new(key.encode(), body.encode(), hashlib.sha256).hexdigest()
+
+
+def approval_verify(key: str, rec: dict) -> bool:
+    """True iff rec["sig"] matches (constant-time); False when missing or malformed."""
+    try:
+        return _same(approval_sign(key, rec), str(rec.get("sig", "")))
+    except (TypeError, ValueError, UnicodeError):
         return False
 
 

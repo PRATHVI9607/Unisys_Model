@@ -51,6 +51,7 @@ from kubeheal.contracts import (
 from kubeheal.features.security import (
     MAX_ENTROPY_SAMPLES,
     MAX_WINDOW_EVENTS,
+    SECURITY_FEATURES,
     SYSCALL_GROUPS,
     WINDOW_S,
     security_features,
@@ -486,8 +487,8 @@ class SecurityAgent:
                                            [{k: v for k, v in r.items() if k in known} for r in rows],
                                            SECURITY_PUBLISH_RISK)
         except Exception:
-            log.exception("embedded security model failed")
-            return None
+            log.exception("embedded security model failed; falling back to the inference service")
+            return await predict_batch(self.session, "security", rows)
 
     async def features(self, key: Key, w: PodWindow) -> tuple[dict, list[dict], int, int, list[float]] | None:
         """(features, events, start_ms, newest_ms, entropy samples) of the pod's window; None (logged) on error."""
@@ -668,6 +669,10 @@ async def main() -> None:
             bundle = await asyncio.to_thread(ModelBundle.load, MODEL_DIR)
         except Exception as e:   # absent dir (no model baked into the image) is the normal remote setup
             log.warning("no embedded security model (%s: %r); using the inference service", MODEL_DIR, e)
+            bundle = None
+        if bundle and not set(bundle.features) <= set(SECURITY_FEATURES):
+            log.error("embedded security model uses features the agent does not send: %s; using the inference service",
+                      sorted(set(bundle.features) - set(SECURITY_FEATURES)))
             bundle = None
         mode = "embedded" if bundle else "remote"
         MODEL_MODE.labels(mode).set(1)

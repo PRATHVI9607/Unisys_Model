@@ -94,10 +94,11 @@ class Hub:
         return self.redis is not None and time.monotonic() - self.last_ok < READY_WINDOW_S
 
     def latency(self) -> dict:
-        """Detection to kill: action time minus the end of the security window that triggered it."""
+        """Detection to kill: action time minus the end of the security window that triggered it (automatic kills only:
+        an approved kill waited for a human)."""
         window_end = {e["event_id"]: e["window_end_ms"] for e in self.buffers["security"] if e["window_end_ms"] > 0}
         ms = sorted(a["timestamp_ms"] - window_end[a["security_event_id"]] for a in self.buffers["action"]
-                    if a["decision"] == "AUTO_KILL" and a["outcome"] in ("pod_killed", "would_kill")
+                    if a["decision"] == "AUTO_KILL" and not a["approved_by"] and a["outcome"] in ("pod_killed", "would_kill")
                     and a["security_event_id"] in window_end)
         ms = [m for m in ms if m >= 0]
         q = lambda p: ms[max(0, math.ceil(p * len(ms)) - 1)] if ms else None   # noqa: E731  nearest rank

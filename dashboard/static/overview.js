@@ -1,5 +1,5 @@
 import { live, subscribe } from './live.js';
-import { dash, decisionClass, dur, esc, isNum, paint, pct, pretty, riskClass, target, time, ago, bar } from './util.js';
+import { decisionClass, dur, esc, isNum, paint, pct, pretty, riskClass, targetHtml, time, ago, bar } from './util.js';
 
 const FILTERS = [
     ['all', 'All', () => true],
@@ -30,7 +30,7 @@ function actionRow(a, fresh) {
     const contain = a.containment ? `<span class="tag ${a.containment === 'failed' ? 'neg' : ''}">containment ${esc(a.containment)}</span>` : '';
     return `<tr class="rail ${decisionClass(a.decision)}${fresh ? ' fresh' : ''}" data-href="#/incident/action/${encodeURIComponent(a.event_id)}">
         <td class="mono muted">${time(a.timestamp_ms)}</td>
-        <td><a href="#/incident/action/${encodeURIComponent(a.event_id)}" data-focus="a-${esc(a.event_id)}">${esc(target(a))}</a>
+        <td><a href="#/incident/action/${encodeURIComponent(a.event_id)}" data-focus="a-${esc(a.event_id)}">${targetHtml(a)}</a>
             ${a.pod ? `<div class="sub mono">${esc(a.pod)}</div>` : ''}</td>
         <td>${esc(pretty(a.decision).toLowerCase())}${dry ? ' <span class="tag">dry-run</span>' : ''}</td>
         <td class="hide-sm">${esc(pretty(a.outcome))} ${contain}</td>
@@ -40,7 +40,7 @@ function actionRow(a, fresh) {
 function signalRow(e, fresh) {
     const rc = riskClass(e.risk);
     return `<li class="signal${fresh ? ' fresh' : ''}"><a href="#/incident/${esc(e.kind)}/${encodeURIComponent(e.event_id)}" data-focus="s-${esc(e.event_id)}">
-        <span class="sig-main"><span class="sig-kind">${e.kind === 'health' ? 'Health' : 'Security'}</span> ${esc(target(e))}</span>
+        <span class="sig-main"><span class="sig-kind">${e.kind === 'health' ? 'Health' : 'Security'}</span> ${targetHtml(e)}</span>
         <span class="sub">${esc(pretty(e.label))}${e.uncertain ? ', uncertain' : ''}${(e.failure_reasons || []).length ? ', ' + esc(e.failure_reasons.join(', ')) : ''} · ${ago(e.timestamp_ms)}</span></a>
         <span class="risk ${rc}"><span class="num">${pct(e.risk)}</span>${bar(e.risk, 1, rc)}</span></li>`;
 }
@@ -67,7 +67,7 @@ export function mount(root) {
         for (const e of arrived) fresh.add(e.event_id);
         paint(root.querySelector('#kpis'), kpis());
         const test = FILTERS.find(f => f[0] === filter)[2];
-        const rows = live.action.filter(test).slice(0, 60);
+        const rows = live.action.filter(test).sort((a, b) => b.timestamp_ms - a.timestamp_ms).slice(0, 60);
         paint(root.querySelector('#actions'), rows.length ? rows.map(a => actionRow(a, fresh.has(a.event_id))).join('')
             : `<tr><td colspan="5" class="empty">${live.action.length ? 'No actions match this filter' : 'No actions yet. Fusion decisions appear here, dry-run ones included.'}</td></tr>`);
         const sig = [...live.health, ...live.security].sort((a, b) => b.timestamp_ms - a.timestamp_ms).slice(0, 30);
