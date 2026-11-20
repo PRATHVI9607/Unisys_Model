@@ -1,0 +1,30 @@
+{{- if .Values.ingress.enabled }}
+{{- if not .Values.dashboard.enabled }}{{ fail "ingress.enabled needs dashboard.enabled" }}{{ end }}
+{{- if not (and .Values.ingress.host .Values.ingress.tlsSecretName) }}{{ fail "ingress.enabled needs ingress.host and ingress.tlsSecretName: the dashboard is never exposed without TLS" }}{{ end }}
+# The dashboard has no login of its own besides the admin token: put it behind your ingress controller's auth too.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kubeheal-dashboard
+  namespace: kubeheal
+  {{- with .Values.ingress.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  tls:
+    - hosts: [{{ .Values.ingress.host | quote }}]
+      secretName: {{ .Values.ingress.tlsSecretName }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kubeheal-dashboard
+                port: {number: 8080}
+{{- end }}

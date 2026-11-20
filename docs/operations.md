@@ -24,6 +24,46 @@ minikube start --cpus=8 --memory=8g
 4. **Deploy** with `kubectl apply -k deploy/k8s/` (namespace, RBAC, Redis with its credentials Job, the five components, the ServiceMonitor and the PodMonitor), then `kubectl apply -f deploy/demo/victim-app.yaml`. The victim app is podinfo with a PVC and a load generator in namespace `demo`, which has tier `prod`.
 5. **Wait** for every rollout.
 
+### Cluster guard
+
+`install.sh`, `demo.sh`, `reset.sh`, `seed_demo.sh`, `smoke.sh`, `evaluate.py` and `training/collect/run_lab.sh` rewrite
+Deployments and delete pods and namespaces. They all run `deploy/scripts/lib/guard.sh` first: it prints
+`kubectl context: <name>` and refuses (exit 2) unless the current context is `minikube` or `k3d-kubeheal`.
+To use another lab cluster, name its context: `--force-context NAME` (NAME must equal
+`kubectl config current-context`; a different name is refused). `KUBECONFIG` is honoured as usual.
+
+### k3d (local, throwaway)
+
+```bash
+./deploy/k3d/create.sh                    # cluster `kubeheal`: 1 server + 2 agents, docker containers
+export KUBECONFIG=~/.kube/kubeheal-k3d.yaml   # create.sh prints the file; it never touches ~/.kube/config
+./deploy/scripts/install.sh --target k3d  # docker build + `k3d image import` (no registry), then the same steps as above
+./deploy/scripts/smoke.sh                 # deploy check, see below
+./deploy/k3d/delete.sh
+```
+
+`create.sh` writes only to `$KUBEHEAL_K3D_KUBECONFIG`, else a single-file `$KUBECONFIG`, else
+`~/.kube/kubeheal-k3d.yaml`, and passes `--kubeconfig-update-default=false --kubeconfig-switch-context=false`
+to k3d, so your current context never changes. `KUBEHEAL_K3D_AGENTS=N` sets the agent count. k3s enforces
+NetworkPolicy (kube-router) and bundles metrics-server. The nodes are docker containers on the host kernel, so the eBPF
+sensor works when the host has BTF (`/sys/kernel/btf/vmlinux`) and `bpf` in `/sys/kernel/security/lsm`; on a
+host without them use `EVENT_SOURCE=falco ./deploy/scripts/install.sh --target k3d`. Pin k3d to a release you checked
+(tested: v5.8.3, k3s v1.31.5).
+
+### Helm chart
+
+`deploy/helm/kubeheal` renders the same objects as the kustomize install (`tests/test_helm.py` compares them for dev,
+production and Falco). `values.yaml` is the single place for images, `mode`, `eventSource` (`sensor`|`falco`), resources and
+the fusion limits; profiles are `values-k3d.yaml` and `values-production.yaml` (== `overlays/production`).
+
+```bash
+helm upgrade --install kubeheal deploy/helm/kubeheal -n kubeheal --create-namespace --set namespace.create=false   # dev
+./deploy/scripts/install.sh --helm [--target k3d] [--production --registry HOST/PATH]   # same, plus images and the rest of install
+```
+
+The chart covers the control plane only; Prometheus and Falco stay separate Helm releases (`install.sh`). Use either
+kustomize or Helm for one cluster, not both.
+
 ### Dev vs production
 
 The manifests live in `deploy/k8s/base/`; two kustomizations build them:
@@ -51,7 +91,7 @@ silently ignored). Check before you rely on it: from a pod outside the allow-lis
 `nc -zv redis-master.kubeheal.svc 6379` must time out.
 
 - `redis-agents-only`: only pods labelled `app` in {health, security, fusion agents, dashboard} reach Redis :6379.
-- `kubeheal-inference-clients`: only the health and security agents, plus namespace `monitoring` (the
+- `kubeheal-inference-clients`: only the health and security agents, the dashboard (Models page), plus namespace `monitoring` (the
   ServiceMonitor scrape), reach inference :8000. If Prometheus runs in another namespace, edit the policy.
 - `kubectl port-forward` is not subject to NetworkPolicy, so the scripts below keep working.
 
@@ -71,6 +111,64 @@ only fusion and the admin can run scripts. Pods that need the Secret wait until 
 - Denied commands are listed by `redis-cli ACL LOG`.
 - **Rotate** (all passwords at once):
   `kubectl -n kubeheal delete secret kubeheal-redis job/kubeheal-redis-secret --ignore-not-found && kubectl apply -k deploy/k8s && kubectl -n kubeheal rollout restart deploy ds`.
+- The dashboard user is read-only except `kubeheal:approval:*`, `kubeheal:mode` and the `kubeheal.approvals` / `kubeheal.ledger`
+  streams (operator approvals and the kill switch). It cannot write baselines, specs, locks, breakers or done markers.
+
+### Admin token
+
+The same Job creates Secret `kubeheal/kubeheal-admin` (key `token`, random 32 bytes, once; it is kept on re-apply). The
+dashboard reads it as `KUBEHEAL_ADMIN_TOKEN` and requires it for admin actions (approvals, mode switch).
+
+- Read: `kubectl -n kubeheal get secret kubeheal-admin -o jsonpath='{.data.token}' | base64 -d`
+- Rotate: `kubectl -n kubeheal delete secret kubeheal-admin job/kubeheal-redis-secret --ignore-not-found && kubectl apply -k deploy/k8s && kubectl -n kubeheal rollout restart deploy/kubeheal-dashboard`
+  (the Job keeps `kubeheal-redis`, so Redis passwords do not change). Or set your own: `kubectl -n kubeheal create secret generic kubeheal-admin --from-literal=token=... --dry-run=client -o yaml | kubectl apply -f -`, then restart the dashboard.
+
+### Containment signing key
+
+The same Job creates Secret `kubeheal/kubeheal-contain-hmac` (key `key`, random 32 bytes, once). Fusion signs the containment
+requests it puts on `kubeheal.contain` with it (`CONTAIN_HMAC_KEY`) and the security agents verify them, so a writer of that
+stream alone cannot freeze pods. Rotate like the admin token (delete the Secret and the Job, re-apply, restart fusion and the
+security-agent DaemonSet together).
+
+### Alerts
+
+Fusion posts alerts to `ALERT_WEBHOOK_URL`, read from the optional key `url` of Secret `kubeheal-alerts`; without the Secret
+nothing is sent. Set it with `kubectl -n kubeheal create secret generic kubeheal-alerts --from-literal=url=https://... && kubectl -n kubeheal rollout restart deploy/kubeheal-fusion-agent`,
+or with Helm `--set alerts.webhookUrl=...` (the URL then also sits in the Helm release record).
+
+### Grafana
+
+`monitoring-values.yaml` enables Grafana (no default dashboards, random admin password, no Ingress) and its sidecar loads
+ConfigMap `kubeheal-grafana-dashboard` (label `grafana_dashboard=1`, namespace `monitoring`, from `deploy/k8s/base/grafana/kubeheal-overview.json`):
+decisions and outcomes, detection to freeze latency, containment, event lag, event/evaluation rates, inference latency and
+requests, KubeHeal CPU and memory, mode and approvals/alerts. There is no sensor-drops panel: the sensor only logs its drop
+counters (`kubeheal-sensor stats:`), it exports no metric.
+
+```bash
+kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
+kubectl -n monitoring get secret monitoring-grafana -o jsonpath='{.data.admin-password}' | base64 -d   # user: admin
+```
+
+### Dashboard Ingress (Helm only)
+
+Off by default. `--set ingress.enabled=true --set ingress.host=HOST --set ingress.tlsSecretName=SECRET [--set ingress.className=nginx]`;
+the chart refuses to render without a host and a TLS Secret, and adds HOST to the dashboard's `DASHBOARD_ALLOWED_HOSTS`. Put your
+ingress controller's authentication in front too: the admin token protects only the admin actions.
+
+### Inference load test and HPA
+
+`uv run --all-extras python deploy/scripts/loadtest_inference.py --in-cluster --hpa kubeheal-inference --duration 180 --concurrency 48` drives
+`/v1/health/predict_batch` (64 rows per request) from inside the health-agent pod (the only client NetworkPolicy admits; the
+Service then balances across replicas), prints p50/p95/p99 and the HPA's replica/CPU timeline. The HPA exists in production or with
+`helm ... --set inference.autoscaling.enabled=true --set inference.resources.requests.cpu=100m` (needs metrics-server).
+
+### Smoke test
+
+`./deploy/scripts/smoke.sh` (after `install.sh`; guarded; exits non-zero on failure) checks: all pods Ready; every Redis
+user authenticates and `ACL DRYRUN` allows and denies the expected commands; inference `/readyz`; dashboard `/api/stats` with an
+accepted Host header (a foreign one gets 400; `--skip-dashboard` for `--production`); the detection-test workload in `khe-smoke-sec`
+gets AUTO_KILL; a bad image on a Deployment with a baseline in `khe-smoke-health` gets AUTO_PATCH and the image is
+restored. It runs in enforce mode on its own `khe-smoke-*` namespaces only and removes them and their Redis keys on exit.
 
 ### Redis persistence
 
@@ -148,39 +246,58 @@ kubectl -n demo set image deploy/victim-app app=ghcr.io/stefanprodan/podinfo:0.0
 ```bash
 kubectl -n kubeheal port-forward svc/kubeheal-dashboard 8080:8080   # http://localhost:8080
 # local, against a port-forwarded Redis:
-REDIS_URL=redis://dashboard:<dashboard-password>@localhost:16379/0 uv run --all-extras uvicorn dashboard.fastapi_app:app --port 8080
+REDIS_URL=redis://dashboard:<dashboard-password>@localhost:16379/0 KUBEHEAL_ADMIN_TOKEN=<token> \
+  uv run --all-extras uvicorn dashboard.fastapi_app:app --port 8080
 ```
 
 The dashboard answers only Host headers in `DASHBOARD_ALLOWED_HOSTS` (default: `localhost`, `127.0.0.1` and the
 `kubeheal-dashboard` Service names; add your Ingress host there) and sends a strict Content-Security-Policy:
-all script and CSS come from `/static`, and `/ws` rejects a cross-site `Origin`.
+all script and CSS come from `/static` (no inline code, no style attributes), and `/ws` rejects a cross-site
+`Origin`. It has no Kubernetes access. Reads are open; every write goes through the admin token.
 
-The dashboard is a read-only console with no write endpoints and no Kubernetes access.
+**Pages** (keys `1` to `5` switch between them, arrow keys walk a table):
 
-**The UI** has three sections:
+- **Overview:** mode banner, KPIs (pods killed, workloads patched, awaiting approval, guard rails hit, detection-to-kill latency p50/p95, containment requested), the live action table with a decision filter, and the health and security signals. KPIs cover the newest 200 actions. Detection-to-kill is the action time minus the end of the security window that triggered an AUTO_KILL (dry-run kills included).
+- **Incident detail** (click a row): decision, mode, outcome, containment, rationale, a decision trail with the time from detection to action, and the linked security and health events with top factors, class probabilities, changed fields and failure reasons. Missing values render as `—`.
+- **Approvals:** HUMAN decisions fusion held back, with the candidate action. Approve or reject opens an inline confirmation with a reason. State shows live: `approve requested`, `executing`, `executed`, `failed`, `rejected`.
+- **Ledger:** paged, filterable (namespace, kind, actor), read-only.
+- **Mode:** the runtime kill switch (`observe` forces dry-run at once; `enforce` only works if the fusion manifest also says enforce). Switching asks for confirmation on the page and is ledgered.
+- **Models:** versions from the inference `/readyz`, plus training metrics when `models/<task>/meta.json` is readable (`KUBEHEAL_MODELS_DIR`, default `models`; the dashboard image does not ship them, so it shows versions only unless you mount them). Skipped quietly when inference is unreachable.
 
-- **Actions:** decision, a `dry-run` badge in observe mode, outcome, score, compound score and summary. The detail view shows the rationale and links to the underlying health and security events.
-- **Health:** label, risk, `uncertain` (the conformal set has more than one label), and the changed-field count.
-- **Security:** label, risk, `uncertain`, the event count and the window.
+Theme follows the OS (button in the sidebar cycles system, light, dark).
 
-Event details show the top factors as SHAP contribution bars, the class probabilities and the
-changed fields. Missing values render as `—`.
+**Admin access.** Set `KUBEHEAL_ADMIN_TOKEN` (the manifest reads it from a Secret). Unset: every write route answers 503. A write needs `Authorization: Bearer <token>`: missing is 401, wrong is 403. The page keeps the token in `sessionStorage` (gone when the tab closes) and sends it only as that header, so there are no cookies and no CSRF surface. `X-Actor` (free text, sanitized, 40 characters) becomes `admin:<name>` in the ledger. All admins share one token, so the actor is a label, not an identity. Failed guesses are not rate-limited: keep the dashboard off the public internet.
+
+**Approval protocol.** Fusion writes `kubeheal:approval:<HUMAN action event id>` (JSON, 24 h TTL, `state` `pending` then `executing`, `executed`, `failed` or `rejected`). The dashboard never changes `state`. On approve or reject it runs `WATCH` on that key, then in one `MULTI`: sets `requested {decision, actor, approval_id, ts_ms}` on it (a second decision gets 409), `XADD kubeheal.approvals {approval_id, action_event_id, decision: approve|reject, actor, reason, ts_ms}` and `XADD kubeheal.ledger` (kind `approval` or `rejection`). Fusion consumes the stream and moves `state` along. A missing key is 404 (never raised, or expired).
+
+**Redis commands the dashboard uses** (for the ACL): `PING`, `XREVRANGE` and `XREAD` on the three event streams and on `kubeheal.ledger`; `HGETALL kubeheal:{kind}:{id}`; `GET kubeheal:mode`, `MGET`/`GET kubeheal:approval:*`; and, admin only, `WATCH`/`MULTI`/`EXEC`, `SET kubeheal:mode`, `SET kubeheal:approval:*` (with `KEEPTTL`), `XADD kubeheal.approvals`, `XADD kubeheal.ledger` (with `MINID ~` 90 days).
+
+**Environment:** `REDIS_URL`, `LOG_LEVEL`, `DASHBOARD_ALLOWED_HOSTS`, `KUBEHEAL_ADMIN_TOKEN` (new), `INFERENCE_URL` (new here, same default as the agents; needs a NetworkPolicy path to inference for the Models page), `KUBEHEAL_MODELS_DIR` (new).
 
 **How it works:**
 
 - **Ingest.** A single background task backfills the newest 200 entries per stream (`XREVRANGE`), then tails all three with `XREAD BLOCK 1000 COUNT 100`. Entries are parsed with the contract's `from_fields()`. A malformed entry is logged and skipped.
 - **Memory.** The newest 200 events per kind are kept in memory, and the counts in the UI cover that window. Older details come from the `kubeheal:{kind}:{id}` hashes (24 h TTL).
-- **Push.** Batches go to every WebSocket client at once. A client that does not accept a message within 2 s is dropped and reconnects. Redis outages retry with backoff from 1 s to 30 s.
+- **Push.** Batches go to every WebSocket client at once. A client that does not accept a message within 2 s is dropped and reconnects. Redis outages retry with backoff from 1 s to 30 s. New actions are announced to screen readers through an `aria-live` region.
 
 | Endpoint | Returns |
 |---|---|
-| `GET /` | The console |
-| `GET /healthz` | 200 while the process is up |
-| `GET /readyz` | 200 if Redis answered in the last 10 s, else 503 |
-| `GET /api/stats` | `health_events`, `health_high_risk` (risk ≥ 0.7), `security_events`, `security_high_risk`, `actions`, `actions_dry_run`, `redis_connected`, `window` |
+| `GET /` | The console (single page, hash routes) |
+| `GET /healthz`, `GET /readyz` | 200 while up; ready is 200 if Redis answered in the last 10 s, else 503 |
+| `GET /api/stats` | Event counts, `kills`, `patches` (and `_dry_run`), `human`, `guard_rails`, `containment_requested`, `latency_ms {p50,p95,n}`, `redis_connected`, `window` |
 | `GET /api/events?kind=health\|security\|action&limit=1..200` | Newest first |
 | `GET /api/events/{kind}/{event_id}` | One event: 404 if unknown, 503 if Redis is needed and down |
-| `WS /ws` | Server → client messages: `stats`, `events` (oldest → newest), `resync` (after a Redis reconnect: refetch) |
+| `GET /api/approvals`, `GET /api/approvals/{id}` | Queue with state; 404 if the approval key is gone |
+| `POST /api/approvals/{id}/approve\|reject` | Admin. `{reason}`. 404 / 409 as above |
+| `GET /api/mode`, `POST /api/mode` | Runtime mode; admin `{mode: observe\|enforce, reason}` |
+| `GET /api/ledger?limit&cursor&namespace&kind&actor` | Newest first, `next_cursor` for the next page |
+| `GET /api/models` | Inference versions and bundle metrics |
+| `GET /api/admin/session` | Admin. Checks the token |
+| `WS /ws` | Server to client: `stats`, `events` (oldest to newest), `resync` (after a Redis reconnect: refetch) |
+
+**Browser tests.** `tests/ui/` drives the real app with Playwright and fake Redis. Install the browser once with
+`uv run playwright install chromium`; without it the tests skip. Run them with `uv run --all-extras pytest tests/ui`;
+`KUBEHEAL_SHOTS=<dir>` also writes screenshots.
 
 ## Benchmark
 

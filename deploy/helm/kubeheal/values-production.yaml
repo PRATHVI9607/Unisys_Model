@@ -1,0 +1,18 @@
+# == deploy/k8s/overlays/production: no dashboard, inference HA + HPA + PDB, PriorityClass, DaemonSet rolling update.
+# Images fail closed (registry.invalid never resolves): pass the real ones, e.g.
+#   --set images.inference=HOST/PATH/inference:TAG --set images.agents=HOST/PATH/agents:TAG --set images.sensor=HOST/PATH/sensor:TAG
+images:
+  inference: registry.invalid/kubeheal/inference:v5
+  agents: registry.invalid/kubeheal/agents:v5
+  dashboard: registry.invalid/kubeheal/dashboard:v5   # unused: the dashboard is off
+  sensor: registry.invalid/kubeheal/sensor:v5
+priorityClass: {enabled: true}
+dashboard: {enabled: false}
+inference:
+  autoscaling: {enabled: true}
+  pdb: {enabled: true}
+  resources:   # the HPA targets 70% of the request: 100m tracks real cluster size, not idle noise
+    requests: {cpu: 100m, memory: 96Mi}
+    limits: {cpu: 500m, memory: 192Mi}
+security:
+  updateStrategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 10%}}

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 import signal
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Any
 
 import aiohttp
 import prometheus_client
@@ -139,14 +142,33 @@ async def predict_batch(session: aiohttp.ClientSession, task: str, rows: list[di
         return None
 
 
+CONTAIN_SIGNED = ("pod_uid", "namespace", "pod", "event_id", "ts_ms")
+
+
+def contain_sign(key: str, fields: dict) -> str:
+    """HMAC-SHA256 (hex) over pod_uid|namespace|pod|event_id|ts_ms of a STREAM_CONTAIN entry."""
+    msg = "|".join(str(fields[f]) for f in CONTAIN_SIGNED)
+    return hmac.new(key.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+
+def contain_verify(key: str, fields: dict) -> bool:
+    """True iff fields["sig"] is the valid signature (constant-time); False when missing or malformed."""
+    try:
+        return hmac.compare_digest(contain_sign(key, fields), str(fields.get("sig", "")))
+    except (KeyError, UnicodeError):
+        return False
+
+
 async def publish_event(r: aioredis.Redis, stream: str, kind: str, event,
-                        ack: tuple[str, str, str] | None = None) -> None:
+                        ack: tuple[str, str, str] | None = None,
+                        extra: Sequence[Callable[[Any], None]] = ()) -> None:
     """XADD the event (approximate MAXLEN) plus a hash copy at key_event(kind, id), in one MULTI.
 
     Copies expire after 24 h and are capped at EVENT_COPIES per kind (an index list; the oldest copies
     are deleted), so a busy cluster cannot fill Redis with them: Redis runs noeviction, and a full Redis
     fails every write. ack=(stream, group, entry id) XACKs the consumed entry in the same transaction,
-    so the event is published and the entry acked, or neither.
+    so the event is published and the entry acked, or neither. extra: callables that queue more commands
+    on the same pipeline (e.g. a ledger XADD, an approval SET): same transaction, no extra round trip.
     """
     fields = event.to_fields()
     key, index = key_event(kind, event.event_id), key_event_index(kind)
@@ -159,6 +181,8 @@ async def publish_event(r: aioredis.Redis, stream: str, kind: str, event,
         p.ltrim(index, 0, EVENT_COPIES - 1)
         if ack:
             p.xack(*ack)
+        for queue in extra:
+            queue(p)
         overflow = (await p.execute())[4]
     if overflow:
         try:

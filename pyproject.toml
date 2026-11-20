@@ -23,6 +23,7 @@ agents = [
     "kubernetes-asyncio>=32.0",
     "prometheus-client>=0.21",
     "orjson>=3.13.0",
+    "lightgbm>=4.6",   # security agent scores in-process (kubeheal.ml.bundle)
 ]
 dashboard = [
     "fastapi>=0.115",
@@ -38,9 +39,10 @@ training = [
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.25",
-    "httpx>=0.28",
     "fakeredis>=2.26",
     "ruff>=0.9",
+    "pytest-playwright>=0.10.0",
+    "httpx2>=2.16.2",
 ]
 
 [tool.uv]

@@ -1,0 +1,6 @@
+# k3d lab cluster `kubeheal` (deploy/k3d/): images are loaded with `k3d image import`, never pulled.
+# The eBPF sensor runs on the host kernel shared by the k3d nodes (needs BTF + `bpf` in /sys/kernel/security/lsm);
+# deploy/scripts/install.sh --target k3d falls back to eventSource: falco when the host cannot do it.
+eventSource: sensor
+mode: enforce
+namespace: {create: false}   # install.sh: helm -n kubeheal --create-namespace

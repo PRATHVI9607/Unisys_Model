@@ -1,0 +1,19 @@
+# k3d lab cluster for KubeHeal (deploy/k3d/create.sh). k3s' embedded kube-router enforces NetworkPolicy
+# (quarantine and the Redis/inference allow-lists need that); k3s bundles metrics-server (the production HPA).
+# No registry and no port mappings: install.sh --target k3d loads the images with `k3d image import`, and
+# the dashboard is reached with `kubectl port-forward`. Nodes are docker containers sharing the host
+# kernel, so the eBPF sensor sees pod file activity (see docs/operations.md "k3d").
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: kubeheal
+servers: 1
+agents: 2
+options:
+  k3s:
+    extraArgs:
+      - {arg: --disable=traefik, nodeFilters: [server:*]}      # not used: saves ~100 MiB
+      - {arg: --disable=servicelb, nodeFilters: [server:*]}
+  kubeconfig:
+    updateDefaultKubeconfig: false
+    switchCurrentContext: false

@@ -4,6 +4,7 @@ Kube APIs are a fake that records every call; Redis is fakeredis. The incident
 lock (Lua) is replaced by a stub here and tested in test_incident_lock.py.
 """
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -14,16 +15,21 @@ from kubernetes_asyncio.client.exceptions import ApiException
 
 from agents.fusion_agent import agent as fa
 from kubeheal.contracts import (
+    KEY_MODE,
+    LEDGER_RETENTION_DAYS,
     PROTECTED_NAMESPACES,
     STREAM_ACTIONS,
+    STREAM_APPROVALS,
     STREAM_DEADLETTER,
     STREAM_HEALTH,
+    STREAM_LEDGER,
     STREAM_SECURITY,
     ActionEvent,
     Decision,
     Factor,
     HealthEvent,
     SecurityEvent,
+    key_approval,
     key_baseline,
     key_event,
     now_ms,
@@ -389,7 +395,9 @@ async def test_lost_consumer_group_is_recreated(redis, monkeypatch):
     await redis.delete(STREAM_HEALTH, STREAM_SECURITY)
     script = [aioredis.ResponseError("NOGROUP No such key or consumer group"), asyncio.CancelledError()]
 
-    async def poll():
+    async def poll(streams=fa.STREAMS):
+        if streams != fa.STREAMS:      # the approvals task idles; the script is for the event loop
+            await asyncio.sleep(3600)
         raise script.pop(0)
     monkeypatch.setattr(agent, "poll_once", poll)
     with pytest.raises(asyncio.CancelledError):
@@ -578,7 +586,9 @@ async def test_non_nogroup_redis_error_backs_off_instead_of_crashing(redis, monk
     script = [aioredis.ResponseError("OOM command not allowed when used memory > 'maxmemory'"),
               asyncio.CancelledError()]
 
-    async def poll():
+    async def poll(streams=fa.STREAMS):
+        if streams != fa.STREAMS:      # the approvals task idles; the script is for the event loop
+            await asyncio.sleep(3600)
         raise script.pop(0)
     monkeypatch.setattr(agent, "poll_once", poll)
     with pytest.raises(asyncio.CancelledError):
@@ -674,3 +684,469 @@ async def test_unsafe_baseline_is_never_restored(redis, tamper):
     a = await agent.handle(drift())
     assert (a.decision, a.outcome) == (Decision.HUMAN, "escalated_unsafe_baseline")
     assert "patch_namespaced_deployment" not in kube.names
+
+
+# ── runtime kill switch ─────────────────────────────────────────────────────
+@pytest.mark.parametrize("env, key, expected", [
+    ("observe", "enforce", "observe"),     # the key can never raise the manifest's mode
+    ("enforce", "observe", "observe"),     # the kill switch
+    ("enforce", "enforce", "enforce"),
+    ("enforce", None, "enforce"),
+    ("enforce", "bogus", "enforce"),       # invalid key → env mode
+    ("enforce", " OBSERVE ", "observe"),
+    ("observe", None, "observe"),
+])
+async def test_effective_mode(redis, env, key, expected):
+    agent, _ = make(redis, mode=env)
+    if key is not None:
+        await redis.set(KEY_MODE, key)
+    await agent.refresh_mode()
+    assert agent.mode == expected
+
+
+async def test_switch_back_to_enforce_when_key_removed(redis):
+    agent, kube = make(redis, mode="enforce")
+    await redis.set(KEY_MODE, "observe")
+    await agent.refresh_mode()
+    assert (await agent.handle(ransomware(eid="a"))).outcome == "would_kill"
+    await redis.delete(KEY_MODE)
+    await agent.refresh_mode()
+    assert (await agent.handle(ransomware(eid="b"))).outcome == "pod_killed"
+    assert kube.names.count("delete_namespaced_pod") == 1
+
+
+async def test_mode_is_refreshed_in_background_never_on_the_kill_path(redis, monkeypatch):
+    assert fa.MODE_REFRESH_S <= 1.0
+    monkeypatch.setattr(fa, "MODE_REFRESH_S", 0.01)
+    agent, _ = make(redis, mode="enforce")
+    reads = []
+    real = redis.get
+
+    async def get(name, *a, **k):
+        reads.append(name)
+        return await real(name, *a, **k)
+    monkeypatch.setattr(redis, "get", get)
+    await agent.handle(ransomware(eid="x"))
+    assert KEY_MODE not in reads                      # the kill path never reads the switch
+    task = asyncio.create_task(agent.mode_loop())
+    try:
+        await real(KEY_MODE)
+        await redis.set(KEY_MODE, "observe")
+        for _ in range(100):
+            if agent.mode == "observe":
+                break
+            await asyncio.sleep(0.01)
+        assert agent.mode == "observe"
+    finally:
+        task.cancel()
+
+
+async def test_mode_read_error_keeps_last_mode(redis, monkeypatch):
+    import redis.asyncio as aioredis
+    agent, _ = make(redis, mode="enforce")
+
+    async def boom(*a, **k):
+        raise aioredis.ConnectionError("down")
+    monkeypatch.setattr(redis, "get", boom)
+    await agent.refresh_mode()
+    assert agent.mode == "enforce"
+
+
+# ── pending approvals, ledger ───────────────────────────────────────────────
+def uncertain(ev):
+    return ev.model_copy(update={"uncertain": True})   # policy: HUMAN (score high, not certain)
+
+
+async def ledger_entries(redis):
+    return [f for _, f in await redis.xrange(STREAM_LEDGER)]
+
+
+async def human(agent, redis, ev=None):
+    """Publish a HUMAN decision (an uncertain ransomware verdict with a pod) and return its ActionEvent."""
+    a = await agent.handle(ev or uncertain(ransomware(eid="s-h")))
+    assert a.decision is Decision.HUMAN
+    return a
+
+
+async def approve(agent, redis, action_id, decision="approve", aid="ap1", actor="alice", reason="looks bad"):
+    await agent.ensure_groups(streams=(STREAM_APPROVALS,))
+    await redis.xadd(STREAM_APPROVALS, {"approval_id": aid, "action_event_id": action_id, "decision": decision,
+                                        "actor": actor, "reason": reason, "ts_ms": str(now_ms())})
+    await agent.poll_once(block_ms=1, streams=(STREAM_APPROVALS,))
+
+
+async def record(redis, action_id):
+    return json.loads(await redis.get(key_approval(action_id)))
+
+
+async def test_human_with_executable_candidate_writes_pending_approval_and_ledger(redis):
+    agent, kube = make(redis, mode="enforce")
+    a = await human(agent, redis)
+    rec = await record(redis, a.event_id)
+    assert rec["state"] == "pending" and rec["candidate"] == "AUTO_KILL"
+    assert (rec["namespace"], rec["workload"], rec["pod"], rec["pod_uid"]) == ("prod-shop", "web", "web-7d9f-abcde", "")
+    assert rec["security_event_id"] == "s-h" and rec["score"] == a.score and rec["rationale"] == a.rationale
+    assert 0 < await redis.ttl(key_approval(a.event_id)) <= 24 * 3600
+    (entry,) = await ledger_entries(redis)
+    assert (entry["kind"], entry["actor"], entry["outcome"], entry["decision"], entry["action_event_id"]) == (
+        "approval_pending", "fusion", "pending", "AUTO_KILL", a.event_id)
+    assert not [n for n in kube.names if n in MUTATING]
+
+
+async def test_health_candidate_is_a_patch_and_no_candidate_means_no_record(redis):
+    agent, _ = make(redis, mode="enforce")
+    h = await agent.handle(uncertain(drift()))
+    assert (await record(redis, h.event_id))["candidate"] == "AUTO_PATCH"
+    # no baseline for the health event, no pod for the security event: nothing executable
+    nb = await agent.handle(uncertain(drift(eid="h2").model_copy(update={"has_baseline": False})))
+    np_ = await agent.handle(uncertain(ransomware(eid="s2", pod="")))
+    for a in (nb, np_):
+        assert a.decision is Decision.HUMAN and not await redis.exists(key_approval(a.event_id))
+    assert [e["kind"] for e in await ledger_entries(redis)] == ["approval_pending"]
+
+
+async def test_automatic_actions_are_ledgered_in_every_outcome(redis):
+    agent, _ = make(redis, mode="enforce", protected=PROTECTED_NAMESPACES | {"prod-shop"})
+    await agent.handle(ransomware())                                           # skipped_protected
+    agent2, _ = make(redis)                                                    # observe: would_kill
+    await agent2.handle(ransomware(eid="s2", ns="prod-x"))
+    e1, e2 = await ledger_entries(redis)
+    assert (e1["kind"], e1["decision"], e1["outcome"], e1["actor"], e1["mode"]) == (
+        "action", "AUTO_KILL", "skipped_protected", "fusion", "enforce")
+    assert (e2["outcome"], e2["mode"], e2["pod"], e2["security_event_id"]) == ("would_kill", "observe", "web-7d9f-abcde", "s2")
+    assert int(e1["ts_ms"]) > 0 and e1["namespace"] == "prod-shop" and e1["workload"] == "web"
+
+
+async def test_benign_and_observe_decisions_are_not_ledgered(redis):
+    agent, _ = make(redis)
+    await agent.handle(drift(risk=0.05, label="benign", eid="b1"))
+    assert await redis.xlen(STREAM_LEDGER) == 0
+
+
+async def test_ledger_xadd_trims_by_age(redis):
+    """XADD MINID ~ now - retention (approximate trimming only drops whole nodes, so check the command)."""
+    async with redis.pipeline(transaction=True) as p:
+        fa.ledger("action", "fusion", "enforce", outcome="x")(p)
+        (args, _), = p.command_stack
+    args = [a.decode() if isinstance(a, bytes) else a for a in args]
+    assert args[:5] == ["XADD", STREAM_LEDGER, "MINID", "~", args[4]]
+    assert abs(int(args[4]) - (now_ms() - LEDGER_RETENTION_DAYS * 86_400_000)) < 5000
+
+
+async def test_ledger_xadd_shares_the_transaction_of_the_publish(redis):
+    """A failing publish leaves neither the ActionEvent nor a ledger entry (one MULTI)."""
+    agent, _ = make(redis)
+    real = redis.pipeline
+
+    def pipeline(*a, **k):
+        p = real(*a, **k)
+        async def execute(*a, **k):
+            raise ConnectionError("down")
+        p.execute = execute
+        return p
+    redis.pipeline = pipeline
+    with pytest.raises(ConnectionError):
+        await agent.handle(ransomware())
+    assert await redis.xlen(STREAM_ACTIONS) == 0 and await redis.xlen(STREAM_LEDGER) == 0
+
+
+# ── approvals consumer ──────────────────────────────────────────────────────
+async def test_approve_executes_through_every_rail_once(redis):
+    agent, kube = make(redis, mode="enforce")
+    a = await human(agent, redis)
+    await approve(agent, redis, a.event_id)
+    assert kube.names.count("delete_namespaced_pod") == 1
+    out = [ActionEvent.from_fields(f) for _, f in await redis.xrange(STREAM_ACTIONS)][-1]
+    assert (out.decision, out.outcome, out.mode, out.security_event_id) == (Decision.AUTO_KILL, "pod_killed", "enforce", "s-h")
+    assert out.event_id != a.event_id and out.pod == "web-7d9f-abcde"
+    assert out.rationale == f"approved by alice: looks bad; original: {a.rationale}"
+    rec = await record(redis, a.event_id)
+    assert (rec["state"], rec["outcome"], rec["actor"]) == ("executed", "pod_killed", "alice")
+    kinds = await ledger_entries(redis)
+    assert [(e["kind"], e["actor"], e["outcome"]) for e in kinds] == [
+        ("approval_pending", "fusion", "pending"), ("approval", "alice", "pod_killed")]
+    assert kinds[1]["approval_id"] == "ap1" and kinds[1]["action_event_id"] == a.event_id
+    assert (await redis.xpending(STREAM_APPROVALS, fa.GROUP))["pending"] == 0
+    # a second approval of the same action never executes again
+    await approve(agent, redis, a.event_id, aid="ap2", actor="bob")
+    assert kube.names.count("delete_namespaced_pod") == 1
+    last = (await ledger_entries(redis))[-1]
+    assert (last["kind"], last["actor"], last["outcome"]) == ("approval", "bob", "refused:not_pending:executed")
+
+
+async def test_concurrent_approvals_have_one_winner(redis):
+    agent, kube = make(redis, mode="enforce")
+    a = await human(agent, redis)
+    reqs = [{"approval_id": f"c{i}", "action_event_id": a.event_id, "decision": "approve", "actor": "x"}
+            for i in range(3)]
+    await asyncio.gather(*(agent.handle_approval(r) for r in reqs))
+    assert kube.names.count("delete_namespaced_pod") == 1
+
+
+async def test_approve_in_observe_is_a_dry_run(redis):
+    agent, kube = make(redis)
+    a = await human(agent, redis)
+    await approve(agent, redis, a.event_id)
+    out = [ActionEvent.from_fields(f) for _, f in await redis.xrange(STREAM_ACTIONS)][-1]
+    assert (out.outcome, out.mode) == ("would_kill", "observe")
+    assert not [n for n in kube.names if n in MUTATING]
+
+
+async def test_approve_after_kill_switch_flips_is_a_dry_run(redis):
+    agent, kube = make(redis, mode="enforce")
+    a = await human(agent, redis)
+    await redis.set(KEY_MODE, "observe")
+    await agent.refresh_mode()
+    await approve(agent, redis, a.event_id)
+    assert not [n for n in kube.names if n in MUTATING]
+    assert (await record(redis, a.event_id))["outcome"] == "would_kill"
+
+
+async def test_approve_respects_protected_namespace_label_and_uid(redis):
+    for kube, kw, outcome in [
+        (FakeKube(), {"protected": PROTECTED_NAMESPACES | {"prod-shop"}}, "skipped_protected"),
+        (FakeKube(pod_labels=PROTECTED), {}, "skipped_protected"),
+        (FakeKube(), {}, "skipped_stale_pod"),
+    ]:
+        agent, kube = make(redis, kube, mode="enforce", **kw)
+        ev = uncertain(ransomware(eid=f"s-{outcome}-{len(kw)}"))
+        if outcome == "skipped_stale_pod":
+            ev = ev.model_copy(update={"pod_uid": "other-uid"})
+        a = await human(agent, redis, ev)
+        await approve(agent, redis, a.event_id, aid=f"ap-{a.event_id}")
+        assert not [n for n in kube.names if n in MUTATING]
+        assert (await record(redis, a.event_id))["outcome"] == outcome
+        assert (await record(redis, a.event_id))["state"] == "failed"
+
+
+async def test_approve_patch_validates_the_baseline(redis):
+    agent, kube = make(redis, mode="enforce")
+    await set_baseline(redis)
+    h = await agent.handle(uncertain(drift()))
+    await approve(agent, redis, h.event_id)
+    assert kube.names.count("patch_namespaced_deployment") == 1
+    assert (await record(redis, h.event_id))["state"] == "executed"
+    # a baseline that weakens posture is still refused by baseline_problem()
+    agent2, kube2 = make(redis, mode="enforce")
+    bad = {"metadata": {"labels": {"app": "other"}}, "spec": {"containers": [{"name": "w", "image": "w"}]}}
+    await redis.set(key_baseline("prod-shop", "web"), json.dumps({"replicas": 2, "template": bad}))
+    h2 = await agent2.handle(uncertain(drift(eid="h9")))
+    await approve(agent2, redis, h2.event_id, aid="ap9")
+    assert "patch_namespaced_deployment" not in kube2.names
+    assert (await record(redis, h2.event_id))["outcome"] == "escalated_unsafe_baseline"
+
+
+async def test_stale_approval_is_refused(redis):
+    agent, kube = make(redis, mode="enforce")
+    a = await human(agent, redis)
+    rec = await record(redis, a.event_id)
+    await redis.set(key_approval(a.event_id), json.dumps({**rec, "created_ms": now_ms() - 2 * 3600 * 1000}), keepttl=True)
+    n_actions = await redis.xlen(STREAM_ACTIONS)
+    await approve(agent, redis, a.event_id)
+    assert not [n for n in kube.names if n in MUTATING]
+    assert await redis.xlen(STREAM_ACTIONS) == n_actions
+    assert (await record(redis, a.event_id))["state"] == "pending"
+    assert (await ledger_entries(redis))[-1]["outcome"] == "refused:stale"
+
+
+async def test_reject_closes_the_approval(redis):
+    agent, kube = make(redis, mode="enforce")
+    a = await human(agent, redis)
+    await approve(agent, redis, a.event_id, decision="reject", reason="false alarm")
+    assert (await record(redis, a.event_id))["state"] == "rejected"
+    e = (await ledger_entries(redis))[-1]
+    assert (e["kind"], e["outcome"], e["actor"], e["detail"]) == ("rejection", "rejected", "alice", "false alarm")
+    await approve(agent, redis, a.event_id, aid="ap2")
+    assert not [n for n in kube.names if n in MUTATING]
+    assert (await ledger_entries(redis))[-1]["outcome"] == "refused:not_pending:rejected"
+
+
+async def test_missing_record_and_bad_decision_are_refused(redis):
+    agent, kube = make(redis, mode="enforce")
+    await approve(agent, redis, "act-nope")
+    a = await human(agent, redis)
+    await approve(agent, redis, a.event_id, decision="maybe", aid="ap2")
+    assert [e["outcome"] for e in (await ledger_entries(redis))[-3:]] == [
+        "refused:no_such_approval", "pending", "refused:bad_decision"]
+    assert (await record(redis, a.event_id))["state"] == "pending" and not kube.calls
+
+
+async def test_malformed_approval_entry_is_dead_lettered(redis):
+    agent, _ = make(redis)
+    await agent.ensure_groups(streams=(STREAM_APPROVALS,))
+    await redis.xadd(STREAM_APPROVALS, {"approval_id": "x"})
+    await agent.poll_once(block_ms=1, streams=(STREAM_APPROVALS,))
+    assert await redis.xlen(STREAM_DEADLETTER) == 1
+    assert (await redis.xpending(STREAM_APPROVALS, fa.GROUP))["pending"] == 0
+
+
+async def test_redelivered_approval_never_acts_twice(redis, monkeypatch):
+    agent, kube = make(redis, mode="enforce")
+    a = await human(agent, redis)
+    real = fa.publish_event
+    fails = [True]
+
+    async def flaky(*args, **kw):
+        if fails:
+            fails.pop()
+            raise ConnectionError("publish failed")
+        return await real(*args, **kw)
+    monkeypatch.setattr(fa, "publish_event", flaky)
+    await approve(agent, redis, a.event_id)                       # executes, publish fails: entry stays pending
+    assert (await redis.xpending(STREAM_APPROVALS, fa.GROUP))["pending"] == 1
+    (msg_id, fields), = await redis.xrange(STREAM_APPROVALS)
+    await agent.process(STREAM_APPROVALS, msg_id, fields, 2)      # redelivery
+    assert kube.names.count("delete_namespaced_pod") == 1
+    approvals = [e for e in await ledger_entries(redis) if e["kind"] == "approval"]
+    assert [e["outcome"] for e in approvals] == ["pod_killed"]
+    assert (await record(redis, a.event_id))["state"] == "executed"
+    assert (await redis.xpending(STREAM_APPROVALS, fa.GROUP))["pending"] == 0
+
+
+async def test_event_redelivery_keeps_one_pending_approval_and_one_ledger_entry(redis):
+    agent, _ = make(redis)
+    ev = uncertain(ransomware(eid="s-r"))
+    a = await agent.handle(ev)
+    rec = await redis.get(key_approval(a.event_id))
+    await agent.handle(ev)                                        # done-marker path republishes the same action
+    assert await redis.get(key_approval(a.event_id)) == rec
+
+
+class SlowKube(FakeKube):
+    """Blocks reading pod "slow-pod" until released."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.entered, self.release = asyncio.Event(), asyncio.Event()
+
+    async def read_namespaced_pod(self, name, ns):
+        if name == "slow-pod":
+            self.entered.set()
+            await self.release.wait()
+        return await super().read_namespaced_pod(name, ns)
+
+
+async def test_a_slow_approval_never_delays_event_handling(redis):
+    kube = SlowKube()
+    agent, _ = make(redis, kube, mode="enforce")
+    slow = await human(agent, redis, uncertain(ransomware(eid="s-slow", pod="slow-pod")))
+    await agent.ensure_groups(streams=(STREAM_APPROVALS,))
+    await redis.xadd(STREAM_APPROVALS, {"approval_id": "ap-s", "action_event_id": slow.event_id,
+                                        "decision": "approve", "actor": "alice"})
+    approvals = asyncio.create_task(agent.poll_once(block_ms=1, streams=(STREAM_APPROVALS,)))
+    await asyncio.wait_for(kube.entered.wait(), 2)               # the approval is stuck inside a kube call
+    assert not approvals.done()
+    fast = await asyncio.wait_for(agent.handle(ransomware(eid="s-fast", pod="fast-pod")), 1)
+    assert fast.outcome == "pod_killed" and fast.containment == "requested"
+    kube.release.set()
+    await asyncio.wait_for(approvals, 2)
+    assert (await record(redis, slow.event_id))["state"] == "executed"
+    assert kube.names.count("delete_namespaced_pod") == 2
+
+
+async def test_run_starts_mode_and_approval_tasks_beside_the_event_loop(redis, monkeypatch):
+    monkeypatch.setattr(fa, "MODE_REFRESH_S", 0.01)
+    agent, kube = make(redis, mode="enforce")
+    a = await human(agent, redis)
+    await agent.ensure_groups(streams=(STREAM_APPROVALS,))
+    await redis.xadd(STREAM_APPROVALS, {"approval_id": "ap-r", "action_event_id": a.event_id,
+                                        "decision": "approve", "actor": "alice"})
+    await redis.set(KEY_MODE, "observe")
+    real = agent.poll_once
+
+    async def poll(streams=fa.STREAMS):
+        if streams == fa.STREAMS:              # the event loop: done once both side tasks did their work
+            while agent.mode != "observe" or (await record(redis, a.event_id))["state"] == "pending":  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+            raise asyncio.CancelledError
+        await real(block_ms=1, streams=streams)   # fakeredis serialises blocking reads: keep this one short
+        await asyncio.sleep(0.01)
+    monkeypatch.setattr(agent, "poll_once", poll)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(agent.run(), 10)
+    assert agent.mode == "observe" and (await record(redis, a.event_id))["outcome"] == "would_kill"
+
+
+# ── alert webhook ───────────────────────────────────────────────────────────
+async def test_alerts_for_actions_and_pending_approvals_only(redis):
+    agent, _ = make(redis, alert_url="http://hook.invalid/x")
+    await agent.handle(ransomware(eid="a1"))                                   # AUTO_KILL would_kill
+    h = await agent.handle(uncertain(ransomware(eid="a2")))                    # HUMAN + candidate
+    await agent.handle(uncertain(ransomware(eid="a3", pod="")))                # HUMAN, nothing to approve
+    await agent.handle(drift(ns="dev-x", risk=0.05, label="benign", eid="b1"))   # BENIGN
+    sent = [agent.alerter.queue.get_nowait() for _ in range(agent.alerter.queue.qsize())]
+    assert [(b["decision"], b["outcome"]) for b in sent] == [("AUTO_KILL", "would_kill"), ("HUMAN", "none")]
+    assert sent[1]["action_event_id"] == h.event_id and "needs approval" in sent[1]["text"]
+    assert {"text", "namespace", "workload", "pod", "score", "mode", "console_path"} <= sent[0].keys()
+
+
+async def test_no_alerter_without_url(redis):
+    agent, _ = make(redis)
+    assert agent.alerter is None
+    await agent.handle(ransomware())
+
+
+async def test_alert_queue_is_bounded_and_drops_oldest():
+    from agents.fusion_agent.alerts import ALERTS, Alerter
+    al = Alerter("http://hook.invalid/x", queue_max=3)
+    before = ALERTS.labels("dropped")._value.get()
+    for i in range(5):
+        al.notify({"n": i})                                   # never blocks
+    assert [al.queue.get_nowait()["n"] for _ in range(3)] == [2, 3, 4]
+    assert ALERTS.labels("dropped")._value.get() - before == 2
+
+
+async def test_alert_worker_posts_json_and_survives_a_dead_webhook():
+    from aiohttp import web
+
+    from agents.fusion_agent.alerts import Alerter
+    got = []
+
+    async def hook(request):
+        got.append(await request.json())
+        return web.Response(status=500 if len(got) == 1 else 200)
+    app = web.Application()
+    app.router.add_post("/x", hook)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    al = Alerter(f"http://127.0.0.1:{port}/x")
+    worker = asyncio.create_task(al.run())
+    try:
+        al.notify({"text": "one"})
+        al.notify({"text": "two"})
+        for _ in range(200):
+            if len(got) == 2:
+                break
+            await asyncio.sleep(0.01)  # noqa: ASYNC110
+        assert [g["text"] for g in got] == ["one", "two"]      # the 500 on the first did not stop the second
+    finally:
+        worker.cancel()
+        await runner.cleanup()
+
+
+async def test_slow_webhook_never_blocks_handling(redis):
+    agent, _ = make(redis, alert_url="http://hook.invalid/x")  # no worker running: nothing drains the queue
+    for i in range(150):
+        await agent.handle(ransomware(eid=f"q{i}", pod=f"p{i}"))
+    assert agent.alerter.queue.qsize() == 100
+
+
+# ── containment HMAC ────────────────────────────────────────────────────────
+async def test_containment_entries_are_signed_when_a_key_is_set(redis):
+    from agents.common import contain_verify
+    agent, _ = make(redis, mode="enforce", contain_key="s3cret")
+    await agent.handle(ransomware(eid="sig1"))
+    (_, entry), = await redis.xrange(fa.STREAM_CONTAIN)
+    assert contain_verify("s3cret", entry) and not contain_verify("other", entry)
+    assert not contain_verify("s3cret", {**entry, "pod": "evil"})
+    assert not contain_verify("s3cret", {k: v for k, v in entry.items() if k != "sig"})
+
+
+async def test_containment_is_unsigned_without_a_key(redis):
+    agent, _ = make(redis, mode="enforce")
+    await agent.handle(ransomware(eid="sig2"))
+    (_, entry), = await redis.xrange(fa.STREAM_CONTAIN)
+    assert "sig" not in entry

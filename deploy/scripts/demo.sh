@@ -17,7 +17,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT"
 NS=demo; KH=kubeheal
 
-command -v kubectl >/dev/null || { echo "need kubectl"; exit 1; }
+source deploy/scripts/lib/guard.sh; kh_guard "$@" || exit 1; set -- "${KH_REST[@]}"
 kubectl get ns "$KH" >/dev/null 2>&1 || { echo "run ./deploy/scripts/install.sh first"; exit 1; }
 kubectl get deploy victim-app -n "$NS" >/dev/null 2>&1 || { echo "demo/victim-app missing — run install.sh"; exit 1; }
 DELAY=$(kubectl get deploy kubeheal-health-agent -n "$KH" \

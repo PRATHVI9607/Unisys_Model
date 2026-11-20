@@ -10,7 +10,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
-command -v kubectl >/dev/null || { echo "need kubectl"; exit 1; }
+source deploy/scripts/lib/guard.sh; kh_guard "$@" || exit 1; set -- "${KH_REST[@]}"
 
 PORT=16379   # not 6379: never hit a local Redis by accident
 kubectl port-forward -n kubeheal svc/redis-master "$PORT:6379" >/tmp/kh-redis-pf.log 2>&1 &

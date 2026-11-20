@@ -35,6 +35,15 @@ STREAM_CAPTURE = "kubeheal.security.capture"
 STREAM_CONTAIN = "kubeheal.contain"
 CONTAIN_MAXLEN = 1_000  # approximate trim; entries are only useful for seconds
 STREAM_MAXLEN = 10_000  # approximate trim (XADD MAXLEN ~)
+# Operator approvals: dashboard admin → fusion. An entry {approval_id, action_event_id, decision (approve|reject), actor,
+# reason, ts_ms} asks fusion to carry out (or close) one HUMAN decision, with every safety rail re-checked.
+STREAM_APPROVALS = "kubeheal.approvals"
+# Append-only audit ledger: every automatic or approved action, approval, rejection and mode change, one entry each.
+# Written by fusion and the dashboard admin API; trimmed by age (MINID), never by count, so it outlives STREAM_ACTIONS.
+STREAM_LEDGER = "kubeheal.ledger"
+LEDGER_RETENTION_DAYS = 90
+# Runtime kill switch: "observe" forces dry-run cluster-wide at once; "enforce" only takes effect when the fusion
+# manifest also says KUBEHEAL_MODE=enforce (the switch can make fusion safer, never bolder than its deployment).
 
 # ── Label sets (index order == model class order) ───────────────────────────
 HEALTH_LABELS: list[str] = ["benign", "degradation", "critical"]
@@ -71,6 +80,14 @@ def key_event(kind: str, event_id: str) -> str:
 def key_event_index(kind: str) -> str:
     """List of key_event keys of one kind, newest first; caps how many hash copies exist."""
     return f"kubeheal:index:{kind}"
+
+
+KEY_MODE = "kubeheal:mode"
+
+
+def key_approval(action_event_id: str) -> str:
+    """State of the operator approval for one HUMAN ActionEvent (pending|approved|rejected|executed, JSON)."""
+    return f"kubeheal:approval:{action_event_id}"
 
 
 def key_done(event_id: str) -> str:

@@ -1,0 +1,29 @@
+{{- if .Values.inference.autoscaling.enabled }}
+# CPU-based autoscaling against the right-sized request (10m; lab peak 8m per replica).
+# Requires metrics-server.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: kubeheal-inference
+  namespace: kubeheal
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: kubeheal-inference}
+  minReplicas: {{ .Values.inference.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.inference.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: {{ .Values.inference.autoscaling.targetCPUUtilization }}}
+{{- end }}
+{{- if .Values.inference.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kubeheal-inference
+  namespace: kubeheal
+spec:
+  minAvailable: {{ .Values.inference.pdb.minAvailable }}
+  selector: {matchLabels: {app: kubeheal-inference}}
+{{- end }}

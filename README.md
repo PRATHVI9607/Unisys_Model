@@ -181,4 +181,4 @@ A live evaluation on workloads outside the training data (false kills, detection
 
 RVCE · Unisys UIP. Built for Unisys "Agents Unleashed".
 
-Team: Ryan Dave Fernandes · P Koti Darshan · Rakshak S. Mentor: Dr. Mohana.
+Team: Ryan Dave Fernandes · P Koti Darshan · Rakshak S · Pranav V. Mentor: Dr. Mohana.

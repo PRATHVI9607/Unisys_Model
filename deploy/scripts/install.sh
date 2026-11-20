@@ -2,9 +2,14 @@
 # KubeHeal v5 install: build the images, install Prometheus (Helm, values in deploy/k8s/helm/),
 # deploy the control plane (kustomize, incl. Redis and the eBPF event sensor) and the
 # demo app. Works on minikube (images built straight into the node) or any
-# cluster your kubectl points at (local docker build; push them yourself).
+# cluster your kubectl points at (local docker build; push them yourself), or a k3d cluster (--target k3d:
+# docker build + `k3d image import`; create it with deploy/k3d/create.sh).
+# Cluster guard (deploy/scripts/lib/guard.sh): refuses unless the context is minikube or k3d-kubeheal
+# (or --force-context NAME equal to the current context). The context is always printed.
 # Idempotent; fails loudly — no `|| true` on real steps.
 # Usage: install.sh                                   dev/lab install from deploy/k8s (minikube or local cluster)
+#        install.sh --target k3d                       same on the k3d cluster `kubeheal` (images imported, not built in-node)
+#        install.sh --helm [...]                       deploy the control plane with deploy/helm/kubeheal instead of kustomize
 #        install.sh --production --registry HOST/PATH [--tag TAG]
 #   --production applies deploy/k8s/overlays/production (no dashboard, inference HPA/PDB,
 #   PriorityClass), with images HOST/PATH/{inference,agents}:TAG (TAG defaults to the git short SHA).
@@ -13,29 +18,39 @@
 # EVENT_SOURCE=falco: Falco (Helm, deploy/k8s/helm/falco-values.yaml) feeds the agent instead
 #   (deploy/k8s/components/falco-source). Falco caps at ~1900 alerts/s per node: sensor/README.md.
 set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+source deploy/scripts/lib/guard.sh; kh_guard "$@" || exit 1; set -- "${KH_REST[@]}"
 EVENT_SOURCE="${EVENT_SOURCE:-sensor}"
 [[ $EVENT_SOURCE == sensor || $EVENT_SOURCE == falco ]] || { echo "EVENT_SOURCE must be sensor or falco"; exit 1; }
 KUSTOMIZE=deploy/k8s/; WAIT_DEPLOYS="redis kubeheal-inference kubeheal-health-agent kubeheal-fusion-agent kubeheal-dashboard"
-PROD=0 REGISTRY="" TAG=""
+PROD=0 REGISTRY="" TAG="" TARGET="" HELM=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --production) PROD=1; KUSTOMIZE=deploy/k8s/overlays/production; WAIT_DEPLOYS="${WAIT_DEPLOYS% kubeheal-dashboard}"; shift ;;
     --registry) REGISTRY="${2%/}"; shift 2 ;;
     --tag) TAG="$2"; shift 2 ;;
-    *) echo "usage: $0 | $0 --production --registry HOST/PATH [--tag TAG]"; exit 1 ;;
+    --target) TARGET="${2:-}"; [[ $TARGET == minikube || $TARGET == k3d ]] || { echo "--target must be minikube or k3d"; exit 1; }; shift 2 ;;
+    --helm) HELM=1; shift ;;
+    *) echo "usage: $0 [--target minikube|k3d] [--helm] [--force-context NAME] | $0 --production --registry HOST/PATH [--tag TAG]"; exit 1 ;;
   esac
 done
 [[ $PROD == 1 || -z "$REGISTRY$TAG" ]] || { echo "--registry/--tag only apply with --production"; exit 1; }
 [[ $PROD == 0 || -n "$REGISTRY" ]] || { echo "--production needs --registry HOST/PATH (the overlay's images fail closed)"; exit 1; }
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$ROOT"
+[[ $TARGET != k3d || $(kubectl config current-context) == k3d-kubeheal ]] || { echo "--target k3d needs context k3d-kubeheal (deploy/k3d/create.sh)"; exit 1; }
+if [[ $TARGET == k3d && $EVENT_SOURCE == sensor ]] && { [[ ! -e /sys/kernel/btf/vmlinux ]] || ! grep -qw bpf /sys/kernel/security/lsm 2>/dev/null; }; then
+  echo "note: this host has no BTF or no bpf LSM (the k3d nodes share its kernel): using EVENT_SOURCE=falco"; EVENT_SOURCE=falco
+fi
 
 need() { command -v "$1" >/dev/null || { echo "need $1 on PATH"; exit 1; }; }
 need kubectl; need helm
 
 # --- Images -----------------------------------------------------------------
+IMPORT=()
 build() {  # build <tag> <dockerfile> [context]
-  if command -v minikube >/dev/null && minikube status >/dev/null 2>&1; then
+  if [[ $TARGET == k3d ]]; then
+    need docker; docker build -t "$1" -f "$2" "${3:-.}"; IMPORT+=("$1")
+  elif command -v minikube >/dev/null && minikube status >/dev/null 2>&1; then
     # minikube reads -f relative to the context and exits 0 on failure: pass it relative, then verify
     minikube image build -t "$1" -f "$(realpath --relative-to="${3:-.}" "$2")" "${3:-.}"
     minikube image ls | grep -qF "$1" || { echo "image build failed: $1"; exit 1; }
@@ -61,6 +76,7 @@ else
   build kubeheal.invalid/dashboard:v5 deploy/docker/Dockerfile.dashboard
   build kubeheal.invalid/chaos:v5     deploy/docker/Dockerfile.chaos
   [[ $EVENT_SOURCE == falco ]] || build kubeheal.invalid/sensor:v5 sensor/Dockerfile sensor
+  [[ $TARGET != k3d ]] || { need k3d; k3d image import -c kubeheal "${IMPORT[@]}"; }
 fi
 
 # --- Dependencies -------------------------------------------------------------
@@ -85,8 +101,19 @@ elif helm status falco -n falco >/dev/null 2>&1; then
 fi
 
 # --- Control plane ----------------------------------------------------------
-echo "[4/5] Deploy KubeHeal (kustomize)$([[ $PROD == 1 ]] || echo ' + demo workload')"
-if [[ $PROD == 1 || $EVENT_SOURCE == falco ]]; then
+echo "[4/5] Deploy KubeHeal ($([[ $HELM == 1 ]] && echo helm || echo kustomize))$([[ $PROD == 1 ]] || echo ' + demo workload')"
+if [[ $HELM == 1 ]]; then
+  # Same objects as kustomize (tests/test_helm.py); profile values in deploy/helm/kubeheal/values-*.yaml.
+  HV=(--set namespace.create=false --set eventSource="$EVENT_SOURCE")
+  [[ $TARGET != k3d ]] || HV+=(-f deploy/helm/kubeheal/values-k3d.yaml)
+  if [[ $PROD == 1 ]]; then
+    HV+=(-f deploy/helm/kubeheal/values-production.yaml --set images.inference="$REGISTRY/inference:$TAG"
+         --set images.agents="$REGISTRY/agents:$TAG" --set images.sensor="$REGISTRY/sensor:$TAG")
+  else
+    kubectl -n kubeheal delete netpol redis-kubeheal-only --ignore-not-found
+  fi
+  helm upgrade --install kubeheal deploy/helm/kubeheal -n kubeheal --create-namespace "${HV[@]}"
+elif [[ $PROD == 1 || $EVENT_SOURCE == falco ]]; then
   # Production: the overlay's images are registry.invalid placeholders; a temp kustomization on top points them
   # at $REGISTRY. Falco: the same temp kustomization adds the falco-source component.
   # (A kustomize base must be a relative path, so the temp dir lives next to the overlay.)

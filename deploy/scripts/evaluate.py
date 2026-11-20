@@ -663,7 +663,11 @@ def main() -> None:
     ap.add_argument("--dur", type=int, default=200)
     ap.add_argument("--c-rows", default="", help="only section C rows whose name contains this")
     ap.add_argument("--repeat", type=int, default=1, help="run sections B, C, E this many times (not D)")
+    ap.add_argument("--force-context", default="", help="run on this kubectl context (must equal the current one)")
     a = ap.parse_args()
+    guard = [str(ROOT / "deploy/scripts/lib/guard.sh")] + (["--force-context", a.force_context] if a.force_context else [])
+    if subprocess.run(guard).returncode:   # cluster guard (prints the context): minikube / k3d-kubeheal only
+        sys.exit(2)
     OUT, DUR = Path(a.out), a.dur
     OUT.mkdir(parents=True, exist_ok=True)
     secs = a.sections.split(",")

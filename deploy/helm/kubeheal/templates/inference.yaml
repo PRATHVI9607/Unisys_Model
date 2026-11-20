@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubeheal-inference
+  namespace: kubeheal
+  labels: {app: kubeheal-inference, kubeheal.io/metrics: "true"}
+spec:
+  selector: {app: kubeheal-inference}
+  ports:
+    - {name: http, port: 8000, targetPort: 8000}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubeheal-inference
+  namespace: kubeheal
+  labels: {app: kubeheal-inference}
+spec:
+{{- if not .Values.inference.autoscaling.enabled }}
+  replicas: {{ .Values.inference.replicas }}   # with autoscaling the HPA owns the count
+{{- end }}
+  selector: {matchLabels: {app: kubeheal-inference}}
+  template:
+    metadata:
+      labels: {app: kubeheal-inference}
+    spec:
+{{- if .Values.priorityClass.enabled }}
+      priorityClassName: {{ .Values.priorityClass.name }}
+{{- end }}
+      automountServiceAccountToken: false   # inference never calls the K8s API
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: inference
+          image: {{ .Values.images.inference }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          ports: [{containerPort: 8000, name: http}]
+          env:
+            - {name: LOG_LEVEL, value: {{ .Values.logLevel | quote }}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          # Sized from kubectl top under lab load (2026-10-17, training/collect/ run): cpu 8m, mem 89Mi peak per replica.
+          # requests ~ p95; limits >= 2x requests and >= 1.5x peak; 500m CPU limit keeps Python startup fast.
+          resources:
+{{- toYaml .Values.inference.resources | nindent 12 }}
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8000}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8000}
+            periodSeconds: 5
+            timeoutSeconds: 3
+---
+# Only the agents that score (health, security), the dashboard (Models page: /readyz) and Prometheus (namespace monitoring, ServiceMonitor kubeheal)
+# may reach the model API. kubectl port-forward is not subject to this policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubeheal-inference-clients
+  namespace: kubeheal
+spec:
+  podSelector: {matchLabels: {app: kubeheal-inference}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - {key: app, operator: In, values: [kubeheal-health-agent, kubeheal-security-agent, kubeheal-dashboard]}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}
+      ports: [{port: 8000}]

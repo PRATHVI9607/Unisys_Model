@@ -1,87 +1,32 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KubeHeal — Autonomous Remediation Console</title>
-    <link rel="stylesheet" href="/static/event-details.css">
-    <link rel="stylesheet" href="/static/console.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>KubeHeal console</title>
+<link rel="stylesheet" href="/static/console.css">
+<script type="module" src="/static/main.js"></script>
 </head>
 <body>
-    <div class="wrap">
-        <header class="topbar">
-            <div class="brand">
-                <span class="mark" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M12 2.5 4 6v5.5c0 4.5 3.2 8.3 8 9.8 4.8-1.5 8-5.3 8-9.8V6l-8-3.5Z"/>
-                        <path d="M9 12.2 11.2 14.4 15.2 9.6"/>
-                    </svg>
-                </span>
-                <div>
-                    <h1>KubeHeal</h1>
-                    <div class="sub">Autonomous health &amp; security remediation</div>
-                </div>
-            </div>
-            <div class="conn" role="status" aria-live="polite">
-                <span class="dot disconnected" id="connectionDot"></span>
-                <span class="label-text" id="connectionText">Connecting</span>
-            </div>
-        </header>
-
-        <section class="kpis" aria-label="Summary metrics">
-            <div class="kpi">
-                <div class="label">Actions</div>
-                <div class="value" id="kpiActions">—</div>
-                <div class="foot" id="kpiActionsFoot">fusion decisions</div>
-            </div>
-            <div class="kpi">
-                <div class="label">Health assessments</div>
-                <div class="value" id="kpiHealth">—</div>
-                <div class="foot" id="kpiHealthFoot">spec drift</div>
-            </div>
-            <div class="kpi">
-                <div class="label">Security windows</div>
-                <div class="value" id="kpiSecurity">—</div>
-                <div class="foot" id="kpiSecurityFoot">syscall &amp; entropy</div>
-            </div>
-            <div class="kpi">
-                <div class="label">High-risk events</div>
-                <div class="value alert" id="kpiHighRisk">—</div>
-                <div class="foot">risk ≥ 70%, health + security</div>
-            </div>
-        </section>
-
-        <section class="panel actions">
-            <div class="panel-head">
-                <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z"/></svg>
-                <h2>Actions</h2>
-                <span class="tally" id="actionTally">0</span>
-            </div>
-            <div class="feed" id="actionEvents" data-kind="action"></div>
-        </section>
-
-        <div class="grid-2">
-            <section class="panel">
-                <div class="panel-head">
-                    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5 7 5-14L17 12h4"/></svg>
-                    <h2>Health assessments</h2>
-                    <span class="tally" id="healthTally">0</span>
-                </div>
-                <div class="feed" id="healthEvents" data-kind="health"></div>
-            </section>
-
-            <section class="panel">
-                <div class="panel-head">
-                    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
-                    <h2>Security events</h2>
-                    <span class="tally" id="securityTally">0</span>
-                </div>
-                <div class="feed" id="securityEvents" data-kind="security"></div>
-            </section>
-        </div>
+<a class="skip" href="#main">Skip to content</a>
+<div class="shell">
+  <aside class="side">
+    <div class="brand">
+      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5 4 6v5.5c0 4.5 3.2 8.3 8 9.8 4.8-1.5 8-5.3 8-9.8V6l-8-3.5Z"/><path d="m9 12.2 2.2 2.2 4-4.8"/></svg>
+      <span>KubeHeal</span>
     </div>
-
-    <script src="/static/event-details.js"></script>
-    <script src="/static/console.js"></script>
+    <nav id="nav" aria-label="Sections"></nav>
+    <div class="side-foot">
+      <div id="who" class="who"></div>
+      <button type="button" id="theme" class="quiet">Theme</button>
+    </div>
+  </aside>
+  <div class="content">
+    <div id="modebar" class="modebar" role="status"></div>
+    <main id="main" tabindex="-1"></main>
+  </div>
+</div>
+<div id="announce" class="sr" role="status" aria-live="polite" aria-atomic="true"></div>
 </body>
 </html>

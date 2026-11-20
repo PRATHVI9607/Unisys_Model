@@ -1,0 +1,63 @@
+{
+  "title": "KubeHeal Overview",
+  "uid": "kubeheal-overview",
+  "tags": ["kubeheal"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {"from": "now-1h", "to": "now"},
+  "panels": [
+    {"id": 1, "type": "timeseries", "title": "Decisions per minute (AUTO_KILL / AUTO_PATCH / HUMAN ...)", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+     "datasource": {"type": "prometheus", "uid": "prometheus"}, "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
+     "targets": [{"refId": "A", "expr": "sum by (decision) (increase(kubeheal_fusion_decisions_total[1m]))", "legendFormat": "{{decision}}"}]},
+    {"id": 2, "type": "timeseries", "title": "Decision outcomes per minute", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+     "datasource": {"type": "prometheus", "uid": "prometheus"}, "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
+     "targets": [{"refId": "A", "expr": "sum by (outcome) (increase(kubeheal_fusion_outcomes_total[1m]))", "legendFormat": "{{outcome}}"}]},
+    {"id": 3, "type": "timeseries", "title": "Detection to freeze latency (containment command age, p50 / p95)", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+     "datasource": {"type": "prometheus", "uid": "prometheus"}, "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+     "targets": [
+       {"refId": "A", "expr": "histogram_quantile(0.5, sum by (le) (rate(kubeheal_security_contain_age_seconds_bucket[5m])))", "legendFormat": "p50"},
+       {"refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(kubeheal_security_contain_age_seconds_bucket[5m])))", "legendFormat": "p95"}]},
+    {"id": 4, "type": "timeseries", "title": "Containment: requests (fusion) and outcomes (security agents), per minute", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+     "datasource": {"type": "prometheus", "uid": "prometheus"}, "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
+     "targets": [
+       {"refId": "A", "expr": "sum by (result) (increase(kubeheal_fusion_containment_total[1m]))", "legendFormat": "fusion {{result}}"},
+       {"refId": "B", "expr": "sum by (outcome) (increase(kubeheal_security_contain_total[1m]))", "legendFormat": "agent {{outcome}}"}]},
+    {"id": 5, "type": "timeseries", "title": "Security event lag (now minus event time, p50 / p95)", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+     "datasource": {"type": "prometheus", "uid": "prometheus"}, "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+     "targets": [
+       {"refId": "A", "expr": "histogram_quantile(0.5, sum by (le) (rate(kubeheal_security_event_lag_seconds_bucket[5m])))", "legendFormat": "p50"},
+       {"refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(kubeheal_security_event_lag_seconds_bucket[5m])))", "legendFormat": "p95"}]},
+    {"id": 6, "type": "timeseries", "title": "Events ingested per second and window evaluations by outcome", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+     "datasource": {"type": "prometheus", "uid": "prometheus"}, "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+     "targets": [
+       {"refId": "A", "expr": "sum(rate(kubeheal_security_falco_events_total[1m]))", "legendFormat": "events/s"},
+       {"refId": "B", "expr": "sum by (outcome) (rate(kubeheal_security_evaluations_total[1m]))", "legendFormat": "eval {{outcome}}"}]},
+    {"id": 7, "type": "timeseries", "title": "Inference latency by task (p50 / p95 / p99)", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+     "datasource": {"type": "prometheus", "uid": "prometheus"}, "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+     "targets": [
+       {"refId": "A", "expr": "histogram_quantile(0.5, sum by (le, task) (rate(kubeheal_inference_latency_seconds_bucket[5m])))", "legendFormat": "{{task}} p50"},
+       {"refId": "B", "expr": "histogram_quantile(0.95, sum by (le, task) (rate(kubeheal_inference_latency_seconds_bucket[5m])))", "legendFormat": "{{task}} p95"},
+       {"refId": "C", "expr": "histogram_quantile(0.99, sum by (le, task) (rate(kubeheal_inference_latency_seconds_bucket[5m])))", "legendFormat": "{{task}} p99"}]},
+    {"id": 8, "type": "timeseries", "title": "Inference requests per second by status", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+     "datasource": {"type": "prometheus", "uid": "prometheus"}, "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+     "targets": [{"refId": "A", "expr": "sum by (task, status) (rate(kubeheal_inference_requests_total[1m]))", "legendFormat": "{{task}} {{status}}"}]},
+    {"id": 9, "type": "timeseries", "title": "KubeHeal CPU (cores) by pod", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+     "datasource": {"type": "prometheus", "uid": "prometheus"}, "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
+     "targets": [{"refId": "A", "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"kubeheal\", container!=\"\"}[2m]))", "legendFormat": "{{pod}}"}]},
+    {"id": 10, "type": "timeseries", "title": "KubeHeal memory working set by pod", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+     "datasource": {"type": "prometheus", "uid": "prometheus"}, "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+     "targets": [{"refId": "A", "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"kubeheal\", container!=\"\"})", "legendFormat": "{{pod}}"}]},
+    {"id": 11, "type": "stat", "title": "Fusion mode (1 = active)", "gridPos": {"h": 4, "w": 6, "x": 0, "y": 40},
+     "datasource": {"type": "prometheus", "uid": "prometheus"}, "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
+     "targets": [{"refId": "A", "expr": "kubeheal_fusion_mode == 1", "legendFormat": "{{mode}}"}]},
+    {"id": 12, "type": "timeseries", "title": "Approvals, alerts, dead letters, stale events per minute", "gridPos": {"h": 4, "w": 18, "x": 6, "y": 40},
+     "datasource": {"type": "prometheus", "uid": "prometheus"}, "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
+     "targets": [
+       {"refId": "A", "expr": "sum by (result) (increase(kubeheal_fusion_approvals_total[1m]))", "legendFormat": "approval {{result}}"},
+       {"refId": "B", "expr": "sum by (result) (increase(kubeheal_fusion_alerts_total[1m]))", "legendFormat": "alert {{result}}"},
+       {"refId": "C", "expr": "sum(increase(kubeheal_fusion_deadlettered_total[1m]))", "legendFormat": "dead letters"},
+       {"refId": "D", "expr": "sum(increase(kubeheal_fusion_stale_events_total[1m]))", "legendFormat": "stale"}]}
+  ]
+}

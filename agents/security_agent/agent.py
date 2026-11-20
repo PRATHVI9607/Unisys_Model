@@ -24,10 +24,11 @@ import orjson
 import redis.asyncio as aioredis
 from kubernetes_asyncio import client
 from kubernetes_asyncio.client.exceptions import ApiException
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 
 from agents.common import (
     connect_redis,
+    contain_verify,
     env_list,
     load_kube_config,
     predict_batch,
@@ -56,6 +57,7 @@ from kubeheal.features.security import (
     shannon_entropy,
     window_seconds,
 )
+from kubeheal.ml.bundle import ModelBundle
 
 log = logging.getLogger("kubeheal.security")
 
@@ -66,6 +68,10 @@ PROC_ROOT = os.environ.get("PROC_ROOT", "/proc")
 CGROUP_ROOT = os.environ.get("CGROUP_ROOT", "/host/sys/fs/cgroup")
 EVAL_INTERVAL_S = float(os.environ.get("EVAL_INTERVAL_S", "1"))   # timer for pods below the burst threshold
 CAPTURE = os.environ.get("KUBEHEAL_CAPTURE", "0") == "1"   # lab data collection: also XADD every scored window
+# Embedded scoring: the security bundle loaded in-process; unset, absent or unloadable → the inference service.
+MODEL_DIR = os.environ.get("SECURITY_MODEL_DIR", "/models/security")
+# Containment commands must carry fusion's HMAC (agents.common.contain_sign); unset → unsigned ones are accepted.
+CONTAIN_KEY = os.environ.get("CONTAIN_HMAC_KEY", "")
 
 MAX_EVENTS = MAX_WINDOW_EVENTS   # per-pod window; events older than WINDOW_S (vs the newest) leave it
 # Capture entries carry the raw window (~70 KB); the lab reader consumes continuously, so a short cap keeps
@@ -101,6 +107,7 @@ EVALS = Counter("kubeheal_security_evaluations_total", "Pod window evaluations b
 EVENT_LAG = Histogram("kubeheal_security_event_lag_seconds", "Now minus event time, newest event of each read",
                       buckets=(0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 300))
 CONTAIN = Counter("kubeheal_security_contain_total", "Containment commands by outcome", ["outcome"])
+MODEL_MODE = Gauge("kubeheal_security_model_mode", "1 for the scoring path in use", ["mode"])
 CONTAIN_AGE = Histogram("kubeheal_security_contain_age_seconds", "Containment command age when its pod froze",
                         buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30))
 
@@ -360,8 +367,10 @@ class OwnerResolver:
 class SecurityAgent:
     def __init__(self, redis: aioredis.Redis, session: aiohttp.ClientSession, owners: OwnerResolver,
                  proc_root: str = PROC_ROOT, protected: frozenset[str] | None = None,
-                 namespaces: list[str] | None = None, capture: bool = CAPTURE):
+                 namespaces: list[str] | None = None, capture: bool = CAPTURE,
+                 bundle: ModelBundle | None = None, contain_key: str = CONTAIN_KEY):
         self.redis, self.session, self.owners, self.proc_root = redis, session, owners, proc_root
+        self.bundle, self.contain_key = bundle, contain_key
         self.capture = capture
         self.protected = protected_namespaces() if protected is None else protected
         self.namespaces = set(env_list("WATCH_NAMESPACES") if namespaces is None else namespaces)
@@ -443,7 +452,7 @@ class SecurityAgent:
                 windows.append((key, w, f))
         if not windows:
             return
-        preds = await predict_batch(self.session, "security", [f[0] for _, _, f in windows])
+        preds = await self.score([f[0] for _, _, f in windows])
         if preds or self.capture:   # owner lookups for the whole batch at once, not one by one in the publish loop
             # a failed lookup surfaces again (and is handled) in that pod's _publish
             await asyncio.gather(*(self.owners.resolve(*key) for (key, _, _), p in zip(
@@ -466,6 +475,19 @@ class SecurityAgent:
                 log.exception("publishing %s/%s failed", *key)
                 self._retry(w)
                 EVALS.labels("error").inc()
+
+    async def score(self, rows: list[dict]) -> list | None:
+        """Predictions in row order: in-process when a bundle is loaded, else the inference service; None on failure."""
+        if self.bundle is None:
+            return await predict_batch(self.session, "security", rows)
+        known = set(self.bundle.features)   # the inference service's rule: ignore unlisted names, missing → None
+        try:
+            return await asyncio.to_thread(self.bundle.predict_batch,
+                                           [{k: v for k, v in r.items() if k in known} for r in rows],
+                                           SECURITY_PUBLISH_RISK)
+        except Exception:
+            log.exception("embedded security model failed")
+            return None
 
     async def features(self, key: Key, w: PodWindow) -> tuple[dict, list[dict], int, int, list[float]] | None:
         """(features, events, start_ms, newest_ms, entropy samples) of the pod's window; None (logged) on error."""
@@ -593,7 +615,10 @@ class SecurityAgent:
             age = (now_ms() - int(fields.get("ts_ms", ""))) / 1000
         except ValueError:
             age = float("inf")
-        if age > CONTAIN_MAX_AGE_S:
+        if self.contain_key and not contain_verify(self.contain_key, fields):
+            outcome = "bad_sig"
+            log.warning("refusing containment of %s/%s: missing or invalid signature", ns, fields.get("pod"))
+        elif age > CONTAIN_MAX_AGE_S:
             outcome = "stale"
         elif ns in self.protected or not POD_UID.fullmatch(uid):   # fusion checks too; never freeze these
             outcome = "error"
@@ -639,7 +664,17 @@ async def main() -> None:
     redis = await connect_redis()
     async with aiohttp.ClientSession() as session, client.ApiClient() as api:
         owners = OwnerResolver(client.CoreV1Api(api), client.AppsV1Api(api))
-        agent = SecurityAgent(redis, session, owners)
+        try:
+            bundle = await asyncio.to_thread(ModelBundle.load, MODEL_DIR)
+        except Exception as e:   # absent dir (no model baked into the image) is the normal remote setup
+            log.warning("no embedded security model (%s: %r); using the inference service", MODEL_DIR, e)
+            bundle = None
+        mode = "embedded" if bundle else "remote"
+        MODEL_MODE.labels(mode).set(1)
+        log.info("security scoring: %s (%s)", mode, MODEL_DIR if bundle else "inference service")
+        if not CONTAIN_KEY:
+            log.warning("CONTAIN_HMAC_KEY unset: unsigned containment commands are accepted")
+        agent = SecurityAgent(redis, session, owners, bundle=bundle)
         runner = await start_http(agent.healthy)
         log.info("security agent tailing %s (proc root %s, cgroup root %s, eval every %.0fs)",
                  FALCO_EVENTS_PATH, PROC_ROOT, node_cgroup_root(PROC_ROOT), EVAL_INTERVAL_S)

@@ -11,7 +11,7 @@ diagram is at the top of the [README](../README.md). Models and data are covered
 |---|---|---|---|
 | **inference** | Deployment ×1 (dev) / 2–6 with an HPA (production), `kubeheal/inference:v5` | `uvicorn kubeheal.inference.app:app` (:8000) | Loads `models/{health,security}` at startup and serves `POST /v1/{task}/predict`. Never serves untrained weights: a missing bundle makes that task, and `/readyz`, return 503. |
 | **health-agent** | Deployment ×1, `kubeheal/agents:v5` | `python -m agents.health_agent.agent` (:8080) | Watches Deployments and assesses each real spec change `ASSESS_DELAY_S` (60 s) after it is seen, sooner on a posture violation or failed rollout. Derives `failure_reasons`, publishes a `HealthEvent`, and keeps the spec and baseline keys up to date. |
-| **security-agent** | DaemonSet, `hostPID`, `kubeheal.invalid/agents:v5` + `kubeheal.invalid/sensor:v5` | `python -m agents.security_agent.agent` (:8080) + `kubeheal-sensor` | Tails the Falco-shaped JSON of its node's event source and builds per-pod windows. Adds file entropy, write bytes and network-out bytes, scores a pod every 1 s or as soon as it has 32 new events, and publishes a `SecurityEvent` when risk ≥ 0.4. **It observes only.** |
+| **security-agent** | DaemonSet, `hostPID`, `kubeheal.invalid/agents:v5` + `kubeheal.invalid/sensor:v5` | `python -m agents.security_agent.agent` (:8080) + `kubeheal-sensor` | Tails the Falco-shaped JSON of its node's event source and builds per-pod windows. Adds file entropy, write bytes and network-out bytes, scores a pod every 1 s or as soon as it has 32 new events, and publishes a `SecurityEvent` when risk ≥ 0.4. Scores in-process when `SECURITY_MODEL_DIR` (default `/models/security`) holds a bundle (metric `kubeheal_security_model_mode{mode=embedded\|remote}`), else via the inference service. With `CONTAIN_HMAC_KEY` set it freezes only pods named by correctly signed `kubeheal.contain` entries (`bad_sig` otherwise). **It observes only.** |
 | **fusion-agent** | Deployment ×1, `strategy: Recreate` | `python -m agents.fusion_agent.agent` (:8080) | The single decision point and the only component that changes the cluster. It pairs events, scores correlation, runs the pure policy, acts or records `would_*`, and publishes an `ActionEvent` for every decision. |
 | **dashboard** | Deployment ×1 | `uvicorn dashboard.fastapi_app:app` (:8080) | Read-only console that tails the three streams and pushes them over WebSocket. It has no Kubernetes access. |
 | **redis** | Deployment ×1, `redis:7.4.2-alpine` | `redis-master:6379` | Holds the streams and keys. It is ephemeral (no RDB or AOF), capped at 256 MB with `noeviction`, and a NetworkPolicy allows only same-namespace clients. |
@@ -37,9 +37,11 @@ change. Stream entries are flat `str → str` maps: nested values are compact JS
 | `kubeheal.actions` | fusion → dashboard | `ActionEvent` |
 | `kubeheal.deadletter` | fusion | The original fields plus `_stream`, `_id` and `_error` |
 | `kubeheal.contain` | fusion → every security-agent (each node acts on its own pods) | `{pod_uid, namespace, pod, event_id, ts_ms}`: freeze this pod's cgroup now. Written only for an enforce-mode AUTO_KILL that passed every check. `MAXLEN ~ 1000`. |
+| `kubeheal.approvals` | dashboard admin API → fusion (group `fusion`, its own consumer task) | `{approval_id, action_event_id, decision (approve\|reject), actor, reason, ts_ms}`: an operator's answer to one pending HUMAN decision. |
+| `kubeheal.ledger` | fusion, dashboard admin API → dashboard | Append-only audit entry `{ts_ms, kind (action\|approval_pending\|approval\|rejection\|mode), actor, namespace, workload, pod, decision, outcome, mode, action_event_id, health_event_id, security_event_id, approval_id, detail}`. Trimmed by age (`XADD MINID ~ now - 90 d`), not by count. |
 | `kubeheal.security.capture` | security-agent (only when `KUBEHEAL_CAPTURE=1`) → `training/collect/security_lab.py` | `SecurityEvent` for **every** scored window, whatever its risk |
 
-Every other XADD uses `MAXLEN ~ 10000` (`STREAM_MAXLEN`).
+`kubeheal.contain` entries also carry `sig` (HMAC-SHA256 hex of `pod_uid|namespace|pod|event_id|ts_ms`, `agents.common.contain_sign` / `contain_verify`) when `CONTAIN_HMAC_KEY` is set. Every other XADD, except the ledger, uses `MAXLEN ~ 10000` (`STREAM_MAXLEN`).
 
 ### Redis keys
 
@@ -49,7 +51,9 @@ Every other XADD uses `MAXLEN ~ 10000` (`STREAM_MAXLEN`).
 | `kubeheal:baseline:{ns}:{workload}` | health (read by fusion) | Restore target for AUTO_PATCH: set on first sight, then promoted only when a new spec is benign **and certain relative to the current baseline** and its rollout completed. Stored API-shaped, so fusion restores `template` verbatim (canonical form camelCases user-data keys such as csi `volumeAttributes`). |
 | `kubeheal:{health\|security\|action}:{event_id}` | every publisher | Hash copy of an event for dashboard detail lookups. TTL 24 h, and at most 10000 per kind (the stream's horizon): Redis runs `noeviction`, so an unbounded count would end in failed writes. Written in the same MULTI as the XADD. |
 | `kubeheal:index:{health\|security\|action}` | every publisher | List of the hash-copy keys, newest first, trimmed to 10000; trimmed-off copies are deleted |
-| `kubeheal:done:{event_id}` | fusion | Idempotency marker for one consumed event: the `ActionEvent` it produced (JSON, `SET NX`, TTL 1 h). A redelivery after a failed publish/XACK republishes it instead of acting again. |
+| `kubeheal:done:{event_id\|approval_id}` | fusion | Idempotency marker for one consumed event (or approval request): the `ActionEvent` it produced (JSON, `SET NX`, TTL 1 h). A redelivery after a failed publish/XACK republishes it instead of acting again. |
+| `kubeheal:mode` | dashboard admin API (read by fusion) | Runtime kill switch: `observe` forces dry-run. Anything else (or missing) means "use `KUBEHEAL_MODE`". It can only make fusion safer. |
+| `kubeheal:approval:{action_event_id}` | fusion (state changed by fusion only) | JSON `{state, candidate, namespace, workload, pod, pod_uid, health_event_id, security_event_id, rationale, score, created_ms, changed_fields}` for one HUMAN decision that has something executable. `state`: `pending` → `executing` → `executed\|failed`, or `rejected`. `SET NX EX 86400` in the same MULTI as the `ActionEvent`; moved with WATCH/MULTI. |
 | `kubeheal:lock:{ns}:{Kind}/{name}` | fusion | Incident lock on the controller acted on (`Deployment/web`, `DaemonSet/agent`, `Pod/x` for a bare pod): `SET NX PX 10000`, a unique token per holder, and an owner-checked heartbeat every 3 s (Lua) |
 | `kubeheal:cb:{kill\|patch}:{ns}:{Kind}/{name}` | fusion | Circuit-breaker counter of **successful** actions on that controller: checked (`GET`) before acting, `INCR` plus `EXPIRE NX 3600` in one transaction after a success. Both run under the incident lock on the same target, which serialises check → act → count across replicas. |
 
@@ -119,7 +123,7 @@ Labels and class risks are listed in index order, which is also the model class 
      - **Write bytes:** the sum of `wbytes=` in the pod's cgroup v2 `io.stat`, read through `/proc/1/root/sys/fs/cgroup`. Both the systemd and cgroupfs layouts are supported. This counts block-device writes at writeback.
      - **Network-out bytes:** the TX bytes of every interface except `lo` in `/proc/{pid}/net/dev`, which is the pod's network namespace.
    - **Rates:** `write_bytes_per_s` and `net_out_bytes_per_s` are the counter increase between the first and last sample inside the event window, divided by the window length. They are `None` with fewer than 2 samples (a pod's first evaluation), after a counter reset, or when a counter is unreadable.
-   - **Features:** `security_features(...)` returns 26 features, and the agent calls `/v1/security/predict`.
+   - **Features:** `security_features(...)` returns 26 features, and the agent scores them in-process with the embedded `ModelBundle` (`SECURITY_MODEL_DIR`, baked into the agents image). It calls `/v1/security/predict` only as a fallback when that directory is missing.
 5. **Publish.** The agent resolves pod → ReplicaSet → Deployment (cached 300 s, or 30 s after a failed lookup). It publishes when risk ≥ 0.4, with a 60 s per-pod cooldown that a label change bypasses. If scoring fails, the window is re-scored on the next tick.
 
 The agent never kills anything and never fabricates events. Falco events without a namespace, pod or
@@ -226,6 +230,18 @@ published as an `ActionEvent`.
      3. Count the success. Outcome: `patched`. The health agent then sees the baseline spec and records it without an assessment.
 9. **Kubernetes errors.** A call that takes longer than 10 s gives `failed:kube_timeout`. An API error gives `failed:api_{status}_{reason}`.
 
+### Kill switch, approvals and ledger
+
+**Kill switch.** Effective mode is `observe` if `KUBEHEAL_MODE` is not `enforce` **or** `kubeheal:mode` is `observe`, else `enforce`. A missing or invalid key means the manifest's mode, so the switch can make fusion safer but never bolder. A background task reads the key every 1 s into `FusionAgent.mode`; `kill()` and `patch()` read that attribute, so the kill path makes no extra Redis call. A change takes effect within about 1 s (plus one Redis round trip). A Redis error keeps the last value. Metric `kubeheal_fusion_mode{mode}` is 1 for the active mode; each change is logged at WARNING. The dashboard ledgers mode changes, not fusion.
+
+**Pending approvals.** A HUMAN decision with an executable candidate (a security event with a pod: AUTO_KILL; a health event with `spec_changed` and `has_baseline`: AUTO_PATCH) writes `kubeheal:approval:{action_event_id}` (state `pending`, TTL 24 h) and a `approval_pending` ledger entry in the same MULTI as the `ActionEvent`. No candidate, no record.
+
+**Approvals consumer.** A separate asyncio task reads `kubeheal.approvals` (group `fusion`; same ack, XAUTOCLAIM, 3-delivery dead-letter and `done` marker patterns as events) so a slow approval never delays event handling. On `approve`: the record must exist, be `pending` and be under 1 h old, else outcome `refused:no_such_approval|not_pending:<state>|stale`. It is claimed (`pending` → `executing`) with WATCH/MULTI, so exactly one request, on any replica, executes. Execution is the same `act()` path as an automatic decision, so protected namespaces and labels, the incident lock, the circuit breaker, the UID precondition, baseline validation and the **current** effective mode all apply (observe gives `would_kill` / `would_patch`). Fusion publishes an `ActionEvent` (rationale `approved by <actor>: <reason>; original: <rationale>`, new id, the record's event ids) and sets the record `executed` (or `failed` for any outcome other than `pod_killed|pod_already_gone|patched|would_*`). On `reject` the record becomes `rejected`. A redelivered request republishes the stored result and never acts twice. shortcut: a Redis error between the claim and the result leaves the record `executing`, so a retry is refused; re-raise the event if that matters.
+
+**Ledger.** One `kubeheal.ledger` entry per: AUTO_KILL / AUTO_PATCH in any outcome (including `would_*` and `skipped_*`, not `already_handled`), HUMAN pending created, approval executed or refused, rejection. It is queued on the same pipeline as the `ActionEvent` publish and XACK (`publish_event(extra=...)`), so it adds a command to an existing MULTI and no round trip to the kill path.
+
+**Alerts.** With `ALERT_WEBHOOK_URL` set, every ledgered action and every pending approval is also posted as Slack-compatible JSON (`text` plus `decision`, `outcome`, `mode`, `namespace`, `workload`, `pod`, `score`, `action_event_id`, `console_path`). A bounded queue (100, oldest dropped) and one worker with a 2 s timeout keep the kill path and consumers independent of the webhook. Metric `kubeheal_fusion_alerts_total{result=sent|failed|dropped}`.
+
 ### Sequence: ransomware-like activity → AUTO_KILL
 
 ```mermaid
@@ -245,8 +261,8 @@ sequenceDiagram
   loop 1 s timer (EVAL_INTERVAL_S) or 32 new events, pods with new events
     Note over F,INF: entropy of up to 8 recently written files via /proc/{pid}/root
     Note over F,INF: sample pod cgroup io.stat wbytes and<br/>netns TX bytes (/proc/{pid}/net/dev)
-    SA->>INF: POST /v1/security/predict {26 features}
-    INF-->>SA: label ransomware, risk, conformal set, top 5 SHAP factors
+    SA->>SA: score {26 features} in-process (ModelBundle): label ransomware, risk, conformal set, top 5 SHAP factors
+    Note over SA,INF: fallback only if the model dir is missing: POST /v1/security/predict
   end
   SA->>K: pod → ReplicaSet → Deployment (cached 5 min)
   SA->>R: XADD kubeheal.security.events + HSET kubeheal:security:{id} (risk ≥ 0.4, 60 s cooldown)
@@ -320,7 +336,7 @@ listed here.
 | Env var | Code default | Manifest | Read by |
 |---|---|---|---|
 | `REDIS_URL` | `redis://redis-master.kubeheal.svc:6379/0` | from Secret `kubeheal-redis` `<user>-url` (per-component ACL user) | health, security, fusion, dashboard |
-| `INFERENCE_URL` | `http://kubeheal-inference.kubeheal.svc:8000` | same (health, security) | health, security |
+| `INFERENCE_URL` | `http://kubeheal-inference.kubeheal.svc:8000` | same (health; security as fallback; dashboard Models page) | health, security, dashboard |
 | `PROMETHEUS_URL` | `http://prometheus-operated.monitoring.svc:9090` | same | health |
 | `ASSESS_DELAY_S` | `60` | `60` | health; `drift_lab.py` imports it |
 | `WATCH_NAMESPACES` | empty = all | not set | health (one watch per namespace), security (filter) |
@@ -335,6 +351,10 @@ listed here.
 | `HOSTNAME` | `socket.gethostname()` | set by Kubernetes | fusion (consumer name) |
 | `KUBEHEAL_MODEL_DIR` | `models` (the image's `/app/models`) | not set | inference |
 | `DASHBOARD_ALLOWED_HOSTS` | `localhost,127.0.0.1,kubeheal-dashboard` and its `.kubeheal`, `.svc`, `.svc.cluster.local` names | not set | dashboard (Host header allow-list) |
+| `KUBEHEAL_ADMIN_TOKEN` | empty (admin actions disabled) | from Secret `kubeheal-admin` `token` (random, created once by the redis-secret Job) | dashboard (bearer token for admin actions) |
+| `SECURITY_MODEL_DIR` | `/models/security` | `/models/security` (baked into the agents image) | security (in-process scoring; falls back to the inference service when missing) |
+| `CONTAIN_HMAC_KEY` | empty (containment requests unsigned, warning logged) | from Secret `kubeheal-contain-hmac` `key` (random, created once by the redis-secret Job) | fusion (signs), security (verifies) |
+| `ALERT_WEBHOOK_URL` | empty (no alerts) | optional key `url` of Secret `kubeheal-alerts`; unset unless that Secret exists | fusion |
 | `LOG_LEVEL` | `INFO` | `INFO` | all |
 
 The toolchain is Python 3.13 and uv, with a single `pyproject.toml` and `uv.lock`. There is one extra
@@ -363,7 +383,7 @@ sum of the unpacked layers, measured 2026-10-17.
 | inference | 8000 | liveness `/healthz`, readiness `/readyz` | Process up; ready = both bundles loaded | `kubeheal_inference_*` |
 | health-agent | 8080 | startup (5 s × 60) + liveness `/healthz` | Every watch loop active within the last 420 s | `kubeheal_health_assessments_total{outcome}`, `_watch_errors_total` |
 | security-agent | 8080 | startup + liveness `/healthz` | Tail and eval loops ticked within max(60 s, 6 × `EVAL_INTERVAL_S`) | `kubeheal_security_falco_events_total`, `_evaluations_total{outcome}` |
-| fusion-agent | 8080 | startup + liveness `/healthz` | Progress (a poll, an entry processed or a Kubernetes call returned) within the last 30 s | `kubeheal_fusion_decisions_total`, `_outcomes_total`, `_deadlettered_total`, `_stale_events_total`, `_containment_total{result}` |
+| fusion-agent | 8080 | startup + liveness `/healthz` | Progress (a poll, an entry processed or a Kubernetes call returned) within the last 30 s | `kubeheal_fusion_decisions_total`, `_outcomes_total`, `_deadlettered_total`, `_stale_events_total`, `_containment_total{result}`, `_mode{mode}`, `_approvals_total{result=executed\|failed\|refused\|rejected}`, `_alerts_total{result}` |
 | dashboard | 8080 | liveness `/healthz`, readiness `/readyz` | Ready = Redis answered within 10 s | none |
 | redis | 6379 | readiness `redis-cli ping`, liveness TCP | n/a | n/a |
 

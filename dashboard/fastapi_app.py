@@ -1,8 +1,9 @@
-"""KubeHeal dashboard: read-only live view of the health, security and action streams.
+"""KubeHeal dashboard: live operator console over the health, security and action streams.
 
 One background task tails all three Redis streams (backfill with XREVRANGE, then a
 single blocking XREAD), keeps the newest events per kind in memory, and pushes each
-new batch to every WebSocket client. Run: `uvicorn dashboard.fastapi_app:app --port 8080`.
+new batch to every WebSocket client. Approvals, the ledger and the mode switch live in dashboard/admin.py
+(writes need KUBEHEAL_ADMIN_TOKEN). Run: `uvicorn dashboard.fastapi_app:app --port 8080`.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import time
 from collections import deque
@@ -26,6 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from dashboard.admin import router as admin_router
 from kubeheal.contracts import (
     STREAM_ACTIONS,
     STREAM_HEALTH,
@@ -45,8 +48,8 @@ ALLOWED_HOSTS = [h.strip() for h in os.getenv(
     "DASHBOARD_ALLOWED_HOSTS",
     "localhost,127.0.0.1,kubeheal-dashboard,kubeheal-dashboard.kubeheal,kubeheal-dashboard.kubeheal.svc,"
     "kubeheal-dashboard.kubeheal.svc.cluster.local").split(",") if h.strip()]
-# Scripts and styles only from /static; style attributes are allowed for the risk bars' computed widths.
-CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; "
+# Scripts and styles only from /static; no inline code or style attributes anywhere.
+CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; "
        "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 BUFFER = 200            # events kept in memory per kind
 HIGH_RISK = 0.7
@@ -90,9 +93,26 @@ class Hub:
     def redis_ok(self) -> bool:
         return self.redis is not None and time.monotonic() - self.last_ok < READY_WINDOW_S
 
+    def latency(self) -> dict:
+        """Detection to kill: action time minus the end of the security window that triggered it."""
+        window_end = {e["event_id"]: e["window_end_ms"] for e in self.buffers["security"] if e["window_end_ms"] > 0}
+        ms = sorted(a["timestamp_ms"] - window_end[a["security_event_id"]] for a in self.buffers["action"]
+                    if a["decision"] == "AUTO_KILL" and a["outcome"] in ("pod_killed", "would_kill")
+                    and a["security_event_id"] in window_end)
+        ms = [m for m in ms if m >= 0]
+        q = lambda p: ms[max(0, math.ceil(p * len(ms)) - 1)] if ms else None   # noqa: E731  nearest rank
+        return {"p50": q(0.5), "p95": q(0.95), "n": len(ms)}
+
     def stats(self) -> dict:
         h, s, a = (self.buffers[k] for k in KINDS)
+        outcomes = [e["outcome"] for e in a]
         return {
+            "kills": outcomes.count("pod_killed"), "kills_dry_run": outcomes.count("would_kill"),
+            "patches": outcomes.count("patched"), "patches_dry_run": outcomes.count("would_patch"),
+            "human": sum(e["decision"] == "HUMAN" for e in a),
+            "guard_rails": sum(o.startswith("skipped_") for o in outcomes),
+            "containment_requested": sum(e["containment"] == "requested" for e in a),
+            "latency_ms": self.latency(),
             "health_events": len(h),
             "health_high_risk": sum(e["risk"] >= HIGH_RISK for e in h),
             "security_events": len(s),
@@ -177,6 +197,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="KubeHeal Dashboard", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)   # also applies to /ws
+app.include_router(admin_router)
 
 
 @app.middleware("http")
@@ -185,6 +206,8 @@ async def security_headers(request: Request, call_next):
     response.headers["Content-Security-Policy"] = CSP
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
     return response
 
 

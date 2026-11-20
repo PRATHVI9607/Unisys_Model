@@ -87,3 +87,25 @@ async def test_publish_event_caps_hash_copies_and_acks_atomically(monkeypatch):
     assert await r.exists(key_event("action", "a1"), key_event("action", "a2")) == 2
     assert await r.llen(key_event_index("action")) == 2
     assert await r.xlen("out") == 3 and (await r.xpending("in", "g"))["pending"] == 0
+
+
+def test_contain_sign_verify_round_trip():
+    f = {"pod_uid": "u", "namespace": "ns", "pod": "p", "event_id": "e", "ts_ms": "1"}
+    sig = common.contain_sign("k", f)
+    assert len(sig) == 64 and common.contain_verify("k", {**f, "sig": sig})
+    assert not common.contain_verify("k2", {**f, "sig": sig})
+    assert not common.contain_verify("k", {**f, "sig": sig, "ts_ms": "2"})
+    assert not common.contain_verify("k", f) and not common.contain_verify("k", {"sig": sig})
+
+
+async def test_publish_event_extra_commands_share_the_transaction():
+    import fakeredis
+
+    from kubeheal.contracts import ActionEvent, Decision
+
+    r = fakeredis.FakeAsyncRedis(decode_responses=True)
+    ev = ActionEvent(event_id="a1", namespace="n", workload="w", decision=Decision.BENIGN, mode="observe",
+                     outcome="none", score=0.0, rationale="r")
+    await common.publish_event(r, "out", "action", ev, extra=[lambda p: p.set("k", "v"),
+                                                              lambda p: p.xadd("led", {"a": "b"})])
+    assert await r.get("k") == "v" and await r.xlen("led") == 1 and await r.xlen("out") == 1

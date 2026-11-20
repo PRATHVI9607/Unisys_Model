@@ -17,15 +17,20 @@ import logging
 import os
 import socket
 import time
+from collections.abc import Callable
+from contextvars import ContextVar
+from types import SimpleNamespace
+from typing import Any
 
 import aiohttp
 import redis.asyncio as aioredis
 from kubernetes_asyncio import client
 from kubernetes_asyncio.client.exceptions import ApiException
-from prometheus_client import Counter
+from prometheus_client import Counter, Gauge
 
 from agents.common import (
     connect_redis,
+    contain_sign,
     load_kube_config,
     protected_namespaces,
     publish_event,
@@ -33,18 +38,23 @@ from agents.common import (
     setup_logging,
     start_http,
 )
+from agents.fusion_agent.alerts import Alerter, payload
 from agents.fusion_agent.decision_policy import decide
 from agents.fusion_agent.incident_lock import circuit_count, circuit_open, incident_lock
 from agents.health_agent.agent import policy_violations
 from kubeheal.contracts import (
     CONTAIN_MAXLEN,
+    KEY_MODE,
+    LEDGER_RETENTION_DAYS,
     PROTECTED_LABEL,
     PROTECTED_NAMESPACES,
     QUARANTINE_LABEL,
     STREAM_ACTIONS,
+    STREAM_APPROVALS,
     STREAM_CONTAIN,
     STREAM_DEADLETTER,
     STREAM_HEALTH,
+    STREAM_LEDGER,
     STREAM_MAXLEN,
     STREAM_SECURITY,
     TIER_LABEL,
@@ -53,6 +63,7 @@ from kubeheal.contracts import (
     Decision,
     HealthEvent,
     SecurityEvent,
+    key_approval,
     key_baseline,
     key_circuit,
     key_done,
@@ -86,6 +97,10 @@ DONE_TTL_S = 3600             # idempotency markers outlive every redelivery (st
 RETRY_S = 1.0                 # back-off after a Redis error in the consumer loop
 # outcomes after which the same automatic decision on the partner event must not act again
 HANDLED = frozenset({"pod_killed", "pod_already_gone", "patched", "would_kill", "would_patch"})
+MODE_REFRESH_S = 1.0          # runtime kill switch (KEY_MODE) is read at most this often, off the event path
+APPROVAL_TTL_S = 24 * 3600    # pending-approval record lifetime
+APPROVAL_MAX_AGE_S = 3600     # an approval older than this is refused: the world has moved on
+APPROVE = frozenset({"approve", "auto_kill", "auto_patch"})   # `decision` values that mean approve
 
 DECISIONS = Counter("kubeheal_fusion_decisions_total", "Decisions made", ["decision"])
 OUTCOMES = Counter("kubeheal_fusion_outcomes_total", "Decision outcomes", ["outcome"])
@@ -93,9 +108,27 @@ DEADLETTERED = Counter("kubeheal_fusion_deadlettered_total", "Events moved to th
 CONTAINMENT = Counter("kubeheal_fusion_containment_total", "Pod freeze requests on STREAM_CONTAIN",
                       ["result"])
 SKIPPED_STALE = Counter("kubeheal_fusion_stale_events_total", "Events skipped as older than MAX_EVENT_AGE_S")
+MODE = Gauge("kubeheal_fusion_mode", "Effective mode (1 for the active one)", ["mode"])
+APPROVALS = Counter("kubeheal_fusion_approvals_total", "Operator approval requests handled", ["result"])
 
 Event = HealthEvent | SecurityEvent
 AUTOMATIC = (Decision.AUTO_KILL, Decision.AUTO_PATCH)
+
+
+def ledger(kind: str, actor: str, mode: str, **f) -> Callable[[Any], None]:
+    """Queue one audit-ledger XADD (trimmed by age) on a pipeline; pass it to publish_event(extra=...)."""
+    fields = {"ts_ms": str(now_ms()), "kind": kind, "actor": actor, "mode": mode}
+    fields.update({k: str(v) for k, v in f.items()})
+    minid = now_ms() - LEDGER_RETENTION_DAYS * 86_400_000
+    return lambda p: p.xadd(STREAM_LEDGER, fields, minid=minid, approximate=True)
+
+
+def parse_approval(fields: dict) -> dict:
+    """The STREAM_APPROVALS entry as a dict; ValueError (→ dead letter) when a required field is missing."""
+    missing = [k for k in ("approval_id", "action_event_id", "decision", "actor") if not fields.get(k)]
+    if missing:
+        raise ValueError(f"approval entry lacks {missing}")
+    return fields
 
 
 class PairBuffer:
@@ -200,22 +233,56 @@ def baseline_problem(live: dict, template) -> str | None:
 class FusionAgent:
     def __init__(self, redis, core, apps, net, batch, *, mode: str = "observe",
                  protected: frozenset = PROTECTED_NAMESPACES, max_kills: int = 3, max_patches: int = 5,
-                 consumer: str = "fusion") -> None:
+                 consumer: str = "fusion", alert_url: str = "", contain_key: str = "") -> None:
         self.redis, self.core, self.apps, self.net, self.batch = redis, core, apps, net, batch
-        self.mode = mode
+        self.env_mode = mode            # the manifest's KUBEHEAL_MODE: the ceiling the kill switch cannot raise
+        self.mode = mode                # effective mode; refresh_mode() keeps it current, no I/O on the event path
+        MODE.labels("observe").set(mode != "enforce")
+        MODE.labels("enforce").set(mode == "enforce")
         self.protected = protected
         self.max_kills, self.max_patches = max_kills, max_patches
         self.consumer = consumer
         self.pairs = PairBuffer()
+        self.contain_key = contain_key                    # signs STREAM_CONTAIN entries; empty: unsigned
+        self.alerter = Alerter(alert_url) if alert_url else None
         self.last_progress = time.monotonic()
         self.tiers: dict[str, tuple[float, str | None]] = {}   # namespace → (expiry, TIER_LABEL value)
         self.owners: dict[tuple[str, str], tuple[float, tuple[str, str] | None]] = {}   # (ns, RS) → controller
-        # Set by kill() during the current act(); read into the ActionEvent (also on a failed outcome).
-        self.containment = ""
+        self._containment: ContextVar[str] = ContextVar("containment", default="")
+
+    @property
+    def containment(self) -> str:
+        """Set by kill() during the current act(); read into the ActionEvent (also on a failed outcome).
+        Per task, so an approval executing alongside an event never mixes the two up."""
+        return self._containment.get()
+
+    @containment.setter
+    def containment(self, value: str) -> None:
+        self._containment.set(value)
+
+    async def refresh_mode(self) -> None:
+        """effective = observe if the manifest says so or KEY_MODE == "observe"; a missing or invalid key
+        changes nothing. A Redis error keeps the last value."""
+        try:
+            key = (await self.redis.get(KEY_MODE) or "").strip().lower()
+        except aioredis.RedisError as e:
+            log.warning("could not read %s (%s); keeping mode %s", KEY_MODE, e, self.mode)
+            return
+        new = "observe" if self.env_mode != "enforce" or key == "observe" else "enforce"
+        if new != self.mode:
+            log.warning("mode %s -> %s (manifest %s, %s=%r)", self.mode, new, self.env_mode, KEY_MODE, key)
+            self.mode = new
+            MODE.labels("observe").set(new == "observe")
+            MODE.labels("enforce").set(new == "enforce")
+
+    async def mode_loop(self) -> None:
+        while True:
+            await self.refresh_mode()
+            await asyncio.sleep(MODE_REFRESH_S)
 
     # ── stream plumbing ─────────────────────────────────────────────────────
-    async def ensure_groups(self, start: str = "$") -> None:
-        for stream in STREAMS:
+    async def ensure_groups(self, start: str = "$", streams: tuple[str, ...] = STREAMS) -> None:
+        for stream in streams:
             try:   # "$": a fresh deploy starts at new events, never replays history; "0" after the group was lost
                 await self.redis.xgroup_create(stream, GROUP, id=start, mkstream=True)
             except aioredis.ResponseError as e:
@@ -227,15 +294,15 @@ class FusionAgent:
                 if c["name"] != self.consumer and c["pending"] == 0:
                     await self.redis.xgroup_delconsumer(stream, GROUP, c["name"])
 
-    async def poll_once(self, block_ms: int = BLOCK_MS) -> None:
+    async def poll_once(self, block_ms: int = BLOCK_MS, streams: tuple[str, ...] = STREAMS) -> None:
         self.last_progress = time.monotonic()
-        for stream in STREAMS:   # retry entries another delivery left unacked
+        for stream in streams:   # retry entries another delivery left unacked
             _, claimed, _ = await self.redis.xautoclaim(stream, GROUP, self.consumer, CLAIM_MIN_IDLE_MS,
                                                         start_id="0-0", count=BATCH)
             for msg_id, fields in claimed:
                 info = await self.redis.xpending_range(stream, GROUP, min=msg_id, max=msg_id, count=1)
                 await self.process(stream, msg_id, fields, info[0]["times_delivered"] if info else MAX_DELIVERIES)
-        resp = await self.redis.xreadgroup(GROUP, self.consumer, {s: ">" for s in STREAMS},
+        resp = await self.redis.xreadgroup(GROUP, self.consumer, {s: ">" for s in streams},
                                            count=BATCH, block=block_ms)
         for stream, entries in resp or []:
             for msg_id, fields in entries:
@@ -244,14 +311,17 @@ class FusionAgent:
     async def process(self, stream: str, msg_id: str, fields: dict, deliveries: int) -> None:
         """Ack only after successful handling; dead-letter malformed or repeatedly failing entries."""
         self.last_progress = time.monotonic()   # a batch of slow entries is progress, not a hang
+        approvals = stream == STREAM_APPROVALS
         try:
-            ev = (HealthEvent if stream == STREAM_HEALTH else SecurityEvent).from_fields(fields)
+            ev = (parse_approval(fields) if approvals else
+                  (HealthEvent if stream == STREAM_HEALTH else SecurityEvent).from_fields(fields))
         except ValueError as e:   # pydantic ValidationError and bad JSON are ValueErrors
             log.error("malformed event %s on %s: %s", msg_id, stream, e)
             await self.deadletter(stream, msg_id, fields, f"malformed: {e}")
             return
         try:
-            if await self.handle(ev, ack=(stream, GROUP, msg_id)) is not None:
+            handler = self.handle_approval if approvals else self.handle
+            if await handler(ev, ack=(stream, GROUP, msg_id)) is not None:
                 return                          # published and acked in one transaction
         except Exception as e:
             log.exception("handling %s on %s failed (delivery %d)", msg_id, stream, deliveries)
@@ -286,7 +356,10 @@ class FusionAgent:
             action = await self._decide(ev, partner, partner_decision, partner_outcome)
             # Recorded before publishing, so a redelivery after a failed publish/XACK never acts twice.
             await self.redis.set(done, action.model_dump_json(), nx=True, ex=DONE_TTL_S)
-        await publish_event(self.redis, STREAM_ACTIONS, "action", action, ack)
+        extra = self._extras(ev, partner, action)
+        await publish_event(self.redis, STREAM_ACTIONS, "action", action, ack, extra)
+        if extra and self.alerter:   # extras exist exactly for ledgered actions and pending approvals
+            self.alerter.notify(payload(action, action.decision is Decision.HUMAN))
         self.pairs.commit(ev, action.decision, action.outcome, partner)
         DECISIONS.labels(action.decision.value).inc()
         OUTCOMES.labels(action.outcome.split(":")[0]).inc()
@@ -294,6 +367,142 @@ class FusionAgent:
         log.log(level, "%s %s/%s pod=%s outcome=%s :: %s", action.decision.value, ev.namespace, ev.workload,
                 action.pod or "-", action.outcome, action.rationale)
         return action
+
+    def _extras(self, ev: Event, partner: Event | None, action: ActionEvent) -> list[Callable[[Any], None]]:
+        """Commands queued in the ActionEvent's own transaction: an automatic action's ledger entry, or a
+        HUMAN decision's pending approval (when something executable exists) plus its ledger entry."""
+        ids = {"namespace": action.namespace, "workload": action.workload, "pod": action.pod,
+               "action_event_id": action.event_id, "health_event_id": action.health_event_id,
+               "security_event_id": action.security_event_id}
+        if action.decision in AUTOMATIC:
+            if action.outcome == "already_handled":
+                return []
+            return [ledger("action", "fusion", action.mode, decision=action.decision.value,
+                           outcome=action.outcome, detail=action.rationale, **ids)]
+        if action.decision is not Decision.HUMAN:
+            return []
+        health, security = (ev, partner) if isinstance(ev, HealthEvent) else (partner, ev)
+        if security and security.pod:
+            candidate = Decision.AUTO_KILL
+        elif health and health.spec_changed and health.has_baseline:
+            candidate = Decision.AUTO_PATCH
+        else:
+            return []
+        record = {"state": "pending", "candidate": candidate.value, "namespace": action.namespace,
+                  "workload": action.workload, "pod": action.pod, "pod_uid": security.pod_uid if security else "",
+                  "health_event_id": action.health_event_id, "security_event_id": action.security_event_id,
+                  "rationale": action.rationale, "score": action.score, "created_ms": now_ms(),
+                  "changed_fields": health.changed_fields if health else []}
+        payload = json.dumps(record)
+        return [lambda p: p.set(key_approval(action.event_id), payload, nx=True, ex=APPROVAL_TTL_S),
+                ledger("approval_pending", "fusion", action.mode, decision=candidate.value,
+                       outcome="pending", detail=action.rationale, **ids)]
+
+    # ── operator approvals (own task: never on the event path) ──────────────
+    async def handle_approval(self, req: dict, ack: tuple[str, str, str] | None = None) -> bool:
+        """Carry out or close one approval request. The result (action, ledger entry, record update) is
+        stored under key_done(approval_id) before publishing, so a redelivery republishes it, never re-acts."""
+        done = key_done(req["approval_id"])
+        if raw := await self.redis.get(done):
+            res = json.loads(raw)
+        else:
+            res = await self._decide_approval(req)
+            await self.redis.set(done, json.dumps(res), nx=True, ex=DONE_TTL_S)
+        kind, fields = res["ledger"]
+        extra = [ledger(kind, req["actor"], self.mode, approval_id=req["approval_id"],
+                        action_event_id=req["action_event_id"], **fields)]
+        if res["record"]:
+            key = key_approval(req["action_event_id"])
+            extra.append(lambda p: p.set(key, res["record"], keepttl=True))
+        if res["action"]:
+            await publish_event(self.redis, STREAM_ACTIONS, "action", ActionEvent.model_validate_json(res["action"]),
+                                ack, extra)
+        else:
+            async with self.redis.pipeline(transaction=True) as p:
+                for queue in extra:
+                    queue(p)
+                if ack:
+                    p.xack(*ack)
+                await p.execute()
+        if res["action"] and self.alerter:
+            self.alerter.notify(payload(ActionEvent.model_validate_json(res["action"]), False))
+        APPROVALS.labels(res["result"]).inc()
+        log.warning("approval %s by %s on %s: %s", req["decision"], req["actor"], req["action_event_id"],
+                    res["ledger"][1].get("outcome"))
+        return True
+
+    async def _claim(self, key: str, state: str, max_age_s: float | None) -> tuple[dict | None, str]:
+        """Atomically move a pending approval record to `state` (WATCH: one winner across replicas and
+        concurrent requests). Returns (previous record, "") or (None, why it was refused)."""
+        async with self.redis.pipeline() as p:
+            try:
+                await p.watch(key)
+                try:
+                    rec = json.loads(await p.get(key) or "")
+                except ValueError:
+                    return None, "no_such_approval"
+                if not isinstance(rec, dict):
+                    return None, "no_such_approval"
+                if rec.get("state") != "pending":
+                    return None, f"not_pending:{rec.get('state')}"
+                if max_age_s is not None and now_ms() - int(rec.get("created_ms", 0)) > max_age_s * 1000:
+                    return None, "stale"
+                p.multi()
+                p.set(key, json.dumps({**rec, "state": state}), keepttl=True)
+                await p.execute()
+            except aioredis.WatchError:
+                return None, "not_pending:claimed"
+        return rec, ""
+
+    async def _decide_approval(self, req: dict) -> dict:
+        eid, actor = req["action_event_id"], req["actor"]
+        decision, reason = req["decision"].strip().lower(), req.get("reason", "")
+        key = key_approval(eid)
+
+        def result(kind, outcome, label, rec=None, action=None, record=None, **fields):
+            rec = rec or {}
+            f = {"namespace": rec.get("namespace", ""), "workload": rec.get("workload", ""),
+                 "pod": rec.get("pod", ""), "decision": rec.get("candidate", ""), "outcome": outcome,
+                 "health_event_id": rec.get("health_event_id", ""),
+                 "security_event_id": rec.get("security_event_id", ""), "detail": reason, **fields}
+            return {"ledger": [kind, f], "action": action, "record": record, "result": label}
+
+        if decision == "reject":
+            rec, why = await self._claim(key, "rejected", None)
+            if rec is None:
+                return result("approval", f"refused:{why}", "refused")
+            return result("rejection", "rejected", "rejected", rec,
+                          record=json.dumps({**rec, "state": "rejected", "actor": actor, "reason": reason}))
+        if decision not in APPROVE:
+            return result("approval", "refused:bad_decision", "refused")
+        rec, why = await self._claim(key, "executing", APPROVAL_MAX_AGE_S)
+        if rec is None:
+            return result("approval", f"refused:{why}", "refused")
+        try:
+            candidate = Decision(rec["candidate"])
+            ns, wl = rec["namespace"], rec["workload"]
+        except (KeyError, ValueError):
+            return result("approval", "refused:bad_record", "refused", rec,
+                          record=json.dumps({**rec, "state": "failed", "outcome": "bad_record"}))
+        # The same act() path as an automatic decision: protected ns/label, lock, breaker, UID precondition,
+        # baseline validation and the effective mode all apply. shortcut: a Redis error here leaves the record
+        # "executing" (a retry is refused); upgrade to a lease if that proves common.
+        sec = SimpleNamespace(namespace=ns, workload=wl, pod=rec.get("pod", ""), pod_uid=rec.get("pod_uid", ""),
+                              event_id=rec.get("security_event_id", ""))
+        hlt = SimpleNamespace(namespace=ns, workload=wl, changed_fields=rec.get("changed_fields", []))
+        self.containment = ""
+        final, outcome = await self.act(candidate, hlt, sec)
+        action = ActionEvent(
+            event_id=new_event_id("act"), namespace=ns, workload=wl, pod=rec.get("pod", ""), decision=final,
+            mode=self.mode, outcome=outcome, score=rec.get("score", 0.0),
+            rationale=f"approved by {actor}: {reason}; original: {rec.get('rationale', '')}",
+            health_event_id=rec.get("health_event_id", ""), security_event_id=rec.get("security_event_id", ""),
+            containment=self.containment)
+        ok = outcome in HANDLED
+        record = json.dumps({**rec, "state": "executed" if ok else "failed", "outcome": outcome, "actor": actor,
+                             "reason": reason, "result_event_id": action.event_id})
+        return result("approval", outcome, "executed" if ok else "failed", rec, action.model_dump_json(), record,
+                      result_event_id=action.event_id)
 
     async def _decide(self, ev: Event, partner: Event | None, partner_decision: Decision | None,
                       partner_outcome: str | None) -> ActionEvent:
@@ -465,24 +674,26 @@ class FusionAgent:
                     return "skipped_stale_pod"      # UID precondition failed
                 raise
             finally:
-                await contain                       # bounded by CONTAIN_TIMEOUT_S, never raises
+                self.containment = await contain    # bounded by CONTAIN_TIMEOUT_S, never raises
             await circuit_count(self.redis, breaker)
         return "pod_killed"
 
-    async def _contain(self, ns: str, pod: str, uid: str, event_id: str) -> None:
+    async def _contain(self, ns: str, pod: str, uid: str, event_id: str) -> str:
         """Ask every node's security agent to freeze the pod's cgroup now. Best effort: never delays the
         kill by more than CONTAIN_TIMEOUT_S and never fails it; the API delete follows regardless."""
         try:
-            await asyncio.wait_for(self.redis.xadd(
-                STREAM_CONTAIN, {"pod_uid": uid, "namespace": ns, "pod": pod, "event_id": event_id,
-                                 "ts_ms": str(now_ms())},
-                maxlen=CONTAIN_MAXLEN, approximate=True), CONTAIN_TIMEOUT_S)
+            fields = {"pod_uid": uid, "namespace": ns, "pod": pod, "event_id": event_id, "ts_ms": str(now_ms())}
+            if self.contain_key:
+                fields["sig"] = contain_sign(self.contain_key, fields)
+            await asyncio.wait_for(self.redis.xadd(STREAM_CONTAIN, fields, maxlen=CONTAIN_MAXLEN, approximate=True),
+                                   CONTAIN_TIMEOUT_S)
         except Exception:   # any failure here must leave the kill path untouched
             log.warning("containment request for %s/%s failed; deleting via the API only", ns, pod, exc_info=True)
-            self.containment = "failed"
+            result = "failed"
         else:
-            self.containment = "requested"
-        CONTAINMENT.labels(self.containment).inc()
+            result = "requested"
+        CONTAINMENT.labels(result).inc()
+        return result
 
     async def _create_quarantine_policy(self, ns: str, pod) -> None:
         try:
@@ -525,13 +736,26 @@ class FusionAgent:
 
     async def run(self) -> None:
         log.info("fusion starting mode=%s consumer=%s protected=%s", self.mode, self.consumer, sorted(self.protected))
+        await self.refresh_mode()
+        # Own tasks: a slow approval or Redis read never holds up the event loop below.
+        side = [asyncio.create_task(self.mode_loop()), asyncio.create_task(self.consume((STREAM_APPROVALS,)))]
+        if self.alerter:
+            side.append(asyncio.create_task(self.alerter.run()))
+        try:
+            await self.consume(STREAMS)
+        finally:
+            for t in side:
+                t.cancel()
+            await asyncio.gather(*side, return_exceptions=True)
+
+    async def consume(self, streams: tuple[str, ...]) -> None:
         start: str | None = "$"
         while True:
             try:
                 if start:
-                    await self.ensure_groups(start)
+                    await self.ensure_groups(start, streams)
                     start = None
-                await self.poll_once()
+                await self.poll_once(streams=streams)
             except aioredis.RedisError as e:
                 if "NOGROUP" in str(e):
                     # Redis restarted (no persistence) or the streams were deleted: recreate, keep consuming.
@@ -548,6 +772,9 @@ async def main() -> None:
     if mode not in ("observe", "enforce"):
         log.warning("unknown KUBEHEAL_MODE=%r; using observe", mode)
         mode = "observe"
+    contain_key = os.environ.get("CONTAIN_HMAC_KEY", "")
+    if not contain_key:
+        log.warning("CONTAIN_HMAC_KEY is unset: containment requests are sent unsigned")
     await load_kube_config()
     api = client.ApiClient()
     redis = await connect_redis()
@@ -558,6 +785,8 @@ async def main() -> None:
         max_kills=int(os.environ.get("MAX_KILLS_PER_HOUR", "3")),
         max_patches=int(os.environ.get("MAX_PATCHES_PER_HOUR", "5")),
         consumer=os.environ.get("HOSTNAME") or socket.gethostname(),
+        alert_url=os.environ.get("ALERT_WEBHOOK_URL", "").strip(),
+        contain_key=contain_key,
     )
     runner = await start_http(agent.alive)
     try:

@@ -53,7 +53,7 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
 ---
-# Only the agents that score (health, security) and Prometheus (namespace monitoring, ServiceMonitor kubeheal)
+# Only the agents that score (health, security), the dashboard (Models page: /readyz) and Prometheus (namespace monitoring, ServiceMonitor kubeheal)
 # may reach the model API. kubectl port-forward is not subject to this policy.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -67,6 +67,6 @@ spec:
     - from:
         - podSelector:
             matchExpressions:
-              - {key: app, operator: In, values: [kubeheal-health-agent, kubeheal-security-agent]}
+              - {key: app, operator: In, values: [kubeheal-health-agent, kubeheal-security-agent, kubeheal-dashboard]}
         - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}
       ports: [{port: 8000}]

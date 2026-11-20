@@ -35,6 +35,8 @@ spec:
           ports: [{containerPort: 8080, name: http}]
           env:
             - {name: REDIS_URL, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: dashboard-url}}}   # per-component ACL user (redis.yaml)
+            - {name: INFERENCE_URL, value: "http://kubeheal-inference.kubeheal.svc:8000"}   # Models page reads /readyz
+            - {name: KUBEHEAL_ADMIN_TOKEN, valueFrom: {secretKeyRef: {name: kubeheal-admin, key: token}}}   # admin actions (Secret from the redis-secret Job)
             - {name: LOG_LEVEL, value: "INFO"}
           securityContext:
             allowPrivilegeEscalation: false

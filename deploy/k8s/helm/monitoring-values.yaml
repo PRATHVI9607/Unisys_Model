@@ -6,7 +6,19 @@
 # ingested (lab runs churn hundreds of pods/hour; everything else would fill the 1.5 GiB head).
 # Add a metric there → add it to the matching keep regex here (or the PodMonitor).
 alertmanager: {enabled: false}
-grafana: {enabled: false}
+# Grafana: only for the KubeHeal dashboard (ConfigMap kubeheal-grafana-dashboard, deploy/k8s/base/grafana/).
+# No default dashboards, no Ingress: reach it with `kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80`.
+# adminPassword null = the chart generates a random one: kubectl -n monitoring get secret monitoring-grafana -o jsonpath='{.data.admin-password}' | base64 -d
+grafana:
+  enabled: true
+  adminPassword: null
+  defaultDashboardsEnabled: false
+  sidecar:
+    dashboards: {enabled: true, label: grafana_dashboard, labelValue: "1", searchNamespace: monitoring}
+    datasources: {enabled: true}
+  resources:
+    requests: {cpu: 50m, memory: 256Mi}
+    limits: {memory: 768Mi}   # 13.x is OOMKilled at 256Mi
 nodeExporter: {enabled: false}
 defaultRules: {create: false}
 kubeEtcd: {enabled: false}

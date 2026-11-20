@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lab data collection run (minikube or any lab cluster kubectl points at; never production).
+# Lab data collection run (minikube or k3d-kubeheal; never production).
 #
 #   training/collect/run_lab.sh --hours 12 [--health-slots 12] [--security-slots 5]   (0 slots = skip that collector)
 #   mkdir -p training/data/collected && nohup training/collect/run_lab.sh --hours 12 >> training/data/collected/run_lab.out 2>&1 &
@@ -13,22 +13,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+source deploy/scripts/lib/guard.sh; kh_guard "$@" || exit 2; set -- "${KH_REST[@]}"   # minikube / k3d-kubeheal, else --force-context NAME
 HOURS="" HEALTH_SLOTS=12 SECURITY_SLOTS=5   # measured on 8 CPU / 8 GB minikube: Falco caps security at ~5-6
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --hours) HOURS="$2"; shift 2 ;;
     --health-slots) HEALTH_SLOTS="$2"; shift 2 ;;
     --security-slots) SECURITY_SLOTS="$2"; shift 2 ;;
-    *) echo "usage: $0 --hours N [--health-slots N] [--security-slots N]" >&2; exit 2 ;;
+    *) echo "usage: $0 --hours N [--health-slots N] [--security-slots N] [--force-context NAME]" >&2; exit 2 ;;
   esac
 done
 [[ -n "$HOURS" ]] || { echo "--hours is required" >&2; exit 2; }
 [[ $HEALTH_SLOTS -gt 0 || $SECURITY_SLOTS -gt 0 ]] || { echo "nothing to collect: both slot counts are 0" >&2; exit 2; }
-# Lab only: this script rewrites deployments and deletes namespaces. Override with KUBEHEAL_LAB_CONTEXT=<current context>.
-WANT_CTX="${KUBEHEAL_LAB_CONTEXT:-minikube}"
-CTX="$(kubectl config current-context)"
-[[ "$CTX" == "$WANT_CTX" ]] || { echo "refusing: kubectl context is '$CTX', expected '$WANT_CTX' (set KUBEHEAL_LAB_CONTEXT to override)" >&2; exit 2; }
-
 OUT="$ROOT/training/data/collected"
 mkdir -p "$OUT"
 LAB_NS=kubeheal-lab

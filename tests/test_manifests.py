@@ -125,3 +125,48 @@ def test_kustomize_renders_dev_and_production():
     assert "kubeheal-dashboard" not in work
     assert "replicas" not in work["kubeheal-inference"]["spec"], "the HPA owns inference replicas"
     assert all(d["spec"]["template"]["spec"].get("priorityClassName") == "kubeheal-security" for d in work.values())
+
+
+# ── cluster guard (deploy/scripts/lib/guard.sh) ──────────────────────────────
+GUARD = ROOT / "deploy/scripts/lib/guard.sh"
+GUARDED = ["deploy/scripts/install.sh", "deploy/scripts/demo.sh", "deploy/scripts/reset.sh",
+           "deploy/scripts/seed_demo.sh", "deploy/scripts/smoke.sh", "training/collect/run_lab.sh"]
+
+
+def run_guard(tmp_path: Path, ctx: str, *args: str) -> subprocess.CompletedProcess:
+    fake = tmp_path / "kubectl"   # `kubectl config current-context` is the only call the guard makes
+    fake.write_text(f"#!/bin/sh\n[ \"$1 $2\" = 'config current-context' ] && echo {ctx}\n")
+    fake.chmod(0o755)
+    env = {"PATH": f"{tmp_path}:/usr/bin:/bin"}
+    return subprocess.run(["bash", str(GUARD), *args], capture_output=True, text=True, env=env)
+
+
+@pytest.mark.parametrize("ctx", ["minikube", "k3d-kubeheal"])
+def test_guard_allows_lab_contexts_and_prints_them(tmp_path, ctx):
+    r = run_guard(tmp_path, ctx)
+    assert r.returncode == 0 and f"kubectl context: {ctx}" in r.stderr
+
+
+def test_guard_refuses_other_contexts_unless_forced_by_name(tmp_path):
+    r = run_guard(tmp_path, "kind-asgard")
+    assert r.returncode == 2 and "kubectl context: kind-asgard" in r.stderr and "refusing" in r.stderr
+    assert run_guard(tmp_path, "kind-asgard", "--force-context", "other").returncode == 2   # must equal the current one
+    assert run_guard(tmp_path, "kind-asgard", "--force-context", "kind-asgard").returncode == 0
+
+
+def test_every_cluster_script_is_guarded():
+    for p in GUARDED:
+        assert "lib/guard.sh" in (ROOT / p).read_text(), p
+    assert "lib/guard.sh" in (ROOT / "deploy/scripts/evaluate.py").read_text()
+
+
+def test_grafana_dashboard_queries_only_existing_metrics():
+    import json
+    dash = json.loads((BASE / "grafana/kubeheal-overview.json").read_text())
+    exprs = [t["expr"] for p in dash["panels"] for t in p["targets"]]
+    used = {m for e in exprs for m in re.findall(r"\b(?:kubeheal|container)_[a-z_]+", e)}
+    code = "\n".join(p.read_text() for d in ("agents", "kubeheal") for p in sorted((ROOT / d).rglob("*.py")))
+    keep = (ROOT / "deploy/k8s/helm/monitoring-values.yaml").read_text()   # cAdvisor keep-list
+    missing = [m for m in used if (f'"{re.sub(r"_(bucket|sum|count)$", "", m)}"' not in code if m.startswith("kubeheal_") else m not in keep)]
+    assert used and not missing, f"dashboard queries metrics nothing exports: {missing}"
+    assert all(p["datasource"]["uid"] == "prometheus" for p in dash["panels"])

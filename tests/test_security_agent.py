@@ -807,3 +807,37 @@ def test_event_lag_metric_and_rate_limited_warning(redis, caplog):
     a.observe_lag(sa.now_ms() - 10_000)
     assert sa.EVENT_LAG._sum.get() - n == pytest.approx(20, abs=1)
     assert sum("lag" in r.message for r in caplog.records) == 1
+
+
+# ── containment signature ────────────────────────────────────────────────────
+CUID = "12345678-1234-1234-1234-123456789abc"
+
+
+def contain_cmd(key=""):
+    from agents.common import contain_sign
+    f = {"pod_uid": CUID, "namespace": "shop", "pod": "web", "event_id": "e1", "ts_ms": str(sa.now_ms())}
+    return {**f, "sig": contain_sign(key, f)} if key else f
+
+
+@pytest.mark.parametrize("key,mutate,outcome", [
+    ("k", lambda f: f, "frozen"),
+    ("k", lambda f: {**f, "pod_uid": CUID.replace("1", "2")}, "bad_sig"),     # tampered field
+    ("k", lambda f: {k: v for k, v in f.items() if k != "sig"}, "bad_sig"),  # unsigned, key set
+    ("", lambda f: f, "frozen"),                                             # no key: unsigned accepted
+])
+async def test_contain_verifies_signature(redis, monkeypatch, key, mutate, outcome):
+    monkeypatch.setattr(sa, "freeze_pod", lambda root, uid: "frozen")
+    a = sa.SecurityAgent(redis, None, FakeOwners(), proc_root="/nonexistent", protected=frozenset(),
+                         namespaces=[], contain_key=key)
+    assert await a.contain(mutate(contain_cmd(key))) == outcome
+
+
+async def test_embedded_bundle_scores_without_http(redis):
+    class Bundle:
+        features = ["a"]
+
+        def predict_batch(self, rows, explain_risk):
+            return [rows, explain_risk]
+    a = make_agent(redis)
+    a.bundle = Bundle()
+    assert await a.score([{"a": 1.0, "zzz": 2.0}]) == [[{"a": 1.0}], sa.SECURITY_PUBLISH_RISK]

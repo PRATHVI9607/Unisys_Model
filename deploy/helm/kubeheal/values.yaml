@@ -1,0 +1,79 @@
+# Dev / demo / lab defaults == `kubectl apply -k deploy/k8s`. Single source of truth for images, modes,
+# resources and the event source. Other profiles: values-k3d.yaml, values-production.yaml (== overlays/production).
+#   helm upgrade --install kubeheal deploy/helm/kubeheal -n kubeheal [-f deploy/helm/kubeheal/values-<profile>.yaml]
+# The chart installs only the KubeHeal control plane. Prometheus and Falco stay separate Helm releases
+# (deploy/k8s/helm/*-values.yaml, deploy/scripts/install.sh).
+images:                      # full references: a digest works too
+  inference: kubeheal.invalid/inference:v5
+  agents: kubeheal.invalid/agents:v5
+  dashboard: kubeheal.invalid/dashboard:v5
+  sensor: kubeheal.invalid/sensor:v5
+  redis: redis:7.4.12-alpine@sha256:c5d34a98396a4775e223c74e929162c35c5a2182901ba26b50ade939941ce14b
+imagePullPolicy: IfNotPresent
+namespace:
+  create: true               # false with `helm -n kubeheal --create-namespace` (Helm cannot adopt a namespace it just created)
+
+eventSource: sensor          # sensor (eBPF, sensor/) | falco (Falco's file_output, deploy/k8s/helm/falco-values.yaml)
+mode: enforce                # fusion KUBEHEAL_MODE: enforce | observe (dry-run)
+logLevel: INFO
+extraProtectedNamespaces: "falco,monitoring"
+monitoring:
+  enabled: true              # ServiceMonitor + PodMonitor: needs the Prometheus Operator CRDs
+priorityClass:               # production: KubeHeal pods are evicted after ordinary workloads
+  enabled: false
+  name: kubeheal-security
+
+alerts:
+  webhookUrl: ""             # set = Secret kubeheal-alerts {url} and fusion's ALERT_WEBHOOK_URL; empty = no alerts
+ingress:                     # dashboard only; off by default. TLS is required when on (host + tlsSecretName)
+  enabled: false
+  className: ""
+  host: ""
+  tlsSecretName: ""
+  annotations: {}
+
+redis:
+  storage: 1Gi
+  storageClassName: ""       # empty = cluster default
+  resources:                 # Guaranteed QoS; see deploy/k8s/base/redis.yaml for the sizing
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: 250m, memory: 512Mi}
+
+inference:
+  replicas: 1
+  autoscaling: {enabled: false, minReplicas: 2, maxReplicas: 6, targetCPUUtilization: 70}   # needs metrics-server
+  pdb: {enabled: false, minAvailable: 1}
+  resources:
+    requests: {cpu: 10m, memory: 96Mi}
+    limits: {cpu: 500m, memory: 192Mi}
+
+health:
+  assessDelayS: 60
+  prometheusUrl: http://prometheus-operated.monitoring.svc:9090
+  resources:
+    requests: {cpu: 15m, memory: 96Mi}
+    limits: {cpu: 500m, memory: 192Mi}
+
+security:
+  capture: "0"               # "1" = lab data capture (training/collect/run_lab.sh toggles it)
+  evalIntervalS: 1
+  updateStrategy: {}         # e.g. {type: RollingUpdate, rollingUpdate: {maxUnavailable: 10%}}
+  resources:
+    requests: {cpu: 400m, memory: 128Mi}
+    limits: {cpu: "1", memory: 288Mi}   # incl. the embedded security model (RSS +14 MB)
+  sensorResources:
+    requests: {cpu: 50m, memory: 32Mi}
+    limits: {cpu: "1", memory: 128Mi}
+
+fusion:
+  maxKillsPerHour: 3
+  maxPatchesPerHour: 5
+  resources:
+    requests: {cpu: 10m, memory: 96Mi}
+    limits: {cpu: 500m, memory: 192Mi}
+
+dashboard:
+  enabled: true              # off in production
+  resources:
+    requests: {cpu: 10m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 128Mi}

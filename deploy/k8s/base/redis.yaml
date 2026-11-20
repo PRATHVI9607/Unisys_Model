@@ -3,7 +3,9 @@
 #   - passwords live in Secret kubeheal-redis, generated in-cluster by Job kubeheal-redis-secret below
 #     (random, never in git; the Job keeps an existing Secret, so re-applying never rotates them);
 #   - each agent gets its own REDIS_URL (Secret key <user>-url) and may write only its own keys;
-#     the dashboard is read-only; only fusion may EVAL (its lock scripts);
+#     the dashboard is read-only except the operator-approval keys (kubeheal:approval:*, kubeheal:mode) and
+#     the kubeheal.approvals / kubeheal.ledger streams (never baselines, specs, locks, breakers, done markers);
+#     only fusion may EVAL (its lock scripts);
 #   - `default` is the admin user (password <default-password>); REDISCLI_AUTH in this container lets
 #     `kubectl exec deploy/redis -- redis-cli ...` (scripts, probes) authenticate as it;
 #   - NetworkPolicy redis-agents-only admits only the three agents and the dashboard.
@@ -72,7 +74,7 @@ spec:
               user health on >$HEALTH_PASSWORD resetchannels -@all +@read +@write +@transaction +ping +client|setinfo -@scripting -@dangerous %RW~kubeheal:spec:* %RW~kubeheal:baseline:* %RW~kubeheal:health:* %RW~kubeheal:index:health %RW~kubeheal.health.events
               user security on >$SECURITY_PASSWORD resetchannels -@all +@read +@write +@transaction +ping +client|setinfo -@scripting -@dangerous %RW~kubeheal:security:* %RW~kubeheal:index:security %RW~kubeheal.security.events %RW~kubeheal.security.capture %R~kubeheal.contain
               user fusion on >$FUSION_PASSWORD resetchannels -@all +@read +@write +@transaction +@stream +ping +client|setinfo -@scripting -@dangerous +eval +evalsha %RW~kubeheal:* %RW~kubeheal.*
-              user dashboard on >$DASHBOARD_PASSWORD resetchannels -@all +@read +ping +client|setinfo -@scripting -@dangerous %R~kubeheal:* %R~kubeheal.*
+              user dashboard on >$DASHBOARD_PASSWORD resetchannels -@all +@read +set +xadd +watch +unwatch +multi +exec +discard +ping +client|setinfo -@scripting -@dangerous %R~kubeheal:* %R~kubeheal.* %RW~kubeheal:approval:* %RW~kubeheal:mode %RW~kubeheal.approvals %RW~kubeheal.ledger
               EOF
               exec redis-server --aclfile /run/redis/users.acl --dir /data \
                 --appendonly yes --appendfsync everysec --aof-use-rdb-preamble yes --save "" \
@@ -112,10 +114,12 @@ spec:
         - name: acl
           emptyDir: {medium: Memory, sizeLimit: 1Mi}
 ---
-# Creates Secret kubeheal-redis once, with random passwords and the matching per-component REDIS_URLs.
+# Creates Secret kubeheal-redis once, with random passwords and the matching per-component REDIS_URLs,
+# Secret kubeheal-admin {token} (the dashboard's admin-action bearer token) and Secret kubeheal-contain-hmac {key}
+# (signs containment requests, fusion -> security agents), each random 32 bytes.
 # Works with plain `kubectl apply -k`: pods referencing the Secret wait (CreateContainerConfigError /
 # ContainerCreating) until it exists. An existing Secret is kept (409), so re-applies never rotate.
-# Rotate: docs/operations.md "Redis credentials".
+# Rotate: docs/operations.md "Redis credentials" and "Admin token".
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -146,20 +150,25 @@ spec:
               USERS = ("default", "health", "security", "fusion", "dashboard")
               HOST = "redis-master.kubeheal.svc:6379/0"
 
+              async def create(api, name: str, data: dict) -> None:
+                  body = client.V1Secret(metadata=client.V1ObjectMeta(name=name), string_data=data)
+                  try:
+                      await client.CoreV1Api(api).create_namespaced_secret("kubeheal", body)
+                      print(f"created secret kubeheal/{name}")
+                  except client.ApiException as e:
+                      if e.status != 409:
+                          raise
+                      print(f"secret kubeheal/{name} exists; kept")
+
               async def main() -> None:
                   config.load_incluster_config()
                   pw = {u: secrets.token_hex(32) for u in USERS}
                   data = {f"{u}-password": p for u, p in pw.items()}
                   data |= {f"{u}-url": f"redis://{u}:{p}@{HOST}" for u, p in pw.items()}
-                  body = client.V1Secret(metadata=client.V1ObjectMeta(name="kubeheal-redis"), string_data=data)
                   async with client.ApiClient() as api:
-                      try:
-                          await client.CoreV1Api(api).create_namespaced_secret("kubeheal", body)
-                          print("created secret kubeheal/kubeheal-redis")
-                      except client.ApiException as e:
-                          if e.status != 409:
-                              raise
-                          print("secret kubeheal/kubeheal-redis exists; kept")
+                      await create(api, "kubeheal-redis", data)
+                      await create(api, "kubeheal-admin", {"token": secrets.token_urlsafe(32)})
+                      await create(api, "kubeheal-contain-hmac", {"key": secrets.token_urlsafe(32)})
 
               asyncio.run(main())
           securityContext:

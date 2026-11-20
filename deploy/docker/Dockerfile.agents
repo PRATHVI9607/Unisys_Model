@@ -31,6 +31,8 @@ COPY --from=build /python /python
 COPY --from=build /app/.venv /app/.venv
 COPY kubeheal/ kubeheal/
 COPY agents/ agents/
+# The security agent scores in-process (SECURITY_MODEL_DIR default /models/security); inference is only its fallback.
+COPY models/security /models/security
 # Compile our sources too: the root fs is read-only at runtime, so Python could not cache .pyc.
 RUN ["python", "-m", "compileall", "-q", "kubeheal", "agents"]
 USER 10001

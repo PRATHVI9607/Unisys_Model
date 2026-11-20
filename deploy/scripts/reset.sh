@@ -4,19 +4,13 @@
 # entries, event copies, baselines/specs, circuit breakers, locks, idempotency markers), and restart the
 # agents so their in-memory state matches (the health agent re-learns the restored spec as the baseline
 # on first sight). Other namespaces' baselines and history are never touched.
-# Refuses to run unless kubectl points at minikube, or you name the current context explicitly:
-#   ./deploy/scripts/reset.sh                       # minikube only
-#   ./deploy/scripts/reset.sh --force-context NAME  # NAME must equal `kubectl config current-context`
+# Cluster guard (deploy/scripts/lib/guard.sh): minikube or k3d-kubeheal only, else --force-context NAME
+# (NAME must equal `kubectl config current-context`).
 set -euo pipefail
 NS=demo; KH=kubeheal
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT"
-command -v kubectl >/dev/null || { echo "need kubectl"; exit 1; }
-CTX="$(kubectl config current-context)"
-case "${1:-}" in
-  "") [[ $CTX == minikube ]] || { echo "refusing: context is '$CTX', not minikube (use --force-context $CTX)"; exit 1; } ;;
-  --force-context) [[ "${2:-}" == "$CTX" ]] || { echo "refusing: --force-context '${2:-}' != current context '$CTX'"; exit 1; } ;;
-  *) echo "usage: $0 [--force-context CONTEXT]"; exit 1 ;;
-esac
+source deploy/scripts/lib/guard.sh; kh_guard "$@" || exit 1; set -- "${KH_REST[@]}"
+[[ $# -eq 0 ]] || { echo "usage: $0 [--force-context CONTEXT]"; exit 1; }
 
 echo "Removing chaos workloads + quarantine network policies..."
 kubectl delete deploy,pod -l kubeheal.io/chaos=true -n "$NS" --ignore-not-found --grace-period=0 --force 2>/dev/null
