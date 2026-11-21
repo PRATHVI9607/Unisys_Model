@@ -147,8 +147,10 @@ CONTAIN_SIGNED = ("pod_uid", "namespace", "pod", "event_id", "ts_ms")
 
 
 def contain_sign(key: str, fields: dict) -> str:
-    """HMAC-SHA256 (hex) over pod_uid|namespace|pod|event_id|ts_ms of a STREAM_CONTAIN entry."""
+    """HMAC-SHA256 (hex) over pod_uid|namespace|pod|event_id|ts_ms[|action] of a STREAM_CONTAIN entry."""
     msg = "|".join(str(fields[f]) for f in CONTAIN_SIGNED)
+    if "action" in fields:   # absent on freeze entries (and old ones): their signature is unchanged
+        msg += "|" + str(fields["action"])
     return hmac.new(key.encode(), msg.encode(), hashlib.sha256).hexdigest()
 
 

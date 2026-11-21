@@ -26,7 +26,7 @@ import aiohttp
 import redis.asyncio as aioredis
 from kubernetes_asyncio import client
 from kubernetes_asyncio.client.exceptions import ApiException
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 
 from agents.common import (
     approval_sign,
@@ -100,6 +100,7 @@ OWNER_CACHE_MAX = 4096
 CONTROLLERS = frozenset({"Deployment", "StatefulSet", "DaemonSet", "Job"})   # pod controllers fusion can read
 CONTAIN_TIMEOUT_S = 1.0       # the containment XADD never holds up the kill longer than this
 DONE_TTL_S = 3600             # idempotency markers outlive every redelivery (stale after MAX_EVENT_AGE_S)
+DELETE_BACKOFF_S = (2.0, 5.0)  # waits before the 2nd and 3rd delete try (a frozen pod must not stay frozen on a blip)
 RETRY_S = 1.0                 # back-off after a Redis error in the consumer loop
 # outcomes after which the same automatic decision on the partner event must not act again
 HANDLED = frozenset({"pod_killed", "pod_already_gone", "patched", "would_kill", "would_patch"})
@@ -110,6 +111,7 @@ HOUSEKEEP_S = 300             # ledger age trim and expired-approval index prune
 LEDGER_REPEAT_S = 600         # an unchanged would_*/skipped_* outcome for a target is ledgered once per this
 LEDGER_SEEN_MAX = 4096
 APPROVE = frozenset({"approve", "auto_kill", "auto_patch"})   # `decision` values that mean approve
+RELEASE = "release"           # thaw + un-quarantine a pod whose kill failed after the freeze (record `releasable`)
 
 DECISIONS = Counter("kubeheal_fusion_decisions_total", "Decisions made", ["decision"])
 OUTCOMES = Counter("kubeheal_fusion_outcomes_total", "Decision outcomes", ["outcome"])
@@ -118,6 +120,11 @@ CONTAINMENT = Counter("kubeheal_fusion_containment_total", "Pod freeze requests 
                       ["result"])
 SKIPPED_STALE = Counter("kubeheal_fusion_stale_events_total", "Events skipped as older than MAX_EVENT_AGE_S")
 MODE = Gauge("kubeheal_fusion_mode", "Effective mode (1 for the active one)", ["mode"])
+DETECT_TO_ACTION = Histogram("kubeheal_fusion_detection_to_action_seconds",
+                             "Action publish time minus the deciding event's window end (automatic decisions only)",
+                             ["decision"], buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 300))
+KILL_API = Histogram("kubeheal_fusion_kill_api_seconds", "Duration of kill() (reads, quarantine, delete)",
+                     buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30))
 APPROVALS = Counter("kubeheal_fusion_approvals_total", "Operator approval requests handled", ["result"])
 
 Event = HealthEvent | SecurityEvent
@@ -387,12 +394,18 @@ class FusionAgent:
         done = key_done(ev.event_id)
         if raw := await self.redis.get(done):   # acted on an earlier delivery whose publish or XACK failed
             action = ActionEvent.model_validate_json(raw)
+            fresh = False
         else:
+            fresh = True
             action = await self._decide(ev, partner, partner_decision, partner_outcome)
             # Recorded before publishing, so a redelivery after a failed publish/XACK never acts twice.
             await self.redis.set(done, action.model_dump_json(), nx=True, ex=DONE_TTL_S)
         extra, notify = await self._extras(ev, partner, action)
         await publish_event(self.redis, STREAM_ACTIONS, "action", action, ack, extra)
+        if fresh and action.outcome in ("pod_killed", "patched", "would_kill", "would_patch"):
+            src = partner if (action.decision is Decision.AUTO_KILL) != isinstance(ev, SecurityEvent) else ev
+            t0 = getattr(src, "window_end_ms", 0) or src.timestamp_ms
+            DETECT_TO_ACTION.labels(action.decision.value).observe(max((now_ms() - t0) / 1000, 0.0))
         if extra and action.decision in AUTOMATIC:   # noted only once published: a retry must still ledger it
             self._ledger_note(action)
         if notify and self.alerter:
@@ -433,8 +446,14 @@ class FusionAgent:
             if action.outcome == "already_handled" or self._ledger_repeat(action):
                 return [], False
             notify = action.outcome in ("pod_killed", "patched") or action.outcome.startswith("failed:")
-            return [ledger("action", "fusion", action.mode, decision=action.decision.value,
-                           outcome=action.outcome, detail=action.rationale, **ids)], notify
+            entries = [ledger("action", "fusion", action.mode, decision=action.decision.value,
+                              outcome=action.outcome, detail=action.rationale, **ids)]
+            sec = ev if isinstance(ev, SecurityEvent) else partner
+            if (action.decision is Decision.AUTO_KILL and action.outcome.startswith("failed:")
+                    and action.containment == "requested" and sec and sec.pod_uid):
+                # The pod may be frozen but alive: the operator retries the kill or releases it.
+                entries += await self._open_approval(action, Decision.AUTO_KILL, None, sec, ids, releasable=True)
+            return entries, notify
         if action.decision is not Decision.HUMAN or action.outcome == "skipped_protected":
             return [], False
         health, security = (ev, partner) if isinstance(ev, HealthEvent) else (partner, ev)
@@ -444,13 +463,19 @@ class FusionAgent:
             candidate = Decision.AUTO_PATCH
         else:
             return [], False
+        queue = await self._open_approval(action, candidate, health, security, ids)
+        return queue, bool(queue)
+
+    async def _open_approval(self, action: ActionEvent, candidate: Decision, health: HealthEvent | None,
+                             security: SecurityEvent | None, ids: dict, releasable: bool = False) -> list:
+        """Commands that record a pending approval and its ledger entry; [] when one exists or none is possible."""
         if await self.redis.exists(key_approval(action.event_id)):   # redelivery: already recorded
-            return [], False
-        dedupe = key_approval_dedupe(action.namespace, action.workload, candidate.value)
+            return []
+        dedupe = key_approval_dedupe(action.namespace, action.workload, "RELEASE" if releasable else candidate.value)
         if prior := await self.redis.get(dedupe):   # one open approval per target: reuse it, never flood
             try:
                 if json.loads(await self.redis.get(key_approval(prior)) or "{}").get("state") == "pending":
-                    return [], False
+                    return []
             except ValueError:
                 pass
         hsh = ""
@@ -460,9 +485,9 @@ class FusionAgent:
             except (ApiException, TimeoutError, aiohttp.ClientError) as e:
                 log.warning("no approval for %s/%s: cannot read the Deployment (%r)", action.namespace,
                             action.workload, e)
-                return [], False
+                return []
             if dep is None:
-                return [], False
+                return []
             hsh = spec_hash(dep)
         created = now_ms()
         record = {"state": "pending", "action_event_id": action.event_id, "candidate": candidate.value,
@@ -471,7 +496,7 @@ class FusionAgent:
                   "health_event_id": action.health_event_id, "security_event_id": action.security_event_id,
                   "rationale": action.rationale, "score": action.score, "created_ms": created,
                   "expires_ms": created + APPROVAL_TTL_S * 1000,
-                  "changed_fields": health.changed_fields if health else []}
+                  "changed_fields": health.changed_fields if health else [], "releasable": releasable}
         payload = self._seal(record)
 
         def queue(p) -> None:
@@ -480,7 +505,7 @@ class FusionAgent:
             p.zadd(KEY_APPROVALS_PENDING, {action.event_id: created})
             p.zremrangebyscore(KEY_APPROVALS_PENDING, "-inf", created - APPROVAL_TTL_S * 1000)
         return [queue, ledger("approval_pending", "fusion", action.mode, decision=candidate.value,
-                              outcome="pending", detail=action.rationale, **ids)], True
+                              outcome="pending", detail=action.rationale, **ids)]
 
     def _seal(self, rec: dict) -> str:
         """The record as JSON, signed over everything but `requested` (the dashboard's) when a key is set."""
@@ -592,7 +617,7 @@ class FusionAgent:
                 return result("approval", f"refused:{why}", "refused", rec)
             return result("rejection", "rejected", "rejected", rec, record=self._seal(
                 {**self._plain(rec), "state": "rejected", "actor": actor, "reason": reason}))
-        if decision not in APPROVE:
+        if decision not in APPROVE | {RELEASE}:
             rec, why = await self._claim(eid, None, None, hold=("bad_decision", "bad decision"))
             return result("approval", f"refused:{why}", "refused", rec)
         if self.mode != "enforce":   # nothing would run: stay pending for when enforcement is back
@@ -611,6 +636,8 @@ class FusionAgent:
             ns, wl = rec["namespace"], rec["workload"]
         except (KeyError, ValueError):
             return failed("bad_record")
+        if decision == RELEASE and not rec.get("releasable"):
+            return failed("not_releasable")
         if candidate is Decision.AUTO_KILL and not rec.get("pod_uid"):
             return failed("no_pod_uid")      # without the UID the delete could hit a successor of that name
         if candidate is Decision.AUTO_PATCH and not rec.get("spec_hash"):
@@ -622,7 +649,15 @@ class FusionAgent:
         hlt = SimpleNamespace(namespace=ns, workload=wl, changed_fields=rec.get("changed_fields", []))
         self.containment = ""
         try:
-            final, outcome = await self.act(candidate, hlt, sec, expect_hash=rec.get("spec_hash", ""))
+            if decision == RELEASE:
+                if ns in self.protected:
+                    final, outcome = Decision.HUMAN, "skipped_protected"
+                else:
+                    final, outcome = Decision.HUMAN, await self.release(ns, sec.pod, sec.pod_uid, sec.event_id)
+            else:
+                final, outcome = await self.act(candidate, hlt, sec, expect_hash=rec.get("spec_hash", ""))
+        except (TimeoutError, aiohttp.ClientError, ApiException) as e:   # release() raises; act() maps its own
+            final, outcome = candidate, f"failed:{type(e).__name__}"
         except Exception:   # never leave the record "executing"
             log.exception("approved %s on %s/%s crashed", candidate.value, ns, wl)
             final, outcome = candidate, "failed:crash"
@@ -632,7 +667,7 @@ class FusionAgent:
             rationale=f"approved by {actor}: {reason}; original: {rec.get('rationale', '')}",
             health_event_id=rec.get("health_event_id", ""), security_event_id=rec.get("security_event_id", ""),
             containment=self.containment, approved_by=actor)
-        ok = outcome in ("pod_killed", "pod_already_gone", "patched")   # a dry run (mode flipped meanwhile) is not one
+        ok = outcome in ("pod_killed", "pod_already_gone", "patched", "released")   # a dry run (mode flipped meanwhile) is not one
         record = self._seal({**self._plain(rec), "state": "executed" if ok else "failed", "outcome": outcome,
                              "actor": actor, "reason": reason, "result_event_id": action.event_id})
         return result("approval", outcome, "executed" if ok else "failed", rec, action.model_dump_json(), record,
@@ -773,6 +808,32 @@ class FusionAgent:
         return owner
 
     async def kill(self, ns: str, wl: str, pod_name: str, pod_uid: str = "", event_id: str = "") -> str:
+        t0 = time.perf_counter()
+        try:
+            return await self._kill(ns, wl, pod_name, pod_uid, event_id)
+        finally:
+            KILL_API.observe(time.perf_counter() - t0)
+
+    async def _delete_pod(self, ns: str, pod_name: str, uid: str) -> None:
+        """Delete with the UID precondition; a 404/409 is final, anything else is retried (DELETE_BACKOFF_S):
+        the pod is frozen by now, so a transient API error must not leave it frozen."""
+        waits = (0.0, *DELETE_BACKOFF_S)
+        for i, wait in enumerate(waits):
+            await asyncio.sleep(wait)
+            try:
+                await self._kube(self.core.delete_namespaced_pod(
+                    pod_name, ns, grace_period_seconds=0,
+                    body=client.V1DeleteOptions(preconditions=client.V1Preconditions(uid=uid))))
+                return
+            except ApiException as e:
+                if e.status in (404, 409) or i == len(waits) - 1:
+                    raise
+            except (TimeoutError, aiohttp.ClientError):
+                if i == len(waits) - 1:
+                    raise
+            log.warning("deleting %s/%s failed; retrying", ns, pod_name)
+
+    async def _kill(self, ns: str, wl: str, pod_name: str, pod_uid: str = "", event_id: str = "") -> str:
         # The event's workload is normally the controlling Deployment: read it alongside the pod (one
         # round trip instead of two). The pod's own controller is resolved and checked too.
         pod, wl_dep = await asyncio.gather(self._read("Pod", ns, pod_name), self._read("Deployment", ns, wl))
@@ -806,9 +867,7 @@ class FusionAgent:
                     self._kube(self.core.patch_namespaced_pod(
                         pod_name, ns, {"metadata": {"uid": uid, "labels": {QUARANTINE_LABEL: "true"}}})),
                     self._create_quarantine_policy(ns, pod))
-                await self._kube(self.core.delete_namespaced_pod(
-                    pod_name, ns, grace_period_seconds=0,
-                    body=client.V1DeleteOptions(preconditions=client.V1Preconditions(uid=uid))))
+                await self._delete_pod(ns, pod_name, uid)
             except ApiException as e:
                 if e.status == 404:
                     return "pod_already_gone"
@@ -820,11 +879,13 @@ class FusionAgent:
             await circuit_count(self.redis, breaker)
         return "pod_killed"
 
-    async def _contain(self, ns: str, pod: str, uid: str, event_id: str) -> str:
+    async def _contain(self, ns: str, pod: str, uid: str, event_id: str, action: str = "") -> str:
         """Ask every node's security agent to freeze the pod's cgroup now. Best effort: never delays the
         kill by more than CONTAIN_TIMEOUT_S and never fails it; the API delete follows regardless."""
         try:
             fields = {"pod_uid": uid, "namespace": ns, "pod": pod, "event_id": event_id, "ts_ms": str(now_ms())}
+            if action:   # "thaw"; a freeze carries no action (the entry stays what older agents understand)
+                fields["action"] = action
             if self.contain_key:
                 fields["sig"] = contain_sign(self.contain_key, fields)
             await asyncio.wait_for(self.redis.xadd(STREAM_CONTAIN, fields, maxlen=CONTAIN_MAXLEN, approximate=True),
@@ -836,6 +897,31 @@ class FusionAgent:
             result = "requested"
         CONTAINMENT.labels(result).inc()
         return result
+
+    async def release(self, ns: str, pod_name: str, pod_uid: str, event_id: str) -> str:
+        """Operator release of a pod whose kill failed: lift the quarantine (label, then policy), thaw last, so
+        any failure leaves it frozen and isolated. A pod that is gone needs no thaw (its cgroup is gone too)."""
+        pod = await self._read("Pod", ns, pod_name)
+        if pod is None:
+            return "pod_already_gone"
+        if pod.metadata.uid != pod_uid:
+            return "skipped_stale_pod"
+        if self.mode != "enforce":
+            return "would_release"
+        try:
+            await self._kube(self.core.patch_namespaced_pod(
+                pod_name, ns, {"metadata": {"uid": pod_uid, "labels": {QUARANTINE_LABEL: None}}}))
+        except ApiException as e:
+            if e.status == 404:
+                return "pod_already_gone"
+            raise
+        try:
+            await self._kube(self.net.delete_namespaced_network_policy(f"kubeheal-quarantine-{pod_name}"[:253], ns))
+        except ApiException as e:
+            if e.status != 404:
+                raise
+        return "released" if await self._contain(ns, pod_name, pod_uid, event_id, "thaw") == "requested" \
+            else "failed:thaw_request"
 
     async def _create_quarantine_policy(self, ns: str, pod) -> None:
         try:

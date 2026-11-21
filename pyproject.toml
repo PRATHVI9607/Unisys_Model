@@ -43,6 +43,7 @@ dev = [
     "ruff>=0.9",
     "pytest-playwright>=0.10.0",
     "httpx2>=2.16.2",
+    "hypothesis>=6.170.17",
 ]
 
 [tool.uv]

@@ -71,7 +71,7 @@ def test_every_mutating_route_requires_admin():
 
 
 MUTATIONS = [("post", "/api/mode", {"mode": "observe"}), ("post", f"/api/approvals/{HUMAN_PENDING}/approve", {}),
-             ("post", f"/api/approvals/{HUMAN_PENDING}/reject", {}), ("get", "/api/admin/session", None)]
+             ("post", f"/api/approvals/{HUMAN_PENDING}/reject", {}), ("post", f"/api/approvals/{HUMAN_PENDING}/release", {}), ("get", "/api/admin/session", None)]
 
 
 @pytest.mark.parametrize(("method", "path", "body"), MUTATIONS)
@@ -105,6 +105,17 @@ def test_list_approvals(env):
     assert set(by) == {HUMAN_PENDING, HUMAN_SECOND, HUMAN_DONE} and d["pending"] == 2
     assert by[HUMAN_PENDING]["candidate"] == "AUTO_PATCH" and by[HUMAN_PENDING]["display_state"] == "pending"
     assert by[HUMAN_DONE]["state"] == "executed" and by[HUMAN_DONE]["requested"]["actor"] == "admin:maria"
+
+
+def test_release_is_an_admin_request_ledgered_as_release(env):
+    sync, client = env
+    assert client.post(f"/api/approvals/{HUMAN_PENDING}/release", json={}).status_code in (401, 403)
+    r = client.post(f"/api/approvals/{HUMAN_PENDING}/release", json={"reason": "false alarm"}, headers=AUTH)
+    assert r.status_code == 200 and r.json()["display_state"] == "release requested"
+    [(_, e)] = sync.xrange(STREAM_APPROVALS)
+    assert (e["decision"], e["actor"]) == ("release", "admin:Maria R")
+    [(_, led)] = sync.xrange(STREAM_LEDGER, min="(0-0", count=1000)[-1:]
+    assert (led["kind"], led["decision"], led["outcome"]) == ("approval", "RELEASE", "release_requested")
 
 
 def test_approve_writes_request_stream_and_ledger_atomically(env):

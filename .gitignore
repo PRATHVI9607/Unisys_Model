@@ -12,3 +12,4 @@ training/data/collected/
 CLAUDE.md
 .mcp.json
 .codegraph/
+.hypothesis/

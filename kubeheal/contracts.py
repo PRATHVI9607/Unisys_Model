@@ -31,7 +31,8 @@ STREAM_DEADLETTER = "kubeheal.deadletter"
 # SecurityEvent, whatever its risk. Read by training/collect/security_lab.py.
 STREAM_CAPTURE = "kubeheal.security.capture"
 # Containment commands: fusion → every node's security agent. An entry {pod_uid, namespace, pod, event_id, ts_ms}
-# asks the agent on the pod's node to freeze the pod cgroup at once (the API delete follows).
+# asks the agent on the pod's node to freeze the pod cgroup at once (the API delete follows). Optional `action`
+# (freeze|thaw, absent = freeze): an operator's release of a pod whose delete failed thaws it.
 STREAM_CONTAIN = "kubeheal.contain"
 CONTAIN_MAXLEN = 1_000  # approximate trim; entries are only useful for seconds
 STREAM_MAXLEN = 10_000  # approximate trim (XADD MAXLEN ~)

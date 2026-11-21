@@ -177,3 +177,19 @@ def test_smoke_acted_reads_whole_stream():
     # `acted` then fails although the action is there (found live: smoke "kill" step timed out on a busy stream)
     body = Path("deploy/scripts/smoke.sh").read_text().split("acted() {", 1)[1].split("\n}\n", 1)[0]
     assert "exit" not in body
+
+
+def test_demo_script_dry_run_and_stream_parser():
+    demo = ROOT / "deploy/scripts/demo.sh"
+    out = subprocess.run(["bash", str(demo), "--dry-run"], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0 and out.stdout.count("plan: s_") == 9, out.stdout + out.stderr
+    fixture = "1-0\nnamespace\nkhe-demo-kill\ndecision\nAUTO_KILL\noutcome\npod killed\nrationale\n\n0-1\nnamespace\nx\n"
+    parse = f'source {demo}; parse_stream "namespace decision outcome" <<<"$1"; field "$(parse_stream "outcome" <<<"$1" | head -1)" outcome'
+    out = subprocess.run(["bash", "-c", parse, "_", fixture], capture_output=True, text=True, timeout=30)
+    assert out.stdout.splitlines() == ["1-0 namespace=khe-demo-kill decision=AUTO_KILL outcome=pod_killed", "0-1 namespace=x", "pod_killed"], out.stdout + out.stderr
+
+
+def test_sensor_stats_path_matches_manifests():
+    for p in ("deploy/k8s/base/security-agent-daemonset.yaml", "deploy/helm/kubeheal/templates/security-agent.yaml"):
+        assert "SENSOR_STATS_PATH" in (ROOT / p).read_text(), p
+    assert "/var/run/kubeheal/sensor-stats.json" in (ROOT / "sensor/src/main.rs").read_text()

@@ -8,7 +8,7 @@ const GROUPS = [
     ['Resolved', i => ['executed', 'failed', 'rejected', 'expired'].includes(i.state)],
 ];
 const STATE_CLASS = { executed: 'ok', failed: 'neg', rejected: 'quiet', expired: 'quiet' };
-const DECIDED = { approve: 'Approved by', reject: 'Rejected by' };
+const DECIDED = { approve: 'Approved by', reject: 'Rejected by', release: 'Released by' };
 
 function item(i, open, msg) {
     const overdue = i.state === 'pending' && !i.requested && left(i.expires_ms) === 'overdue';
@@ -28,11 +28,12 @@ function item(i, open, msg) {
             ${i.outcome ? `<div><dt>${i.state === 'pending' ? 'Held because' : 'Result'}</dt><dd>${esc(pretty(i.outcome))}</dd></div>` : ''}</dl>
         <p class="prose">${esc(i.rationale || '')}</p>
         ${msg && msg.id === i.action_event_id ? `<p class="err" role="alert">${esc(msg.text)}</p>` : ''}
-        ${can && !verb ? `<div class="btns"><button type="button" class="primary" data-ask="approve" data-focus="ap-${esc(i.action_event_id)}">Approve ${esc(cand)}</button>
+        ${can && !verb ? `<div class="btns"><button type="button" class="primary" data-ask="approve" data-focus="ap-${esc(i.action_event_id)}">${i.releasable ? 'Retry kill' : `Approve ${esc(cand)}`}</button>
+            ${i.releasable ? `<button type="button" data-ask="release" data-focus="rl-${esc(i.action_event_id)}">Release</button>` : ''}
             <button type="button" data-ask="reject" data-focus="rj-${esc(i.action_event_id)}">Reject</button></div>` : ''}
-        ${can && verb ? `<form class="confirm" data-confirm><label>${verb === 'approve' ? `Approving runs ${esc(cand)} on ${esc(target(i))} with every safety rail re-checked` : 'Rejecting closes this item without touching the cluster'}.
+        ${can && verb ? `<form class="confirm" data-confirm><label>${verb === 'release' ? `Releasing thaws ${esc(i.pod)} and removes its quarantine: the pod runs again` : verb === 'approve' ? `Approving runs ${esc(cand)} on ${esc(target(i))} with every safety rail re-checked` : 'Rejecting closes this item without touching the cluster'}.
             <textarea name="reason" rows="2" maxlength="500" placeholder="Reason, recorded in the ledger (optional)" data-focus="reason">${esc(open.reason)}</textarea></label>
-            <div class="btns"><button type="submit" class="${verb === 'approve' ? 'primary' : 'danger'}">Confirm ${verb}</button><button type="button" data-cancel>Cancel</button></div></form>` : ''}
+            <div class="btns"><button type="submit" class="${verb === 'reject' ? 'danger' : 'primary'}">Confirm ${verb}</button><button type="button" data-cancel>Cancel</button></div></form>` : ''}
     </li>`;
 }
 

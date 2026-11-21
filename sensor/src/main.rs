@@ -1,5 +1,6 @@
 mod pods;
 mod render;
+mod stats;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -54,6 +55,9 @@ struct Args {
     /// Seconds between stats lines on stderr (0 = only at exit)
     #[arg(long, default_value_t = 60)]
     stats_secs: u64,
+    /// Stats snapshot (JSON, rewritten every 5 s) for the security agent; default $SENSOR_STATS_PATH, else /var/run/kubeheal/sensor-stats.json
+    #[arg(long)]
+    stats_path: Option<PathBuf>,
     /// Print one fixture line per event kind and exit (no BPF, no root)
     #[arg(long)]
     selftest_json: bool,
@@ -210,6 +214,7 @@ fn main() -> Result<()> {
         Some(f)
     };
 
+    let stats_path = a.stats_path.clone().or_else(|| std::env::var_os("SENSOR_STATS_PATH").map(PathBuf::from)).unwrap_or_else(|| "/var/run/kubeheal/sensor-stats.json".into());
     let batch: Rc<RefCell<Vec<Rec>>> = Rc::default();
     let mut rb = RingBufferBuilder::new();
     {
@@ -237,7 +242,7 @@ fn main() -> Result<()> {
     let (mut counts, mut unresolved) = ([0u64; 6], 0u64);
     let mut off = boot_to_epoch_ns();
     let start = Instant::now();
-    let (mut last_flush, mut last_clock, mut last_prune, mut last_stat) = (start, start, start, start);
+    let (mut last_flush, mut last_clock, mut last_prune, mut last_stat, mut last_json) = (start, start, start, start, start);
     let mut dirty = false;
 
     let stats = |skel: &SensorSkel, counts: &[u64; 6], unresolved: u64, pending: usize, pods: usize| {
@@ -305,6 +310,16 @@ fn main() -> Result<()> {
         if now - last_clock >= Duration::from_secs(1) {
             off = boot_to_epoch_ns(); // follows NTP steps of the realtime clock
             last_clock = now;
+        }
+        if now - last_json >= Duration::from_secs(5) {
+            let (drops, pool_full, misses) = lost(&skel);
+            let ts_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+            let snap = stats::Snapshot { events: counts.iter().sum(), drops, pool_full, lost: drops + pool_full + misses,
+                cgroups: res.pods().len(), uptime_s: start.elapsed().as_secs(), ts_ms };
+            if let Err(e) = stats::write(&stats_path, &snap) {
+                eprintln!("kubeheal-sensor: stats file {}: {e}", stats_path.display()); // best effort: never stops event output
+            }
+            last_json = now;
         }
         if stop {
             break;

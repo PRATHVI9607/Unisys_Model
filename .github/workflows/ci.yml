@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -13,6 +14,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           version: "0.13.0"
+          enable-cache: true
       - run: uv sync --frozen --all-extras   # tests import every component
       - run: uv run --all-extras ruff check .
       - run: uv run --all-extras pytest
@@ -32,3 +34,108 @@ jobs:
           for img in inference agents dashboard chaos; do
             docker build -t "kubeheal/$img:ci" -f "deploy/docker/Dockerfile.$img" .
           done
+
+  sensor:
+    runs-on: ubuntu-latest
+    env:
+      C_INCLUDE_PATH: /usr/include/x86_64-linux-gnu
+      CARGO_TERM_COLOR: never
+    defaults:
+      run:
+        working-directory: sensor
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libbpf-dev libelf-dev zlib1g-dev make pkg-config
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal -c clippy -c rustfmt && rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            sensor/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('sensor/Cargo.lock', 'sensor/src/bpf/**', 'sensor/build.rs') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - run: cargo test --release --locked
+      - run: cargo clippy --release --locked -- -D warnings
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.13.0"
+          enable-cache: true
+      - run: uv sync --frozen --all-extras
+      - name: Lint and render every values profile
+        run: |
+          for v in values.yaml values-k3d.yaml values-production.yaml; do
+            helm lint deploy/helm/kubeheal -f "deploy/helm/kubeheal/$v"
+            helm template kubeheal deploy/helm/kubeheal -n kubeheal -f "deploy/helm/kubeheal/$v" >/dev/null
+          done
+      - run: uv run --all-extras pytest -q tests/test_helm.py
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.13.0"
+          enable-cache: true
+      - run: uv sync --frozen --all-extras
+      - run: uv run --all-extras playwright install --with-deps chromium
+      - run: uv run --all-extras pytest -q tests/ui
+
+  # Real cluster: k3d in the runner, install, deploy/scripts/smoke.sh (kill + patch end to end, enforce mode).
+  # GitHub runners usually lack the bpf LSM: install.sh then falls back to EVENT_SOURCE=falco by itself
+  # (set EVENT_SOURCE=sensor on a runner that has lsm=bpf to force the eBPF sensor).
+  e2e:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      K3D_VERSION: v5.8.3
+      K3D_SHA256: dbaa79a76ace7f4ca230a1ff41dc7d8a5036a8ad0309e9c54f9bf3836dbe853e   # k3d-linux-amd64 of the release's checksums.txt
+      KUBEHEAL_K3D_KUBECONFIG: /home/runner/.kube/kubeheal-k3d.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install k3d (pinned, checksum verified)
+        run: |
+          curl -fsSL -o k3d "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          echo "${K3D_SHA256}  k3d" | sha256sum -c -
+          sudo install -m 0755 k3d /usr/local/bin/k3d
+      - name: Host kernel
+        run: |
+          echo "btf: $(test -e /sys/kernel/btf/vmlinux && echo yes || echo no)"; echo "lsm: $(cat /sys/kernel/security/lsm 2>&1)"
+      - run: ./deploy/k3d/create.sh
+      - name: Install
+        run: |
+          export KUBECONFIG="$KUBEHEAL_K3D_KUBECONFIG"
+          ./deploy/scripts/install.sh --target k3d
+      - name: Smoke
+        run: |
+          export KUBECONFIG="$KUBEHEAL_K3D_KUBECONFIG"
+          ./deploy/scripts/smoke.sh
+      - name: Collect logs
+        if: always()
+        run: |
+          export KUBECONFIG="$KUBEHEAL_K3D_KUBECONFIG"
+          mkdir -p logs
+          kubectl get pods -A -o wide >logs/pods.txt 2>&1
+          kubectl get events -A --sort-by=.lastTimestamp >logs/events.txt 2>&1
+          kubectl describe pods -n kubeheal >logs/describe-kubeheal.txt 2>&1
+          for p in $(kubectl get pods -n kubeheal -o name 2>/dev/null); do
+            kubectl logs -n kubeheal "$p" --all-containers --tail=-1 >"logs/$(basename "$p").log" 2>&1
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-logs
+          path: logs/
+          if-no-files-found: ignore
+      - name: Delete cluster
+        if: always()
+        run: ./deploy/k3d/delete.sh

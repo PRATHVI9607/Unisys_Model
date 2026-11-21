@@ -34,6 +34,8 @@ and a ransomware pod was killed minutes late (missed entirely in the 20-pod eval
   TLS crate. An unknown cgroup triggers a rescan (at most every 100 ms); its records wait up to 10 s, in order, then
   count as `unresolved`. A rescan every 30 s prunes vanished cgroups.
 - **Output.** Buffered, flushed at most 40 ms after the last write (an event reaches the file in < 100 ms).
+  Every 5 s the sensor also replaces (tmp + rename) `$SENSOR_STATS_PATH` (default `/var/run/kubeheal/sensor-stats.json`, same emptyDir)
+  with `{events_total, drops_total, pool_full_total, lost_total, cgroups, uptime_s, ts_ms}`; the security agent exports it as `kubeheal_sensor_*`.
   SIGTERM/SIGINT drain the ring buffer, flush and print final stats. `evt.time` = boottime stamp + realtime offset
   (re-read every second).
 

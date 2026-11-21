@@ -826,7 +826,7 @@ def contain_cmd(key=""):
     ("", lambda f: f, "frozen"),                                             # no key: unsigned accepted
 ])
 async def test_contain_verifies_signature(redis, monkeypatch, key, mutate, outcome):
-    monkeypatch.setattr(sa, "freeze_pod", lambda root, uid: "frozen")
+    monkeypatch.setattr(sa, "freeze_pod", lambda root, uid, freeze=True: "frozen")
     a = sa.SecurityAgent(redis, None, FakeOwners(), proc_root="/nonexistent", protected=frozenset(),
                          namespaces=[], contain_key=key)
     assert await a.contain(mutate(contain_cmd(key))) == outcome
@@ -856,3 +856,88 @@ async def test_embedded_failure_falls_back_to_the_inference_service(redis, monke
     a = make_agent(redis)
     a.bundle = Broken()
     assert await a.score([{"a": 1.0}]) == ["remote", "security", [{"a": 1.0}]]
+
+
+# ── thaw, freeze watchdog, sensor stats ──────────────────────────────────────
+def thaw_cmd(key="", **over):
+    from agents.common import contain_sign
+    f = {"pod_uid": UID, "namespace": "shop", "pod": "p", "event_id": "e", "ts_ms": str(sa.now_ms()),
+         "action": "thaw", **over}
+    return {**f, "sig": contain_sign(key, f)} if key else f
+
+
+async def test_thaw_writes_zero_with_the_same_checks_and_signature(redis, monkeypatch, tmp_path):
+    monkeypatch.setattr(sa, "CGROUP_ROOT", str(tmp_path))
+    freeze = pod_cgroup(tmp_path, f"kubepods/pod{UID}")
+    a = sa.SecurityAgent(redis, None, FakeOwners(), proc_root="/nonexistent", protected=frozenset({"kube-system"}),
+                         namespaces=[], contain_key="k")
+    freeze.write_text("1")
+    a.frozen[UID] = ["shop", "p", 0.0, False]
+    assert await a.contain(thaw_cmd("k")) == "thawed" and freeze.read_text() == "0" and UID not in a.frozen
+    forged = thaw_cmd("k")
+    forged["action"] = "freeze"                       # action is signed: a swapped action fails
+    assert await a.contain(forged) == "bad_sig"
+    assert await a.contain(thaw_cmd("k", namespace="kube-system")) == "error"    # signed, but protected
+    assert await a.contain(thaw_cmd("")) == "bad_sig"                            # unsigned into a keyed agent
+    b = make_agent(redis)
+    assert await b.contain(thaw_cmd(namespace="kube-system")) == "error"          # protected
+    assert await b.contain(thaw_cmd(action="bogus")) == "error"
+    assert await b.contain(thaw_cmd(pod_uid="0" * 8 + UID[8:])) == "not_on_node"  # pod gone: nothing to thaw
+
+
+def test_freeze_watchdog_reports_but_never_thaws(redis, monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(sa, "CGROUP_ROOT", str(tmp_path))
+    freeze = pod_cgroup(tmp_path, f"kubepods/pod{UID}")
+    freeze.write_text("1")
+    (freeze.parent / "cgroup.events").write_text("populated 1\nfrozen 1\n")
+    a = make_agent(redis)
+    a.frozen[UID] = ["shop", "p", time.monotonic() - 10, False]
+    a.watch_frozen()
+    assert sa.FROZEN_OVERDUE._value.get() == 0
+    a.frozen[UID][2] = time.monotonic() - sa.FREEZE_MAX_S - 1
+    a.watch_frozen()
+    a.watch_frozen()
+    assert sa.FROZEN_OVERDUE._value.get() == 1 and freeze.read_text() == "1"
+    assert sum("still frozen" in r.message for r in caplog.records) == 1       # logged once
+    (freeze.parent / "cgroup.events").write_text("populated 1\nfrozen 0\n")
+    a.watch_frozen()
+    assert sa.FROZEN_OVERDUE._value.get() == 0 and UID not in a.frozen
+
+
+def test_sensor_stats_exported_as_deltas_and_liveness(redis, monkeypatch, tmp_path):
+    path = tmp_path / "stats.json"
+    monkeypatch.setattr(sa, "SENSOR_STATS_PATH", str(path))
+    a = make_agent(redis)
+    a.read_sensor_stats()                             # no file: down
+    assert sa.SENSOR_UP._value.get() == 0
+    ev, dr = sa.SENSOR_EVENTS._value.get(), sa.SENSOR_DROPS._value.get()
+    path.write_text(json.dumps({"events_total": 100, "drops_total": 2, "pool_full_total": 1, "lost_total": 0,
+                                "cgroups": 3, "uptime_s": 5}))
+    a.read_sensor_stats()
+    path.write_text(json.dumps({"events_total": 150, "drops_total": 2}))
+    a.read_sensor_stats()
+    assert sa.SENSOR_UP._value.get() == 1
+    assert sa.SENSOR_EVENTS._value.get() - ev == 150 and sa.SENSOR_DROPS._value.get() - dr == 2
+    path.write_text(json.dumps({"events_total": 10}))   # sensor restarted: counts from zero again
+    a.read_sensor_stats()
+    assert sa.SENSOR_EVENTS._value.get() - ev == 160
+    old = time.time() - 60
+    os.utime(path, (old, old))
+    a.read_sensor_stats()
+    assert sa.SENSOR_UP._value.get() == 0
+    path.write_text("not json")
+    a.read_sensor_stats()
+    assert sa.SENSOR_UP._value.get() == 0
+
+
+async def test_embedded_score_is_timed(redis):
+    class Bundle:
+        features = ["a"]
+
+        def predict_batch(self, rows, explain_risk):
+            return []
+    a = make_agent(redis)
+    a.bundle = Bundle()
+    n = sa.SCORE_SECONDS._sum.get()
+    await a.score([{"a": 1.0}])
+    assert sa.SCORE_SECONDS._sum.get() > n

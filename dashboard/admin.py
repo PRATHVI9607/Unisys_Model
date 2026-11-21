@@ -116,7 +116,7 @@ def _view(action_id: str, state: dict, action: dict | None) -> dict:
     created = state.get("created_ms")
     out["expires_ms"] = created + APPROVAL_TTL_MS if isinstance(created, int) else None
     for k in ("candidate", "namespace", "workload", "pod", "pod_uid", "health_event_id", "security_event_id",
-              "rationale", "score", "created_ms", "outcome"):
+              "rationale", "score", "created_ms", "outcome", "releasable"):
         out[k] = state.get(k, action.get(k) if action else None)
     return out
 
@@ -173,9 +173,9 @@ async def _decide(request: Request, action_id: str, decision: str, reason: str, 
                                          "decision": decision, "actor": admin.actor, "reason": reason,
                                          "ts_ms": str(now_ms())}, maxlen=APPROVALS_MAXLEN, approximate=True)
             _xadd_ledger(pipe, _ledger_entry(
-                kind="approval" if decision == "approve" else "rejection", actor=admin.actor,
+                kind="rejection" if decision == "reject" else "approval", actor=admin.actor,
                 namespace=state.get("namespace", ""), workload=state.get("workload", ""), pod=state.get("pod", ""),
-                decision=state.get("candidate", "") if decision == "approve" else "REJECT",
+                decision={"reject": "REJECT", "release": "RELEASE"}.get(decision, state.get("candidate", "")),
                 outcome=f"{decision}_requested", action_event_id=action_id, detail=reason))
             await pipe.execute()
     except aioredis.WatchError as exc:
@@ -186,6 +186,12 @@ async def _decide(request: Request, action_id: str, decision: str, reason: str, 
 @router.post("/api/approvals/{action_event_id}/approve")
 async def approve(action_event_id: str, request: Request, admin: AdminDep, body: DecisionBody | None = None):
     return await _decide(request, action_event_id, "approve", body.reason if body else "", admin)
+
+
+@router.post("/api/approvals/{action_event_id}/release")
+async def release(action_event_id: str, request: Request, admin: AdminDep, body: DecisionBody | None = None):
+    """Thaw and un-quarantine a pod whose kill failed after the freeze (fusion refuses it on any other record)."""
+    return await _decide(request, action_event_id, "release", body.reason if body else "", admin)
 
 
 @router.post("/api/approvals/{action_event_id}/reject")

@@ -36,7 +36,7 @@ change. Stream entries are flat `str → str` maps: nested values are compact JS
 | `kubeheal.security.events` | security-agent → fusion (group `fusion`), dashboard | `SecurityEvent` |
 | `kubeheal.actions` | fusion → dashboard | `ActionEvent` |
 | `kubeheal.deadletter` | fusion | The original fields plus `_stream`, `_id` and `_error` |
-| `kubeheal.contain` | fusion → every security-agent (each node acts on its own pods) | `{pod_uid, namespace, pod, event_id, ts_ms}`: freeze this pod's cgroup now. Written only for an enforce-mode AUTO_KILL that passed every check. `MAXLEN ~ 1000`. |
+| `kubeheal.contain` | fusion → every security-agent (each node acts on its own pods) | `{pod_uid, namespace, pod, event_id, ts_ms[, action]}`: freeze (default) or, with `action=thaw` after an operator release, thaw this pod's cgroup. Written only for an enforce-mode AUTO_KILL that passed every check. `MAXLEN ~ 1000`. |
 | `kubeheal.approvals` | dashboard admin API → fusion (group `fusion`, its own consumer task) | `{approval_id, action_event_id, decision (approve\|reject), actor, reason, ts_ms}`: an operator's answer to one pending HUMAN decision. |
 | `kubeheal.ledger` | fusion, dashboard admin API → dashboard | Append-only audit entry `{ts_ms, kind (action\|approval_pending\|approval\|rejection\|mode), actor, namespace, workload, pod, decision, outcome, mode, action_event_id, health_event_id, security_event_id, approval_id, detail}`. Every XADD is capped `MAXLEN ~ LEDGER_MAXLEN` (100000; Redis is noeviction); fusion's housekeeping task also runs `XTRIM MINID ~ now - 90 d` every 5 min (MAXLEN and MINID cannot share one XADD). |
 | `kubeheal.security.capture` | security-agent (only when `KUBEHEAL_CAPTURE=1`) → `training/collect/security_lab.py` | `SecurityEvent` for **every** scored window, whatever its risk |
@@ -225,7 +225,7 @@ published as an `ActionEvent`.
      1. XADD `{pod_uid, namespace, pod, event_id, ts_ms}` to `kubeheal.contain`, concurrently with the steps below: the security agent on the pod's node freezes its cgroup within milliseconds. Best effort: it never delays the kill by more than 1 s and a Redis error never fails it. `ActionEvent.containment` is `requested` or `failed`; metric `kubeheal_fusion_containment_total{result}`.
      2. Label the pod `kubeheal.io/quarantined=true`. The patch carries `metadata.uid`, so a successor that reuses the name gets 409 (`skipped_stale_pod`).
      3. Create the NetworkPolicy `kubeheal-quarantine-{pod}` (concurrently with step 2). It selects the quarantine label, denies all ingress and egress, and has an `ownerReference` to the pod, so it is garbage-collected with the pod. A 409 from an earlier attempt is fine.
-     4. Only then delete the pod with grace period 0 and a UID precondition (the UID read in step 4), so the pod is never alive without isolation.
+     4. Only then delete the pod with grace period 0 and a UID precondition (the UID read in step 4), so the pod is never alive without isolation. A failed delete (not 404/409) is retried twice, after 2 s and 5 s more, with the same UID. If it still fails the outcome is `failed:*`, the pod stays frozen and quarantined, and fusion opens a HUMAN approval (`releasable`) offering **Retry kill** (`approve`: the whole kill again) or **Release** (`release`: remove the quarantine label and policy, then a signed `kubeheal.contain` entry with `action=thaw`; nothing to thaw when the pod is gone). `action` (freeze, the default, or thaw) is part of the HMAC only when present, so freeze signatures are unchanged. Release needs RBAC `delete` on `networkpolicies`.
      5. Count the success in the breaker. Outcome: `pod_killed`.
    - **AUTO_PATCH:**
      1. JSON-patch `replace /spec/template` with the baseline template.
@@ -346,6 +346,8 @@ listed here.
 | `EXTRA_PROTECTED_NAMESPACES` | empty | `falco,monitoring` | health, security, fusion |
 | `FALCO_EVENTS_PATH` | `/var/run/falco/events.jsonl` | `/var/run/kubeheal/events.jsonl` (shared `events` volume: the sensor's emptyDir, or Falco's hostPath with `components/falco-source`) | security |
 | `CGROUP_ROOT` | `/host/sys/fs/cgroup` | `/host/sys/fs/cgroup` (host cgroup v2, read-write) | security (containment: `cgroup.freeze`) |
+| `FREEZE_MAX_S` | `900` | unset | security (a pod it froze, still frozen after this long: error log + `kubeheal_security_frozen_overdue`; never thawed automatically) |
+| `SENSOR_STATS_PATH` | `/var/run/kubeheal/sensor-stats.json` | same, on the shared `events` volume (the sensor writes it every 5 s) | security (read at most every 5 s), sensor (writes) |
 | `PROC_ROOT` | `/proc` | `/host/proc` | security |
 | `EVAL_INTERVAL_S` | `1` | `1` | security (timer; a pod with 32 new events is scored at once) |
 | `KUBEHEAL_CAPTURE` | `0` | `0` (`run_lab.sh` sets `1` for a run) | security |
@@ -386,8 +388,8 @@ sum of the unpacked layers, measured 2026-10-17.
 |---|---|---|---|---|
 | inference | 8000 | liveness `/healthz`, readiness `/readyz` | Process up; ready = both bundles loaded | `kubeheal_inference_*` |
 | health-agent | 8080 | startup (5 s × 60) + liveness `/healthz` | Every watch loop active within the last 420 s | `kubeheal_health_assessments_total{outcome}`, `_watch_errors_total` |
-| security-agent | 8080 | startup + liveness `/healthz` | Tail and eval loops ticked within max(60 s, 6 × `EVAL_INTERVAL_S`) | `kubeheal_security_falco_events_total`, `_evaluations_total{outcome}` |
-| fusion-agent | 8080 | startup + liveness `/healthz` | Progress (a poll, an entry processed or a Kubernetes call returned) within the last 30 s | `kubeheal_fusion_decisions_total`, `_outcomes_total`, `_deadlettered_total`, `_stale_events_total`, `_containment_total{result}`, `_mode{mode}`, `_approvals_total{result=executed\|failed\|refused\|rejected}`, `_alerts_total{result}` |
+| security-agent | 8080 | startup + liveness `/healthz` | Tail and eval loops ticked within max(60 s, 6 × `EVAL_INTERVAL_S`) | `kubeheal_security_falco_events_total`, `_evaluations_total{outcome}`, `_score_seconds`, `_event_lag_seconds`, `_frozen_overdue`, `kubeheal_sensor_{events,drops,pool_full,lost}_total`, `kubeheal_sensor_up` (from the sensor stats file) |
+| fusion-agent | 8080 | startup + liveness `/healthz` | Progress (a poll, an entry processed or a Kubernetes call returned) within the last 30 s | `kubeheal_fusion_detection_to_action_seconds{decision}` (action publish minus the event's `window_end_ms`; automatic, freshly decided actions only), `kubeheal_fusion_kill_api_seconds`, `kubeheal_fusion_decisions_total`, `_outcomes_total`, `_deadlettered_total`, `_stale_events_total`, `_containment_total{result}`, `_mode{mode}`, `_approvals_total{result=executed\|failed\|refused\|rejected}`, `_alerts_total{result}` |
 | dashboard | 8080 | liveness `/healthz`, readiness `/readyz` | Ready = Redis answered within 10 s | none |
 | redis | 6379 | readiness `redis-cli ping`, liveness TCP | n/a | n/a |
 

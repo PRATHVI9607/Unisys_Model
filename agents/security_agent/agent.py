@@ -91,6 +91,13 @@ POD_MIN_INTERVAL_S = 0.5   # a pod is re-scored at most this often; a pod not sc
 MAX_BACKOFF_S = 30.0       # failed evaluations retry at once, then after 1, 2, 4 ... s up to this
 PID_MISS_TTL_S = 10.0      # a container id not found in /proc is not searched for again this long
 MAX_PID_CACHE = 4096
+# A pod this agent froze that is still frozen after this long (no kill, no release) is logged and counted, never
+# thawed on its own: ransomware must not run again without a decision.
+FREEZE_MAX_S = float(os.environ.get("FREEZE_MAX_S", "900"))
+# The sensor writes its counters here every ~5 s (shared volume); read on the eval tick, at most every STATS_EVERY_S.
+SENSOR_STATS_PATH = os.environ.get("SENSOR_STATS_PATH", "/var/run/kubeheal/sensor-stats.json")
+STATS_EVERY_S = 5.0
+STATS_FRESH_S = 30.0       # a stats file older than this: the sensor is down
 CONTAIN_MAX_AGE_S = 30.0   # older containment commands are stale (the API delete has landed or failed by now)
 LAG_WARN_S = 5.0           # event lag (now - event time) worth a WARNING, logged at most once a minute
 OWNER_TTL_S = 300.0
@@ -108,6 +115,16 @@ EVALS = Counter("kubeheal_security_evaluations_total", "Pod window evaluations b
 EVENT_LAG = Histogram("kubeheal_security_event_lag_seconds", "Now minus event time, newest event of each read",
                       buckets=(0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 300))
 CONTAIN = Counter("kubeheal_security_contain_total", "Containment commands by outcome", ["outcome"])
+SCORE_SECONDS = Histogram("kubeheal_security_score_seconds", "Embedded scoring (predict + explain) per batch",
+                          buckets=(0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5))
+FROZEN_OVERDUE = Gauge("kubeheal_security_frozen_overdue", "Pods frozen by this agent still frozen after FREEZE_MAX_S")
+SENSOR_EVENTS = Counter("kubeheal_sensor_events_total", "Events the node sensor saw (from its stats file)")
+SENSOR_DROPS = Counter("kubeheal_sensor_drops_total", "Events the sensor dropped (ring buffer full)")
+SENSOR_POOL_FULL = Counter("kubeheal_sensor_pool_full_total", "Sensor event-pool exhaustions")
+SENSOR_LOST = Counter("kubeheal_sensor_lost_total", "Events the sensor lost before delivery")
+SENSOR_UP = Gauge("kubeheal_sensor_up", "1 while the sensor stats file is fresher than 30 s")
+SENSOR_COUNTERS = {"events_total": SENSOR_EVENTS, "drops_total": SENSOR_DROPS, "pool_full_total": SENSOR_POOL_FULL,
+                   "lost_total": SENSOR_LOST}
 MODEL_MODE = Gauge("kubeheal_security_model_mode", "1 for the scoring path in use", ["mode"])
 CONTAIN_AGE = Histogram("kubeheal_security_contain_age_seconds", "Containment command age when its pod froze",
                         buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30))
@@ -276,9 +293,9 @@ def cgroup_write_bytes(cgroup_root: str, pod_uid: str) -> float | None:
     return None
 
 
-def freeze_pod(cgroup_root: str, pod_uid: str) -> str:
-    """Freeze the pod's cgroup v2 (every process in it stops) → "frozen" | "not_on_node"; OSError if it exists
-    here but cannot be frozen. Only the fixed pod-cgroup paths of a validated UID, no symlink followed."""
+def freeze_pod(cgroup_root: str, pod_uid: str, freeze: bool = True) -> str:
+    """Freeze (or thaw) the pod's cgroup v2 → "frozen" | "thawed" | "not_on_node"; OSError if it exists here but
+    cannot be written. Only the fixed pod-cgroup paths of a validated UID, no symlink followed."""
     for rel in pod_cgroups(pod_uid):
         try:
             d = _open_dir(cgroup_root, rel.split("/"))
@@ -287,13 +304,33 @@ def freeze_pod(cgroup_root: str, pod_uid: str) -> str:
         try:
             fd = os.open("cgroup.freeze", os.O_WRONLY | os.O_NOFOLLOW, dir_fd=d)
             try:
-                os.write(fd, b"1")
+                os.write(fd, b"1" if freeze else b"0")
             finally:
                 os.close(fd)
         finally:
             os.close(d)
-        return "frozen"
+        return "frozen" if freeze else "thawed"
     return "not_on_node"
+
+
+def cgroup_frozen(cgroup_root: str, pod_uid: str) -> bool | None:
+    """True if the pod's cgroup is frozen, False if not, None when it is not on this node (pod gone)."""
+    for rel in pod_cgroups(pod_uid):
+        try:
+            d = _open_dir(cgroup_root, rel.split("/"))
+        except FileNotFoundError:
+            continue
+        try:
+            fd = os.open("cgroup.events", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=d)
+            try:
+                return "frozen 1" in os.read(fd, 4096).decode().splitlines()
+            finally:
+                os.close(fd)
+        except OSError:
+            return None
+        finally:
+            os.close(d)
+    return None
 
 
 def read_pod(proc_root: str, files: list[tuple[str, tuple[int, str]]], proc: tuple[int, str], pod_uid: str,
@@ -381,6 +418,9 @@ class SecurityAgent:
         self.ticks = {"tail": time.monotonic(), "eval": time.monotonic(), "contain": time.monotonic()}
         self.wake = asyncio.Event()        # set when a pod crosses BURST_EVENTS
         self.lag_logged = float("-inf")
+        self.frozen: dict[str, list] = {}  # pod uid → [namespace, pod, monotonic freeze time, overdue logged]
+        self.stats_at = float("-inf")      # monotonic time of the last sensor-stats read
+        self.sensor_seen: dict[str, float] = {}   # last cumulative value per sensor counter (deltas feed Counters)
 
     def ingest(self, ev: dict) -> bool:
         """Add a parsed Falco event to its pod's window (kept as is: no per-event copy); False if ignored."""
@@ -483,9 +523,10 @@ class SecurityAgent:
             return await predict_batch(self.session, "security", rows)
         known = set(self.bundle.features)   # the inference service's rule: ignore unlisted names, missing → None
         try:
-            return await asyncio.to_thread(self.bundle.predict_batch,
-                                           [{k: v for k, v in r.items() if k in known} for r in rows],
-                                           SECURITY_PUBLISH_RISK)
+            with SCORE_SECONDS.time():
+                return await asyncio.to_thread(self.bundle.predict_batch,
+                                               [{k: v for k, v in r.items() if k in known} for r in rows],
+                                               SECURITY_PUBLISH_RISK)
         except Exception:
             log.exception("embedded security model failed; falling back to the inference service")
             return await predict_batch(self.session, "security", rows)
@@ -604,6 +645,7 @@ class SecurityAgent:
                 if timer:
                     next_tick = time.monotonic() + EVAL_INTERVAL_S
                 wake_at = await self.evaluate_all(burst_only=not timer)
+                self.housekeep()
             except Exception:   # one bad round must not end the agent (and lose every window); CancelledError passes
                 log.exception("evaluation round failed")
                 wake_at = None
@@ -612,6 +654,7 @@ class SecurityAgent:
     async def contain(self, fields: dict) -> str:
         """Freeze the commanded pod's cgroup if the pod runs on this node (fusion deletes it via the API next)."""
         uid, ns = fields.get("pod_uid", ""), fields.get("namespace", "")
+        action = fields.get("action", "freeze")   # entries from before thaw existed carry none
         try:
             age = (now_ms() - int(fields.get("ts_ms", ""))) / 1000
         except ValueError:
@@ -621,21 +664,66 @@ class SecurityAgent:
             log.warning("refusing containment of %s/%s: missing or invalid signature", ns, fields.get("pod"))
         elif age > CONTAIN_MAX_AGE_S:
             outcome = "stale"
-        elif ns in self.protected or not POD_UID.fullmatch(uid):   # fusion checks too; never freeze these
+        elif action not in ("freeze", "thaw") or ns in self.protected or not POD_UID.fullmatch(uid):   # fusion checks too; never freeze these
             outcome = "error"
             log.warning("refusing containment of %s/%s uid %r", ns, fields.get("pod"), uid)
         else:
             try:
-                outcome = freeze_pod(node_cgroup_root(self.proc_root), uid)
+                outcome = freeze_pod(node_cgroup_root(self.proc_root), uid, action == "freeze")
             except OSError as e:
                 outcome = "error"
-                log.warning("freezing %s/%s (%s) failed: %s", ns, fields.get("pod"), uid, e)
-            if outcome == "frozen":
+                log.warning("%s of %s/%s (%s) failed: %s", action, ns, fields.get("pod"), uid, e)
+            if outcome == "thawed":
+                self.frozen.pop(uid, None)
+                log.warning("thawed pod %s/%s (%s) for event %s", ns, fields.get("pod"), uid, fields.get("event_id"))
+            elif outcome == "frozen":
+                self.frozen[uid] = [ns, fields.get("pod", ""), time.monotonic(), False]
                 CONTAIN_AGE.observe(max(age, 0.0))
                 log.warning("froze pod %s/%s (%s) for event %s, %.0f ms after the decision", ns, fields.get("pod"),
                             uid, fields.get("event_id"), age * 1000)
         CONTAIN.labels(outcome).inc()
         return outcome
+
+    def watch_frozen(self) -> None:
+        """Surface pods this agent froze that are still frozen past FREEZE_MAX_S; never thaws them itself."""
+        now, overdue = time.monotonic(), 0
+        for uid, rec in list(self.frozen.items()):
+            if now - rec[2] < FREEZE_MAX_S:
+                continue
+            if not cgroup_frozen(node_cgroup_root(self.proc_root), uid):   # thawed elsewhere, or the pod is gone
+                del self.frozen[uid]
+                continue
+            overdue += 1
+            if not rec[3]:
+                rec[3] = True
+                log.error("pod %s/%s (%s) still frozen %.0f s after the freeze with no decision: kill or release it",
+                          rec[0], rec[1], uid, now - rec[2])
+        FROZEN_OVERDUE.set(overdue)
+
+    def read_sensor_stats(self) -> None:
+        """Export the sensor's stats file: counter deltas (a sensor restart resets its counters) and liveness."""
+        try:
+            fresh = time.time() - os.stat(SENSOR_STATS_PATH).st_mtime < STATS_FRESH_S
+            with open(SENSOR_STATS_PATH, "rb") as fh:
+                stats = orjson.loads(fh.read())
+        except (OSError, ValueError):
+            SENSOR_UP.set(0)
+            return
+        SENSOR_UP.set(fresh)
+        for name, counter in SENSOR_COUNTERS.items():
+            v = stats.get(name)
+            if isinstance(v, int | float) and v >= 0:
+                prev = self.sensor_seen.get(name)
+                counter.inc(v if prev is None or v < prev else v - prev)
+                self.sensor_seen[name] = v
+
+    def housekeep(self) -> None:
+        """Eval-tick extras, at most every STATS_EVERY_S: sensor stats and the freeze watchdog."""
+        if time.monotonic() - self.stats_at < STATS_EVERY_S:
+            return
+        self.stats_at = time.monotonic()
+        self.read_sensor_stats()
+        self.watch_frozen()
 
     async def contain_loop(self) -> None:
         """Follow STREAM_CONTAIN (every node reads every command; no consumer group) from its end at startup."""

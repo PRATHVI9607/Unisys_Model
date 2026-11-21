@@ -39,7 +39,7 @@ from kubeheal.contracts import (
 )
 
 MUTATING = {"patch_namespaced_pod", "create_namespaced_network_policy", "delete_namespaced_pod",
-            "patch_namespaced_deployment"}
+            "patch_namespaced_deployment", "delete_namespaced_network_policy"}
 TEMPLATE = {"metadata": {"labels": {"app": "web"}}, "spec": {"containers": [{"name": "web", "image": "web:1.2"}]}}
 
 
@@ -102,6 +102,9 @@ class FakeKube:
 
     async def delete_namespaced_pod(self, name, ns, **kwargs):
         self._rec("delete_namespaced_pod", name, ns, **kwargs)
+
+    async def delete_namespaced_network_policy(self, name, ns):
+        self._rec("delete_namespaced_network_policy", name, ns)
 
     async def patch_namespaced_deployment(self, name, ns, body, **kwargs):
         self._rec("patch_namespaced_deployment", name, ns, body, **kwargs)
@@ -1405,3 +1408,102 @@ async def test_unlabelled_namespace_still_acted_on_and_read_once(redis):
     assert (await agent.handle(ransomware())).outcome == "pod_killed"
     assert await agent.tier("prod-shop") is None
     assert len(reads) == 1          # tier and protected share one cached read
+
+
+# ── failed delete after the freeze: retry, then an operator release / retry item ──────────────────
+class FlakyDelete(FakeKube):
+    def __init__(self, fails, **kw):
+        super().__init__(**kw)
+        self.fails = fails
+
+    async def delete_namespaced_pod(self, name, ns, **kwargs):
+        self._rec("delete_namespaced_pod", name, ns, **kwargs)
+        if self.fails:
+            self.fails -= 1
+            raise ApiException(status=500, reason="Boom")
+
+
+@pytest.fixture
+def fast_retry(monkeypatch):
+    monkeypatch.setattr(fa, "DELETE_BACKOFF_S", (0.0, 0.0))
+
+
+async def test_delete_is_retried_with_the_same_uid(redis, fast_retry):
+    agent, kube = make(redis, FlakyDelete(2), mode="enforce")
+    a = await agent.handle(ransomware())
+    assert a.outcome == "pod_killed"
+    deletes = [c for c in kube.calls if c[0] == "delete_namespaced_pod"]
+    assert len(deletes) == 3 and {c[2]["body"].preconditions.uid for c in deletes} == {"uid-123"}
+    assert not await redis.exists(key_approval(a.event_id))
+
+
+async def test_persistent_delete_failure_opens_a_release_or_retry_item(redis, fast_retry):
+    agent, kube = make(redis, FlakyDelete(99), mode="enforce")
+    a = await agent.handle(ransomware())
+    assert a.outcome.startswith("failed:") and a.containment == "requested"
+    assert len([c for c in kube.calls if c[0] == "delete_namespaced_pod"]) == 3
+    rec = await record(redis, a.event_id)
+    assert (rec["state"], rec["candidate"], rec["releasable"], rec["pod_uid"]) == ("pending", "AUTO_KILL", True, "uid-123")
+    assert not [c for c in kube.calls if c[0] == "delete_namespaced_network_policy"]   # stays quarantined
+    assert [e["kind"] for e in await ledger_entries(redis)] == ["action", "approval_pending"]
+
+
+async def test_404_and_409_are_not_retried(redis, fast_retry):
+    agent, kube = make(redis, FakeKube(errors={"delete_namespaced_pod": 409}), mode="enforce")
+    assert (await agent.handle(ransomware())).outcome == "skipped_stale_pod"
+    assert [c[0] for c in kube.calls].count("delete_namespaced_pod") == 1
+
+
+async def test_release_thaws_and_lifts_the_quarantine(redis, fast_retry):
+    agent, kube = make(redis, FlakyDelete(99), mode="enforce", contain_key="ck")
+    a = await agent.handle(ransomware())
+    kube.fails = 0
+    await approve(agent, redis, a.event_id, decision="release")
+    names = kube.names
+    assert names[-2:] == ["patch_namespaced_pod", "delete_namespaced_network_policy"]
+    assert kube.calls[-2][1][2] == {"metadata": {"uid": "uid-123", "labels": {fa.QUARANTINE_LABEL: None}}}
+    *_, (_, thaw) = await redis.xrange(fa.STREAM_CONTAIN)
+    assert thaw["action"] == "thaw" and thaw["pod_uid"] == "uid-123"
+    from agents.common import contain_verify
+    assert contain_verify("ck", thaw)
+    rec = await record(redis, a.event_id)
+    assert (rec["state"], rec["outcome"]) == ("executed", "released")
+
+
+async def test_release_of_a_vanished_pod_sends_no_thaw(redis, fast_retry):
+    agent, kube = make(redis, FlakyDelete(99), mode="enforce")
+    a = await agent.handle(ransomware())
+    n = await redis.xlen(fa.STREAM_CONTAIN)
+    kube.errors["read_namespaced_pod"] = 404
+    await approve(agent, redis, a.event_id, decision="release")
+    assert await redis.xlen(fa.STREAM_CONTAIN) == n
+    assert (await record(redis, a.event_id))["outcome"] == "pod_already_gone"
+
+
+async def test_retry_kill_from_the_item_deletes_the_pod(redis, fast_retry):
+    agent, kube = make(redis, FlakyDelete(3), mode="enforce")
+    a = await agent.handle(ransomware())
+    await approve(agent, redis, a.event_id)
+    assert (await record(redis, a.event_id))["outcome"] == "pod_killed"
+
+
+async def test_release_is_refused_on_an_ordinary_approval(redis):
+    agent, kube = make(redis, mode="enforce")
+    a = await human(agent, redis)
+    await approve(agent, redis, a.event_id, decision="release")
+    assert (await record(redis, a.event_id))["state"] == "failed"
+    assert not MUTATING & set(kube.names)
+
+
+async def test_latency_metrics(redis):
+    agent, _ = make(redis, mode="enforce")
+    n, k = fa.DETECT_TO_ACTION.labels("AUTO_KILL")._sum.get(), fa.KILL_API._sum.get()
+    ev = ransomware()
+    ev.window_end_ms = now_ms() - 2000
+    await agent.handle(ev)
+    assert 1.9 < fa.DETECT_TO_ACTION.labels("AUTO_KILL")._sum.get() - n < 10
+    assert fa.KILL_API._sum.get() > k
+    a2, _ = make(redis, mode="enforce")      # a redelivery is not measured again
+    n = fa.DETECT_TO_ACTION.labels("AUTO_KILL")._sum.get()
+    await a2.handle(ev)
+    assert fa.DETECT_TO_ACTION.labels("AUTO_KILL")._sum.get() == n

@@ -84,6 +84,8 @@ spec:
           image: kubeheal.invalid/sensor:v5
           imagePullPolicy: IfNotPresent
           args: ["--output", "/var/run/kubeheal/events.jsonl", "--prefix", "/data/", "--exclude-ns", "kubeheal"]
+          # stats snapshot every 5 s on the shared events emptyDir; the agent exports it as kubeheal_sensor_* metrics
+          env: [{name: SENSOR_STATS_PATH, value: "/var/run/kubeheal/sensor-stats.json"}]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

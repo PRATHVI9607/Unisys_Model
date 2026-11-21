@@ -106,7 +106,7 @@ rules:
     verbs: ["get"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["create"]
+    verbs: ["create", "delete"]   # delete: operator "Release" of a quarantined pod
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
