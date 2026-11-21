@@ -147,17 +147,36 @@ async def predict_batch(session: aiohttp.ClientSession, task: str, rows: list[di
 CONTAIN_SIGNED = ("pod_uid", "namespace", "pod", "event_id", "ts_ms")
 
 
+def _contain_msg(fields: dict, legacy: bool) -> bytes:
+    if legacy:   # pipe-joined, as agents of the previous release sign and verify freezes
+        return "|".join(str(fields[f]) for f in CONTAIN_SIGNED).encode()
+    names = CONTAIN_SIGNED + (("action",) if "action" in fields else ())
+    return json.dumps([str(fields[f]) for f in names], separators=(",", ":")).encode()   # JSON: no field can forge a boundary
+
+
+def _legacy_ok(fields: dict) -> bool:
+    """Pipe format only for a freeze whose fields hold no '|' (real names never do): no boundary can be forged."""
+    return "action" not in fields and not any("|" in str(fields.get(f, "")) for f in CONTAIN_SIGNED)
+
+
 def contain_sign(key: str, fields: dict) -> str:
-    """HMAC-SHA256 (hex) over the JSON array [pod_uid, namespace, pod, event_id, ts_ms[, action]] of a STREAM_CONTAIN entry."""
-    names = CONTAIN_SIGNED + (("action",) if "action" in fields else ())   # absent on freeze entries
-    msg = json.dumps([str(fields[f]) for f in names], separators=(",", ":"))   # JSON: no field can forge a boundary
-    return hmac.new(key.encode(), msg.encode(), hashlib.sha256).hexdigest()
+    """HMAC-SHA256 (hex) of a STREAM_CONTAIN entry. A freeze (no `action`) is signed in the previous release's pipe
+    format so a rolling upgrade (new fusion, old security agents) keeps freezing; thaw (new) is signed as the JSON
+    array [pod_uid, namespace, pod, event_id, ts_ms, action]. shortcut: drop the legacy freeze format one release
+    after every security agent verifies JSON (docs/operations.md "Upgrading")."""
+    return hmac.new(key.encode(), _contain_msg(fields, _legacy_ok(fields)), hashlib.sha256).hexdigest()
 
 
 def contain_verify(key: str, fields: dict) -> bool:
-    """True iff fields["sig"] is the valid signature (constant-time); False when missing or malformed."""
+    """True iff fields["sig"] is valid (constant-time); False when missing or malformed. A freeze verifies in either
+    format (pipe from older fusion, JSON); an entry with an `action` only in JSON, so a freeze signature can never
+    authorise a thaw."""
     try:
-        return _same(contain_sign(key, fields), str(fields.get("sig", "")))
+        sig = str(fields.get("sig", ""))
+        ok = _same(hmac.new(key.encode(), _contain_msg(fields, False), hashlib.sha256).hexdigest(), sig)
+        if _legacy_ok(fields):
+            ok |= _same(hmac.new(key.encode(), _contain_msg(fields, True), hashlib.sha256).hexdigest(), sig)
+        return ok
     except (KeyError, UnicodeError):
         return False
 

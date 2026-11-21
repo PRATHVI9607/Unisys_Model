@@ -269,12 +269,19 @@ static __always_inline void h_truncate(int via, struct path *p)           // tru
 		one(K_TRUNCATE, 0, BPF_CORE_READ(p, mnt), BPF_CORE_READ(p, dentry));
 }
 
+// Syscalls whose O_TRUNC the open event already carries. Per arch: arm64 reuses x86's numbers for other calls.
+#if defined(__TARGET_ARCH_arm64)
+#define IS_OPEN_NR(nr) ((nr) == 56 || (nr) == 437)                                  // openat, openat2
+#else
+#define IS_OPEN_NR(nr) ((nr) == 2 || (nr) == 257 || (nr) == 437 || (nr) == 85)      // open, openat, openat2, creat
+#endif
+
 static __always_inline void h_ftruncate(int via, struct file *f)  // ftruncate(2); also open(O_TRUNC), carried by the open event
 {
 	if (self(via, H_FTRUNCATE) || !in_scope())
 		return;
 	__u32 nr = syscall_nr();
-	if (nr == 2 || nr == 257 || nr == 437 || nr == 85)        // open, openat, openat2, creat
+	if (IS_OPEN_NR(nr))
 		return;
 	one(K_FTRUNCATE, 0, BPF_CORE_READ(f, f_path.mnt), BPF_CORE_READ(f, f_path.dentry));
 }

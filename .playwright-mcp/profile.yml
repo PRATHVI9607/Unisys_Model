@@ -1,0 +1,38 @@
+- generic [ref=f24e2]:
+  - link "Skip to main content" [ref=f24e11] [cursor=pointer]:
+    - /url: "#skipToContent"
+  - generic [ref=f24e13]:
+    - generic [ref=f24e14]:
+      - generic [ref=f24e30]:
+        - application [ref=f24e31]:
+          - button "Navigation menu." [ref=f24e32] [cursor=pointer]:
+            - img "Navigation menu." [ref=f24e36]
+        - link "Console home page" [ref=f24e38] [cursor=pointer]:
+          - /url: /
+          - heading [level=1] [aria-hidden] [ref=f24e39]
+        - generic "Search" [ref=f24e49]:
+          - button "Search" [ref=f24e51] [cursor=pointer]:
+            - img "Search resources, services, documentation, and Marketplace" [ref=f24e52]
+        - generic [ref=f24e54]:
+          - button "Region menu, active region is India West (Mumbai)" [ref=f24e57] [cursor=pointer]:
+            - combobox [ref=f24e59]:
+              - generic [ref=f24e64]: India West (Mumbai)
+          - button "Developer tools" [ref=f24e67] [cursor=pointer]:
+            - button "Developer tools" [ref=f24e70]
+          - button "Unread announcements" [ref=f24e75] [cursor=pointer]:
+            - img "Unread announcements" [ref=f24e78]
+          - button "Help menu" [ref=f24e82] [cursor=pointer]:
+            - combobox [ref=f24e84]:
+              - img "Help menu" [ref=f24e85]
+          - button "User menu" [ref=f24e89] [cursor=pointer]:
+            - combobox [ref=f24e91]:
+              - img "Profile" [ref=f24e92]
+      - main [ref=f24e96]:
+        - generic "Main content" [ref=f24e98]
+    - generic [ref=f24e104]:
+      - generic [ref=f24e106]:
+        - link "Terms of Use and Privacy" [ref=f24e108] [cursor=pointer]:
+          - /url: http://www.oracle.com/legal/privacy/index.html
+        - complementary "Open Cookie Preferences Modal" [ref=f24e109]:
+          - link "Cookie Preferences, opens a dedicated popup modal window" [ref=f24e110] [cursor=pointer]: Cookie Preferences
+      - generic [ref=f24e111]: Copyright © 2026, Oracle and/or its affiliates. All rights reserved.

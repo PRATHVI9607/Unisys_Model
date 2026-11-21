@@ -101,10 +101,10 @@ spec:
             requests: {cpu: 50m, memory: 32Mi}
             limits: {cpu: "1", memory: 128Mi}
           # Wedged (not crashed) sensor: it rewrites the stats file every 5 s, so a file older than 30 s means a hung main loop.
-          # debian-slim has sh/stat/date. startupProbe covers the first write after the BPF programs load.
+          # distroless image: no sh/stat/date, so the binary checks itself (--check-stats). startupProbe covers the first write after the BPF programs load.
           startupProbe:
             exec: &statsfresh
-              command: [sh, -c, 'test $(( $(date +%s) - $(stat -c %Y "$SENSOR_STATS_PATH") )) -lt 30']
+              command: [/kubeheal-sensor, --check-stats, /var/run/kubeheal/sensor-stats.json, "30"]
             periodSeconds: 5
             failureThreshold: 12
           livenessProbe:

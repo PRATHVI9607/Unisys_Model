@@ -1,0 +1,12 @@
+- generic [ref=f28e2]:
+  - heading "Cloud Infrastructure" [level=1] [ref=f28e4]
+  - generic "loading" [ref=f28e7]
+  - contentinfo [ref=f28e19]:
+    - generic [ref=f28e20]:
+      - link "Terms of Use" [ref=f28e21] [cursor=pointer]:
+        - /url: http://www.oracle.com/us/legal/terms/index.html
+      - link "Privacy" [ref=f28e22] [cursor=pointer]:
+        - /url: http://www.oracle.com/us/legal/privacy/overview/index.html
+      - complementary "Open Cookie Preferences Modal" [ref=f28e23] [cursor=pointer]:
+        - link "Cookie Preferences, opens a dedicated popup modal window" [ref=f28e24]: Cookie Preferences
+    - paragraph [ref=f28e25]: Copyright © 2016-2026, Oracle and/or its affiliates. All rights reserved.

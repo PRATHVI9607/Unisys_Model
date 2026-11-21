@@ -22,6 +22,11 @@ pub fn write(path: &Path, s: &Snapshot) -> io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// Time since `path` was last rewritten (probe for a wedged main loop).
+pub fn age(path: &Path) -> io::Result<std::time::Duration> {
+    Ok(std::fs::metadata(path)?.modified()?.elapsed().unwrap_or_default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,6 +45,8 @@ mod tests {
             }
         }
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        assert!(age(&p).unwrap() < std::time::Duration::from_secs(5));
+        assert!(age(&dir.join("missing")).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

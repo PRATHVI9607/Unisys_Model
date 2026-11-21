@@ -58,6 +58,9 @@ struct Args {
     /// Stats snapshot (JSON, rewritten every 5 s) for the security agent; default $SENSOR_STATS_PATH, else /var/run/kubeheal/sensor-stats.json
     #[arg(long)]
     stats_path: Option<PathBuf>,
+    /// Probe: exit 0 if the stats file was rewritten within MAX_AGE_S (default 30); no BPF (distroless image has no sh/stat/date)
+    #[arg(long, num_args = 0..=2, value_names = ["PATH", "MAX_AGE_S"])]
+    check_stats: Option<Vec<String>>,
     /// Print one fixture line per event kind and exit (no BPF, no root)
     #[arg(long)]
     selftest_json: bool,
@@ -198,6 +201,14 @@ fn main() -> Result<()> {
     if a.selftest_json {
         selftest();
         return Ok(());
+    }
+    if let Some(v) = &a.check_stats {
+        let path = v.first().map(PathBuf::from).or_else(|| a.stats_path.clone()).or_else(|| std::env::var_os("SENSOR_STATS_PATH").map(PathBuf::from)).unwrap_or_else(|| "/var/run/kubeheal/sensor-stats.json".into());
+        let max = v.get(1).map_or(Ok(30), |m| m.parse::<u64>()).context("MAX_AGE_S")?;
+        match stats::age(&path) {
+            Ok(age) if age < Duration::from_secs(max) => return Ok(()),
+            r => bail!("stats {} stale or unreadable: {r:?}", path.display()),
+        }
     }
     let prefixes = clean_prefixes(&a.prefix).map_err(anyhow::Error::msg)?;
     for s in [libc::SIGTERM, libc::SIGINT] {
@@ -340,4 +351,17 @@ fn main() -> Result<()> {
     }
     stats(&skel, &counts, unresolved, pending.len(), res.pods().len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The probes exec `/kubeheal-sensor --check-stats <path> <max_age>` (distroless: no sh); the flag must parse as the manifests use it.
+    #[test]
+    fn check_stats_flag_parses_as_probed() {
+        let a = Args::try_parse_from(["s", "--check-stats", "/var/run/kubeheal/sensor-stats.json", "30"]).unwrap();
+        assert_eq!(a.check_stats.unwrap(), ["/var/run/kubeheal/sensor-stats.json", "30"]);
+        assert_eq!(Args::try_parse_from(["s", "--check-stats"]).unwrap().check_stats.unwrap().len(), 0);
+    }
 }

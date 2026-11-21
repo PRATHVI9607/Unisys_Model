@@ -93,6 +93,8 @@ sso:
   githubRepo: ""             # github: "owner/repo", whose collaborators may sign in
   allowedUsers: []           # github: extra logins that may sign in
   issuerURL: ""              # oidc: e.g. https://accounts.google.com
+  emailDomains: []           # oidc: only these email domains may sign in (this and/or allowedGroups is required)
+  allowedGroups: []          # oidc: only members of these groups may sign in (viewers); adminGroups are admins
   adminUsers: []             # logins (github) or emails (oidc) that are admins
   adminGroups: []            # oidc group-claim values that make an admin
   redirectURL: ""            # empty = https://<ingress.host>/oauth2/callback, else http://localhost:4180/oauth2/callback (port-forward)

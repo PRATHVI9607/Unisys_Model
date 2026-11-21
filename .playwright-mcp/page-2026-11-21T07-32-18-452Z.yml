@@ -1,0 +1,27 @@
+- generic [ref=f35e4]:
+  - generic [ref=f35e5]: Cloud Infrastructure
+  - generic [ref=f35e11]:
+    - generic [ref=f35e12]:
+      - img "Company Logo for ippoprathvi" [ref=f35e14]
+      - generic [ref=f35e16]:
+        - generic:
+          - heading [level=1]
+        - heading [level=2]
+        - generic [ref=f35e18]:
+          - generic [ref=f35e19]:
+            - text: Identity domain
+            - button [ref=f35e20] [cursor=pointer]:
+              - img "What is an identity domain?" [ref=f35e21]
+          - generic [ref=f35e22]: Default
+    - generic [ref=f35e23]:
+      - generic:
+        - generic:
+          - main:
+            - main
+  - contentinfo [ref=f35e24]:
+    - generic [ref=f35e25]:
+      - link "Terms of Use" [ref=f35e26] [cursor=pointer]:
+        - /url: https://www.oracle.com/legal/terms.html
+      - link "Privacy" [ref=f35e27] [cursor=pointer]:
+        - /url: https://www.oracle.com/us/legal/privacy/overview/index.html
+    - paragraph [ref=f35e28]: Copyright © 2016, 2026, Oracle and/or its affiliates. All rights reserved.

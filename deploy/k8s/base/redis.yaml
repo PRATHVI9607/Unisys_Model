@@ -167,6 +167,8 @@ spec:
                   data |= {f"{u}-url": f"redis://{u}:{p}@{HOST}" for u, p in pw.items()}
                   async with client.ApiClient() as api:
                       await create(api, "kubeheal-redis", data)
+                      # HA only (components/redis-ha): own Secret, so an install made before it exists just gets it on re-apply
+                      await create(api, "kubeheal-redis-ha", {"replicator-password": secrets.token_hex(32), "sentinel-password": secrets.token_hex(32)})
                       await create(api, "kubeheal-admin", {"token": secrets.token_urlsafe(32)})
                       await create(api, "kubeheal-contain-hmac", {"key": secrets.token_urlsafe(32)})
                       await create(api, "kubeheal-approval-hmac", {"key": secrets.token_urlsafe(32)})

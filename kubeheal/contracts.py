@@ -87,7 +87,7 @@ KEY_MODE = "kubeheal:mode"
 # Fusion's effective mode (observe|enforce: manifest AND switch), rewritten on every refresh with a short TTL; what the
 # console shows. Missing = fusion not running.
 KEY_MODE_EFFECTIVE = "kubeheal:mode:effective"
-# Pending approvals index: ZSET member = HUMAN action event_id, score = created_ms (fusion adds/removes; dashboard reads).
+# Pending approvals index: ZSET member = HUMAN action event_id, score = created_ms (a releasable record: later, by its longer life; fusion adds/removes; dashboard reads).
 KEY_APPROVALS_PENDING = "kubeheal:approvals:pending"
 LEDGER_MAXLEN = 100_000  # count cap next to the age trim: Redis runs with maxmemory + noeviction
 

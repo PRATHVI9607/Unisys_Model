@@ -126,7 +126,8 @@ def _view(action_id: str, state: dict, action: dict | None) -> dict:
     shown = f"{req['decision']} requested" if st == "pending" and req.get("decision") else st
     out = {"action_event_id": action_id, "state": st, "display_state": shown, "requested": req or None}
     created = state.get("created_ms")
-    out["expires_ms"] = created + APPROVAL_TTL_MS if isinstance(created, int) else None
+    exp = state.get("expires_ms")   # fusion's own (a releasable record lives longer than 1 h)
+    out["expires_ms"] = exp if isinstance(exp, int) else created + APPROVAL_TTL_MS if isinstance(created, int) else None
     for k in ("candidate", "namespace", "workload", "pod", "pod_uid", "health_event_id", "security_event_id",
               "rationale", "score", "created_ms", "outcome", "releasable"):
         out[k] = state.get(k, action.get(k) if action else None)

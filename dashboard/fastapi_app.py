@@ -30,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from dashboard.admin import router as admin_router
+from dashboard.auth import public_host
 from kubeheal.contracts import (
     STREAM_ACTIONS,
     STREAM_HEALTH,
@@ -270,7 +271,7 @@ async def event_detail(request: Request, kind: Kind, event_id: str):
 async def ws(websocket: WebSocket):
     hub: Hub = websocket.app.state.hub
     origin = websocket.headers.get("origin")
-    if origin and urlparse(origin).netloc != websocket.headers.get("host"):   # cross-site WebSocket hijacking
+    if origin and urlparse(origin).netloc != public_host(websocket.headers):   # cross-site WebSocket hijacking
         await websocket.close(code=1008)
         return
     await websocket.accept()

@@ -524,6 +524,7 @@ class SecurityAgent:
             elif w.hot or w.new >= (BURST_EVENTS if burst_only else 1):
                 if w.due_at > now:
                     wake_at = w.due_at if wake_at is None else min(wake_at, w.due_at)
+                    self.fast = self.fast or w.hot or w.suspicious   # waiting for a 50 ms slot: do not sleep a full tick
                     continue
                 w.new = 0
                 w.scored_at = now
@@ -738,7 +739,7 @@ class SecurityAgent:
             except Exception:   # one bad round must not end the agent (and lose every window); CancelledError passes
                 log.exception("evaluation round failed")
                 wake_at = None
-            if self.fast or wake_at is not None:   # a hot pod was taken or is waiting for its slot: soon
+            if self.fast:   # a hot/suspicious pod was taken or is waiting for its slot: soon. Other waiting pods batch at MIN_TICK_S
                 await asyncio.sleep(HOT_TICK_S)
             else:
                 try:

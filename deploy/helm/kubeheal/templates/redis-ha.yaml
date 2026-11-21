@@ -3,14 +3,15 @@ redis-sentinel-0.redis-sentinel.kubeheal.svc:26379,redis-sentinel-1.redis-sentin
 {{- end }}
 {{- if .Values.redis.ha.enabled }}
 # Redis HA: 3 Redis + 3 Sentinels. Same ACL users and Secret (kubeheal-redis) as deploy/k8s/base/redis.yaml, plus
-# a `replicator` user (PSYNC/REPLCONF/PING only; same password as `default`) that replicas use for replication.
+# a `replicator` user (PSYNC/REPLCONF/PING only; its own password, Secret kubeheal-redis-ha) that replicas use for replication.
 #   - Role at start: ask the Sentinels who the primary is; none answers (first boot) -> redis-0 is primary, others
 #     replicate it. So a restarted ex-primary rejoins as a replica instead of splitting the brain.
 #   - min-replicas-to-write 1 / min-replicas-max-lag 10: a primary cut off from every replica stops accepting
 #     writes after 10 s, which bounds what an async-replication failover can lose (docs/operations.md). The price:
 #     with both replicas down, writes fail until one returns (readers and the kill path degrade fail-safe).
-#   - Sentinels are unauthenticated and reachable only through the NetworkPolicies below; they authenticate to Redis
-#     as `default` (sentinel auth-pass). Sentinel state lives in memory (emptyDir); a restarted Sentinel re-learns
+#   - Sentinels require a password: clients log in as `default` with Secret kubeheal-redis-ha `sentinel-password`
+#     (REDIS_SENTINEL_PASSWORD) and may only look up the primary; peers use ACL user `peer` (the admin password).
+#     They authenticate to Redis as `default` (sentinel auth-pass). Sentinel state lives in memory (emptyDir); a restarted Sentinel re-learns
 #     the primary from its peers.
 #   - Anti-affinity is "preferred": a cluster with fewer than 3 nodes still schedules (but then loses HA).
 apiVersion: v1
@@ -85,7 +86,7 @@ spec:
               ORD="${HOSTNAME##*-}"
               cat > /run/redis/users.acl <<EOF
               user default on >$REDISCLI_AUTH ~* &* +@all
-              user replicator on >$REDISCLI_AUTH resetchannels -@all +psync +replconf +ping
+              user replicator on >$REPLICATOR_PASSWORD resetchannels -@all +psync +replconf +ping
               user health on >$HEALTH_PASSWORD resetchannels -@all +@read +@write +@transaction +ping +client|setinfo -@scripting -@dangerous %RW~kubeheal:spec:* %RW~kubeheal:baseline:* %RW~kubeheal:health:* %RW~kubeheal:index:health %RW~kubeheal.health.events
               user security on >$SECURITY_PASSWORD resetchannels -@all +@read +@write +@transaction +ping +client|setinfo -@scripting -@dangerous %RW~kubeheal:security:* %RW~kubeheal:index:security %RW~kubeheal.security.events %RW~kubeheal.security.capture %R~kubeheal.contain
               user fusion on >$FUSION_PASSWORD resetchannels -@all +@read +@write +@transaction +@stream +ping +client|setinfo -@scripting -@dangerous +eval +evalsha %RW~kubeheal:* %RW~kubeheal.*
@@ -95,7 +96,7 @@ spec:
               master=""
               for i in 0 1 2; do
                 if [ -z "$master" ]; then
-                  master="$(timeout 3 env -u REDISCLI_AUTH redis-cli -h "redis-sentinel-$i.redis-sentinel" -p 26379 sentinel get-master-addr-by-name kubeheal 2>/dev/null | sed -n 1p || true)"
+                  master="$(timeout 3 redis-cli --user peer -h "redis-sentinel-$i.redis-sentinel" -p 26379 sentinel get-master-addr-by-name kubeheal 2>/dev/null | sed -n 1p || true)"
                 fi
               done
               if [ -z "$master" ]; then
@@ -111,7 +112,7 @@ spec:
               maxmemory 192mb
               maxmemory-policy noeviction
               masteruser replicator
-              masterauth $REDISCLI_AUTH
+              masterauth $REPLICATOR_PASSWORD
               min-replicas-to-write 1
               min-replicas-max-lag 10
               EOF
@@ -120,6 +121,7 @@ spec:
           env:
             - {name: POD_IP, valueFrom: {fieldRef: {fieldPath: status.podIP}}}
             - {name: REDISCLI_AUTH, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: default-password}}}
+            - {name: REPLICATOR_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis-ha, key: replicator-password}}}   # its own secret: not the admin password
             - {name: HEALTH_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: health-password}}}
             - {name: SECURITY_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: security-password}}}
             - {name: FUSION_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: fusion-password}}}
@@ -222,7 +224,7 @@ spec:
               master=""
               for i in 0 1 2; do
                 if [ -z "$master" ] && [ "$i" != "$ORD" ]; then
-                  master="$(timeout 3 env -u REDISCLI_AUTH redis-cli -h "redis-sentinel-$i.redis-sentinel" -p 26379 sentinel get-master-addr-by-name kubeheal 2>/dev/null | sed -n 1p || true)"
+                  master="$(timeout 3 redis-cli --user peer -h "redis-sentinel-$i.redis-sentinel" -p 26379 sentinel get-master-addr-by-name kubeheal 2>/dev/null | sed -n 1p || true)"
                 fi
               done
               : "${master:=redis-0.redis-headless.kubeheal.svc}"
@@ -230,6 +232,10 @@ spec:
               port 26379
               dir /run/sentinel
               sentinel resolve-hostnames yes
+              user default on >$SENTINEL_PASSWORD resetchannels -@all +sentinel|masters +sentinel|get-master-addr-by-name +sentinel|replicas +ping +auth +hello +client|setinfo
+              user peer on >$REDISCLI_AUTH +@all
+              sentinel sentinel-user peer
+              sentinel sentinel-pass $REDISCLI_AUTH
               sentinel monitor kubeheal $master 6379 2
               sentinel auth-pass kubeheal $REDISCLI_AUTH
               sentinel down-after-milliseconds kubeheal 5000
@@ -239,6 +245,7 @@ spec:
               exec redis-sentinel /run/sentinel/sentinel.conf
           env:
             - {name: REDISCLI_AUTH, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: default-password}}}
+            - {name: SENTINEL_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis-ha, key: sentinel-password}}}   # what clients (REDIS_SENTINEL_PASSWORD) use: sentinel|masters only
           ports: [{containerPort: 26379, name: sentinel}]
           securityContext:
             allowPrivilegeEscalation: false
@@ -248,7 +255,7 @@ spec:
             requests: {cpu: 20m, memory: 64Mi}
             limits: {cpu: 20m, memory: 64Mi}
           readinessProbe:          # ready once it knows a primary
-            exec: {command: ["sh", "-c", "env -u REDISCLI_AUTH redis-cli -p 26379 sentinel get-master-addr-by-name kubeheal | grep -q ."]}
+            exec: {command: ["sh", "-c", "redis-cli --user peer -p 26379 sentinel get-master-addr-by-name kubeheal | grep -q ."]}
             periodSeconds: 5
             timeoutSeconds: 5
           livenessProbe:

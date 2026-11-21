@@ -15,7 +15,7 @@ from tests.dashboard_seed import HUMAN_DONE, HUMAN_PENDING, HUMAN_SECOND, seed
 from tests.test_dashboard import BASE, wait_for
 
 TOKEN = "s3cret-token"
-AUTH = {"Authorization": f"Bearer {TOKEN}", "X-Actor": "Maria R"}
+AUTH = {"X-Kubeheal-CSRF": "1", "Authorization": f"Bearer {TOKEN}", "X-Actor": "Maria R"}
 
 
 @pytest.fixture
@@ -140,7 +140,7 @@ def test_unicode_reason_is_stored_verbatim_and_safely(env):
 @pytest.mark.parametrize("actor", ["evil\r\nX-Injected: 1", "a\nb", "x" * 10_000, "<b>x</b>", "'; DROP", "\t\t", "María", ""])
 def test_actor_header_is_sanitised(env, actor):
     sync, c = env
-    status = raw_post(c, "/api/mode", {"Authorization": AUTH["Authorization"].encode(), "X-Actor": actor.encode()})
+    status = raw_post(c, "/api/mode", {"X-Kubeheal-CSRF": b"1", "Authorization": AUTH["Authorization"].encode(), "X-Actor": actor.encode()})
     assert status < 500, status
     if status == 200:
         entry = sync.xrevrange(STREAM_LEDGER, count=1)[0][1]

@@ -21,7 +21,7 @@ from tests.dashboard_seed import HUMAN_DONE, HUMAN_PENDING, HUMAN_SECOND, seed
 from tests.test_dashboard import BASE, wait_for
 
 TOKEN = "s3cret-token"
-AUTH = {"Authorization": f"Bearer {TOKEN}", "X-Actor": "Maria R"}
+AUTH = {"X-Kubeheal-CSRF": "1", "Authorization": f"Bearer {TOKEN}", "X-Actor": "Maria R"}
 
 
 @pytest.fixture(autouse=True)

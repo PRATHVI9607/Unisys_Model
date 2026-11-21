@@ -193,3 +193,51 @@ def test_sensor_stats_path_matches_manifests():
     for p in ("deploy/k8s/base/security-agent-daemonset.yaml", "deploy/helm/kubeheal/templates/security-agent.yaml"):
         assert "SENSOR_STATS_PATH" in (ROOT / p).read_text(), p
     assert "/var/run/kubeheal/sensor-stats.json" in (ROOT / "sensor/src/main.rs").read_text()
+
+
+def _final_stage(df: Path) -> tuple[str, str]:
+    """(base image, text of the final stage) of a Dockerfile."""
+    parts = re.split(r"(?m)^(?=FROM )", df.read_text())
+    last = [p for p in parts if p.startswith("FROM ")][-1]
+    return last.split()[1], last
+
+
+@pytest.mark.skipif(shutil.which("kubectl") is None, reason="kubectl not on PATH")
+def test_exec_probe_binaries_exist_in_their_image():
+    """Distroless final stages have no sh/stat/date: an exec probe through them fails forever (CrashLoop on liveness)."""
+    checked = 0
+    for path in ("deploy/k8s", "deploy/k8s/overlays/production"):
+        for d in render(path):
+            if d["kind"] not in ("Deployment", "DaemonSet", "StatefulSet"):
+                continue
+            for c in d["spec"]["template"]["spec"]["containers"]:
+                name = re.sub(r"[:@].*", "", c["image"]).rsplit("/", 1)[-1]
+                df = ROOT / ("sensor/Dockerfile" if name == "sensor" else f"deploy/docker/Dockerfile.{name}")
+                if not df.exists():
+                    continue   # third-party image (redis, oauth2-proxy, ...)
+                base, stage = _final_stage(df)
+                for probe in ("startupProbe", "livenessProbe", "readinessProbe"):
+                    cmd = (c.get(probe) or {}).get("exec", {}).get("command")
+                    if not cmd:
+                        continue
+                    checked += 1
+                    if "distroless" in base:
+                        assert cmd[0] not in ("sh", "bash", "/bin/sh", "test", "stat", "date"), (c["name"], probe, cmd)
+                        if cmd[0].startswith("/"):
+                            assert f" {cmd[0]}" in stage, (c["name"], probe, cmd)   # COPY'd or ENTRYPOINT in the final stage
+    assert checked >= 1
+
+
+def test_sensor_probe_uses_the_binary_itself():
+    for p in ("deploy/k8s/base/security-agent-daemonset.yaml", "deploy/helm/kubeheal/templates/security-agent.yaml"):
+        assert "[/kubeheal-sensor, --check-stats," in (ROOT / p).read_text(), p
+
+
+def test_release_workflow_pins_actions_by_sha_gates_on_ci_and_keeps_actor_out_of_shell():
+    wf = (ROOT / ".github/workflows/release.yml").read_text()
+    uses = re.findall(r"uses: (\S+)", wf)
+    assert uses and all(u.startswith("./") or re.fullmatch(r"[\w./-]+@[0-9a-f]{40}", u) for u in uses), uses
+    parsed = yaml.safe_load(wf)["jobs"]
+    assert parsed["ci"]["uses"] == "./.github/workflows/ci.yml" and parsed["images"]["needs"] == "ci"
+    assert "workflow_call" in yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())[True]
+    assert not re.search(r"run:[^\n]*\$\{\{\s*github\.actor", wf) and '-u "${{ github.actor' not in wf

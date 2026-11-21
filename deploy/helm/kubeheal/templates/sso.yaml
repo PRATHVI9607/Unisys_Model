@@ -3,6 +3,7 @@
 {{- if not .Values.dashboard.enabled }}{{ fail "sso.enabled needs dashboard.enabled" }}{{ end }}
 {{- if and (eq .Values.sso.provider "github") (not .Values.sso.githubRepo) }}{{ fail "sso.provider github needs sso.githubRepo (owner/repo)" }}{{ end }}
 {{- if and (eq .Values.sso.provider "oidc") (not .Values.sso.issuerURL) }}{{ fail "sso.provider oidc needs sso.issuerURL" }}{{ end }}
+{{- if and (eq .Values.sso.provider "oidc") (not .Values.sso.emailDomains) (not .Values.sso.allowedGroups) }}{{ fail "sso.provider oidc admits every account of the IdP: set sso.emailDomains and/or sso.allowedGroups" }}{{ end }}
 {{- if not (or .Values.sso.adminUsers .Values.sso.adminGroups) }}{{ fail "sso needs adminUsers or adminGroups: nobody could approve or switch the mode" }}{{ end }}
 # Secret kubeheal-sso is yours (docs/operations.md "Single sign-on"): pods wait in CreateContainerConfigError until it exists.
 apiVersion: v1
@@ -22,9 +23,13 @@ data:
   OAUTH2_PROXY_OIDC_ISSUER_URL: {{ .Values.sso.issuerURL | quote }}
   OAUTH2_PROXY_SCOPE: "openid email profile groups"
   OAUTH2_PROXY_OIDC_GROUPS_CLAIM: "groups"
+  {{- with .Values.sso.allowedGroups }}
+  OAUTH2_PROXY_ALLOWED_GROUPS: {{ join "," . | quote }}
+  {{- end }}
   {{- end }}
   OAUTH2_PROXY_REDIRECT_URL: {{ default (printf "%s" (ternary (printf "https://%s/oauth2/callback" .Values.ingress.host) "http://localhost:4180/oauth2/callback" (.Values.ingress.enabled | default false))) .Values.sso.redirectURL | quote }}
-  OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+  OAUTH2_PROXY_EMAIL_DOMAINS: {{ ternary (join "," .Values.sso.emailDomains) "*" (and (eq .Values.sso.provider "oidc") (not (empty .Values.sso.emailDomains))) | quote }}
+  OAUTH2_PROXY_COOKIE_SAMESITE: "strict"   # a cross-site POST carries no session cookie (the CSRF header + Origin check is the second layer)
   OAUTH2_PROXY_COOKIE_SECURE: {{ .Values.ingress.enabled | default false | quote }}
   OAUTH2_PROXY_HTTP_ADDRESS: "0.0.0.0:4180"
   OAUTH2_PROXY_ALPHA_CONFIG: /etc/oauth2-proxy/alpha.yaml

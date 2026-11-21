@@ -235,6 +235,16 @@ mod tests {
         assert_eq!((f["evt.type"].as_str(), f["evt.arg.flags"].as_str()), (Some("openat"), Some("O_WRONLY|O_CREAT")));
     }
 
+    // The kernel-side skip list (open(O_TRUNC) is already reported by the open event) must name each arch's openat numbers.
+    #[test]
+    fn bpf_open_skip_list_is_per_arch() {
+        let defs: Vec<&str> = include_str!("bpf/sensor.bpf.c").lines().filter(|l| l.starts_with("#define IS_OPEN_NR")).collect();
+        assert_eq!(defs.len(), 2);
+        let (arm, x86) = (defs[0], defs[1]);
+        assert!(arm.contains("== 56") && arm.contains("== 437") && !arm.contains("257"));
+        assert!(x86.contains("== 257") && x86.contains("== 2 ") && x86.contains("== 85"));
+    }
+
     #[test]
     fn parse_record() {
         let mut b = vec![0u8; EV_SIZE];

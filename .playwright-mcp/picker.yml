@@ -1,0 +1,27 @@
+- generic [ref=f29e2]:
+  - heading "Cloud Infrastructure" [level=1] [ref=f29e4]
+  - generic [ref=f29e9]:
+    - heading "Oracle Cloud" [level=4] [ref=f29e10]
+    - heading "You have one active session." [level=3] [ref=f29e11]
+    - paragraph [ref=f29e12]: Please select the user account you would like to sign in with.
+    - generic [ref=f29e14]:
+      - 'button "I ippoprathvi@gmail.com Domain: Default Tenant: ippoprathvi" [ref=f29e15] [cursor=pointer]':
+        - generic [ref=f29e16]: I
+        - generic [ref=f29e17]:
+          - generic [ref=f29e18]: ippoprathvi@gmail.com
+          - generic [ref=f29e19]:
+            - generic [ref=f29e20]: "Domain:"
+            - generic [ref=f29e21]: Default
+          - generic [ref=f29e22]:
+            - generic [ref=f29e23]: "Tenant:"
+            - generic [ref=f29e24]: ippoprathvi
+      - button "Sign in with a different user account" [ref=f29e25] [cursor=pointer]
+  - contentinfo [ref=f29e27]:
+    - generic [ref=f29e28]:
+      - link "Terms of Use" [ref=f29e29] [cursor=pointer]:
+        - /url: http://www.oracle.com/us/legal/terms/index.html
+      - link "Privacy" [ref=f29e30] [cursor=pointer]:
+        - /url: http://www.oracle.com/us/legal/privacy/overview/index.html
+      - complementary "Open Cookie Preferences Modal" [ref=f29e31] [cursor=pointer]:
+        - link "Cookie Preferences, opens a dedicated popup modal window" [ref=f29e32]: Cookie Preferences
+    - paragraph [ref=f29e33]: Copyright © 2016-2026, Oracle and/or its affiliates. All rights reserved.

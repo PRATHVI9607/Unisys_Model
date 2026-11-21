@@ -127,6 +127,17 @@ def test_sensor_has_a_liveness_probe():
                 assert c.get("livenessProbe")
 
 
+def test_sensor_probes_need_no_shell():
+    """The sensor image is distroless: a probe through sh/date/stat would CrashLoop every node."""
+    for r in RENDERS:
+        for _, _, c in containers(list(render(r))):
+            if c["name"] == "sensor":
+                for probe in ("startupProbe", "livenessProbe"):
+                    cmd = c[probe]["exec"]["command"]
+                    assert cmd[:2] == ["/kubeheal-sensor", "--check-stats"], (r, probe, cmd)
+                    assert not {"sh", "bash", "/bin/sh"} & set(cmd)
+
+
 def test_images_are_pinned(objs):
     for name, _, c in containers(objs):
         image = c["image"]

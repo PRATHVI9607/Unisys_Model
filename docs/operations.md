@@ -329,14 +329,13 @@ Optional; the dev install keeps one Redis. The production overlay (`deploy/k8s/c
 `redis.ha.enabled` (true in `values-production.yaml`) replace it with:
 
 - StatefulSet `redis`: 3 pods (1 primary + 2 replicas), a 1Gi PVC each, AOF as in the single install, the same ACL users
-  and Secret `kubeheal-redis`, plus a `replicator` ACL user (`+psync +replconf +ping`, same password as `default`)
+  and Secret `kubeheal-redis`, plus a `replicator` ACL user (`+psync +replconf +ping`, its own password in Secret `kubeheal-redis-ha`, created by the credentials Job; an install made before this key existed gets it on the next apply, then restart the Redis and Sentinel pods)
   that replicas use as `masteruser`. Roughly 1.5Gi of requests for the three.
-- StatefulSet `redis-sentinel`: 3 Sentinels, quorum 2, `down-after-milliseconds` 5000. Unauthenticated, reachable only
-  through NetworkPolicies `redis-sentinel-clients` (agents, dashboard, Redis and Sentinel pods); they authenticate to Redis as `default`.
+- StatefulSet `redis-sentinel`: 3 Sentinels, quorum 2, `down-after-milliseconds` 5000. Password-protected: clients log in as ACL user `default` with `sentinel-password` from `kubeheal-redis-ha` (`REDIS_SENTINEL_PASSWORD`, wired to every client) and may only run `sentinel masters|replicas|get-master-addr-by-name`, ping, auth, hello; peers use user `peer`. Also behind NetworkPolicies `redis-sentinel-clients`; they authenticate to Redis as `default`.
 - Preferred pod anti-affinity per node (a cluster with fewer than 3 nodes still schedules, without HA), a PodDisruptionBudget
   `minAvailable: 2` on each set, NetworkPolicies `redis-agents-only` (unchanged) and `redis-peers`.
 - Agents and dashboard get `REDIS_SENTINELS`; `REDIS_URL` still supplies each component's ACL user and password and its host is
-  ignored. `REDIS_SENTINEL_MASTER` (default `kubeheal`) and `REDIS_SENTINEL_PASSWORD` are optional. Service `redis-master` and
+  ignored. `REDIS_SENTINEL_MASTER` (default `kubeheal`) is optional. Service `redis-master` and
   `deploy/redis` do not exist in HA: run admin commands on the primary,
   `kubectl -n kubeheal exec redis-N -c redis -- redis-cli ...` (`redis-cli role` tells which pod; or ask a Sentinel:
   `kubectl -n kubeheal exec redis-sentinel-0 -- redis-cli -p 26379 sentinel get-master-addr-by-name kubeheal` gives the primary's pod IP).
@@ -544,3 +543,14 @@ but never acts on them, even in enforce mode.
 | Actions say `skipped_circuit_open` | The per-workload hourly budget is spent. Wait out the hour, or clear the `kubeheal:cb:*` keys (`reset.sh` clears those of namespace `demo`; it refuses to run unless the context is minikube or `--force-context <current context>` is given). |
 | Capture is still on after a collection run was killed with `-9` | Run `kubectl -n kubeheal set env ds/kubeheal-security-agent KUBEHEAL_CAPTURE=0`. Capture only adds the `kubeheal.security.capture` stream (capped by MAXLEN). It never changes decisions. |
 | `/readyz` of inference returns 503 | A bundle in `models/{health,security}` is missing or does not match its `meta.json`. The logs name the task. Retrain or restore the bundle and rebuild the image. |
+
+
+## Upgrading: containment HMAC
+
+Freeze entries on `kubeheal.contain` are still signed in the previous release's pipe-joined format (`uid|ns|pod|event|ts`), so a
+rolling upgrade (new fusion, old security agents, or the reverse) keeps freezing pods. Thaw entries (new) are signed as a JSON array
+and an old security agent refuses them: release works only once every security agent is upgraded. New security agents verify both
+freeze formats. A later release will switch freezes to JSON and drop the pipe format; upgrade all components before that one.
+
+Also new: release records of a frozen pod live 7 days (nothing thaws it), the dashboard SSO cookie is `SameSite=strict`, and Helm
+`sso.provider=oidc` requires `sso.emailDomains` and/or `sso.allowedGroups`.

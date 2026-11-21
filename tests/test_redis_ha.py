@@ -49,8 +49,8 @@ def test_acl_users_and_replication_auth(prod):
     script = prod[("StatefulSet", "redis")]["spec"]["template"]["spec"]["containers"][0]["args"][0]
     for user in ("default", "health", "security", "fusion", "dashboard"):
         assert f"user {user} on >" in script
-    assert "user replicator on >$REDISCLI_AUTH" in script and "+psync +replconf" in script
-    assert "masteruser replicator" in script and "masterauth $REDISCLI_AUTH" in script
+    assert "user replicator on >$REPLICATOR_PASSWORD" in script and "+psync +replconf" in script
+    assert "masteruser replicator" in script and "masterauth $REPLICATOR_PASSWORD" in script
     assert "min-replicas-to-write 1" in script and "min-replicas-max-lag 10" in script
 
 
@@ -62,6 +62,30 @@ def test_agents_get_sentinel_env(prod):
         hosts = env["REDIS_SENTINELS"]["value"].split(",")
         assert len(hosts) == 3 and all(h.endswith(".redis-sentinel.kubeheal.svc:26379") for h in hosts)
         assert "REDIS_URL" in env   # still supplies the component's ACL user and password
+
+
+@needs_tools
+def test_sentinel_is_authenticated_and_clients_are_limited(prod):
+    sts = prod[("StatefulSet", "redis-sentinel")]["spec"]["template"]["spec"]["containers"][0]
+    script = sts["args"][0]
+    assert "user default on >$SENTINEL_PASSWORD" in script and "sentinel|get-master-addr-by-name" in script
+    default_line = next(ln for ln in script.splitlines() if ln.strip().startswith("user default on"))
+    assert "+@all" not in default_line and "-@all" in default_line      # clients may only look up the primary
+    assert "sentinel sentinel-user peer" in script and "user peer on >$REDISCLI_AUTH" in script
+    assert "env -u REDISCLI_AUTH" not in script and "--user peer" in str(sts["readinessProbe"])
+    redis = prod[("StatefulSet", "redis")]["spec"]["template"]["spec"]["containers"][0]
+    assert "user replicator on >$REPLICATOR_PASSWORD" in redis["args"][0] and "masterauth $REPLICATOR_PASSWORD" in redis["args"][0]
+    for c, key in ((sts, "SENTINEL_PASSWORD"), (redis, "REPLICATOR_PASSWORD")):
+        ref = {e["name"]: e for e in c["env"]}[key]["valueFrom"]["secretKeyRef"]
+        assert ref["name"] == "kubeheal-redis-ha"
+    for kind, name in (("Deployment", "kubeheal-fusion-agent"), ("Deployment", "kubeheal-health-agent"),
+                       ("Deployment", "kubeheal-dashboard"), ("DaemonSet", "kubeheal-security-agent")):
+        if (kind, name) not in prod:   # kustomize production drops the dashboard
+            continue
+        env = {e["name"]: e for e in prod[(kind, name)]["spec"]["template"]["spec"]["containers"][0]["env"]}
+        assert env["REDIS_SENTINEL_PASSWORD"]["valueFrom"]["secretKeyRef"] == {"name": "kubeheal-redis-ha", "key": "sentinel-password"}, name
+    job = prod[("Job", "kubeheal-redis-secret")]["spec"]["template"]["spec"]["containers"][0]["command"][2]
+    assert 'create(api, "kubeheal-redis-ha", {"replicator-password"' in job and "sentinel-password" in job
 
 
 @needs_tools

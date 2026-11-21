@@ -77,6 +77,18 @@ def test_sso_refuses_incomplete_config():
         assert r.returncode != 0 and "sso" in r.stderr
 
 
+def test_sso_oidc_needs_an_allow_list_and_cookie_is_samesite():
+    oidc = ["--set", "sso.enabled=true", "--set", "sso.provider=oidc", "--set", "sso.issuerURL=https://idp.example", "--set", "sso.adminGroups={sre}"]
+    r = subprocess.run(["helm", "template", "k", str(CHART), *oidc], capture_output=True, text=True)
+    assert r.returncode != 0 and "emailDomains" in r.stderr
+    cm = lambda *x: helm(*oidc, *x)[("ConfigMap", "kubeheal", "kubeheal-sso")]["data"]   # noqa: E731
+    d = cm("--set", "sso.emailDomains={example.com,corp.io}")
+    assert d["OAUTH2_PROXY_EMAIL_DOMAINS"] == "example.com,corp.io" and d["OAUTH2_PROXY_COOKIE_SAMESITE"] == "strict"
+    d = cm("--set", "sso.allowedGroups={dev,sre}")
+    assert d["OAUTH2_PROXY_ALLOWED_GROUPS"] == "dev,sre" and d["OAUTH2_PROXY_EMAIL_DOMAINS"] == "*"
+    assert helm(*SSO)[("ConfigMap", "kubeheal", "kubeheal-sso")]["data"]["OAUTH2_PROXY_EMAIL_DOMAINS"] == "*"   # github: repo collaborators
+
+
 def test_k3d_values_are_dev_without_the_namespace():
     dev = helm()
     del dev[("Namespace", "", "kubeheal")]

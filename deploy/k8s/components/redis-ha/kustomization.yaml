@@ -30,6 +30,9 @@ patches:
     patch: &env |-
       - op: add
         path: /spec/template/spec/containers/0/env/1
+        value: {name: REDIS_SENTINEL_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis-ha, key: sentinel-password}}}
+      - op: add
+        path: /spec/template/spec/containers/0/env/1
         value: {name: REDIS_SENTINELS, value: "redis-sentinel-0.redis-sentinel.kubeheal.svc:26379,redis-sentinel-1.redis-sentinel.kubeheal.svc:26379,redis-sentinel-2.redis-sentinel.kubeheal.svc:26379"}
   - target: {group: apps, version: v1, kind: Deployment, name: kubeheal-health-agent}
     patch: *env
@@ -37,6 +40,9 @@ patches:
     patch: *env
   - target: {group: apps, version: v1, kind: DaemonSet, name: kubeheal-security-agent}   # its env starts with EVENT_SOURCE, so index 2
     patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/2
+        value: {name: REDIS_SENTINEL_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis-ha, key: sentinel-password}}}
       - op: add
         path: /spec/template/spec/containers/0/env/2
         value: {name: REDIS_SENTINELS, value: "redis-sentinel-0.redis-sentinel.kubeheal.svc:26379,redis-sentinel-1.redis-sentinel.kubeheal.svc:26379,redis-sentinel-2.redis-sentinel.kubeheal.svc:26379"}

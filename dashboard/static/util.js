@@ -52,6 +52,7 @@ export class ApiError extends Error {
 export async function api(url, { method = 'GET', body, auth = false } = {}) {
     const headers = {};
     if (method !== 'GET' || auth) {
+        headers['X-Kubeheal-CSRF'] = '1';
         if (body) headers['Content-Type'] = 'application/json';
         headers.Authorization = `Bearer ${session.token}`;
         if (session.actor) headers['X-Actor'] = session.actor;

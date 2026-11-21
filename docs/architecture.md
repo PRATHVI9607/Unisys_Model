@@ -341,7 +341,7 @@ listed here.
 | `REDIS_URL` | `redis://redis-master.kubeheal.svc:6379/0` | from Secret `kubeheal-redis` `<user>-url` (per-component ACL user) | health, security, fusion, dashboard |
 | `REDIS_SENTINELS` | empty = plain `REDIS_URL` | HA only (production): the three `redis-sentinel-N.redis-sentinel.kubeheal.svc:26379` | health, security, fusion, dashboard; `host:port,host:port,...`; the master is resolved on every reconnect with the ACL user and password from `REDIS_URL` |
 | `REDIS_SENTINEL_MASTER` | `kubeheal` | not set | same; the Sentinel master name |
-| `REDIS_SENTINEL_PASSWORD` | empty (Sentinels are unauthenticated) | not set | same; the Sentinels' own password if you set one |
+| `REDIS_SENTINEL_PASSWORD` | empty | HA: Secret `kubeheal-redis-ha` key `sentinel-password` | same; the Sentinels' password |
 | `INFERENCE_URL` | `http://kubeheal-inference.kubeheal.svc:8000` | same (health; security as fallback; dashboard Models page) | health, security, dashboard |
 | `PROMETHEUS_URL` | `http://prometheus-operated.monitoring.svc:9090` | same | health |
 | `ASSESS_DELAY_S` | `60` | `60` | health; `drift_lab.py` imports it |

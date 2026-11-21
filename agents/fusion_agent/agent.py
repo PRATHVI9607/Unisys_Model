@@ -102,12 +102,15 @@ CONTROLLERS = frozenset({"Deployment", "StatefulSet", "DaemonSet", "Job"})   # p
 CONTAIN_TIMEOUT_S = 1.0       # the containment XADD never holds up the kill longer than this
 DONE_TTL_S = 3600             # idempotency markers outlive every redelivery (stale after MAX_EVENT_AGE_S)
 DELETE_BACKOFF_S = (2.0, 5.0)  # waits before the 2nd and 3rd delete try (a frozen pod must not stay frozen on a blip)
+MAX_INFLIGHT = 32             # entries being handled at once across lanes (a slow delete holds one slot, not the lane)
+WAIT_REPLICA_MS = 500         # HA: how long an automatic action's done-marker waits for one replica
 RETRY_S = 1.0                 # back-off after a Redis error in the consumer loop
 # outcomes after which the same automatic decision on the partner event must not act again
 HANDLED = frozenset({"pod_killed", "pod_already_gone", "patched", "would_kill", "would_patch"})
 MODE_REFRESH_S = 1.0          # runtime kill switch (KEY_MODE) is read at most this often, off the event path
 APPROVAL_TTL_S = 3600         # pending-approval record lifetime; also the age past which an approval is refused
 APPROVAL_MAX_AGE_S = APPROVAL_TTL_S   # the world has moved on: record expiry and refusal agree
+RELEASABLE_TTL_S = 7 * 86_400  # a releasable record outlives the 1 h: the pod stays frozen until an operator acts (nothing thaws it)
 HOUSEKEEP_S = 300             # ledger age trim and expired-approval index prune
 LEDGER_REPEAT_S = 600         # an unchanged would_*/skipped_* outcome for a target is ledgered once per this
 LEDGER_SEEN_MAX = 4096
@@ -255,6 +258,7 @@ class FusionAgent:
                  protected: frozenset = PROTECTED_NAMESPACES, max_kills: int = 3, max_patches: int = 5,
                  consumer: str = "fusion", alert_url: str = "", contain_key: str = "", approval_key: str = "") -> None:
         self.redis, self.core, self.apps, self.net, self.batch = redis, core, apps, net, batch
+        self.ha = bool(os.environ.get("REDIS_SENTINELS", "").strip())   # replicas exist: WAIT is meaningful
         self.env_mode = mode            # the manifest's KUBEHEAL_MODE: the ceiling the kill switch cannot raise
         self.mode = mode                # effective mode; refresh_mode() keeps it current, no I/O on the event path
         MODE.labels("observe").set(mode != "enforce")
@@ -268,8 +272,12 @@ class FusionAgent:
         self.alerter = Alerter(alert_url) if alert_url else None
         self.ledger_seen: dict[tuple[str, str, str], tuple[str, float]] = {}   # (ns, workload, decision) → (outcome, t)
         self.side_failed = False                          # a side task died: alive() goes false, kubelet restarts us
-        self.last_progress = time.monotonic()
-        self.tiers: dict[str, tuple[float, str | None, bool]] = {}   # namespace → (expiry, TIER_LABEL value, protected label)
+        now = time.monotonic()
+        self.progress = {s: now for s in (*STREAMS, STREAM_APPROVALS)}   # per lane (stream): alive() needs every lane fresh
+        self._lane: ContextVar[str] = ContextVar("lane", default="")
+        self._inflight: dict[str, asyncio.Task] = {}      # msg id → its handler task (poll_once(wait=False))
+        self._slots = asyncio.Semaphore(MAX_INFLIGHT)
+        self.tiers: dict[str, tuple[float, str | None, bool, bool]] = {}   # namespace → (expiry, TIER_LABEL, protected, lookup failed)
         self.owners: dict[tuple[str, str], tuple[float, tuple[str, str] | None]] = {}   # (ns, RS) → controller
         self._containment: ContextVar[str] = ContextVar("containment", default="")
         self._serial: dict[str, list] = {}   # workload → [asyncio.Lock, users]: one event at a time per workload
@@ -341,23 +349,45 @@ class FusionAgent:
                 if c["name"] != self.consumer and c["pending"] == 0:
                     await self.redis.xgroup_delconsumer(stream, GROUP, c["name"])
 
-    async def poll_once(self, block_ms: int = BLOCK_MS, streams: tuple[str, ...] = STREAMS) -> None:
-        self.last_progress = time.monotonic()
+    def _spawn(self, stream: str, msg_id: str, fields: dict, deliveries: int) -> asyncio.Task | None:
+        if msg_id in self._inflight:   # claimed back while its own handler still runs
+            return None
+        task = self._inflight[msg_id] = asyncio.create_task(self.process(stream, msg_id, fields, deliveries))
+        task.add_done_callback(lambda _t: self._inflight.pop(msg_id, None))
+        return task
+
+    async def poll_once(self, block_ms: int = BLOCK_MS, streams: tuple[str, ...] = STREAMS, wait: bool = True) -> None:
+        """One read round. Each entry is its own task (per-workload order is the lock in handle()), so a slow
+        delete on one workload never stalls the lane; wait=False (the consumer loop) does not await them,
+        wait=True (tests, one-shot use) does. Entries are acked by their handler when done."""
+        for stream in streams:
+            self.progress[stream] = time.monotonic()
+        tasks = []
         for stream in streams:   # retry entries another delivery left unacked
             _, claimed, _ = await self.redis.xautoclaim(stream, GROUP, self.consumer, CLAIM_MIN_IDLE_MS,
                                                         start_id="0-0", count=BATCH)
             for msg_id, fields in claimed:
                 info = await self.redis.xpending_range(stream, GROUP, min=msg_id, max=msg_id, count=1)
-                await self.process(stream, msg_id, fields, info[0]["times_delivered"] if info else MAX_DELIVERIES)
+                await self._slots.acquire()
+                tasks.append(self._spawn(stream, msg_id, fields, info[0]["times_delivered"] if info else MAX_DELIVERIES))
+                tasks[-1] is None and self._slots.release()
         resp = await self.redis.xreadgroup(GROUP, self.consumer, {s: ">" for s in streams},
                                            count=BATCH, block=block_ms)
         for stream, entries in resp or []:
             for msg_id, fields in entries:
-                await self.process(stream, msg_id, fields, 1)
+                await self._slots.acquire()
+                tasks.append(self._spawn(stream, msg_id, fields, 1))
+                tasks[-1] is None and self._slots.release()
+        for t in tasks:
+            if t is not None:
+                t.add_done_callback(lambda _t: self._slots.release())
+        if wait:
+            await asyncio.gather(*(t for t in tasks if t), return_exceptions=True)
 
     async def process(self, stream: str, msg_id: str, fields: dict, deliveries: int) -> None:
         """Ack only after successful handling; dead-letter malformed or repeatedly failing entries."""
-        self.last_progress = time.monotonic()   # a batch of slow entries is progress, not a hang
+        self._lane.set(stream)
+        self.progress[stream] = time.monotonic()   # a batch of slow entries is progress, not a hang
         approvals = stream == STREAM_APPROVALS
         try:
             ev = (parse_approval(fields) if approvals else
@@ -424,6 +454,8 @@ class FusionAgent:
             action = await self._decide(ev, partner, partner_decision, partner_outcome)
             # Recorded before publishing, so a redelivery after a failed publish/XACK never acts twice.
             await self.redis.set(done, action.model_dump_json(), nx=True, ex=DONE_TTL_S)
+            if self.ha and action.decision in AUTOMATIC:
+                await self._replicated()
         extra, notify = await self._extras(ev, partner, action)
         await publish_event(self.redis, STREAM_ACTIONS, "action", action, ack, extra)
         if fresh and action.outcome in ("pod_killed", "patched", "would_kill", "would_patch"):
@@ -441,6 +473,15 @@ class FusionAgent:
         log.log(level, "%s %s/%s pod=%s outcome=%s :: %s", action.decision.value, ev.namespace, ev.workload,
                 action.pod or "-", action.outcome, action.rationale)
         return action
+
+    async def _replicated(self) -> None:
+        """HA only: wait (<= WAIT_REPLICA_MS) until one replica has the done-marker, so a failover right after an
+        automatic action does not lose it and repeat the action on redelivery. Best effort: a timeout or error
+        changes nothing. Single Redis has no replicas: never called there."""
+        try:
+            await self.redis.execute_command("WAIT", 1, WAIT_REPLICA_MS)
+        except aioredis.RedisError as e:
+            log.warning("WAIT for a replica failed: %s", e)
 
     def _ledger_repeat(self, action: ActionEvent) -> bool:
         """An unchanged would_*/skipped_* outcome for the same target within LEDGER_REPEAT_S: not ledgered again."""
@@ -495,7 +536,10 @@ class FusionAgent:
         """Commands that record a pending approval and its ledger entry; [] when one exists or none is possible."""
         if await self.redis.exists(key_approval(action.event_id)):   # redelivery: already recorded
             return []
-        dedupe = key_approval_dedupe(action.namespace, action.workload, "RELEASE" if releasable else candidate.value)
+        # a release is per frozen pod (two replicas of a workload can both be frozen); the rest is per workload
+        dedupe = key_approval_dedupe(action.namespace, action.workload,
+                                     f"RELEASE:{security.pod_uid}" if releasable else candidate.value)
+        ttl = RELEASABLE_TTL_S if releasable else APPROVAL_TTL_S
         if prior := await self.redis.get(dedupe):   # one open approval per target: reuse it, never flood
             try:
                 if json.loads(await self.redis.get(key_approval(prior)) or "{}").get("state") == "pending":
@@ -519,14 +563,15 @@ class FusionAgent:
                   "pod_uid": security.pod_uid if security else "", "spec_hash": hsh,
                   "health_event_id": action.health_event_id, "security_event_id": action.security_event_id,
                   "rationale": action.rationale, "score": action.score, "created_ms": created,
-                  "expires_ms": created + APPROVAL_TTL_S * 1000,
+                  "expires_ms": created + ttl * 1000,
                   "changed_fields": health.changed_fields if health else [], "releasable": releasable}
         payload = self._seal(record)
 
         def queue(p) -> None:
-            p.set(key_approval(action.event_id), payload, nx=True, ex=APPROVAL_TTL_S)
-            p.set(dedupe, action.event_id, ex=APPROVAL_TTL_S)
-            p.zadd(KEY_APPROVALS_PENDING, {action.event_id: created})
+            p.set(key_approval(action.event_id), payload, nx=True, ex=ttl)
+            p.set(dedupe, action.event_id, ex=ttl)
+            # score = expiry - APPROVAL_TTL_S: the 1 h prune below and in housekeeping then drops each record at its own expiry
+            p.zadd(KEY_APPROVALS_PENDING, {action.event_id: created + (ttl - APPROVAL_TTL_S) * 1000})
             p.zremrangebyscore(KEY_APPROVALS_PENDING, "-inf", created - APPROVAL_TTL_S * 1000)
         return [queue, ledger("approval_pending", "fusion", action.mode, decision=candidate.value,
                               outcome="pending", detail=action.rationale, **ids)]
@@ -603,7 +648,8 @@ class FusionAgent:
                 if rec.get("state") != "pending":
                     why = f"not_pending:{rec.get('state')}"
                     new = self._plain(rec) if "requested" in rec else None
-                elif max_age_s is not None and now_ms() - int(rec.get("created_ms", 0)) > max_age_s * 1000:
+                elif max_age_s is not None and now_ms() - int(rec.get("created_ms", 0)) > (
+                        RELEASABLE_TTL_S if rec.get("releasable") else max_age_s) * 1000:
                     why, new = "stale", {**self._plain(rec), "state": "expired"}
                 elif hold:
                     why, new = hold[0], {**self._plain(rec), "note": hold[1]}
@@ -734,6 +780,8 @@ class FusionAgent:
         ev = security if decision is Decision.AUTO_KILL else health
         ns, wl = ev.namespace, ev.workload
         if ns in self.protected or (await self.ns_info(ns))[1]:   # cached by _decide: no extra read on the kill path
+            if self.tiers.get(ns, (0, None, False, False))[3]:   # label unknown: a human decides, nothing automatic
+                return Decision.HUMAN, "escalated_ns_lookup_failed"
             return decision, "skipped_protected"
         try:
             if decision is Decision.AUTO_KILL:
@@ -767,7 +815,7 @@ class FusionAgent:
 
     async def ns_info(self, ns: str) -> tuple[str | None, bool]:
         """(tier, protected): one cached namespace read. protected = the namespace carries PROTECTED_LABEL=true;
-        a failed lookup is not protected (name-based tier, as before)."""
+        a failed lookup is protected (fail closed: act() escalates), while the tier falls back to the name."""
         now = time.monotonic()
         if (hit := self.tiers.get(ns)) and hit[0] > now:
             return hit[1], hit[2]
@@ -776,23 +824,24 @@ class FusionAgent:
         except (ApiException, TimeoutError, aiohttp.ClientError) as e:
             status = getattr(e, "status", None)
             if status == 404:
-                self.tiers[ns] = (now + TIER_FAIL_TTL_S, NAMESPACE_GONE, False)   # short: the name may be re-created
+                self.tiers[ns] = (now + TIER_FAIL_TTL_S, NAMESPACE_GONE, False, False)   # short: the name may be re-created
                 return NAMESPACE_GONE, False
-            log.warning("tier lookup for namespace %s failed (%s); using its name, not protected", ns, status or e)
-            self.tiers[ns] = (now + TIER_FAIL_TTL_S, None, False)   # do not hammer a failing API on every event
-            return None, False
+            log.warning("tier lookup for namespace %s failed (%s); using its name, treating it as protected", ns, status or e)
+            self.tiers[ns] = (now + TIER_FAIL_TTL_S, None, True, True)   # short negative cache: no hammering a failing API
+            return None, True
         label, protected = labels.get(TIER_LABEL), labels.get(PROTECTED_LABEL) == "true"
         if label is not None and label not in TIERS:
             log.warning("namespace %s has invalid %s=%r; using its name", ns, TIER_LABEL, label)
             label = None
-        self.tiers[ns] = (now + TIER_TTL_S, label, protected)
+        self.tiers[ns] = (now + TIER_TTL_S, label, protected, False)
         return label, protected
 
     async def _kube(self, coro):
         try:
             return await asyncio.wait_for(coro, KUBE_TIMEOUT_S)
         finally:
-            self.last_progress = time.monotonic()   # every call ends within KUBE_TIMEOUT_S: progress
+            if lane := self._lane.get():   # every call ends within KUBE_TIMEOUT_S: progress of the lane that made it
+                self.progress[lane] = time.monotonic()
 
     async def _read(self, kind: str, ns: str, name: str):
         """GET a pod or workload object; None when it does not exist (404)."""
@@ -940,8 +989,13 @@ class FusionAgent:
             if e.status == 404:
                 return "pod_already_gone"
             raise
-        try:
-            await self._kube(self.net.delete_namespaced_network_policy(f"kubeheal-quarantine-{pod_name}"[:253], ns))
+        name = f"kubeheal-quarantine-{pod_name}"[:253]
+        try:   # only a policy KubeHeal created (its managed-by label) is ever deleted, never a look-alike of the same name
+            policy = await self._kube(self.net.read_namespaced_network_policy(name, ns))
+            if _labels(policy).get("app.kubernetes.io/managed-by") == "kubeheal":
+                await self._kube(self.net.delete_namespaced_network_policy(name, ns))
+            else:
+                log.warning("NetworkPolicy %s/%s is not KubeHeal's; left alone", ns, name)
         except ApiException as e:
             if e.status != 404:
                 raise
@@ -988,7 +1042,8 @@ class FusionAgent:
 
     # ── process ─────────────────────────────────────────────────────────────
     def alive(self) -> bool:
-        return not self.side_failed and time.monotonic() - self.last_progress < LIVENESS_STALE_S
+        now = time.monotonic()
+        return not self.side_failed and all(now - t < LIVENESS_STALE_S for t in self.progress.values())
 
     async def run(self) -> None:
         log.info("fusion starting mode=%s consumer=%s protected=%s", self.mode, self.consumer, sorted(self.protected))
@@ -1022,7 +1077,7 @@ class FusionAgent:
                 if start:
                     await self.ensure_groups(start, streams)
                     start = None
-                await self.poll_once(streams=streams)
+                await self.poll_once(streams=streams, wait=False)
             except aioredis.RedisError as e:
                 if "NOGROUP" in str(e):
                     # Redis restarted (no persistence) or the streams were deleted: recreate, keep consuming.

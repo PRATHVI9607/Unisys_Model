@@ -52,6 +52,7 @@ class FakeKube:
         self.owners, self.pod_uid = owners, pod_uid     # owners: Deployment name the pod's ReplicaSet belongs to
         self.pod_owner, self.ctrl_labels = pod_owner, ctrl_labels   # (kind, name) of a non-RS controller
         self.errors = errors or {}     # method name -> HTTP status to raise
+        self.np_labels = {"app.kubernetes.io/managed-by": "kubeheal"}   # labels of the quarantine NetworkPolicy
 
     def _rec(self, name, *args, **kwargs):
         self.calls.append((name, args, kwargs))
@@ -102,6 +103,10 @@ class FakeKube:
 
     async def delete_namespaced_pod(self, name, ns, **kwargs):
         self._rec("delete_namespaced_pod", name, ns, **kwargs)
+
+    async def read_namespaced_network_policy(self, name, ns):
+        self._rec("read_namespaced_network_policy", name, ns)
+        return SimpleNamespace(metadata=SimpleNamespace(name=name, labels=self.np_labels))
 
     async def delete_namespaced_network_policy(self, name, ns):
         self._rec("delete_namespaced_network_policy", name, ns)
@@ -259,6 +264,17 @@ async def test_namespace_tier_label(redis, ns_labels, errors, decision):
     assert (await agent.handle(ransomware(ns="demo", risk=0.95))).decision is decision
 
 
+async def test_failed_namespace_lookup_fails_closed_for_automatic_actions(redis):
+    kube = FakeKube(errors={"read_namespace": 500})
+    agent, _ = make(redis, kube, mode="enforce")
+    a = await agent.handle(ransomware(ns="prod-shop", risk=0.95))      # prod by name: AUTO_KILL if the label were readable
+    assert (a.decision, a.outcome) == (Decision.HUMAN, "escalated_ns_lookup_failed")
+    assert not [n for n in kube.names if n in MUTATING]
+    kube.errors.clear()
+    agent.tiers.clear()                                               # the negative cache is short; once it lapses we act
+    assert (await agent.handle(ransomware(ns="prod-shop", risk=0.95, eid="s2"))).outcome == "pod_killed"
+
+
 async def test_patch_without_baseline_goes_to_human(redis):
     agent, kube = make(redis, mode="enforce")
     a = await agent.handle(drift())
@@ -402,7 +418,7 @@ async def test_lost_consumer_group_is_recreated(redis, monkeypatch):
     script = {(STREAM_HEALTH,): [aioredis.ResponseError("NOGROUP No such key or consumer group"), asyncio.CancelledError()],
               (STREAM_SECURITY,): [aioredis.ResponseError("NOGROUP No such key or consumer group")]}
 
-    async def poll(streams=fa.STREAMS):
+    async def poll(streams=fa.STREAMS, **kw):
         if streams not in script or not script[streams]:   # approvals idle; each event lane has its own script
             await asyncio.sleep(3600)
         await asyncio.sleep(0.05)      # the other lane recreates its group first
@@ -579,10 +595,55 @@ async def test_publish_and_ack_in_one_transaction(redis):
 
 async def test_progress_counts_per_kube_call(redis):
     agent, _ = make(redis)
-    agent.last_progress -= 100
+    agent.progress = {k: v - 100 for k, v in agent.progress.items()}
     assert not agent.alive()
+    agent._lane.set(STREAM_SECURITY)
     await agent._kube(agent.core.read_namespace("x"))
+    assert not agent.alive()          # one lane's kube call does not vouch for the others
+    agent.progress = dict.fromkeys(agent.progress, __import__("time").monotonic())
     assert agent.alive()
+
+
+async def test_wedged_security_lane_is_unhealthy_while_health_runs(redis):
+    agent, _ = make(redis)
+    await agent.ensure_groups(streams=(STREAM_HEALTH, STREAM_SECURITY, fa.STREAM_APPROVALS))
+    agent.progress[STREAM_SECURITY] -= 100
+    await agent.poll_once(block_ms=1, streams=(STREAM_HEALTH,))
+    assert not agent.alive()
+    await agent.poll_once(block_ms=1, streams=(STREAM_SECURITY,))
+    assert agent.alive() or fa.STREAM_APPROVALS in agent.progress   # approvals lane is polled too
+    await agent.poll_once(block_ms=1, streams=(fa.STREAM_APPROVALS,))
+    assert agent.alive()
+
+
+async def test_slow_delete_on_one_workload_does_not_delay_a_kill_on_another(redis):
+    kube = FakeKube()
+    agent, _ = make(redis, kube, mode="enforce")
+    gate, order = asyncio.Event(), []
+    orig = kube.delete_namespaced_pod
+
+    async def delete(name, ns, **kw):
+        order.append(name)
+        if name == "slow-pod":
+            await gate.wait()
+        return await orig(name, ns, **kw)
+    kube.delete_namespaced_pod = delete
+    a = ransomware(eid="sa")
+    a.pod, a.workload = "slow-pod", "wa"
+    b = ransomware(eid="sb")
+    b.pod, b.workload = "fast-pod", "wb"
+    await agent.ensure_groups()
+    await redis.xadd(STREAM_SECURITY, a.to_fields())
+    await redis.xadd(STREAM_SECURITY, b.to_fields())
+    await agent.poll_once(block_ms=1, streams=(STREAM_SECURITY,), wait=False)
+    for _ in range(200):
+        if "fast-pod" in order and await redis.xlen(STREAM_ACTIONS) >= 1:
+            break
+        await asyncio.sleep(0.01)
+    assert "fast-pod" in order and await redis.xlen(STREAM_ACTIONS) == 1     # B done while A is still deleting
+    gate.set()
+    await asyncio.gather(*agent._inflight.values())
+    assert await redis.xlen(STREAM_ACTIONS) == 2
 
 
 async def test_non_nogroup_redis_error_backs_off_instead_of_crashing(redis, monkeypatch):
@@ -594,7 +655,7 @@ async def test_non_nogroup_redis_error_backs_off_instead_of_crashing(redis, monk
     script = [aioredis.ResponseError("OOM command not allowed when used memory > 'maxmemory'"),
               asyncio.CancelledError()]
 
-    async def poll(streams=fa.STREAMS):
+    async def poll(streams=fa.STREAMS, **kw):
         if streams != (STREAM_HEALTH,):   # the other lanes idle; the script is for the health lane
             await asyncio.sleep(3600)
         raise script.pop(0)
@@ -1107,7 +1168,7 @@ async def test_run_starts_mode_and_approval_tasks_beside_the_event_loop(redis, m
     await redis.set(KEY_MODE, "observe")
     real = agent.poll_once
 
-    async def poll(streams=fa.STREAMS):
+    async def poll(streams=fa.STREAMS, **kw):
         if streams == (STREAM_SECURITY,):      # the security lane idles
             await asyncio.sleep(3600)
         if streams == (STREAM_HEALTH,):        # the event loop: done once both side tasks did their work
@@ -1465,14 +1526,40 @@ async def test_release_thaws_and_lifts_the_quarantine(redis, fast_retry):
     kube.fails = 0
     await approve(agent, redis, a.event_id, decision="release")
     names = kube.names
-    assert names[-2:] == ["patch_namespaced_pod", "delete_namespaced_network_policy"]
-    assert kube.calls[-2][1][2] == {"metadata": {"uid": "uid-123", "labels": {fa.QUARANTINE_LABEL: None}}}
+    assert names[-3:] == ["patch_namespaced_pod", "read_namespaced_network_policy", "delete_namespaced_network_policy"]
+    assert kube.calls[-3][1][2] == {"metadata": {"uid": "uid-123", "labels": {fa.QUARANTINE_LABEL: None}}}
     *_, (_, thaw) = await redis.xrange(fa.STREAM_CONTAIN)
     assert thaw["action"] == "thaw" and thaw["pod_uid"] == "uid-123"
     from agents.common import contain_verify
     assert contain_verify("ck", thaw)
     rec = await record(redis, a.event_id)
     assert (rec["state"], rec["outcome"]) == ("executed", "released")
+
+
+async def test_release_never_deletes_a_foreign_network_policy(redis, fast_retry):
+    agent, kube = make(redis, FlakyDelete(99), mode="enforce")
+    a = await agent.handle(ransomware())
+    kube.fails, kube.np_labels = 0, {"team": "web"}           # someone else's policy that happens to carry the name
+    await approve(agent, redis, a.event_id, decision="release")
+    assert "read_namespaced_network_policy" in kube.names and "delete_namespaced_network_policy" not in kube.names
+    assert (await record(redis, a.event_id))["outcome"] == "released"
+
+
+async def test_two_frozen_replicas_each_get_a_release_item_that_outlives_the_hour(redis, fast_retry):
+    agent, kube = make(redis, FlakyDelete(99), mode="enforce")
+    a1 = await agent.handle(ransomware(eid="s1"))
+    kube.pod_uid = "uid-456"
+    s2 = ransomware(eid="s2")
+    s2.pod, s2.pod_uid = "web-2", "uid-456"
+    a2 = await agent.handle(s2)
+    r1, r2 = await record(redis, a1.event_id), await record(redis, a2.event_id)
+    assert (r1["state"], r2["state"], r1["pod_uid"], r2["pod_uid"]) == ("pending", "pending", "uid-123", "uid-456")
+    assert await redis.ttl(key_approval(a2.event_id)) > fa.APPROVAL_TTL_S      # nothing thaws a frozen pod: no 1 h expiry
+    assert await redis.zcard(fa.KEY_APPROVALS_PENDING) == 2
+    await agent.housekeep_once()
+    assert await redis.zcard(fa.KEY_APPROVALS_PENDING) == 2
+    again = await agent.handle(ransomware(eid="s3"))                           # same pod again: still one item
+    assert not await redis.exists(key_approval(again.event_id))
 
 
 async def test_release_of_a_vanished_pod_sends_no_thaw(redis, fast_retry):
@@ -1519,7 +1606,7 @@ async def test_run_gives_security_events_their_own_consumer(redis, monkeypatch):
     agent, _ = make(redis)
     seen = set()
 
-    async def poll(streams=fa.STREAMS):
+    async def poll(streams=fa.STREAMS, **kw):
         seen.add(streams)
         if streams == (STREAM_HEALTH,):
             while (STREAM_SECURITY,) not in seen:      # noqa: ASYNC110
@@ -1552,3 +1639,21 @@ async def test_events_of_one_workload_run_in_turn_others_alongside(redis, monkey
     gate.set()
     await asyncio.gather(first, same, diff)
     assert started == ["a1", "b1", "a2"] and agent._serial == {}               # the lock table empties itself
+
+
+async def test_done_marker_waits_for_a_replica_only_in_ha(redis, monkeypatch):
+    waits = []
+    for ha in ("", "s0:26379"):
+        monkeypatch.setenv("REDIS_SENTINELS", ha)
+        agent, _ = make(redis, mode="enforce")
+        orig = redis.execute_command
+
+        async def spy(*a, _o=orig, **k):
+            if a[0] == "WAIT":
+                waits.append(a)
+                return 0
+            return await _o(*a, **k)
+        monkeypatch.setattr(redis, "execute_command", spy)
+        await agent.handle(ransomware(eid=f"s{len(ha)}"))
+        monkeypatch.undo()
+    assert waits == [("WAIT", 1, fa.WAIT_REPLICA_MS)]

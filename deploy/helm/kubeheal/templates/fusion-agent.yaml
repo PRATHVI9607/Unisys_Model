@@ -41,6 +41,7 @@ spec:
             - {name: REDIS_URL, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: fusion-url}}}   # per-component ACL user (redis.yaml)
 {{- if .Values.redis.ha.enabled }}
             - {name: REDIS_SENTINELS, value: {{ include "kubeheal.redisSentinels" . | quote }}}
+            - {name: REDIS_SENTINEL_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis-ha, key: sentinel-password}}}
 {{- end }}
             - {name: KUBEHEAL_MODE, value: {{ .Values.mode | quote }}}   # "observe" = dry-run: decide and publish, change nothing
             - {name: CONTAIN_HMAC_KEY, valueFrom: {secretKeyRef: {name: kubeheal-contain-hmac, key: key}}}   # signs/verifies kubeheal.contain entries

@@ -1,0 +1,44 @@
+- generic [ref=f41e1]:
+  - generic [ref=f41e2]:
+    - link "Skip to main content" [ref=f41e11] [cursor=pointer]:
+      - /url: "#skipToContent"
+    - generic [ref=f41e13]:
+      - generic [ref=f41e14]:
+        - generic [ref=f41e30]:
+          - application [ref=f41e31]:
+            - button "Navigation menu." [ref=f41e32] [cursor=pointer]:
+              - img "Navigation menu." [ref=f41e36]
+          - link "Console home page" [ref=f41e38] [cursor=pointer]:
+            - /url: /
+            - heading [level=1] [aria-hidden] [ref=f41e39]
+          - generic "Search" [ref=f41e49]:
+            - button "Search" [ref=f41e51] [cursor=pointer]:
+              - img "Search resources, services, documentation, and Marketplace" [ref=f41e52]
+          - generic [ref=f41e54]:
+            - button "Region menu, active region is India West (Mumbai)" [ref=f41e57] [cursor=pointer]:
+              - combobox [ref=f41e59]:
+                - generic [ref=f41e64]: India West (Mumbai)
+            - button "Developer tools" [ref=f41e67] [cursor=pointer]:
+              - button "Developer tools" [ref=f41e70]
+            - button "Unread announcements" [ref=f41e75] [cursor=pointer]:
+              - img "Unread announcements" [ref=f41e78]
+            - button "Help menu" [ref=f41e82] [cursor=pointer]:
+              - combobox [ref=f41e84]:
+                - img "Help menu" [ref=f41e85]
+            - button "User menu" [ref=f41e89] [cursor=pointer]:
+              - combobox [ref=f41e91]:
+                - img "Profile" [ref=f41e92]
+        - main [ref=f41e96]:
+          - generic "Main content" [ref=f41e98]:
+            - iframe [ref=f41e100]:
+              - generic [ref=f44e3]:
+                - alertdialog "Loading..." [ref=f44e5]
+                - paragraph [ref=f44e7]: Loading...
+      - generic [ref=f41e106]:
+        - generic [ref=f41e108]:
+          - link "Terms of Use and Privacy" [ref=f41e110] [cursor=pointer]:
+            - /url: http://www.oracle.com/legal/privacy/index.html
+          - complementary "Open Cookie Preferences Modal" [ref=f41e111]:
+            - link "Cookie Preferences, opens a dedicated popup modal window" [ref=f41e112] [cursor=pointer]: Cookie Preferences
+        - generic [ref=f41e113]: Copyright © 2026, Oracle and/or its affiliates. All rights reserved.
+  - status

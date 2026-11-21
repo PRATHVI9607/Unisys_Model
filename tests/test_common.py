@@ -120,3 +120,15 @@ def test_signatures_with_non_ascii_never_raise():
     assert not common.approval_verify("k", {**rec, "sig": sig, "pod": "q"})
     assert not common.approval_verify("k2", {**rec, "sig": sig})
     assert not common.approval_verify("k", {**rec, "sig": "é" * 64}) and not common.approval_verify("k", rec)
+
+
+def test_contain_hmac_rolling_upgrade_formats():
+    f = {"pod_uid": "u", "namespace": "n", "pod": "p", "event_id": "e", "ts_ms": "1"}
+    legacy = common.hmac.new(b"k", b"u|n|p|e|1", common.hashlib.sha256).hexdigest()
+    assert common.contain_sign("k", f) == legacy                                   # freezes: old format on the wire
+    assert common.contain_verify("k", {**f, "sig": legacy})                        # old fusion -> new agent
+    new_json = common.hmac.new(b"k", b'["u","n","p","e","1"]', common.hashlib.sha256).hexdigest()
+    assert common.contain_verify("k", {**f, "sig": new_json})
+    thaw = {**f, "action": "thaw"}
+    assert common.contain_sign("k", thaw) != legacy and common.contain_verify("k", {**thaw, "sig": common.contain_sign("k", thaw)})
+    assert not common.contain_verify("k", {**thaw, "sig": legacy})                 # a freeze signature never authorises a thaw

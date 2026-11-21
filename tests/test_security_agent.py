@@ -10,6 +10,7 @@ import fakeredis
 import pytest
 from kubernetes_asyncio.client.exceptions import ApiException
 
+from agents.common import CONTAIN_SIGNED, contain_verify
 from agents.security_agent import agent as sa
 from agents.security_agent.falco import FalcoTail, parse_line
 from kubeheal.contracts import STREAM_SECURITY, Prediction, SecurityEvent, key_event
@@ -1086,3 +1087,43 @@ async def test_hot_pod_ends_the_pause_between_rounds(redis, monkeypatch):
     await asyncio.sleep(0.2)
     task.cancel()
     assert len(calls) == 1
+
+
+# ── containment signature: both wire formats during a rolling upgrade ─────────
+def _hmac(key, msg):
+    import hashlib
+    import hmac as h
+    return h.new(key.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+
+def test_contain_verify_accepts_pipe_and_json_for_freeze_but_only_json_with_action():
+    f = {"pod_uid": CUID, "namespace": "shop", "pod": "web", "event_id": "e1", "ts_ms": "1"}
+    vals = [f[k] for k in CONTAIN_SIGNED]
+    pipe, js = _hmac("k", "|".join(vals)), _hmac("k", json.dumps(vals, separators=(",", ":")))
+    assert contain_verify("k", {**f, "sig": pipe}) and contain_verify("k", {**f, "sig": js})
+    thaw = {**f, "action": "thaw"}
+    tj = _hmac("k", json.dumps([*vals, "thaw"], separators=(",", ":")))
+    assert contain_verify("k", {**thaw, "sig": tj})
+    assert not contain_verify("k", {**thaw, "sig": _hmac("k", "|".join([*vals, "thaw"]))})   # pipe never covers an action
+    assert not contain_verify("k", {**thaw, "sig": pipe}) and not contain_verify("k", {**f, "sig": "é" * 64})
+    assert not contain_verify("k2", {**f, "sig": pipe}) and not contain_verify("k", {"sig": pipe})
+
+
+async def test_eval_loop_batches_staggered_non_hot_pods(redis, monkeypatch):
+    """Pods waiting for their POD_MIN_INTERVAL_S slot must not spin the loop at HOT_TICK_S: they batch per MIN_TICK_S."""
+    a = make_agent(redis)
+    rounds = []
+
+    async def batch(due):
+        rounds.append(len(due))
+    monkeypatch.setattr(a, "evaluate_batch", batch)
+    now = time.monotonic()
+    for i in range(40):
+        a.ingest(parse_line(falco_line(pod=f"web-{i}-x2x7q", **{"k8s.pod.uid": f"u{i}"})))
+        w = a.windows[("shop", f"web-{i}-x2x7q")]
+        w.new, w.due_at = sa.BURST_EVENTS, now + 0.02 * i   # bursting, due staggered over 0.8 s
+    a.wake.set()
+    t = asyncio.create_task(a.eval_loop())
+    await asyncio.sleep(1.3)
+    t.cancel()
+    assert sum(rounds) == 40 and len(rounds) <= 8, rounds
