@@ -1362,3 +1362,46 @@ async def test_effective_mode_is_published_with_a_short_ttl(redis):
     await redis.set(KEY_MODE, "observe")
     await agent.refresh_mode()
     assert await redis.get(KEY_MODE_EFFECTIVE) == "observe"
+
+
+# ── namespace-level protection (kubeheal.io/protected=true on the Namespace) ─
+NS_PROTECTED = {"kubeheal.io/protected": "true"}
+
+
+@pytest.mark.parametrize("ev", [ransomware(), drift()], ids=["kill", "patch"])
+async def test_protected_namespace_label_blocks_everything(redis, ev):
+    agent, kube = make(redis, FakeKube(ns_labels=NS_PROTECTED), mode="enforce")
+    await set_baseline(redis)
+    a = await agent.handle(ev)
+    assert a.outcome == "skipped_protected"
+    assert not MUTATING & set(kube.names)
+    assert await redis.xlen(fa.STREAM_CONTAIN) == 0
+
+
+async def test_protected_namespace_label_offers_no_approval(redis):
+    agent, kube = make(redis, FakeKube(ns_labels=NS_PROTECTED), mode="enforce")
+    a = await agent.handle(uncertain(ransomware(eid="s-h")))
+    assert a.outcome == "skipped_protected"
+    assert await redis.get(key_approval(a.event_id)) is None
+
+
+async def test_approval_rechecks_protected_namespace_label(redis):
+    kube = FakeKube()
+    agent, _ = make(redis, kube, mode="enforce")
+    a = await human(agent, redis)
+    kube.ns_labels = NS_PROTECTED       # labelled after the approval was queued
+    agent.tiers.clear()
+    await approve(agent, redis, a.event_id)
+    assert not MUTATING & set(kube.names)
+    assert (await record(redis, a.event_id))["outcome"] == "skipped_protected"
+
+
+async def test_unlabelled_namespace_still_acted_on_and_read_once(redis):
+    kube = FakeKube()
+    agent, _ = make(redis, kube, mode="enforce")
+    reads = []
+    orig = kube.read_namespace
+    kube.read_namespace = lambda n: reads.append(n) or orig(n)
+    assert (await agent.handle(ransomware())).outcome == "pod_killed"
+    assert await agent.tier("prod-shop") is None
+    assert len(reads) == 1          # tier and protected share one cached read

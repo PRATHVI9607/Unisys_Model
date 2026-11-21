@@ -64,6 +64,7 @@ change. Stream entries are flat `str → str` maps: nested values are compact JS
 | Label | Where | Meaning |
 |---|---|---|
 | `kubeheal.io/protected=true` | pod, or its controller (Deployment, StatefulSet, DaemonSet, Job) | KubeHeal never acts on it |
+| `kubeheal.io/protected=true` | namespace | Fusion never kills, freezes, quarantines or patches anything in it, and offers no approval |
 | `kubeheal.io/quarantined=true` | pod, set by fusion | Selected by the pod's deny-all quarantine NetworkPolicy |
 | `kubeheal.io/namespace-tier=prod\|staging\|dev` | namespace | Tier multiplier. Without it, the tier comes from the name (`prod` → prod, `stag` → staging, otherwise dev). |
 | `kubeheal.io/scrape=true` | app pods | Scraped by the `kubeheal-apps` PodMonitor (request, error and latency metrics) |
@@ -211,7 +212,7 @@ the name-heuristic tier would otherwise produce.
 published as an `ActionEvent`.
 
 1. **Not automatic** (HUMAN, OBSERVE or BENIGN): outcome `none`.
-2. **Protected namespace** (built-in set or `EXTRA_PROTECTED_NAMESPACES`): `skipped_protected`.
+2. **Protected namespace** (built-in set, `EXTRA_PROTECTED_NAMESPACES`, or the Namespace labelled `kubeheal.io/protected=true`): `skipped_protected`, no containment entry, no approval record (a HUMAN decision there is also `skipped_protected`). The label comes from the same cached namespace read as the tier (one read per 5 min), so the kill path makes no extra call; a failed lookup keeps the name-based tier and counts as not protected. The approval executor re-checks it.
 3. **AUTO_KILL without a pod name**: decision becomes HUMAN, `escalated_no_pod`. **AUTO_PATCH without a readable baseline**: HUMAN, `escalated_no_baseline`.
 4. **Target state.**
    - **Kill:** read the pod and the event's workload Deployment in parallel (pod 404 gives `pod_already_gone`; a different UID than the event's gives `skipped_stale_pod`). Resolve the pod's controller from its `controller=true` ownerReference: ReplicaSet → its Deployment (the mapping is cached 5 min; the Deployment is still read fresh), StatefulSet / DaemonSet / Job as themselves, a bare pod is its own target. Any other controller kind (for example an Argo Rollout) cannot be checked: HUMAN, `escalated_unknown_owner`. If the pod, its controller or the event's Deployment has `kubeheal.io/protected=true`: `skipped_protected`.

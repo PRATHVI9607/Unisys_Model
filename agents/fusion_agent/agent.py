@@ -259,7 +259,7 @@ class FusionAgent:
         self.ledger_seen: dict[tuple[str, str, str], tuple[str, float]] = {}   # (ns, workload, decision) → (outcome, t)
         self.side_failed = False                          # a side task died: alive() goes false, kubelet restarts us
         self.last_progress = time.monotonic()
-        self.tiers: dict[str, tuple[float, str | None]] = {}   # namespace → (expiry, TIER_LABEL value)
+        self.tiers: dict[str, tuple[float, str | None, bool]] = {}   # namespace → (expiry, TIER_LABEL value, protected label)
         self.owners: dict[tuple[str, str], tuple[float, tuple[str, str] | None]] = {}   # (ns, RS) → controller
         self._containment: ContextVar[str] = ContextVar("containment", default="")
 
@@ -435,7 +435,7 @@ class FusionAgent:
             notify = action.outcome in ("pod_killed", "patched") or action.outcome.startswith("failed:")
             return [ledger("action", "fusion", action.mode, decision=action.decision.value,
                            outcome=action.outcome, detail=action.rationale, **ids)], notify
-        if action.decision is not Decision.HUMAN:
+        if action.decision is not Decision.HUMAN or action.outcome == "skipped_protected":
             return [], False
         health, security = (ev, partner) if isinstance(ev, HealthEvent) else (partner, ev)
         if security and security.pod:
@@ -642,7 +642,7 @@ class FusionAgent:
                       partner_outcome: str | None) -> ActionEvent:
         health, security = (ev, partner) if isinstance(ev, HealthEvent) else (partner, ev)
         cscore, reasons = compound_score(health, security) if health and security else (0.0, [])
-        label = await self.tier(ev.namespace)
+        label, protected = await self.ns_info(ev.namespace)
         result = decide(health, security, compound=cscore >= COMPOUND_THRESHOLD,
                         tier=None if label == NAMESPACE_GONE else label)
         decision, rationale, self.containment = result.decision, result.rationale, ""
@@ -650,6 +650,8 @@ class FusionAgent:
             # Everything in it is deleted: nothing to act on or escalate, and the name-heuristic tier misleads.
             decision, outcome = Decision.OBSERVE, "namespace_gone"
             rationale = f"namespace gone, nothing to act on (policy alone: {result.decision.value}; {rationale})"
+        elif protected and decision is Decision.HUMAN:
+            outcome = "skipped_protected"   # no approval is offered for a protected namespace
         elif decision is partner_decision and decision in AUTOMATIC and partner_outcome in HANDLED:
             # Same action on the same pod/workload was already taken when the partner was decided alone.
             outcome = "already_handled"
@@ -672,7 +674,7 @@ class FusionAgent:
             return decision, "none"
         ev = security if decision is Decision.AUTO_KILL else health
         ns, wl = ev.namespace, ev.workload
-        if ns in self.protected:
+        if ns in self.protected or (await self.ns_info(ns))[1]:   # cached by _decide: no extra read on the kill path
             return decision, "skipped_protected"
         try:
             if decision is Decision.AUTO_KILL:
@@ -702,24 +704,30 @@ class FusionAgent:
     async def tier(self, ns: str) -> str | None:
         """The namespace's TIER_LABEL (cached); None → the policy falls back to the name heuristic;
         NAMESPACE_GONE when the namespace does not exist."""
+        return (await self.ns_info(ns))[0]
+
+    async def ns_info(self, ns: str) -> tuple[str | None, bool]:
+        """(tier, protected): one cached namespace read. protected = the namespace carries PROTECTED_LABEL=true;
+        a failed lookup is not protected (name-based tier, as before)."""
         now = time.monotonic()
         if (hit := self.tiers.get(ns)) and hit[0] > now:
-            return hit[1]
+            return hit[1], hit[2]
         try:
-            label = _labels(await self._kube(self.core.read_namespace(ns))).get(TIER_LABEL)
+            labels = _labels(await self._kube(self.core.read_namespace(ns)))
         except (ApiException, TimeoutError, aiohttp.ClientError) as e:
             status = getattr(e, "status", None)
             if status == 404:
-                self.tiers[ns] = (now + TIER_FAIL_TTL_S, NAMESPACE_GONE)   # short: the name may be re-created
-                return NAMESPACE_GONE
-            log.warning("tier lookup for namespace %s failed (%s); using its name", ns, status or e)
-            self.tiers[ns] = (now + TIER_FAIL_TTL_S, None)   # do not hammer a failing API on every event
-            return None
+                self.tiers[ns] = (now + TIER_FAIL_TTL_S, NAMESPACE_GONE, False)   # short: the name may be re-created
+                return NAMESPACE_GONE, False
+            log.warning("tier lookup for namespace %s failed (%s); using its name, not protected", ns, status or e)
+            self.tiers[ns] = (now + TIER_FAIL_TTL_S, None, False)   # do not hammer a failing API on every event
+            return None, False
+        label, protected = labels.get(TIER_LABEL), labels.get(PROTECTED_LABEL) == "true"
         if label is not None and label not in TIERS:
             log.warning("namespace %s has invalid %s=%r; using its name", ns, TIER_LABEL, label)
             label = None
-        self.tiers[ns] = (now + TIER_TTL_S, label)
-        return label
+        self.tiers[ns] = (now + TIER_TTL_S, label, protected)
+        return label, protected
 
     async def _kube(self, coro):
         try:

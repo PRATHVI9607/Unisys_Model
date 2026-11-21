@@ -213,7 +213,7 @@ label, the incident lock and the circuit breakers apply in both modes.
 
 Two settings help when rolling KubeHeal out to a new cluster:
 
-- **Exclusions.** Use `EXTRA_PROTECTED_NAMESPACES` on all three agents to exclude namespaces.
+- **Exclusions.** Use `EXTRA_PROTECTED_NAMESPACES` on all three agents to exclude namespaces. Fusion also skips any namespace labelled `kubeheal.io/protected=true` (`kubectl label ns NAME kubeheal.io/protected=true`; picked up within 5 min, the namespace cache TTL). If that lookup fails, the namespace is treated as unprotected.
 - **Tiers.** Label namespaces with `kubeheal.io/namespace-tier: prod|staging|dev`. In dev, only the rule-based rollback acts automatically.
 
 ## Demo
