@@ -1,0 +1,86 @@
+# KubeHeal alert rules for kube-prometheus-stack (PrometheusRule CRD). Every metric is exported by the code
+# (tests/test_alerting.py checks that) except `up` (Prometheus) and redis_memory_* (the redis_exporter sidecar of components/redis-exporter,
+# on in the production overlay / values-production.yaml; without it KubeHealRedisMemoryHigh stays silent).
+# Route by `severity` with deploy/k8s/helm/monitoring-values.yaml (alertmanager.config).
+# Helm renders this same file (deploy/helm/kubeheal/alerts -> here) when monitoring.enabled and alerting.enabled.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: kubeheal
+  namespace: monitoring
+  labels: {app.kubernetes.io/part-of: kubeheal}
+spec:
+  groups:
+    - name: kubeheal.actions
+      rules:
+        - alert: KubeHealPodKilled
+          expr: increase(kubeheal_fusion_outcomes_total{outcome="pod_killed"}[5m]) > 0
+          labels: {severity: info}
+          annotations:
+            summary: KubeHeal killed a pod
+            description: Fusion quarantined and deleted a pod in the last 5 minutes. The ledger (console, Ledger page) has the workload and the reason.
+        - alert: KubeHealWorkloadPatched
+          expr: increase(kubeheal_fusion_outcomes_total{outcome="patched"}[5m]) > 0
+          labels: {severity: info}
+          annotations:
+            summary: KubeHeal restored a workload to its baseline
+            description: Fusion patched a drifted workload back to its baseline template in the last 5 minutes.
+        - alert: KubeHealApprovalPending
+          expr: kubeheal_fusion_approvals_pending > 0
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: A KubeHeal approval has waited over 10 minutes
+            description: A HUMAN decision is still unanswered. Open the console, Approvals page; it expires 1 hour after it was raised.
+    - name: kubeheal.health
+      rules:
+        - alert: KubeHealSensorDown
+          # With EVENT_SOURCE=falco no sensor runs and the gauge reads 0: those agents say so in kubeheal_security_event_source.
+          expr: kubeheal_sensor_up == 0 unless on(pod) kubeheal_security_event_source{source="falco"}
+          for: 2m
+          labels: {severity: critical}
+          annotations:
+            summary: "KubeHeal sensor down on {{ $labels.pod }}"
+            description: The node sensor's stats file is stale or missing, so that node has no ransomware detection.
+        - alert: KubeHealEventLagHigh
+          expr: histogram_quantile(0.95, sum by (le) (rate(kubeheal_security_event_lag_seconds_bucket[5m]))) > 5
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: Security events arrive more than 5 s late (p95)
+            description: The security agent is behind its event source; detection to action is delayed by at least this much.
+        - alert: KubeHealFusionDown
+          expr: absent(up{namespace="kubeheal", job="kubeheal-fusion-agent"} == 1)
+          for: 2m
+          labels: {severity: critical}
+          annotations:
+            summary: KubeHeal fusion agent is not being scraped
+            description: Nothing acts on detections while fusion is down. Check the kubeheal-fusion-agent Deployment.
+        - alert: KubeHealDetectionSlow
+          expr: histogram_quantile(0.95, sum by (le) (rate(kubeheal_fusion_detection_to_action_seconds_bucket[10m]))) > 2
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: KubeHeal detection to action is slower than 2 s (p95)
+            description: p95 of kubeheal_fusion_detection_to_action_seconds has been above 2 s for 10 minutes.
+        - alert: KubeHealRedisMemoryHigh
+          # redis_exporter sidecar metrics (components/redis-exporter); silent where the sidecar is off (dev).
+          expr: redis_memory_max_bytes{namespace="kubeheal"} > 0 and redis_memory_used_bytes{namespace="kubeheal"} / redis_memory_max_bytes{namespace="kubeheal"} > 0.8
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: KubeHeal Redis is above 80% of maxmemory
+            description: Redis runs noeviction, so at maxmemory the streams stop accepting writes.
+        - alert: KubeHealCircuitOpen
+          expr: increase(kubeheal_fusion_circuit_opens_total[5m]) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: A KubeHeal circuit breaker is blocking actions
+            description: Fusion hit its kills or patches per hour limit for a workload and skipped an action. Look for a flapping workload.
+        - alert: KubeHealFrozenOverdue
+          expr: kubeheal_security_frozen_overdue > 0
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: "A pod frozen by KubeHeal on {{ $labels.pod }} was never released"
+            description: A quarantined pod is still frozen after FREEZE_MAX_S. KubeHeal never thaws it automatically, so decide in the console.

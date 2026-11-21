@@ -66,6 +66,7 @@ def load_bundles(model_dir: Path) -> dict[str, ModelBundle]:
     for task in TASKS:
         try:
             bundles[task] = ModelBundle.load(model_dir / task)
+            bundles[task].predict_batch([{}], 0.0)   # build the TreeSHAP explainer now (~0.8 s): not in the first request
             log.info("loaded %s model %s", task, bundles[task].meta["version"])
         except Exception:
             log.exception("no usable %s bundle in %s; its predictions will return 503", task, model_dir / task)

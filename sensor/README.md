@@ -54,13 +54,21 @@ and a ransomware pod was killed minutes late (missed entirely in the 20-pod eval
 uid 0 with `drop: [ALL]`, `add: [BPF, PERFMON]`, `readOnlyRootFilesystem`, no hostPID. No SYS_ADMIN (attach is a BPF
 link) and no SYS_RESOURCE (kernel >= 5.11 charges BPF memory to the memcg: the ring buffer counts against the
 container's memory limit). Mounts: the events emptyDir (rw), host `/sys/fs/cgroup` (ro), `/var/log/pods` (ro).
-Kernel needs: BTF (`/sys/kernel/btf/vmlinux`), `bpf_loop` (5.17+), x86_64 (syscall numbers read from `orig_ax`).
+Kernel needs: BTF (`/sys/kernel/btf/vmlinux`), `bpf_loop` (5.17+); x86_64 or arm64 (syscall number read from `orig_ax` / `syscallno`).
+Per-platform kernel notes (BPF LSM, managed node images): `docs/operations.md` "Platforms".
 
 ## Build and test
+
+The BPF object is compiled per target arch (`build.rs`: `-D__TARGET_ARCH_x86|arm64`, `-I/usr/include/<triple>`; the bpf target itself is arch-neutral).
+Native `cargo build` on arm64 hosts works the same; cross: `rustup target add aarch64-unknown-linux-gnu` + `gcc-aarch64-linux-gnu`, `libelf-dev:arm64`, `zlib1g-dev:arm64` (the Dockerfile shows the exact environment).
+
 
     cd sensor && CARGO_BUILD_JOBS=4 nice -n 10 cargo build --release && cargo test --release
     uv run --all-extras pytest sensor/tests       # every --selftest-json line through parse_line + SYSCALL_GROUPS
     minikube image build -t kubeheal.invalid/sensor:v5 sensor/   # install.sh does this
+    docker buildx build --platform linux/amd64,linux/arm64 sensor/   # multi-arch; the compile is a cross build, no QEMU
+    docker buildx build --target clippy --platform linux/arm64 sensor/            # clippy -D warnings, aarch64
+    docker buildx build --target test-bin --platform linux/arm64 -o out sensor/   # unit tests; run under QEMU (see Dockerfile)
 
 Flags: `--prefix` (1-4), `--exclude-ns`, `--output`, `--cgroup-root`, `--pod-logs-dir`, `--stats-secs` (default 60),
 `--all-cgroups` (debug: every process), `--selftest-json` (fixture lines, no BPF).
@@ -80,7 +88,7 @@ khe-perf/ioload (write tmp, rename, read; RATE 500 per pod), lag sampled every 2
 
 ## Limits
 
-- x86_64 only (`orig_ax`, syscall table). rmdir/mkdir, link/symlink, chown, xattrs, mmap writes are not hooked
+- x86_64 and arm64 (arm64 has no `open`/`creat`/`rename`/`unlink`/`chmod` syscalls; `evt.type` is the `*at` name). Not run on a real arm64 kernel yet. rmdir/mkdir, link/symlink, chown, xattrs, mmap writes are not hooked
   (the model does not use them).
 - An open is reported after the LSM check; a later failure inside the filesystem's `->open` still shows.
 - With `fexit/` only (no bpf LSM), inlined hooks are blind: the startup line says which.

@@ -8,6 +8,9 @@ images:
   sensor: registry.invalid/kubeheal/sensor:v5
 priorityClass: {enabled: true}
 dashboard: {enabled: false}
+redis:
+  ha: {enabled: true}   # 3 Redis + 3 Sentinels (== components/redis-ha)
+  exporter: {enabled: true}   # == components/redis-exporter
 inference:
   autoscaling: {enabled: true}
   pdb: {enabled: true}
@@ -16,3 +19,6 @@ inference:
     limits: {cpu: 500m, memory: 192Mi}
 security:
   updateStrategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 10%}}
+# Console SSO admins (the repo collaborators) once sso.enabled=true and dashboard.enabled=true; dev values stay on the admin token.
+sso:
+  adminUsers: [PRATHVI9607, K-aligrapher, Codexhack286, nullpointerx0]

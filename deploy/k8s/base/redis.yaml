@@ -147,7 +147,7 @@ spec:
               import asyncio, secrets
               from kubernetes_asyncio import client, config
 
-              USERS = ("default", "health", "security", "fusion", "dashboard")
+              USERS = ("default", "health", "security", "fusion", "dashboard", "exporter")
               HOST = "redis-master.kubeheal.svc:6379/0"
 
               async def create(api, name: str, data: dict) -> None:

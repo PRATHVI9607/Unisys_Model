@@ -63,7 +63,7 @@ fi
 if want redis; then
   say "FAULT redis restart"
   base_before="$(rc --scan --pattern 'kubeheal:baseline:*' | sort | md5sum)"
-  kubectl rollout restart deploy/redis -n "$KH" >/dev/null
+  kubectl rollout restart "$(kubectl get sts redis -n "$KH" -o name 2>/dev/null || echo deploy/redis)" -n "$KH" >/dev/null
   chaos_attack "redis-during"     # no kill requirement
   recover redis
   check "redis: baselines identical after the restart (AOF + PVC)" test "$base_before" == "$(rc --scan --pattern 'kubeheal:baseline:*' | sort | md5sum)"
@@ -100,7 +100,7 @@ fi
 
 if want redisfull; then
   say "FAULT redis memory fill"
-  rw_undo "for k in \$(kubectl exec -n $KH deploy/redis -- redis-cli --raw --scan --pattern 'kubeheal:khe-rw-fill:*'); do kubectl exec -n $KH deploy/redis -- redis-cli DEL \$k >/dev/null; done"
+  rw_undo "for k in \$(kubectl exec -n $KH \$(kh_redis_target) -- redis-cli --raw --scan --pattern 'kubeheal:khe-rw-fill:*'); do kubectl exec -n $KH \$(kh_redis_target) -- redis-cli DEL \$k >/dev/null; done"
   fill() {   # fill PERCENT: pipe 32 KiB values into Redis until used_memory >= PERCENT of maxmemory
     local pct=$1 i used max n val
     val="$(head -c 32768 /dev/zero | tr '\0' x)"
@@ -108,7 +108,7 @@ if want redisfull; then
       read -r used max < <(rwpy mem | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["used"], d["max"])')
       n=$(( (max * pct / 100 - used) / 33000 )); (( n > 0 )) || return 0
       awk -v n="$n" -v s="$RANDOM" -v v="$val" 'BEGIN{for(i=1;i<=n;i++) printf "SET kubeheal:khe-rw-fill:%d-%d %s\r\n", s, i, v}' \
-        | kubectl exec -i -n "$KH" deploy/redis -- redis-cli --pipe >/dev/null   # OOM replies near 99% are expected
+        | kubectl exec -i -n "$KH" $(kh_redis_target) -- redis-cli --pipe >/dev/null   # OOM replies near 99% are expected
     done
   }
   R0="$(kh_restarts)"

@@ -8,7 +8,7 @@ metadata:
 spec:
   selector: {app: kubeheal-dashboard}
   ports:
-    - {name: http, port: 8080, targetPort: 8080}
+    - {name: http, port: 8080, targetPort: {{ if .Values.sso.enabled }}4180{{ else }}8080{{ end }}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -32,13 +32,31 @@ spec:
         runAsNonRoot: true
         runAsUser: 10001
         seccompProfile: {type: RuntimeDefault}
+{{- if .Values.sso.enabled }}
+      volumes:
+        - name: sso-proxy
+          configMap: {name: kubeheal-sso-proxy}
+{{- end }}
       containers:
         - name: dashboard
-          image: {{ .Values.images.dashboard }}
+          image: {{ include "kubeheal.image" (list . .Values.images.dashboard) }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
+{{- if .Values.sso.enabled }}
+          args: ["uvicorn", "dashboard.fastapi_app:app", "--host", "127.0.0.1", "--port", "8080"]
+{{- end }}
           ports: [{containerPort: 8080, name: http}]
           env:
+{{- if .Values.sso.enabled }}
+            - {name: KUBEHEAL_AUTH_MODE, value: proxy}
+            - {name: KUBEHEAL_ADMIN_USERS, valueFrom: {configMapKeyRef: {name: kubeheal-sso, key: admin-users}}}
+            - {name: KUBEHEAL_ACTOR_CLAIM, valueFrom: {configMapKeyRef: {name: kubeheal-sso, key: actor-claim}}}
+            - {name: KUBEHEAL_ADMIN_GROUPS, valueFrom: {configMapKeyRef: {name: kubeheal-sso, key: admin-groups}}}
+            - {name: KUBEHEAL_PROXY_SECRET, valueFrom: {secretKeyRef: {name: kubeheal-sso, key: proxy-secret}}}
+{{- end }}
             - {name: REDIS_URL, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: dashboard-url}}}   # per-component ACL user (redis.yaml)
+{{- if .Values.redis.ha.enabled }}
+            - {name: REDIS_SENTINELS, value: {{ include "kubeheal.redisSentinels" . | quote }}}
+{{- end }}
             - {name: INFERENCE_URL, value: "http://kubeheal-inference.kubeheal.svc:8000"}   # Models page reads /readyz
             - {name: KUBEHEAL_ADMIN_TOKEN, valueFrom: {secretKeyRef: {name: kubeheal-admin, key: token}}}   # admin actions (Secret from the redis-secret Job)
             {{- if .Values.ingress.enabled }}
@@ -53,6 +71,38 @@ spec:
           # requests ~ p95; limits >= 2x requests and >= 1.5x peak; 500m CPU limit keeps Python startup fast.
           resources:
 {{- toYaml .Values.dashboard.resources | nindent 12 }}
+{{- if .Values.sso.enabled }}
+          # The kubelet cannot reach a loopback listener: probe from inside the container.
+          livenessProbe:
+            exec: {command: [python, -c, "import urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8080/healthz', headers={'Host': 'localhost'}), timeout=3)"]}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec: {command: [python, -c, "import urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8080/readyz', headers={'Host': 'localhost'}), timeout=3)"]}
+            periodSeconds: 5
+            timeoutSeconds: 3
+        - name: oauth2-proxy
+          image: {{ .Values.sso.image }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          ports: [{containerPort: 4180, name: http}]
+          envFrom: [{configMapRef: {name: kubeheal-sso}}]
+          env:
+            - {name: OAUTH2_PROXY_CLIENT_ID, valueFrom: {secretKeyRef: {name: kubeheal-sso, key: client-id}}}
+            - {name: OAUTH2_PROXY_CLIENT_SECRET, valueFrom: {secretKeyRef: {name: kubeheal-sso, key: client-secret}}}
+            - {name: OAUTH2_PROXY_COOKIE_SECRET, valueFrom: {secretKeyRef: {name: kubeheal-sso, key: cookie-secret}}}
+            - {name: KUBEHEAL_PROXY_SECRET, valueFrom: {secretKeyRef: {name: kubeheal-sso, key: proxy-secret}}}
+          volumeMounts: [{name: sso-proxy, mountPath: /etc/oauth2-proxy, readOnly: true}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 96Mi}
+          livenessProbe: {httpGet: {path: /ping, port: 4180}, periodSeconds: 10}
+          readinessProbe: {httpGet: {path: /ready, port: 4180}, periodSeconds: 5}
+{{- else }}
           # Host header: the app rejects hosts outside DASHBOARD_ALLOWED_HOSTS, and the kubelet would send the pod IP.
           livenessProbe:
             httpGet: {path: /healthz, port: 8080, httpHeaders: [{name: Host, value: localhost}]}
@@ -63,6 +113,7 @@ spec:
             httpGet: {path: /readyz, port: 8080, httpHeaders: [{name: Host, value: localhost}]}
             periodSeconds: 5
             timeoutSeconds: 3
+{{- end }}
 ---
 # The dashboard's admin API accepts only pods in the kubeheal namespace (plus the ingress controller when ingress.enabled). It emits no metrics, so monitoring is not admitted.
 # kubectl port-forward is not subject to this policy: the kubelet/CRI opens the connection inside the pod's network namespace,
@@ -81,5 +132,5 @@ spec:
 {{- if .Values.ingress.enabled }}
         - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ .Values.ingress.controllerNamespace | quote }}}}
 {{- end }}
-      ports: [{port: 8080}]
+      ports: [{port: {{ if .Values.sso.enabled }}4180{{ else }}8080{{ end }}}]
 {{- end }}

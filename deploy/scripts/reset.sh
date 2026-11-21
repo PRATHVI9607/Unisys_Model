@@ -9,7 +9,7 @@
 set -euo pipefail
 NS=demo; KH=kubeheal
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT"
-source deploy/scripts/lib/guard.sh; kh_guard "$@" || exit 1; set -- "${KH_REST[@]}"
+source deploy/scripts/lib/guard.sh; source deploy/scripts/lib/redis.sh; kh_guard "$@" || exit 1; set -- "${KH_REST[@]}"
 [[ $# -eq 0 ]] || { echo "usage: $0 [--force-context CONTEXT]"; exit 1; }
 
 echo "Removing chaos workloads + quarantine network policies..."
@@ -28,7 +28,7 @@ echo "Deleting KubeHeal Redis state of namespace $NS..."
 # One Lua script (admin user via the container's REDISCLI_AUTH): stream entries and event hashes whose
 # `namespace` field is $NS, keys kubeheal:{spec,baseline,lock}:$NS:* and kubeheal:cb:*:$NS:*, and
 # kubeheal:done:* markers whose ActionEvent JSON names $NS. Streams and consumer groups stay.
-OUT="$(kubectl exec -i -n "$KH" deploy/redis -- sh -c 'redis-cli EVAL "$(cat)" 0 "$1"' _ "$NS" <<'LUA'
+OUT="$(kubectl exec -i -n "$KH" $(kh_redis_target) -- sh -c 'redis-cli EVAL "$(cat)" 0 "$1"' _ "$NS" <<'LUA'
 local ns, n, cursor = ARGV[1], 0, "0"
 repeat
   local page = redis.call("SCAN", cursor, "MATCH", "kubeheal*", "COUNT", 1000)

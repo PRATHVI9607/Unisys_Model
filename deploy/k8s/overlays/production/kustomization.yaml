@@ -19,6 +19,9 @@ resources:
   - ../../base
   - priorityclass.yaml
   - inference-hpa-pdb.yaml
+components:
+  - ../../components/redis-ha   # 3 Redis + 3 Sentinels replace the single Redis; the agents get REDIS_SENTINELS
+  - ../../components/redis-exporter   # redis_exporter sidecar: the memory metric behind KubeHealRedisMemoryHigh
 
 patches:
   # No dashboard in production: its Deployment, Service, ServiceAccount and NetworkPolicy are dropped.
@@ -77,8 +80,15 @@ patches:
           spec: {priorityClassName: kubeheal-security}
   - patch: |-
       apiVersion: apps/v1
-      kind: Deployment
+      kind: StatefulSet
       metadata: {name: redis, namespace: kubeheal}
+      spec:
+        template:
+          spec: {priorityClassName: kubeheal-security}
+  - patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata: {name: redis-sentinel, namespace: kubeheal}
       spec:
         template:
           spec: {priorityClassName: kubeheal-security}

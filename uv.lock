@@ -606,7 +606,6 @@ name = "kubeheal"
 version = "5.0.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "numpy" },
     { name = "pydantic" },
 ]
 
@@ -615,6 +614,7 @@ agents = [
     { name = "aiohttp" },
     { name = "kubernetes-asyncio" },
     { name = "lightgbm" },
+    { name = "numpy" },
     { name = "orjson" },
     { name = "prometheus-client" },
     { name = "redis" },
@@ -627,11 +627,13 @@ dashboard = [
 inference = [
     { name = "fastapi" },
     { name = "lightgbm" },
+    { name = "numpy" },
     { name = "prometheus-client" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 training = [
     { name = "lightgbm" },
+    { name = "numpy" },
     { name = "scikit-learn" },
 ]
 
@@ -655,7 +657,9 @@ requires-dist = [
     { name = "lightgbm", marker = "extra == 'agents'", specifier = ">=4.6" },
     { name = "lightgbm", marker = "extra == 'inference'", specifier = ">=4.6" },
     { name = "lightgbm", marker = "extra == 'training'", specifier = ">=4.6" },
-    { name = "numpy", specifier = ">=2.2" },
+    { name = "numpy", marker = "extra == 'agents'", specifier = ">=2.2" },
+    { name = "numpy", marker = "extra == 'inference'", specifier = ">=2.2" },
+    { name = "numpy", marker = "extra == 'training'", specifier = ">=2.2" },
     { name = "orjson", marker = "extra == 'agents'", specifier = ">=3.13.0" },
     { name = "prometheus-client", marker = "extra == 'agents'", specifier = ">=0.21" },
     { name = "prometheus-client", marker = "extra == 'inference'", specifier = ">=0.21" },

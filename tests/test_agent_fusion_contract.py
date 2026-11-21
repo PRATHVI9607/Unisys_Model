@@ -399,12 +399,14 @@ async def test_lost_consumer_group_is_recreated(redis, monkeypatch):
     agent, _ = make(redis, mode="enforce")
     await agent.ensure_groups()
     await redis.delete(STREAM_HEALTH, STREAM_SECURITY)
-    script = [aioredis.ResponseError("NOGROUP No such key or consumer group"), asyncio.CancelledError()]
+    script = {(STREAM_HEALTH,): [aioredis.ResponseError("NOGROUP No such key or consumer group"), asyncio.CancelledError()],
+              (STREAM_SECURITY,): [aioredis.ResponseError("NOGROUP No such key or consumer group")]}
 
     async def poll(streams=fa.STREAMS):
-        if streams != fa.STREAMS:      # the approvals task idles; the script is for the event loop
+        if streams not in script or not script[streams]:   # approvals idle; each event lane has its own script
             await asyncio.sleep(3600)
-        raise script.pop(0)
+        await asyncio.sleep(0.05)      # the other lane recreates its group first
+        raise script[streams].pop(0)
     monkeypatch.setattr(agent, "poll_once", poll)
     with pytest.raises(asyncio.CancelledError):
         await agent.run()
@@ -593,7 +595,7 @@ async def test_non_nogroup_redis_error_backs_off_instead_of_crashing(redis, monk
               asyncio.CancelledError()]
 
     async def poll(streams=fa.STREAMS):
-        if streams != fa.STREAMS:      # the approvals task idles; the script is for the event loop
+        if streams != (STREAM_HEALTH,):   # the other lanes idle; the script is for the health lane
             await asyncio.sleep(3600)
         raise script.pop(0)
     monkeypatch.setattr(agent, "poll_once", poll)
@@ -852,6 +854,7 @@ async def test_ledger_xadd_is_count_capped_and_housekeeping_trims_by_age(redis):
     assert a == (STREAM_LEDGER,) and k["approximate"] is True
     assert abs(k["minid"] - (now_ms() - LEDGER_RETENTION_DAYS * 86_400_000)) < 5000
     assert await redis.zrange(KEY_APPROVALS_PENDING, 0, -1) == ["fresh"]
+    assert fa.APPROVALS_PENDING._value.get() == 1   # the gauge behind KubeHealApprovalPending
 
 
 async def test_unchanged_would_and_skipped_outcomes_are_ledgered_once_per_window(redis, monkeypatch):
@@ -1105,7 +1108,9 @@ async def test_run_starts_mode_and_approval_tasks_beside_the_event_loop(redis, m
     real = agent.poll_once
 
     async def poll(streams=fa.STREAMS):
-        if streams == fa.STREAMS:              # the event loop: done once both side tasks did their work
+        if streams == (STREAM_SECURITY,):      # the security lane idles
+            await asyncio.sleep(3600)
+        if streams == (STREAM_HEALTH,):        # the event loop: done once both side tasks did their work
             while agent.mode != "observe" or "note" not in await record(redis, a.event_id):  # noqa: ASYNC110
                 await asyncio.sleep(0.01)
             raise asyncio.CancelledError
@@ -1507,3 +1512,43 @@ async def test_latency_metrics(redis):
     n = fa.DETECT_TO_ACTION.labels("AUTO_KILL")._sum.get()
     await a2.handle(ev)
     assert fa.DETECT_TO_ACTION.labels("AUTO_KILL")._sum.get() == n
+
+
+# ── fast lane: security events do not wait behind health work ───────────────────────────────────────
+async def test_run_gives_security_events_their_own_consumer(redis, monkeypatch):
+    agent, _ = make(redis)
+    seen = set()
+
+    async def poll(streams=fa.STREAMS):
+        seen.add(streams)
+        if streams == (STREAM_HEALTH,):
+            while (STREAM_SECURITY,) not in seen:      # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+            raise asyncio.CancelledError
+        await asyncio.sleep(3600)
+    monkeypatch.setattr(agent, "poll_once", poll)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(agent.run(), 10)
+    assert {(STREAM_SECURITY,), (STREAM_HEALTH,)} <= seen
+
+
+async def test_events_of_one_workload_run_in_turn_others_alongside(redis, monkeypatch):
+    agent, _ = make(redis)
+    gate, started = asyncio.Event(), []
+
+    async def slow(ev, partner, partner_decision, partner_outcome):
+        started.append(ev.event_id)
+        await gate.wait()
+        return await real(ev, partner, partner_decision, partner_outcome)
+    real = agent._decide
+    monkeypatch.setattr(agent, "_decide", slow)
+    other = ransomware(eid="b1").model_copy(update={"workload": "api"})
+    first = asyncio.create_task(agent.handle(drift(eid="a1")))                 # workload web, held
+    await asyncio.sleep(0.05)
+    same = asyncio.create_task(agent.handle(ransomware(eid="a2")))             # workload web: waits for a1
+    diff = asyncio.create_task(agent.handle(other))                            # workload api: runs alongside
+    await asyncio.sleep(0.05)
+    assert started == ["a1", "b1"] and not agent._serial.keys() - {"prod-shop/web", "prod-shop/api"}
+    gate.set()
+    await asyncio.gather(first, same, diff)
+    assert started == ["a1", "b1", "a2"] and agent._serial == {}               # the lock table empties itself

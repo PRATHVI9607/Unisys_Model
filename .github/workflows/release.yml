@@ -1,0 +1,110 @@
+name: release
+
+# Tag push v1.2.3 (or v1.2.3-rc.1): multi-arch images, signed (cosign keyless) with SBOM and provenance, to
+# ghcr.io/prathvi9607/kubeheal-<name>:<version>; the Helm chart as an OCI artifact at
+# oci://ghcr.io/prathvi9607/charts/kubeheal; a GitHub Release whose notes are the CHANGELOG.md section.
+# :latest moves only for final releases (no `-` in the tag).
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  OWNER: prathvi9607
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write       # cosign keyless (Sigstore OIDC)
+      attestations: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - {name: inference, file: deploy/docker/Dockerfile.inference, context: .}
+          - {name: agents, file: deploy/docker/Dockerfile.agents, context: .}
+          - {name: dashboard, file: deploy/docker/Dockerfile.dashboard, context: .}
+          - {name: chaos, file: deploy/docker/Dockerfile.chaos, context: .}
+          - {name: sensor, file: sensor/Dockerfile, context: sensor}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+      - uses: sigstore/cosign-installer@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ env.OWNER }}/kubeheal-${{ matrix.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true                  # SBOM (syft) attached to the image index
+          provenance: mode=max        # SLSA provenance attestation
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+      - name: Sign the image index by digest (keyless)
+        env:
+          REF: ghcr.io/${{ env.OWNER }}/kubeheal-${{ matrix.name }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$REF"
+
+  chart:
+    needs: images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - uses: sigstore/cosign-installer@v3
+      - name: Package (version = appVersion = tag without the v) and push
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          helm lint deploy/helm/kubeheal
+          helm package deploy/helm/kubeheal --version "$v" --app-version "$v" -d dist
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm push "dist/kubeheal-$v.tgz" "oci://ghcr.io/${OWNER}/charts" 2>&1 | tee push.log
+          digest="$(sed -n 's/^Digest: //p' push.log)"
+          [ -n "$digest" ] || { echo "no chart digest in helm push output"; exit 1; }
+          cosign sign --yes "ghcr.io/${OWNER}/charts/kubeheal@${digest}"
+
+  release:
+    needs: [images, chart]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Release notes from CHANGELOG.md
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          # section "## [1.0.0] - date" or "## 1.0.0": up to the next "## "
+          awk -v v="$v" '$0 ~ "^## \\[?" v "\\]?([ ]|$)" {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "CHANGELOG.md has no section for $v"; exit 1; }
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pre=""; case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md $pre

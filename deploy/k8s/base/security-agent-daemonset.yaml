@@ -38,6 +38,7 @@ spec:
           command: ["python", "-m", "agents.security_agent.agent"]
           ports: [{containerPort: 8080, name: http}]
           env:
+            - {name: EVENT_SOURCE, value: "sensor"}   # label of kubeheal_security_event_source (components/falco-source sets falco)
             - {name: REDIS_URL, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: security-url}}}
             - {name: CONTAIN_HMAC_KEY, valueFrom: {secretKeyRef: {name: kubeheal-contain-hmac, key: key}}}   # signs/verifies kubeheal.contain entries
             - {name: INFERENCE_URL, value: "http://kubeheal-inference.kubeheal.svc:8000"}   # fallback only

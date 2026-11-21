@@ -39,12 +39,16 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: agent
-          image: {{ .Values.images.agents }}
+          image: {{ include "kubeheal.image" (list . .Values.images.agents) }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           command: ["python", "-m", "agents.security_agent.agent"]
           ports: [{containerPort: 8080, name: http}]
           env:
+            - {name: EVENT_SOURCE, value: {{ .Values.eventSource | quote }}}
             - {name: REDIS_URL, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: security-url}}}
+{{- if .Values.redis.ha.enabled }}
+            - {name: REDIS_SENTINELS, value: {{ include "kubeheal.redisSentinels" . | quote }}}
+{{- end }}
             - {name: CONTAIN_HMAC_KEY, valueFrom: {secretKeyRef: {name: kubeheal-contain-hmac, key: key}}}   # signs/verifies kubeheal.contain entries
             - {name: INFERENCE_URL, value: "http://kubeheal-inference.kubeheal.svc:8000"}   # fallback only
             - {name: SECURITY_MODEL_DIR, value: "/models/security"}   # scored in-process (baked into the agents image); inference is the fallback
@@ -87,7 +91,7 @@ spec:
         # eBPF event source (sensor/): lsm/ (or fexit/) programs on the VFS security hooks, filtered in the kernel
         # to pod cgroups and the data prefix, appending Falco-shaped JSON lines to the file the agent tails.
         - name: sensor
-          image: {{ .Values.images.sensor }}
+          image: {{ include "kubeheal.image" (list . .Values.images.sensor) }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           args: ["--output", "/var/run/kubeheal/events.jsonl", "--prefix", "/data/", "--exclude-ns", "kubeheal"]
           # stats snapshot every 5 s on the shared events emptyDir; the agent exports it as kubeheal_sensor_* metrics

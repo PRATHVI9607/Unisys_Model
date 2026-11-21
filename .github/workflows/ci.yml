@@ -24,16 +24,70 @@ jobs:
           kubectl kustomize deploy/k8s/overlays/production >/dev/null
           bash -n deploy/scripts/*.sh training/collect/run_lab.sh
 
+  # Every image for amd64 + arm64 (arm64 Python stages run under QEMU), no push. Layers cached in the GitHub cache, one scope per image.
   images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: inference, file: deploy/docker/Dockerfile.inference, context: .}
+          - {name: agents, file: deploy/docker/Dockerfile.agents, context: .}
+          - {name: dashboard, file: deploy/docker/Dockerfile.dashboard, context: .}
+          - {name: chaos, file: deploy/docker/Dockerfile.chaos, context: .}
+          - {name: sensor, file: sensor/Dockerfile, context: sensor}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+
+  # Sensor on arm64 (AWS Graviton, Ampere, Apple-silicon k3d): cross-compiled inside the image build (no QEMU for the
+  # compile), clippy -D warnings on the aarch64 target, and the unit tests run under QEMU in the arm64 runtime image.
+  sensor-arm64:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
       - uses: docker/setup-buildx-action@v3
-      - name: Build images (no push)
-        run: |
-          for img in inference agents dashboard chaos; do
-            docker build -t "kubeheal/$img:ci" -f "deploy/docker/Dockerfile.$img" .
-          done
+      - name: clippy (aarch64)
+        uses: docker/build-push-action@v6
+        with:
+          context: sensor
+          target: clippy
+          platforms: linux/arm64
+          cache-from: type=gha,scope=sensor-arm64
+          cache-to: type=gha,scope=sensor-arm64,mode=max
+      - name: Cross-compile the unit tests
+        uses: docker/build-push-action@v6
+        with:
+          context: sensor
+          target: test-bin
+          platforms: linux/arm64
+          outputs: type=local,dest=out
+          cache-from: type=gha,scope=sensor-arm64
+          cache-to: type=gha,scope=sensor-arm64,mode=max
+      - name: Runtime image (arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: sensor
+          platforms: linux/arm64
+          load: true
+          tags: kubeheal-sensor:arm64
+          cache-from: type=gha,scope=sensor-arm64
+      - name: Run the arm64 unit tests under QEMU
+        run: docker run --rm --platform linux/arm64 --entrypoint /t -v "$PWD/out/kubeheal-sensor-tests:/t:ro" kubeheal-sensor:arm64
 
   sensor:
     runs-on: ubuntu-latest
@@ -71,7 +125,7 @@ jobs:
       - run: uv sync --frozen --all-extras
       - name: Lint and render every values profile
         run: |
-          for v in values.yaml values-k3d.yaml values-production.yaml; do
+          for v in values.yaml values-dev.yaml values-k3d.yaml values-production.yaml; do
             helm lint deploy/helm/kubeheal -f "deploy/helm/kubeheal/$v"
             helm template kubeheal deploy/helm/kubeheal -n kubeheal -f "deploy/helm/kubeheal/$v" >/dev/null
           done

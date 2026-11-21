@@ -28,7 +28,15 @@ struct path { struct vfsmount *mnt; struct dentry *dentry; } PAI;
 struct file { struct path f_path; unsigned int f_flags; } PAI;
 struct fs_struct { struct path root; } PAI;
 struct task_struct { struct fs_struct *fs; } PAI;
-struct pt_regs___kh { long orig_ax; } PAI;   // x86_64: the syscall number
+#if defined(__TARGET_ARCH_arm64)
+struct pt_regs___kh { int syscallno; } PAI;   // arm64: the syscall number (-1 outside a syscall)
+#define NR_FIELD syscallno
+#elif defined(__TARGET_ARCH_x86)
+struct pt_regs___kh { long orig_ax; } PAI;    // x86_64: the syscall number
+#define NR_FIELD orig_ax
+#else
+#error "unsupported arch: define __TARGET_ARCH_x86 or __TARGET_ARCH_arm64 (build.rs does)"
+#endif
 
 struct ev {
 	__u64 ts, cgid;
@@ -176,7 +184,7 @@ static __always_inline int in_scope(void)
 static __always_inline __u32 syscall_nr(void)
 {
 	struct pt_regs___kh *r = (void *)bpf_task_pt_regs(bpf_get_current_task_btf());
-	return BPF_CORE_READ(r, orig_ax);
+	return BPF_CORE_READ(r, NR_FIELD);
 }
 
 static __always_inline void emit(__u32 kind, __u32 flags, struct walk *a, struct walk *b)

@@ -39,6 +39,7 @@ from kubeheal.contracts import (
     SecurityEvent,
     key_event,
 )
+from kubeheal.redis_client import redis_client
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 log = logging.getLogger("kubeheal.dashboard")
@@ -69,7 +70,7 @@ DIR = Path(__file__).parent
 
 def make_redis() -> aioredis.Redis:
     # socket_timeout must exceed the XREAD BLOCK (1 s).
-    return aioredis.from_url(REDIS_URL, decode_responses=True, socket_timeout=5, socket_connect_timeout=3)
+    return redis_client(REDIS_URL, socket_timeout=5, socket_connect_timeout=3)
 
 
 def parse(kind: str, entry_id: str, fields: dict) -> dict | None:

@@ -1,0 +1,48 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# redis_exporter sidecar on the HA Redis pods (components/redis-ha; used by overlays/production, Helm redis.exporter.enabled).
+# Feeds KubeHealRedisMemoryHigh (redis_memory_used_bytes / redis_memory_max_bytes). It logs in as ACL user `exporter`:
+# INFO and the SLOWLOG/LATENCY/COMMAND INFO reads it polls, no keys, no channels, no CONFIG GET (that could read masterauth).
+# Verified against redis:7.4.12 with the real ACL: no NOPERM, `ACL LOG` stays empty.
+# Secret kubeheal-redis needs the key exporter-password (the credentials Job creates it; an install made before this
+# component existed must add it: docs/operations.md "Redis memory metrics"). Prometheus in namespace `monitoring` scrapes :9121
+# through the redis-headless Service (label kubeheal.io/metrics, port http).
+patches:
+  # JSON patch: appends after the redis container (a strategic merge would put it first, and containers[0] must stay redis).
+  - target: {group: apps, version: v1, kind: StatefulSet, name: redis}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/-
+        value:
+          name: redis-exporter
+          image: oliver006/redis_exporter:v1.96.0@sha256:3d57b9eb142a62ffc600063606a41cd471cd53d81bed10be5b56b3a8918f2c26
+          env:
+            - {name: REDIS_ADDR, value: "redis://127.0.0.1:6379"}
+            - {name: REDIS_USER, value: exporter}
+            - {name: REDIS_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: exporter-password}}}
+          ports: [{containerPort: 9121, name: http}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: 25m, memory: 48Mi}
+            limits: {cpu: 25m, memory: 48Mi}
+          livenessProbe:
+            tcpSocket: {port: 9121}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+  - patch: |-
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: redis-headless
+        namespace: kubeheal
+        labels: {kubeheal.io/metrics: "true"}
+      spec:
+        ports:
+          - {name: http, port: 9121, targetPort: 9121}
+resources:
+  - networkpolicy.yaml

@@ -116,7 +116,7 @@ def test_liveness_and_readiness_probes(objs):
         if (name, c["name"]) in NO_LIVENESS:
             continue
         assert c.get("livenessProbe"), f"{name}/{c['name']} has no livenessProbe"
-        if name in NEEDS_READINESS:
+        if name in NEEDS_READINESS and c["name"] != "redis-exporter":   # a down exporter must not make Redis unready
             assert c.get("readinessProbe"), f"{name}/{c['name']} has no readinessProbe"
 
 
@@ -135,10 +135,17 @@ def test_images_are_pinned(objs):
         assert c.get("imagePullPolicy") != "Always" or "@sha256:" in image or tag != "latest"
 
 
+FIRST_PARTY = re.compile(r"^(ghcr\.io/prathvi9607/kubeheal-[a-z]+|kubeheal\.invalid/[^:@]+):")   # ghcr: built by the release workflow, no digest before the release (tag = appVersion); kubeheal.invalid: local build, tag checked by test_images_are_pinned
+
+
 def test_third_party_images_are_digest_pinned(objs):
+    app_version = yaml.safe_load((CHART / "Chart.yaml").read_text())["appVersion"]
     for name, _, c in containers(objs):
-        if "kubeheal" not in c["image"].split("/")[0] and not re.search(r"/(agents|inference|dashboard|sensor):", c["image"]):
-            assert "@sha256:" in c["image"], f"{name}: third-party image {c['image']} needs a digest"
+        image = c["image"]
+        if FIRST_PARTY.match(image):
+            assert image.startswith("kubeheal.invalid/") or image.endswith(f":{app_version}") or "@sha256:" in image, f"{name}: first-party image {image} must be tagged appVersion {app_version}"
+        elif "kubeheal" not in image.split("/")[0] and not re.search(r"/(agents|inference|dashboard|sensor):", image):
+            assert "@sha256:" in image, f"{name}: third-party image {image} needs a digest"
 
 
 def test_api_token_only_for_workloads_that_call_the_api(objs):
@@ -164,7 +171,8 @@ def policies_for(objs, labels, ns="kubeheal"):
 
 def test_redis_and_inference_are_behind_ingress_policies(objs):
     by_name = {n: lab for n, _, lab in pods(objs)}
-    for target, allowed in (("redis", {"kubeheal-health-agent", "kubeheal-security-agent", "kubeheal-fusion-agent", "kubeheal-dashboard"}),
+    for target, allowed in (("redis", {"kubeheal-health-agent", "kubeheal-security-agent", "kubeheal-fusion-agent", "kubeheal-dashboard",
+                                       "redis", "redis-sentinel"}),   # the last two: Redis HA replication/Sentinel peers
                             ("kubeheal-inference", {"kubeheal-health-agent", "kubeheal-security-agent", "kubeheal-dashboard"})):
         pols = policies_for(objs, by_name[target])
         assert pols and all("Ingress" in p["spec"]["policyTypes"] for p in pols), f"{target} has no ingress NetworkPolicy"

@@ -25,7 +25,7 @@ import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from dashboard.auth import Admin, require_admin
+from dashboard.auth import Admin, proxy_identity, proxy_mode, require_admin
 from dashboard.ratelimit import Bucket
 from kubeheal.contracts import (
     KEY_APPROVALS_PENDING,
@@ -79,6 +79,15 @@ def _xadd_ledger(pipe, entry: dict[str, str]) -> None:
 @router.get("/api/admin/session")
 async def session(admin: AdminDep):
     return {"actor": admin.actor}
+
+
+@router.get("/api/me")
+async def me(request: Request):
+    """Who the console shows: token mode has no user identity (the page keeps its own token session)."""
+    if not proxy_mode():
+        return {"mode": "token", "user": None, "admin": False}
+    who = proxy_identity(request)
+    return {"mode": "proxy", "user": who.actor, "admin": who.admin}
 
 
 @router.get("/api/mode")

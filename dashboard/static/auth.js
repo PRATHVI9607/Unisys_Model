@@ -1,12 +1,23 @@
 // Shared admin sign-in. Reads stay open; this only unlocks the write buttons.
+// SSO (KUBEHEAL_AUTH_MODE=proxy): oauth2-proxy has already signed the user in; /api/me says who and whether admin.
 import { ApiError, api, esc, session } from './util.js';
 
 const subs = new Set();
+export const sso = { on: false, user: '', admin: false };
 export const onAuth = fn => { subs.add(fn); return () => subs.delete(fn); };
-export const authed = () => !!session.token;
+export const authed = () => sso.on ? sso.admin : !!session.token;
 export const signOut = () => { session.clear(); subs.forEach(f => f()); };
+export async function loadMe() {
+    try {
+        const me = await api('/api/me');
+        Object.assign(sso, { on: me.mode === 'proxy', user: me.user || '', admin: !!me.admin });
+        subs.forEach(f => f());
+    } catch { /* token mode or API down: keep the token flow */ }
+}
 
-export const gateHtml = what => `
+export const gateHtml = what => sso.on ? `
+    <div class="gate"><h3>Admin only</h3>
+        <p class="hint">${esc(what)} needs membership of an admin group. You are signed in as ${esc(sso.user)} (viewer).</p></div>` : `
     <form class="gate" data-gate autocomplete="off">
         <h3>Admin sign-in</h3>
         <p class="hint">${esc(what)} needs the admin token. It stays in this tab's session storage and is sent only as a bearer header.</p>
@@ -37,4 +48,4 @@ export function bindGate(root) {
 }
 
 // A write failed because the token stopped working: drop the session so the gate comes back.
-export const expired = e => { if (e instanceof ApiError && (e.status === 401 || e.status === 403)) { signOut(); return true; } return false; };
+export const expired = e => { if (sso.on) return false; if (e instanceof ApiError && (e.status === 401 || e.status === 403)) { signOut(); return true; } return false; };

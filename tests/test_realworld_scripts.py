@@ -10,7 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 RW = ROOT / "deploy/scripts/realworld"
-SH = ["soak.sh", "chaos.sh", "multinode.sh", "upgrade.sh"]
+SH = ["soak.sh", "chaos.sh", "multinode.sh", "upgrade.sh", "redis_failover.sh"]
 PY = ["rwlib.py", "soak.py", "scale.py"]
 TOOLS = ("kubectl", "helm", "docker", "k3d", "git", "minikube")
 
@@ -57,6 +57,7 @@ def fake_path(tmp_path):
     ["soak.sh", "--dry-run", "--hours", "0.01"],
     ["chaos.sh", "--dry-run"],
     ["multinode.sh", "--dry-run"],
+    ["redis_failover.sh", "--dry-run"],
     ["upgrade.sh", "--dry-run", "--from-ref", "HEAD~1", "--path", "both", "--wipe"],
     ["scale.py", "--dry-run"],
 ])
@@ -79,7 +80,7 @@ def test_refusals_are_loud(tmp_path):
     assert r.returncode != 0
 
 
-@pytest.mark.parametrize("cmd", [["soak.sh"], ["chaos.sh"], ["multinode.sh"], ["upgrade.sh", "--from-ref", "HEAD"]])
+@pytest.mark.parametrize("cmd", [["soak.sh"], ["chaos.sh"], ["multinode.sh"], ["redis_failover.sh"], ["upgrade.sh", "--from-ref", "HEAD"]])
 def test_guard_refuses_a_non_lab_context_before_doing_anything(cmd, tmp_path, monkeypatch):
     bindir, log = fake_path(tmp_path)
     script = ("#!/bin/sh\n" f'echo "kubectl $*" >> {log}\n'

@@ -18,6 +18,7 @@ import os
 import socket
 import time
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Any
@@ -125,6 +126,8 @@ DETECT_TO_ACTION = Histogram("kubeheal_fusion_detection_to_action_seconds",
                              ["decision"], buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 300))
 KILL_API = Histogram("kubeheal_fusion_kill_api_seconds", "Duration of kill() (reads, quarantine, delete)",
                      buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30))
+APPROVALS_PENDING = Gauge("kubeheal_fusion_approvals_pending", "Approvals waiting for an operator (ZCARD, refreshed by housekeeping)")
+CIRCUIT_OPENS = Counter("kubeheal_fusion_circuit_opens_total", "Actions blocked by an open circuit breaker", ["action"])
 APPROVALS = Counter("kubeheal_fusion_approvals_total", "Operator approval requests handled", ["result"])
 
 Event = HealthEvent | SecurityEvent
@@ -269,6 +272,7 @@ class FusionAgent:
         self.tiers: dict[str, tuple[float, str | None, bool]] = {}   # namespace → (expiry, TIER_LABEL value, protected label)
         self.owners: dict[tuple[str, str], tuple[float, tuple[str, str] | None]] = {}   # (ns, RS) → controller
         self._containment: ContextVar[str] = ContextVar("containment", default="")
+        self._serial: dict[str, list] = {}   # workload → [asyncio.Lock, users]: one event at a time per workload
 
     @property
     def containment(self) -> str:
@@ -313,6 +317,7 @@ class FusionAgent:
         now = now_ms()
         await self.redis.xtrim(STREAM_LEDGER, minid=now - LEDGER_RETENTION_DAYS * 86_400_000, approximate=True)
         await self.redis.zremrangebyscore(KEY_APPROVALS_PENDING, "-inf", now - APPROVAL_TTL_S * 1000)
+        APPROVALS_PENDING.set(await self.redis.zcard(KEY_APPROVALS_PENDING))
 
     async def housekeeping_loop(self) -> None:
         while True:
@@ -384,8 +389,27 @@ class FusionAgent:
         DEADLETTERED.inc()
 
     # ── decision ────────────────────────────────────────────────────────────
+    @asynccontextmanager
+    async def _one_at_a_time(self, ev: Event):
+        """Events of one workload run in turn (the pair buffer and the act-once markers rely on it) while the
+        security and health lanes run side by side: a patch in flight never holds up another workload's kill."""
+        key = workload_key(ev.namespace, ev.workload)
+        entry = self._serial.setdefault(key, [asyncio.Lock(), 0])
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                yield
+        finally:
+            entry[1] -= 1
+            if not entry[1]:
+                del self._serial[key]
+
     async def handle(self, ev: Event, ack: tuple[str, str, str] | None = None) -> ActionEvent | None:
         """Decide, act and publish one event; `ack` (stream, group, entry id) is XACKed with the publish."""
+        async with self._one_at_a_time(ev):
+            return await self._handle(ev, ack)
+
+    async def _handle(self, ev: Event, ack: tuple[str, str, str] | None) -> ActionEvent | None:
         if now_ms() - ev.timestamp_ms > MAX_EVENT_AGE_S * 1000:
             log.info("skipping stale %s (%.0f s old)", ev.event_id, (now_ms() - ev.timestamp_ms) / 1000)
             SKIPPED_STALE.inc()
@@ -857,6 +881,7 @@ class FusionAgent:
                 return "skipped_locked"
             breaker = key_circuit("kill", ns, target)
             if await circuit_open(self.redis, breaker, self.max_kills):
+                CIRCUIT_OPENS.labels("kill").inc()
                 return "skipped_circuit_open"
             contain = asyncio.create_task(self._contain(ns, pod_name, uid, event_id))   # freeze within ms
             try:
@@ -949,6 +974,7 @@ class FusionAgent:
                 return "skipped_locked"
             breaker = key_circuit("patch", ns, target)
             if await circuit_open(self.redis, breaker, self.max_patches):
+                CIRCUIT_OPENS.labels("patch").inc()
                 return "skipped_circuit_open"
             try:
                 await self._kube(self.apps.patch_namespaced_deployment(
@@ -967,15 +993,16 @@ class FusionAgent:
     async def run(self) -> None:
         log.info("fusion starting mode=%s consumer=%s protected=%s", self.mode, self.consumer, sorted(self.protected))
         await self.refresh_mode()
-        # Own tasks: a slow approval or Redis read never holds up the event loop below.
+        # Own tasks: a slow approval or Redis read never holds up the event loop below, and security events
+        # (the kill path) have their own consumer, so a slow health event (a patch, an approval) cannot delay a kill.
         side = [asyncio.create_task(self.mode_loop()), asyncio.create_task(self.consume((STREAM_APPROVALS,))),
-                asyncio.create_task(self.housekeeping_loop())]
+                asyncio.create_task(self.housekeeping_loop()), asyncio.create_task(self.consume((STREAM_SECURITY,)))]
         if self.alerter:
             side.append(asyncio.create_task(self.alerter.run()))
         for t in side:
             t.add_done_callback(self._side_done)
         try:
-            await self.consume(STREAMS)
+            await self.consume((STREAM_HEALTH,))
         finally:
             for t in side:
                 t.cancel()

@@ -13,7 +13,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-source deploy/scripts/lib/guard.sh; kh_guard "$@" || exit 2; set -- "${KH_REST[@]}"   # minikube / k3d-kubeheal, else --force-context NAME
+source deploy/scripts/lib/guard.sh; source deploy/scripts/lib/redis.sh; kh_guard "$@" || exit 2; set -- "${KH_REST[@]}"   # minikube / k3d-kubeheal, else --force-context NAME
 HOURS="" HEALTH_SLOTS=12 SECURITY_SLOTS=5   # measured on 8 CPU / 8 GB minikube: Falco caps security at ~5-6
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -107,7 +107,7 @@ resources() {
     { echo "--- $(date -Is)"
       kubectl top node --no-headers
       kubectl -n monitoring top pod -l app.kubernetes.io/name=prometheus --no-headers
-      kubectl -n kubeheal exec deploy/redis -- redis-cli --no-auth-warning -a "$REDIS_PW" info memory | grep '^used_memory_human'
+      kubectl -n kubeheal exec $(kh_redis_target) -- redis-cli --no-auth-warning -a "$REDIS_PW" info memory | grep '^used_memory_human'
       kubectl -n kubeheal exec "$DS" -- python -c \
         "import os; s=os.stat('/var/run/falco/events.jsonl'); print('falco_events size', s.st_size, 'allocated', s.st_blocks*512)"
       # Falco over capacity drops alerts (deploy/k8s/helm/falco-values.yaml outputs_queue): fewer security slots if > 0

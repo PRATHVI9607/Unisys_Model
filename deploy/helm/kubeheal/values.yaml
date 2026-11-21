@@ -1,13 +1,15 @@
-# Dev / demo / lab defaults == `kubectl apply -k deploy/k8s`. Single source of truth for images, modes,
-# resources and the event source. Other profiles: values-k3d.yaml, values-production.yaml (== overlays/production).
+# Release defaults: published images (GHCR, tag = appVersion). Single source of truth for images, modes, resources
+# and the event source. Profiles: values-dev.yaml (== `kubectl apply -k deploy/k8s`, locally built images),
+# values-k3d.yaml, values-production.yaml (== overlays/production).
 #   helm upgrade --install kubeheal deploy/helm/kubeheal -n kubeheal [-f deploy/helm/kubeheal/values-<profile>.yaml]
 # The chart installs only the KubeHeal control plane. Prometheus and Falco stay separate Helm releases
 # (deploy/k8s/helm/*-values.yaml, deploy/scripts/install.sh).
-images:                      # full references: a digest works too
-  inference: kubeheal.invalid/inference:v5
-  agents: kubeheal.invalid/agents:v5
-  dashboard: kubeheal.invalid/dashboard:v5
-  sensor: kubeheal.invalid/sensor:v5
+images:                      # repository (tag = Chart appVersion) or a full reference: a digest works too
+  inference: ghcr.io/prathvi9607/kubeheal-inference
+  agents: ghcr.io/prathvi9607/kubeheal-agents
+  dashboard: ghcr.io/prathvi9607/kubeheal-dashboard
+  sensor: ghcr.io/prathvi9607/kubeheal-sensor
+  redisExporter: oliver006/redis_exporter:v1.96.0@sha256:3d57b9eb142a62ffc600063606a41cd471cd53d81bed10be5b56b3a8918f2c26   # only with redis.exporter.enabled
   redis: redis:7.4.12-alpine@sha256:c5d34a98396a4775e223c74e929162c35c5a2182901ba26b50ade939941ce14b
 imagePullPolicy: IfNotPresent
 namespace:
@@ -39,6 +41,8 @@ redis:
   resources:                 # Guaranteed QoS; see deploy/k8s/base/redis.yaml for the sizing
     requests: {cpu: 250m, memory: 512Mi}
     limits: {cpu: 250m, memory: 512Mi}
+  exporter: {enabled: false} # true: redis_exporter sidecar for the redis_memory_* alert metrics (needs ha.enabled; production values turn it on)
+  ha: {enabled: false}       # true: 3 Redis + 3 Sentinels (templates/redis-ha.yaml; ~1.5Gi); false: one Redis
 
 inference:
   replicas: 1
@@ -78,3 +82,22 @@ dashboard:
   resources:
     requests: {cpu: 10m, memory: 64Mi}
     limits: {cpu: 500m, memory: 128Mi}
+
+# Single sign-on for the dashboard (docs/operations.md "Single sign-on"): oauth2-proxy sidecar, dashboard on 127.0.0.1.
+# Needs Secret kubeheal-sso {client-id, client-secret, cookie-secret, proxy-secret}, created with kubectl (never in values).
+# Default provider GitHub (free): repo collaborators (+ allowedUsers) may sign in as viewers; adminUsers are admins.
+# provider oidc = Google, Microsoft Entra ID, Okta, Keycloak, Dex: issuerURL, and adminGroups and/or adminUsers.
+sso:
+  enabled: false
+  provider: github           # github | oidc
+  githubRepo: ""             # github: "owner/repo", whose collaborators may sign in
+  allowedUsers: []           # github: extra logins that may sign in
+  issuerURL: ""              # oidc: e.g. https://accounts.google.com
+  adminUsers: []             # logins (github) or emails (oidc) that are admins
+  adminGroups: []            # oidc group-claim values that make an admin
+  redirectURL: ""            # empty = https://<ingress.host>/oauth2/callback, else http://localhost:4180/oauth2/callback (port-forward)
+  image: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1@sha256:f6a4aa83a27e316114bf79664302b1ffb2cc8ce697fb479273af4feb3fb16fe3
+
+# Alert rules (PrometheusRule, needs the Prometheus Operator CRDs; route them with deploy/k8s/helm/monitoring-values.yaml).
+alerting:
+  enabled: true              # with monitoring.enabled; KubeHealRedisMemoryHigh needs redis.exporter.enabled (values-production turns it on)

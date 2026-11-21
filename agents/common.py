@@ -16,9 +16,9 @@ import aiohttp
 import prometheus_client
 import redis.asyncio as aioredis
 from aiohttp import web
-from kubernetes_asyncio import config as k8s_config
 
 from kubeheal.contracts import PROTECTED_NAMESPACES, STREAM_MAXLEN, Prediction, key_event, key_event_index
+from kubeheal.redis_client import redis_client
 
 log = logging.getLogger("kubeheal.agents")
 
@@ -68,7 +68,7 @@ async def connect_redis(attempts: int = 30) -> aioredis.Redis:
     delay, attempt = 1.0, 0
     while True:
         # socket_timeout > fusion's XREADGROUP BLOCK (1 s); without it a half-open connection hangs forever.
-        r = aioredis.from_url(REDIS_URL, decode_responses=True, socket_timeout=10, socket_connect_timeout=5)
+        r = redis_client(REDIS_URL, socket_timeout=10, socket_connect_timeout=5)
         try:
             await r.ping()
             return r
@@ -83,6 +83,7 @@ async def connect_redis(attempts: int = 30) -> aioredis.Redis:
 
 
 async def load_kube_config() -> None:
+    from kubernetes_asyncio import config as k8s_config  # heavy (the whole generated client): not at import
     try:
         k8s_config.load_incluster_config()
     except k8s_config.ConfigException:

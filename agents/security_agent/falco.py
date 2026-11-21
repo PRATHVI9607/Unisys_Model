@@ -25,6 +25,26 @@ def punch_hole(fd: int, offset: int, length: int) -> bool:
     return _libc.fallocate(fd, _FALLOC_PUNCH, offset, length) == 0
 
 
+_IN_WRITE = 0x2 | 0x80 | 0x100        # IN_MODIFY | IN_MOVED_TO | IN_CREATE
+_libc.inotify_init1.argtypes = [ctypes.c_int]
+_libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+
+
+def watch_dir(path: str) -> int | None:
+    """Non-blocking inotify fd that turns readable when something in `path`'s directory is written, created or
+    moved in; None when unavailable (callers then poll). Watches the directory: it survives a rotation."""
+    try:
+        fd = _libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        if fd < 0:
+            return None
+        if _libc.inotify_add_watch(fd, os.fsencode(os.path.dirname(os.path.abspath(path))), _IN_WRITE) < 0:
+            os.close(fd)
+            return None
+        return fd
+    except (AttributeError, OSError):
+        return None
+
+
 _NA = (None, "", "<NA>")
 
 

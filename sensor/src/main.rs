@@ -80,11 +80,20 @@ fn boot_to_epoch_ns() -> u64 {
 fn selftest() {
     use render::*;
     let pod = Pod { ns: "demo".into(), name: "web-0".into(), uid: "11111111-2222-3333-4444-555555555555".into(), cid: "c".repeat(64) };
+    // syscall numbers of the build arch (arm64 has no open/creat/rename/unlink/chmod)
+    #[cfg(target_arch = "x86_64")]
     let cases = [
         (K_OPEN, 2, 0o100000), (K_OPEN, 257, 0), (K_OPEN, 257, 0o101), (K_OPEN, 437, 0o2), (K_OPEN, 85, 0o1101), (K_OPEN, 257, 0o1000),
         (K_RENAME, 82, 0), (K_RENAME, 264, 0), (K_RENAME, 316, 0),
         (K_UNLINK, 87, 0), (K_UNLINK, 263, 0), (K_TRUNCATE, 76, 0), (K_FTRUNCATE, 77, 0),
         (K_CHMOD, 90, 0), (K_CHMOD, 91, 0), (K_CHMOD, 268, 0), (K_CHMOD, 452, 0),
+    ];
+    #[cfg(target_arch = "aarch64")]
+    let cases = [
+        (K_OPEN, 56, 0), (K_OPEN, 56, 0o101), (K_OPEN, 437, 0o2), (K_OPEN, 56, 0o1000),
+        (K_RENAME, 38, 0), (K_RENAME, 276, 0),
+        (K_UNLINK, 35, 0), (K_TRUNCATE, 45, 0), (K_FTRUNCATE, 46, 0),
+        (K_CHMOD, 52, 0), (K_CHMOD, 53, 0), (K_CHMOD, 452, 0),
     ];
     for (kind, nr, flags) in cases {
         let new_path = if kind == K_RENAME { "/data/f.txt.locked".into() } else { String::new() };

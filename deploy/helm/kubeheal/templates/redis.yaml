@@ -12,7 +12,9 @@
 # Persistence matters: the health agent's baselines (the AUTO_PATCH targets) live here, and an empty Redis
 # would make it re-baseline whatever is live, drift included. Keep Redis in namespace kubeheal: the
 # Falco/sensor rules exclude it from /data write monitoring (AOF rewrites look like bulk rewrites).
-# Service name redis-master keeps REDIS_URL stable.
+# Service name redis-master keeps REDIS_URL stable. With redis.ha.enabled this Deployment, its Service and PVC give way
+# to templates/redis-ha.yaml (3 Redis + 3 Sentinels); the Job and NetworkPolicy below stay.
+{{- if not .Values.redis.ha.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -119,6 +121,7 @@ spec:
         - name: acl
           emptyDir: {medium: Memory, sizeLimit: 1Mi}
 ---
+{{- end }}
 # Creates Secret kubeheal-redis once, with random passwords and the matching per-component REDIS_URLs,
 # Secret kubeheal-admin {token} (the dashboard's admin-action bearer token) Secret kubeheal-contain-hmac {key} and Secret kubeheal-approval-hmac {key} (fusion only)
 # (signs containment requests, fusion -> security agents), each random 32 bytes.
@@ -146,7 +149,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: create
-          image: {{ .Values.images.agents }}   # has Python + kubernetes_asyncio
+          image: {{ include "kubeheal.image" (list . .Values.images.agents) }}   # has Python + kubernetes_asyncio
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           command:
             - python
@@ -155,7 +158,7 @@ spec:
               import asyncio, secrets
               from kubernetes_asyncio import client, config
 
-              USERS = ("default", "health", "security", "fusion", "dashboard")
+              USERS = ("default", "health", "security", "fusion", "dashboard", "exporter")
               HOST = "redis-master.kubeheal.svc:6379/0"
 
               async def create(api, name: str, data: dict) -> None:

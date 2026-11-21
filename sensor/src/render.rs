@@ -17,7 +17,7 @@ pub struct Rec {
     pub ts: u64, // CLOCK_BOOTTIME ns
     pub cgid: u64,
     pub pid: u32,
-    pub nr: u32, // x86_64 syscall number (orig_ax) at the hook
+    pub nr: u32, // syscall number at the hook (orig_ax on x86_64, syscallno on arm64)
     pub flags: u32,
     pub kind: u32,
     pub path: String,
@@ -57,24 +57,56 @@ impl Rec {
     }
 }
 
-/// Hook kind + x86_64 syscall number -> Falco evt.type. Calls from elsewhere (io_uring, fchmodat2) get the
+/// Syscall numbers (orig_ax / syscallno at the hook) that have their own Falco evt.type. arm64 has only the *at
+/// family (no open, creat, rename, unlink, chmod); u32::MAX never matches.
+#[cfg(target_arch = "x86_64")]
+mod sysno {
+    pub const OPEN: u32 = 2;
+    pub const CREAT: u32 = 85;
+    pub const RENAME: u32 = 82;
+    pub const RENAMEAT: u32 = 264;
+    pub const UNLINK: u32 = 87;
+    pub const CHMOD: u32 = 90;
+    pub const FCHMOD: u32 = 91;
+    pub const OPENAT2: u32 = 437;
+}
+#[cfg(target_arch = "aarch64")]
+mod sysno {
+    const NONE: u32 = u32::MAX;
+    pub const OPEN: u32 = NONE;
+    pub const CREAT: u32 = NONE;
+    pub const RENAME: u32 = NONE;
+    pub const RENAMEAT: u32 = 38;
+    pub const UNLINK: u32 = NONE;
+    pub const CHMOD: u32 = NONE;
+    pub const FCHMOD: u32 = 52;
+    pub const OPENAT2: u32 = 437;
+}
+
+/// Hook kind + syscall number of this arch -> Falco evt.type. Calls from elsewhere (io_uring, fchmodat2) get the
 /// kind's generic name; the model only uses the group (kubeheal.features.security.SYSCALL_GROUPS).
 pub fn evt_type(kind: u32, nr: u32) -> Option<&'static str> {
-    Some(match (kind, nr) {
-        (K_OPEN, 2) => "open",
-        (K_OPEN, 437) => "openat2",
-        (K_OPEN, 85) => "creat",
-        (K_OPEN, _) => "openat",
-        (K_RENAME, 82) => "rename",
-        (K_RENAME, 264) => "renameat",
-        (K_RENAME, _) => "renameat2",
-        (K_UNLINK, 87) => "unlink",
-        (K_UNLINK, _) => "unlinkat",
-        (K_TRUNCATE, _) => "truncate",
-        (K_FTRUNCATE, _) => "ftruncate",
-        (K_CHMOD, 90) => "chmod",
-        (K_CHMOD, 91) => "fchmod",
-        (K_CHMOD, _) => "fchmodat",
+    Some(match kind {
+        K_OPEN => match nr {
+            n if n == sysno::OPEN => "open",
+            n if n == sysno::OPENAT2 => "openat2",
+            n if n == sysno::CREAT => "creat",
+            _ => "openat",
+        },
+        K_RENAME => match nr {
+            n if n == sysno::RENAME => "rename",
+            n if n == sysno::RENAMEAT => "renameat",
+            _ => "renameat2",
+        },
+        K_UNLINK if nr == sysno::UNLINK => "unlink",
+        K_UNLINK => "unlinkat",
+        K_TRUNCATE => "truncate",
+        K_FTRUNCATE => "ftruncate",
+        K_CHMOD => match nr {
+            n if n == sysno::CHMOD => "chmod",
+            n if n == sysno::FCHMOD => "fchmod",
+            _ => "fchmodat",
+        },
         _ => return None,
     })
 }
@@ -166,6 +198,7 @@ mod tests {
         assert!(clean_prefixes(&vec!["/a".to_string(); 5]).is_err());
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn rename_and_open_json() {
         let f = fields(&Rec { ts: 5, kind: K_RENAME, nr: 316, pid: 7, path: "/data/a".into(), new_path: "/data/a.locked".into(), ..Default::default() });
@@ -177,6 +210,7 @@ mod tests {
         assert_eq!((f["evt.type"].as_str(), f["evt.arg.flags"].as_str()), (Some("open"), Some("O_RDONLY")));
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn kinds_map_to_falco_fields() {
         let ty = |kind, nr| evt_type(kind, nr).unwrap();
@@ -189,6 +223,16 @@ mod tests {
         assert_eq!(f["fs.path.name"].as_str(), Some("/data/c"));
         assert_eq!(group(&Rec { kind: K_OPEN, flags: 0o1000, ..Default::default() }), 1); // O_RDONLY|O_TRUNC writes
         assert_eq!(group(&Rec { kind: K_OPEN, flags: 0o200000, ..Default::default() }), 0); // O_DIRECTORY reads
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn arm64_syscalls_map_to_falco_types() {
+        let ty = |kind, nr| evt_type(kind, nr).unwrap();
+        assert_eq!([ty(K_OPEN, 56), ty(K_OPEN, 437), ty(K_RENAME, 38), ty(K_RENAME, 276)], ["openat", "openat2", "renameat", "renameat2"]);
+        assert_eq!([ty(K_UNLINK, 35), ty(K_CHMOD, 52), ty(K_CHMOD, 53), ty(K_CHMOD, 452), ty(K_FTRUNCATE, 46)], ["unlinkat", "fchmod", "fchmodat", "fchmodat", "ftruncate"]);
+        let f = fields(&Rec { kind: K_OPEN, nr: 56, flags: 0o101, path: "/data/x".into(), ..Default::default() });
+        assert_eq!((f["evt.type"].as_str(), f["evt.arg.flags"].as_str()), (Some("openat"), Some("O_WRONLY|O_CREAT")));
     }
 
     #[test]

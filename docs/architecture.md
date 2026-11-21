@@ -14,7 +14,7 @@ diagram is at the top of the [README](../README.md). Models and data are covered
 | **security-agent** | DaemonSet, `hostPID`, `kubeheal.invalid/agents:v5` + `kubeheal.invalid/sensor:v5` | `python -m agents.security_agent.agent` (:8080) + `kubeheal-sensor` | Tails the Falco-shaped JSON of its node's event source and builds per-pod windows. Adds file entropy, write bytes and network-out bytes, scores a pod every 1 s or as soon as it has 32 new events, and publishes a `SecurityEvent` when risk ≥ 0.4. Scores in-process when `SECURITY_MODEL_DIR` (default `/models/security`) holds a bundle (metric `kubeheal_security_model_mode{mode=embedded\|remote}`), else via the inference service. With `CONTAIN_HMAC_KEY` set it freezes only pods named by correctly signed `kubeheal.contain` entries (`bad_sig` otherwise). **It observes only.** |
 | **fusion-agent** | Deployment ×1, `strategy: Recreate` | `python -m agents.fusion_agent.agent` (:8080) | The single decision point and the only component that changes the cluster. It pairs events, scores correlation, runs the pure policy, acts or records `would_*`, and publishes an `ActionEvent` for every decision. |
 | **dashboard** | Deployment ×1 | `uvicorn dashboard.fastapi_app:app` (:8080) | Read-only console that tails the three streams and pushes them over WebSocket. It has no Kubernetes access. |
-| **redis** | Deployment ×1, `redis:7.4.2-alpine` | `redis-master:6379` | Holds the streams and keys. It is ephemeral (no RDB or AOF), capped at 256 MB with `noeviction`, and a NetworkPolicy allows only same-namespace clients. |
+| **redis** | Deployment ×1 (dev), `redis:7.4.12-alpine`; production: StatefulSet ×3 + Sentinel StatefulSet ×3 | `redis-master:6379` (dev); `REDIS_SENTINELS` (HA) | Holds the streams and keys. AOF on a PVC, capped at 192 MB with `noeviction`, per-component ACL users, and a NetworkPolicy that admits only the agents and the dashboard. HA: 1 primary + 2 replicas, Sentinel quorum 2 (`docs/operations.md` "Redis high availability"). |
 | Prometheus | Helm `kube-prometheus-stack` 92.10.1, namespace `monitoring` | `prometheus-operated:9090` | cAdvisor, kube-state-metrics and app `/metrics` (PodMonitor `kubeheal.io/scrape=true`), every 15 s, with keep-lists. |
 | Event source: sensor (default) | container `sensor` in the security-agent DaemonSet (`sensor/`) | `/var/run/kubeheal/events.jsonl` (emptyDir shared with the agent) | Rust + libbpf. `lsm/` programs (fallback `fexit/`) on `file_open`, `path_rename`, `path_unlink`, `path_truncate`, `file_truncate`, `path_chmod`; filters in the kernel (pod cgroups under `kubepods`, resolved path prefix `/data/`, namespace `kubeheal` excluded) and writes Falco-shaped JSON lines. See `sensor/README.md`. |
 | Event source: Falco (`EVENT_SOURCE=falco`) | Helm `falco` 9.2.0, namespace `falco` | `/var/run/falco/events.jsonl` (hostPath) | Modern eBPF, loading **only** `deploy/k8s/falco-kubeheal-rules.yaml`. `deploy/k8s/components/falco-source` drops the sensor and mounts this directory as the agent's `events` volume. Single event thread: ~1900 alerts/s per node. |
@@ -339,6 +339,9 @@ listed here.
 | Env var | Code default | Manifest | Read by |
 |---|---|---|---|
 | `REDIS_URL` | `redis://redis-master.kubeheal.svc:6379/0` | from Secret `kubeheal-redis` `<user>-url` (per-component ACL user) | health, security, fusion, dashboard |
+| `REDIS_SENTINELS` | empty = plain `REDIS_URL` | HA only (production): the three `redis-sentinel-N.redis-sentinel.kubeheal.svc:26379` | health, security, fusion, dashboard; `host:port,host:port,...`; the master is resolved on every reconnect with the ACL user and password from `REDIS_URL` |
+| `REDIS_SENTINEL_MASTER` | `kubeheal` | not set | same; the Sentinel master name |
+| `REDIS_SENTINEL_PASSWORD` | empty (Sentinels are unauthenticated) | not set | same; the Sentinels' own password if you set one |
 | `INFERENCE_URL` | `http://kubeheal-inference.kubeheal.svc:8000` | same (health; security as fallback; dashboard Models page) | health, security, dashboard |
 | `PROMETHEUS_URL` | `http://prometheus-operated.monitoring.svc:9090` | same | health |
 | `ASSESS_DELAY_S` | `60` | `60` | health; `drift_lab.py` imports it |
@@ -347,6 +350,7 @@ listed here.
 | `FALCO_EVENTS_PATH` | `/var/run/falco/events.jsonl` | `/var/run/kubeheal/events.jsonl` (shared `events` volume: the sensor's emptyDir, or Falco's hostPath with `components/falco-source`) | security |
 | `CGROUP_ROOT` | `/host/sys/fs/cgroup` | `/host/sys/fs/cgroup` (host cgroup v2, read-write) | security (containment: `cgroup.freeze`) |
 | `FREEZE_MAX_S` | `900` | unset | security (a pod it froze, still frozen after this long: error log + `kubeheal_security_frozen_overdue`; never thawed automatically) |
+| `EVENT_SOURCE` | `sensor` | `sensor` (`components/falco-source` and Helm `eventSource` set `falco`) | security (only labels `kubeheal_security_event_source`, so `KubeHealSensorDown` ignores Falco installs) |
 | `SENSOR_STATS_PATH` | `/var/run/kubeheal/sensor-stats.json` | same, on the shared `events` volume (the sensor writes it every 5 s) | security (read at most every 5 s), sensor (writes) |
 | `PROC_ROOT` | `/proc` | `/host/proc` | security |
 | `EVAL_INTERVAL_S` | `1` | `1` | security (timer; a pod with 32 new events is scored at once) |
@@ -357,6 +361,7 @@ listed here.
 | `KUBEHEAL_MODEL_DIR` | `models` (the image's `/app/models`) | not set | inference |
 | `DASHBOARD_ALLOWED_HOSTS` | `localhost,127.0.0.1,kubeheal-dashboard` and its `.kubeheal`, `.svc`, `.svc.cluster.local` names | not set | dashboard (Host header allow-list) |
 | `KUBEHEAL_ADMIN_TOKEN` | empty (admin actions disabled) | from Secret `kubeheal-admin` `token` (random, created once by the redis-secret Job) | dashboard (bearer token for admin actions) |
+| `KUBEHEAL_AUTH_MODE` / `KUBEHEAL_PROXY_SECRET` / `KUBEHEAL_ADMIN_USERS` / `KUBEHEAL_ADMIN_GROUPS` / `KUBEHEAL_ACTOR_CLAIM` | `token` / unset / unset / unset / `email` | only with the sso component or `sso.enabled`: `proxy`, Secret `kubeheal-sso` `proxy-secret`, ConfigMap `kubeheal-sso` keys | dashboard (OIDC identity headers from the oauth2-proxy sidecar; docs/operations.md "Single sign-on") |
 | `SECURITY_MODEL_DIR` | `/models/security` | `/models/security` (baked into the agents image) | security (in-process scoring; falls back to the inference service when missing) |
 | `APPROVAL_HMAC_KEY` | empty (approval records unsigned, warning logged) | from a Secret (deploy step) | fusion |
 | `CONTAIN_HMAC_KEY` | empty (containment requests unsigned, warning logged) | from Secret `kubeheal-contain-hmac` `key` (random, created once by the redis-secret Job) | fusion (signs), security (verifies) |

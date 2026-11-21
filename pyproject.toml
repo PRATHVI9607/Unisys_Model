@@ -3,21 +3,23 @@ name = "kubeheal"
 version = "5.0.0"
 description = "Autonomous configuration-drift and ransomware remediation for Kubernetes"
 requires-python = ">=3.13"
-# Core: the shared contract + feature code every component imports.
+# Core: the shared contract every component imports. numpy comes with the extras that compute features/scores
+# (not the dashboard: its image has no use for 50 MB of it).
 dependencies = [
     "pydantic>=2.10",
-    "numpy>=2.2",
 ]
 
 [project.optional-dependencies]
 # One extra per container image; Dockerfiles install exactly one of these.
 inference = [
+    "numpy>=2.2",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "lightgbm>=4.6",
     "prometheus-client>=0.21",
 ]
 agents = [
+    "numpy>=2.2",
     "redis>=5.2",
     "aiohttp>=3.11",
     "kubernetes-asyncio>=32.0",
@@ -31,6 +33,7 @@ dashboard = [
     "redis>=5.2",
 ]
 training = [
+    "numpy>=2.2",
     "lightgbm>=4.6",
     "scikit-learn>=1.6",          # metrics + grouped splits only
 ]

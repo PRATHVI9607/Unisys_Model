@@ -14,6 +14,7 @@
 # The human step depends on the health model finding the drift uncertain: if it decides otherwise the script says so and goes on.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT"
+source deploy/scripts/lib/redis.sh
 KH=kubeheal; PFX=khe-demo
 NS_BENIGN=$PFX-benign NS_KILL=$PFX-kill NS_PATCH=$PFX-patch NS_HUMAN=$PFX-human NS_OBS=$PFX-observe
 CHAOS=kubeheal.invalid/chaos:v5
@@ -22,7 +23,7 @@ declare -a CREATED=(); PF=""; TOKEN=""; MODE_BEFORE="" MODE_TOUCHED=0; T0=$SECON
 
 say() { printf '[%s +%3ss] %s\n' "$(date +%T)" $((SECONDS - T0)) "$*"; }
 die() { say "FAIL: $*" >&2; exit 1; }
-rc() { kubectl exec -i -n "$KH" deploy/redis -- redis-cli --raw "$@" 2>&1; }   # admin user via REDISCLI_AUTH
+rc() { kubectl exec -i -n "$KH" $(kh_redis_target) -- redis-cli --raw "$@" 2>&1; }   # admin user via REDISCLI_AUTH
 
 # Redis stream output (--raw) -> one line per entry: "<id> k=v k=v ..." for the keys in $1 (space separated).
 # Values lose their spaces; entries come newest first, as XREVRANGE returns them.
@@ -68,7 +69,7 @@ cleanup() {
   if [[ ${#CREATED[@]} -gt 0 && ${KEEP:-0} == 0 ]]; then
     say "cleanup: deleting ${CREATED[*]}"
     kubectl delete ns "${CREATED[@]}" --wait=false --ignore-not-found >/dev/null 2>&1
-    kubectl exec -n "$KH" deploy/redis -- sh -c "redis-cli --scan --pattern 'kubeheal:*$PFX*' | xargs -r -n50 redis-cli DEL >/dev/null" 2>/dev/null
+    kubectl exec -n "$KH" $(kh_redis_target) -- sh -c "redis-cli --scan --pattern 'kubeheal:*$PFX*' | xargs -r -n50 redis-cli DEL >/dev/null" 2>/dev/null
   elif [[ ${#CREATED[@]} -gt 0 ]]; then
     say "--keep: left ${CREATED[*]} (delete: kubectl delete ns ${CREATED[*]})"
   fi

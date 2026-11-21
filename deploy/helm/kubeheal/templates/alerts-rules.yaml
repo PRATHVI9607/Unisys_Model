@@ -1,0 +1,3 @@
+{{- if and .Values.monitoring.enabled .Values.alerting.enabled }}
+{{ .Files.Get "alerts/kubeheal-rules.yaml" }}
+{{- end }}

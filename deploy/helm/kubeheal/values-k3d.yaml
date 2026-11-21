@@ -2,5 +2,10 @@
 # The eBPF sensor runs on the host kernel shared by the k3d nodes (needs BTF + `bpf` in /sys/kernel/security/lsm);
 # deploy/scripts/install.sh --target k3d falls back to eventSource: falco when the host cannot do it.
 eventSource: sensor
+images:                      # built locally by install.sh, never pulled
+  inference: kubeheal.invalid/inference:v5
+  agents: kubeheal.invalid/agents:v5
+  dashboard: kubeheal.invalid/dashboard:v5
+  sensor: kubeheal.invalid/sensor:v5
 mode: enforce
 namespace: {create: false}   # install.sh: helm -n kubeheal --create-namespace

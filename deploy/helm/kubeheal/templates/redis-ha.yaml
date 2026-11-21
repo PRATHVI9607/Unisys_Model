@@ -1,0 +1,336 @@
+{{- define "kubeheal.redisSentinels" -}}
+redis-sentinel-0.redis-sentinel.kubeheal.svc:26379,redis-sentinel-1.redis-sentinel.kubeheal.svc:26379,redis-sentinel-2.redis-sentinel.kubeheal.svc:26379
+{{- end }}
+{{- if .Values.redis.ha.enabled }}
+# Redis HA: 3 Redis + 3 Sentinels. Same ACL users and Secret (kubeheal-redis) as deploy/k8s/base/redis.yaml, plus
+# a `replicator` user (PSYNC/REPLCONF/PING only; same password as `default`) that replicas use for replication.
+#   - Role at start: ask the Sentinels who the primary is; none answers (first boot) -> redis-0 is primary, others
+#     replicate it. So a restarted ex-primary rejoins as a replica instead of splitting the brain.
+#   - min-replicas-to-write 1 / min-replicas-max-lag 10: a primary cut off from every replica stops accepting
+#     writes after 10 s, which bounds what an async-replication failover can lose (docs/operations.md). The price:
+#     with both replicas down, writes fail until one returns (readers and the kill path degrade fail-safe).
+#   - Sentinels are unauthenticated and reachable only through the NetworkPolicies below; they authenticate to Redis
+#     as `default` (sentinel auth-pass). Sentinel state lives in memory (emptyDir); a restarted Sentinel re-learns
+#     the primary from its peers.
+#   - Anti-affinity is "preferred": a cluster with fewer than 3 nodes still schedules (but then loses HA).
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-headless
+  namespace: kubeheal
+  labels: {app.kubernetes.io/name: redis{{ if .Values.redis.exporter.enabled }}, kubeheal.io/metrics: "true"{{ end }}}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true   # peers find each other while a replica is still loading
+  selector: {app.kubernetes.io/name: redis}
+  ports:
+{{- if .Values.redis.exporter.enabled }}
+    - {name: http, port: 9121, targetPort: 9121}   # redis_exporter, scraped by the kubeheal ServiceMonitor
+{{- end }}
+    - {name: redis, port: 6379, targetPort: 6379}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-sentinel
+  namespace: kubeheal
+  labels: {app.kubernetes.io/name: redis-sentinel}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: {app.kubernetes.io/name: redis-sentinel}
+  ports:
+    - {name: sentinel, port: 26379, targetPort: 26379}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: kubeheal
+  labels: {app.kubernetes.io/name: redis}
+spec:
+  replicas: 3
+  serviceName: redis-headless
+  selector: {matchLabels: {app.kubernetes.io/name: redis}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: redis}
+    spec:
+{{- if .Values.priorityClass.enabled }}
+      priorityClassName: {{ .Values.priorityClass.name }}
+{{- end }}
+      automountServiceAccountToken: false
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector: {matchLabels: {app.kubernetes.io/name: redis}}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: redis
+          image: {{ .Values.images.redis }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              umask 077
+              ORD="${HOSTNAME##*-}"
+              cat > /run/redis/users.acl <<EOF
+              user default on >$REDISCLI_AUTH ~* &* +@all
+              user replicator on >$REDISCLI_AUTH resetchannels -@all +psync +replconf +ping
+              user health on >$HEALTH_PASSWORD resetchannels -@all +@read +@write +@transaction +ping +client|setinfo -@scripting -@dangerous %RW~kubeheal:spec:* %RW~kubeheal:baseline:* %RW~kubeheal:health:* %RW~kubeheal:index:health %RW~kubeheal.health.events
+              user security on >$SECURITY_PASSWORD resetchannels -@all +@read +@write +@transaction +ping +client|setinfo -@scripting -@dangerous %RW~kubeheal:security:* %RW~kubeheal:index:security %RW~kubeheal.security.events %RW~kubeheal.security.capture %R~kubeheal.contain
+              user fusion on >$FUSION_PASSWORD resetchannels -@all +@read +@write +@transaction +@stream +ping +client|setinfo -@scripting -@dangerous +eval +evalsha %RW~kubeheal:* %RW~kubeheal.*
+              user dashboard on >$DASHBOARD_PASSWORD resetchannels -@all +@read +set +xadd +watch +unwatch +multi +exec +discard +ping +client|setinfo -@scripting -@dangerous %R~kubeheal:* %R~kubeheal.* %RW~kubeheal:approval:* %RW~kubeheal:mode %RW~kubeheal.approvals %RW~kubeheal.ledger
+              EOF
+              [ -z "${EXPORTER_PASSWORD:-}" ] || echo "user exporter on >$EXPORTER_PASSWORD resetkeys resetchannels -@all +info +ping +client|setname +client|setinfo +slowlog|get +slowlog|len +latency|latest +latency|histogram +command|info" >> /run/redis/users.acl
+              master=""
+              for i in 0 1 2; do
+                if [ -z "$master" ]; then
+                  master="$(timeout 3 env -u REDISCLI_AUTH redis-cli -h "redis-sentinel-$i.redis-sentinel" -p 26379 sentinel get-master-addr-by-name kubeheal 2>/dev/null | sed -n 1p || true)"
+                fi
+              done
+              if [ -z "$master" ]; then
+                if [ "$ORD" = 0 ]; then master="$POD_IP"; else master=redis-0.redis-headless.kubeheal.svc; fi
+              fi
+              cat > /run/redis/redis.conf <<EOF
+              aclfile /run/redis/users.acl
+              dir /data
+              appendonly yes
+              appendfsync everysec
+              aof-use-rdb-preamble yes
+              save ""
+              maxmemory 192mb
+              maxmemory-policy noeviction
+              masteruser replicator
+              masterauth $REDISCLI_AUTH
+              min-replicas-to-write 1
+              min-replicas-max-lag 10
+              EOF
+              [ "$master" = "$POD_IP" ] || echo "replicaof $master 6379" >> /run/redis/redis.conf
+              exec redis-server /run/redis/redis.conf
+          env:
+            - {name: POD_IP, valueFrom: {fieldRef: {fieldPath: status.podIP}}}
+            - {name: REDISCLI_AUTH, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: default-password}}}
+            - {name: HEALTH_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: health-password}}}
+            - {name: SECURITY_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: security-password}}}
+            - {name: FUSION_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: fusion-password}}}
+            - {name: DASHBOARD_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: dashboard-password}}}
+            - {name: EXPORTER_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: exporter-password, optional: true}}}   # redis_exporter sidecar only (components/redis-exporter)
+          ports: [{containerPort: 6379, name: redis}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          # Sizing as in base/redis.yaml (512Mi covers maxmemory plus an AOF-rewrite fork's copy-on-write).
+          resources:
+{{- toYaml .Values.redis.resources | nindent 12 }}
+          readinessProbe:          # not ready while the AOF replays or a replica loads (PING answers LOADING)
+            exec: {command: ["sh", "-c", "redis-cli ping | grep -qx PONG"]}
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: {port: 6379}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: acl, mountPath: /run/redis}
+{{- if .Values.redis.exporter.enabled }}
+        - name: redis-exporter
+          image: {{ .Values.images.redisExporter }}
+          env:
+            - {name: REDIS_ADDR, value: "redis://127.0.0.1:6379"}
+            - {name: REDIS_USER, value: exporter}
+            - {name: REDIS_PASSWORD, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: exporter-password}}}
+          ports: [{containerPort: 9121, name: http}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: 25m, memory: 48Mi}
+            limits: {cpu: 25m, memory: 48Mi}
+          livenessProbe:
+            tcpSocket: {port: 9121}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+{{- end }}
+      volumes:
+        - name: acl
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.redis.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources: {requests: {storage: {{ .Values.redis.storage }}}}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-sentinel
+  namespace: kubeheal
+  labels: {app.kubernetes.io/name: redis-sentinel}
+spec:
+  replicas: 3
+  serviceName: redis-sentinel
+  podManagementPolicy: Parallel
+  selector: {matchLabels: {app.kubernetes.io/name: redis-sentinel}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: redis-sentinel}
+    spec:
+{{- if .Values.priorityClass.enabled }}
+      priorityClassName: {{ .Values.priorityClass.name }}
+{{- end }}
+      automountServiceAccountToken: false
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector: {matchLabels: {app.kubernetes.io/name: redis-sentinel}}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: sentinel
+          image: {{ .Values.images.redis }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              umask 077
+              ORD="${HOSTNAME##*-}"
+              master=""
+              for i in 0 1 2; do
+                if [ -z "$master" ] && [ "$i" != "$ORD" ]; then
+                  master="$(timeout 3 env -u REDISCLI_AUTH redis-cli -h "redis-sentinel-$i.redis-sentinel" -p 26379 sentinel get-master-addr-by-name kubeheal 2>/dev/null | sed -n 1p || true)"
+                fi
+              done
+              : "${master:=redis-0.redis-headless.kubeheal.svc}"
+              cat > /run/sentinel/sentinel.conf <<EOF
+              port 26379
+              dir /run/sentinel
+              sentinel resolve-hostnames yes
+              sentinel monitor kubeheal $master 6379 2
+              sentinel auth-pass kubeheal $REDISCLI_AUTH
+              sentinel down-after-milliseconds kubeheal 5000
+              sentinel failover-timeout kubeheal 30000
+              sentinel parallel-syncs kubeheal 1
+              EOF
+              exec redis-sentinel /run/sentinel/sentinel.conf
+          env:
+            - {name: REDISCLI_AUTH, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: default-password}}}
+          ports: [{containerPort: 26379, name: sentinel}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: 20m, memory: 64Mi}
+            limits: {cpu: 20m, memory: 64Mi}
+          readinessProbe:          # ready once it knows a primary
+            exec: {command: ["sh", "-c", "env -u REDISCLI_AUTH redis-cli -p 26379 sentinel get-master-addr-by-name kubeheal | grep -q ."]}
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: {port: 26379}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - {name: conf, mountPath: /run/sentinel}
+      volumes:
+        - name: conf
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis
+  namespace: kubeheal
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app.kubernetes.io/name: redis}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-sentinel
+  namespace: kubeheal
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app.kubernetes.io/name: redis-sentinel}}
+---
+# Base's NetworkPolicy redis-agents-only still admits the three agents and the dashboard to Redis :6379 (policies
+# add up); these add the Redis and Sentinel pods (replication, Sentinel monitoring, start-up primary lookup)
+# and the same admission for the Sentinels on :26379.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-peers
+  namespace: kubeheal
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: redis}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - {key: app.kubernetes.io/name, operator: In, values: [redis, redis-sentinel]}
+      ports: [{port: 6379}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-sentinel-clients
+  namespace: kubeheal
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: redis-sentinel}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [kubeheal-health-agent, kubeheal-security-agent, kubeheal-fusion-agent, kubeheal-dashboard]
+        - podSelector:
+            matchExpressions:
+              - {key: app.kubernetes.io/name, operator: In, values: [redis, redis-sentinel]}
+      ports: [{port: 26379}]
+{{- if .Values.redis.exporter.enabled }}
+---
+# Prometheus (namespace monitoring) scrapes the redis_exporter sidecar.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-exporter-scrape
+  namespace: kubeheal
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: redis}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}
+      ports: [{port: 9121}]
+{{- end }}
+{{- end }}

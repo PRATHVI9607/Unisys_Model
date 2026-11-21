@@ -32,12 +32,15 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: agent
-          image: {{ .Values.images.agents }}
+          image: {{ include "kubeheal.image" (list . .Values.images.agents) }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           command: ["python", "-m", "agents.health_agent.agent"]
           ports: [{containerPort: 8080, name: http}]
           env:
             - {name: REDIS_URL, valueFrom: {secretKeyRef: {name: kubeheal-redis, key: health-url}}}   # per-component ACL user (redis.yaml)
+{{- if .Values.redis.ha.enabled }}
+            - {name: REDIS_SENTINELS, value: {{ include "kubeheal.redisSentinels" . | quote }}}
+{{- end }}
             - {name: INFERENCE_URL, value: "http://kubeheal-inference.kubeheal.svc:8000"}
             - {name: PROMETHEUS_URL, value: {{ .Values.health.prometheusUrl | quote }}}
             - {name: ASSESS_DELAY_S, value: {{ .Values.health.assessDelayS | quote }}}

@@ -10,20 +10,21 @@ Run: python -m agents.security_agent.agent
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import posixpath
 import re
+import ssl
 import stat
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import aiohttp
 import orjson
 import redis.asyncio as aioredis
-from kubernetes_asyncio import client
-from kubernetes_asyncio.client.exceptions import ApiException
 from prometheus_client import Counter, Gauge, Histogram
 
 from agents.common import (
@@ -38,7 +39,7 @@ from agents.common import (
     setup_logging,
     start_http,
 )
-from agents.security_agent.falco import FalcoTail, parse_line
+from agents.security_agent.falco import FalcoTail, parse_line, watch_dir
 from kubeheal.contracts import (
     SECURITY_PUBLISH_RISK,
     STREAM_CAPTURE,
@@ -88,6 +89,10 @@ MAX_ENTROPY_CACHE = 2 * MAX_WRITTEN   # per pod: files whose entropy is reused w
 COOLDOWN_S = 60.0          # per pod; a label change still publishes
 RISK_RISE = 0.05           # a risk this much above the last published one is news: not cooled down
 POD_MIN_INTERVAL_S = 0.5   # a pod is re-scored at most this often; a pod not scored that recently goes at once
+HOT_INTERVAL_S = 0.05      # ... but a pod that just renamed a file to "<name>.<ext>" (the encryption signature), or
+                           # last scored suspicious or worse, is re-scored this often
+HOT_TICK_S = 0.02          # pause between evaluation rounds while a hot pod is due (MIN_TICK_S otherwise)
+IDLE_POLL_S = 0.2          # tail poll when the file watch (inotify) is unavailable; with it, the fallback wake-up
 MAX_BACKOFF_S = 30.0       # failed evaluations retry at once, then after 1, 2, 4 ... s up to this
 PID_MISS_TTL_S = 10.0      # a container id not found in /proc is not searched for again this long
 MAX_PID_CACHE = 4096
@@ -96,6 +101,8 @@ MAX_PID_CACHE = 4096
 FREEZE_MAX_S = float(os.environ.get("FREEZE_MAX_S", "900"))
 # The sensor writes its counters here every ~5 s (shared volume); read on the eval tick, at most every STATS_EVERY_S.
 SENSOR_STATS_PATH = os.environ.get("SENSOR_STATS_PATH", "/var/run/kubeheal/sensor-stats.json")
+# "sensor" (eBPF, default) or "falco": only labels kubeheal_security_event_source so KubeHealSensorDown skips Falco installs.
+EVENT_SOURCE = os.environ.get("EVENT_SOURCE", "sensor")
 STATS_EVERY_S = 5.0
 STATS_FRESH_S = 30.0       # a stats file older than this: the sensor is down
 CONTAIN_MAX_AGE_S = 30.0   # older containment commands are stale (the API delete has landed or failed by now)
@@ -125,6 +132,7 @@ SENSOR_LOST = Counter("kubeheal_sensor_lost_total", "Events the sensor lost befo
 SENSOR_UP = Gauge("kubeheal_sensor_up", "1 while the sensor stats file is fresher than 30 s")
 SENSOR_COUNTERS = {"events_total": SENSOR_EVENTS, "drops_total": SENSOR_DROPS, "pool_full_total": SENSOR_POOL_FULL,
                    "lost_total": SENSOR_LOST}
+EVENT_SOURCE_INFO = Gauge("kubeheal_security_event_source", "1 for the configured event source", ["source"])
 MODEL_MODE = Gauge("kubeheal_security_model_mode", "1 for the scoring path in use", ["mode"])
 CONTAIN_AGE = Histogram("kubeheal_security_contain_age_seconds", "Containment command age when its pod froze",
                         buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30))
@@ -143,11 +151,20 @@ class PodWindow:
     last_uncertain: bool = False
     last_risk: float = 0.0
     due_at: float = float("-inf")                              # monotonic; not scored before (interval, backoff)
+    scored_at: float = float("-inf")                           # monotonic time this window was last taken for scoring
+    hot: bool = False                                          # a rename added a suffix since the last scoring
+    suspicious: bool = False                                   # the last scoring was at publish risk or above
     fails: int = 0                                             # consecutive failed evaluations
     pod_uid: str = ""
     proc: tuple[int, str] = (0, "")                            # (Falco pid, container id) of the latest event
     samples: deque = field(default_factory=lambda: deque(maxlen=MAX_SAMPLES))  # (clock() s, net tx, cgroup wbytes)
     entropy_cache: OrderedDict = field(default_factory=OrderedDict)  # path → (stat signature, entropy), LRU
+
+
+def _suffix_added(path: str, new: str) -> bool:
+    """path → path + ".ext" with a non-numeric ext (file.txt → file.txt.locked); a rotation (x.log → x.log.1) is not."""
+    n = len(path)
+    return 0 < n < len(new) - 1 and new[n] == "." and new.startswith(path) and not new[n + 1:].isdigit()
 
 
 clock = time.monotonic   # counter-sample clock (wall-clock steps must not freeze sampling); patched in tests
@@ -371,6 +388,37 @@ def sample_entropy(proc_root: str, files: list[tuple[str, tuple[int, str]]],
     return out
 
 
+SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
+
+
+class KubeLite:
+    """The two read-only GETs the owner lookup needs (pod, ReplicaSet), straight over aiohttp with the pod's
+    service-account token: the generated Kubernetes client costs ~34 MB resident per node for nothing else.
+    A non-2xx reply raises aiohttp.ClientResponseError (.status). In-cluster only; elsewhere main() uses the client."""
+
+    def __init__(self, session: aiohttp.ClientSession, sa_dir: str = SA_DIR):
+        self.session, self.sa_dir = session, sa_dir
+        self.base = f"https://{os.environ['KUBERNETES_SERVICE_HOST']}:{os.environ.get('KUBERNETES_SERVICE_PORT', '443')}"
+        self.ssl = ssl.create_default_context(cafile=f"{sa_dir}/ca.crt")
+
+    async def _get(self, path: str, total_s: float) -> SimpleNamespace:
+        with open(f"{self.sa_dir}/token") as fh:   # noqa: ASYNC230  rotated by the kubelet: read per call (lookups are cached)
+            headers = {"Authorization": f"Bearer {fh.read().strip()}"}
+        async with self.session.get(self.base + path, headers=headers, ssl=self.ssl,
+                                    timeout=aiohttp.ClientTimeout(total=total_s)) as resp:
+            resp.raise_for_status()
+            meta = (await resp.json(loads=orjson.loads)).get("metadata") or {}
+        refs = [SimpleNamespace(kind=r.get("kind"), name=r.get("name"), controller=r.get("controller"))
+                for r in meta.get("ownerReferences") or []]
+        return SimpleNamespace(metadata=SimpleNamespace(owner_references=refs))
+
+    async def read_namespaced_pod(self, name: str, ns: str, _request_timeout: float = 10):
+        return await self._get(f"/api/v1/namespaces/{ns}/pods/{name}", _request_timeout)
+
+    async def read_namespaced_replica_set(self, name: str, ns: str, _request_timeout: float = 10):
+        return await self._get(f"/apis/apps/v1/namespaces/{ns}/replicasets/{name}", _request_timeout)
+
+
 class OwnerResolver:
     """pod → workload name, cached. The pod's controller (ownerReference with controller=true): a ReplicaSet
     owned by a Deployment → the Deployment's name; any other controller (StatefulSet, DaemonSet, Job, a bare
@@ -393,7 +441,7 @@ class OwnerResolver:
                 ref = next((r for r in rs.metadata.owner_references or []
                             if r.controller and r.kind == "Deployment"), ref)
             name = ref.name if ref is not None else pod
-        except (ApiException, aiohttp.ClientError, TimeoutError) as e:
+        except Exception as e:   # any failed lookup (API error, timeout, odd reply): the pod name, retried soon
             log.warning("owner lookup for %s/%s failed (%s); using pod name", ns, pod, getattr(e, "status", e))
             ttl = 30.0                         # retry the lookup soon
         if len(self.cache) > 4096:
@@ -416,7 +464,9 @@ class SecurityAgent:
         self.pids: dict[str, float] = {}   # container id → a local PID of it, or a cached miss (see local_pid)
         self.sem = asyncio.Semaphore(MAX_CONCURRENT)
         self.ticks = {"tail": time.monotonic(), "eval": time.monotonic(), "contain": time.monotonic()}
-        self.wake = asyncio.Event()        # set when a pod crosses BURST_EVENTS
+        self.wake = asyncio.Event()        # set when a pod crosses BURST_EVENTS or turns hot
+        self.fast = False                  # a hot or suspicious pod was taken in this round: short pause after it
+        self.hot_seen = asyncio.Event()    # set when a pod turns hot: ends the pause between rounds early
         self.lag_logged = float("-inf")
         self.frozen: dict[str, list] = {}  # pod uid → [namespace, pod, monotonic freeze time, overdue logged]
         self.stats_at = float("-inf")      # monotonic time of the last sensor-stats read
@@ -448,7 +498,13 @@ class SecurityAgent:
                 if len(written) > MAX_WRITTEN:
                     written.popitem(last=False)
         w.new += 1
-        if w.new == BURST_EVENTS:
+        if sc in RENAME_SYSCALLS and _suffix_added(ev["path"], ev["new_path"]):
+            w.hot = True
+            self.hot_seen.set()
+            if not w.fails:   # a failed window keeps its backoff
+                w.due_at = min(w.due_at, w.scored_at + min(HOT_INTERVAL_S, POD_MIN_INTERVAL_S))
+            self.wake.set()
+        elif w.new == BURST_EVENTS:
             self.wake.set()
         w.last_seen = time.monotonic()
         return True
@@ -465,12 +521,14 @@ class SecurityAgent:
                 del self.windows[key]
                 for cid in {w.proc[1], *(v[1] for v in w.written.values())}:
                     self.pids.pop(cid, None)
-            elif w.new >= (BURST_EVENTS if burst_only else 1):
+            elif w.hot or w.new >= (BURST_EVENTS if burst_only else 1):
                 if w.due_at > now:
                     wake_at = w.due_at if wake_at is None else min(wake_at, w.due_at)
                     continue
                 w.new = 0
-                w.due_at = now + POD_MIN_INTERVAL_S
+                w.scored_at = now
+                w.due_at = now + (min(HOT_INTERVAL_S, POD_MIN_INTERVAL_S) if w.hot or w.suspicious else POD_MIN_INTERVAL_S)
+                self.fast = self.fast or w.hot or w.suspicious
                 due.append((key, w))
         for i in range(0, len(due), MAX_BATCH):
             await self.evaluate_batch(due[i:i + MAX_BATCH])
@@ -485,6 +543,10 @@ class SecurityAgent:
 
     async def evaluate_batch(self, due: list[tuple[Key, PodWindow]]) -> None:
         """Features per pod (concurrent, file/proc reads in threads), one inference call, then publish per pod."""
+        # a pod that may be killed soon gets its owner resolved while its features and score are computed
+        early = [asyncio.ensure_future(self.owners.resolve(*key)) for key, w in due if w.hot or w.suspicious]
+        for _, w in due:
+            w.hot = False
         windows = []
         for (key, w), f in zip(due, await asyncio.gather(*(self.features(key, w) for key, w in due)), strict=True):
             if f is None:
@@ -492,8 +554,10 @@ class SecurityAgent:
             else:
                 windows.append((key, w, f))
         if not windows:
+            await asyncio.gather(*early, return_exceptions=True)
             return
         preds = await self.score([f[0] for _, _, f in windows])
+        await asyncio.gather(*early, return_exceptions=True)
         if preds or self.capture:   # owner lookups for the whole batch at once, not one by one in the publish loop
             # a failed lookup surfaces again (and is handled) in that pod's _publish
             await asyncio.gather(*(self.owners.resolve(*key) for (key, _, _), p in zip(
@@ -501,6 +565,10 @@ class SecurityAgent:
                 if self.capture or (p and p.risk >= SECURITY_PUBLISH_RISK)), return_exceptions=True)
         for i, (key, w, f) in enumerate(windows):
             pred = preds[i] if preds else None
+            if pred is not None:
+                w.suspicious = pred.risk >= SECURITY_PUBLISH_RISK
+                if w.suspicious:   # looks bad: re-scored soon, not after the normal interval
+                    w.due_at = min(w.due_at, w.scored_at + min(HOT_INTERVAL_S, POD_MIN_INTERVAL_S))
             if pred is None:
                 self._retry(w)
                 EVALS.labels("inference_error").inc()
@@ -613,9 +681,23 @@ class SecurityAgent:
             log.warning("security events lag %.1fs behind (the event source or this agent cannot keep up)", lag)
 
     async def tail_loop(self, tail: FalcoTail) -> None:
+        """Read the events file as it grows; with a file watch (inotify) an idle tail wakes on the write itself,
+        else it polls every IDLE_POLL_S."""
+        written, fd = asyncio.Event(), watch_dir(tail.path)
+        loop = asyncio.get_running_loop()
+
+        def on_write() -> None:
+            try:
+                os.read(fd, 65536)   # drain: one wake-up per batch of writes
+            except OSError:
+                pass
+            written.set()
+        if fd is not None:
+            loop.add_reader(fd, on_write)
         try:
             while True:
                 self.ticks["tail"] = time.monotonic()
+                written.clear()   # before the read: a write landing during it wakes the next wait
                 lines = await asyncio.to_thread(tail.read_lines)
                 n, ev = 0, None
                 for line in lines:
@@ -625,8 +707,14 @@ class SecurityAgent:
                 if ev:
                     self.observe_lag(ev["ts_ms"])
                 if not lines:
-                    await asyncio.sleep(0.2)
+                    try:
+                        await asyncio.wait_for(written.wait(), IDLE_POLL_S)
+                    except TimeoutError:
+                        pass
         finally:
+            if fd is not None:
+                loop.remove_reader(fd)
+                os.close(fd)
             tail.close()
 
     async def eval_loop(self) -> None:
@@ -641,6 +729,7 @@ class SecurityAgent:
                 except TimeoutError:
                     pass
                 self.wake.clear()
+                self.hot_seen.clear()
                 timer = time.monotonic() >= next_tick
                 if timer:
                     next_tick = time.monotonic() + EVAL_INTERVAL_S
@@ -649,7 +738,14 @@ class SecurityAgent:
             except Exception:   # one bad round must not end the agent (and lose every window); CancelledError passes
                 log.exception("evaluation round failed")
                 wake_at = None
-            await asyncio.sleep(MIN_TICK_S)
+            if self.fast or wake_at is not None:   # a hot pod was taken or is waiting for its slot: soon
+                await asyncio.sleep(HOT_TICK_S)
+            else:
+                try:
+                    await asyncio.wait_for(self.hot_seen.wait(), MIN_TICK_S)   # a pod turning hot ends the pause
+                except TimeoutError:
+                    pass
+            self.fast = False
 
     async def contain(self, fields: dict) -> str:
         """Freeze the commanded pod's cgroup if the pod runs on this node (fusion deletes it via the API next)."""
@@ -749,21 +845,31 @@ class SecurityAgent:
 
 async def main() -> None:
     setup_logging()
-    await load_kube_config()
     redis = await connect_redis()
-    async with aiohttp.ClientSession() as session, client.ApiClient() as api:
-        owners = OwnerResolver(client.CoreV1Api(api), client.AppsV1Api(api))
+    async with contextlib.AsyncExitStack() as stack:
+        session = await stack.enter_async_context(aiohttp.ClientSession())
+        in_cluster = "KUBERNETES_SERVICE_HOST" in os.environ and os.path.exists(f"{SA_DIR}/token")  # noqa: ASYNC240
+        if in_cluster:
+            owners = OwnerResolver(*(KubeLite(session),) * 2)
+        else:   # outside a cluster: the full client reads kubeconfig (imported only here: it is heavy)
+            from kubernetes_asyncio import client
+            await load_kube_config()
+            api = await stack.enter_async_context(client.ApiClient())
+            owners = OwnerResolver(client.CoreV1Api(api), client.AppsV1Api(api))
         try:
             bundle = await asyncio.to_thread(ModelBundle.load, MODEL_DIR)
         except Exception as e:   # absent dir (no model baked into the image) is the normal remote setup
             log.warning("no embedded security model (%s: %r); using the inference service", MODEL_DIR, e)
             bundle = None
+        if bundle:   # build the TreeSHAP explainer now: its first use would cost ~1 s inside the first attack
+            await asyncio.to_thread(bundle.predict_batch, [{}], 0.0)
         if bundle and not set(bundle.features) <= set(SECURITY_FEATURES):
             log.error("embedded security model uses features the agent does not send: %s; using the inference service",
                       sorted(set(bundle.features) - set(SECURITY_FEATURES)))
             bundle = None
         mode = "embedded" if bundle else "remote"
         MODEL_MODE.labels(mode).set(1)
+        EVENT_SOURCE_INFO.labels(EVENT_SOURCE).set(1)
         log.info("security scoring: %s (%s)", mode, MODEL_DIR if bundle else "inference service")
         if not CONTAIN_KEY:
             log.warning("CONTAIN_HMAC_KEY unset: unsigned containment commands are accepted")

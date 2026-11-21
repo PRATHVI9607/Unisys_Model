@@ -5,7 +5,46 @@
 # Keep-lists: only the series agents/health_agent/prometheus.py build_queries() reads are
 # ingested (lab runs churn hundreds of pods/hour; everything else would fill the 1.5 GiB head).
 # Add a metric there → add it to the matching keep regex here (or the PodMonitor).
-alertmanager: {enabled: false}
+# Alertmanager: off on a laptop. To get notifications (rules: deploy/k8s/base/alerts/), install with
+# `--set alertmanager.enabled=true` and uncomment the receivers you use below; docs/operations.md "Alert routing" has the Secret.
+# Receivers are commented out because Alertmanager refuses to start when a referenced secret file is missing.
+# Routing: critical -> pager, warning -> chat, info -> chat digest; everything lands in `null` until a receiver is enabled.
+alertmanager:
+  enabled: false
+  alertmanagerSpec:
+    secrets: []   # [kubeheal-alertmanager] once you create it: mounted at /etc/alertmanager/secrets/kubeheal-alertmanager/
+  config:
+    global: {resolve_timeout: 5m}
+    route:
+      receiver: "null"
+      group_by: [alertname, namespace]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        - {matchers: ['severity="critical"'], receiver: "null"}   # -> pagerduty
+        - {matchers: ['severity="warning"'], receiver: "null"}    # -> slack
+        - {matchers: ['severity="info"'], receiver: "null", repeat_interval: 24h}   # -> slack
+    receivers:
+      - name: "null"
+      # - name: slack          # Secret key slack-url: the incoming-webhook URL
+      #   slack_configs:
+      #     - api_url_file: /etc/alertmanager/secrets/kubeheal-alertmanager/slack-url
+      #       channel: "#kubeheal"
+      #       send_resolved: true
+      #       title: "{{ .CommonLabels.alertname }} ({{ .CommonLabels.severity }})"
+      #       text: "{{ range .Alerts }}{{ .Annotations.description }}\n{{ end }}"
+      # - name: pagerduty      # Secret key pagerduty-key: the Events API v2 integration key
+      #   pagerduty_configs:
+      #     - routing_key_file: /etc/alertmanager/secrets/kubeheal-alertmanager/pagerduty-key
+      #       description: "{{ .CommonLabels.alertname }}: {{ .CommonAnnotations.summary }}"
+      # - name: email          # Secret key smtp-password
+      #   email_configs:
+      #     - to: oncall@example.com
+      #       from: kubeheal@example.com
+      #       smarthost: smtp.example.com:587
+      #       auth_username: kubeheal@example.com
+      #       auth_password_file: /etc/alertmanager/secrets/kubeheal-alertmanager/smtp-password
 # Grafana: only for the KubeHeal dashboard (ConfigMap kubeheal-grafana-dashboard, deploy/k8s/base/grafana/).
 # No default dashboards, no Ingress: reach it with `kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80`.
 # adminPassword null = the chart generates a random one: kubectl -n monitoring get secret monitoring-grafana -o jsonpath='{.data.admin-password}' | base64 -d
@@ -49,6 +88,7 @@ prometheus:
     # pick up every ServiceMonitor / PodMonitor, not only ones labelled with the release name
     serviceMonitorSelectorNilUsesHelmValues: false
     podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false   # and every PrometheusRule (deploy/k8s/base/alerts/)
     resources:
       requests: {cpu: 200m, memory: 512Mi}
       limits: {memory: 1536Mi}

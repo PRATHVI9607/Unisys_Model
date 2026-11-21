@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Redis high availability (used by deploy/k8s/overlays/production; Helm: redis.ha.enabled). Replaces base's
+# single Redis Deployment with 3 Redis (1 primary + 2 replicas, StatefulSet, a PVC each) and 3 Sentinels
+# (quorum 2), and points the agents and the dashboard at the Sentinels via REDIS_SENTINELS. The credentials
+# Job and Secret kubeheal-redis stay as they are (REDIS_URL still supplies each component's ACL user and
+# password; its host is ignored while REDIS_SENTINELS is set). See docs/operations.md "Redis high availability".
+resources:
+  - redis-ha.yaml
+
+patches:
+  - patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: redis, namespace: kubeheal}
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata: {name: redis-master, namespace: kubeheal}
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata: {name: redis-data, namespace: kubeheal}
+  # Index 1 = right after REDIS_URL, where the Helm templates put it. Container 0 is the agent in each workload.
+  - target: {group: apps, version: v1, kind: Deployment, name: kubeheal-fusion-agent}
+    patch: &env |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/1
+        value: {name: REDIS_SENTINELS, value: "redis-sentinel-0.redis-sentinel.kubeheal.svc:26379,redis-sentinel-1.redis-sentinel.kubeheal.svc:26379,redis-sentinel-2.redis-sentinel.kubeheal.svc:26379"}
+  - target: {group: apps, version: v1, kind: Deployment, name: kubeheal-health-agent}
+    patch: *env
+  - target: {group: apps, version: v1, kind: Deployment, name: kubeheal-dashboard}
+    patch: *env
+  - target: {group: apps, version: v1, kind: DaemonSet, name: kubeheal-security-agent}   # its env starts with EVENT_SOURCE, so index 2
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/2
+        value: {name: REDIS_SENTINELS, value: "redis-sentinel-0.redis-sentinel.kubeheal.svc:26379,redis-sentinel-1.redis-sentinel.kubeheal.svc:26379,redis-sentinel-2.redis-sentinel.kubeheal.svc:26379"}

@@ -11,12 +11,12 @@
 #   ./deploy/scripts/smoke.sh [--force-context NAME] [--skip-dashboard]
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT"
-source deploy/scripts/lib/guard.sh; kh_guard "$@" || exit 1; set -- "${KH_REST[@]}"
+source deploy/scripts/lib/guard.sh; source deploy/scripts/lib/redis.sh; kh_guard "$@" || exit 1; set -- "${KH_REST[@]}"
 DASH=1; [[ ${1:-} == --skip-dashboard ]] && { DASH=0; shift; }   # the dashboard is not deployed with --production
 [[ $# -eq 0 ]] || { echo "usage: $0 [--force-context NAME] [--skip-dashboard]"; exit 1; }
 KH=kubeheal; SEC_NS=khe-smoke-sec; HEALTH_NS=khe-smoke-health
 declare -a TIMES=(); PF=""; T0=$SECONDS
-rc() { kubectl exec -i -n "$KH" deploy/redis -- redis-cli --raw "$@" 2>&1; }   # admin user via REDISCLI_AUTH
+rc() { kubectl exec -i -n "$KH" $(kh_redis_target) -- redis-cli --raw "$@" 2>&1; }   # admin user via REDISCLI_AUTH
 step() { STEP="$1"; S=$SECONDS; echo "== $1"; }
 ok() { TIMES+=("$(printf '%-10s %4ss  PASS' "$STEP" $((SECONDS - S)))"); echo "   ok ($((SECONDS - S))s)"; }
 fail() {
@@ -27,7 +27,7 @@ cleanup() {
   local rc_=$?; set +e
   [[ -n $PF ]] && kill "$PF" 2>/dev/null
   kubectl delete ns "$SEC_NS" "$HEALTH_NS" --wait=false --ignore-not-found >/dev/null 2>&1
-  kubectl exec -n "$KH" deploy/redis -- sh -c "redis-cli --scan --pattern 'kubeheal:*khe-smoke*' | xargs -r -n50 redis-cli DEL >/dev/null" 2>/dev/null
+  kubectl exec -n "$KH" $(kh_redis_target) -- sh -c "redis-cli --scan --pattern 'kubeheal:*khe-smoke*' | xargs -r -n50 redis-cli DEL >/dev/null" 2>/dev/null
   echo; printf '%s\n' "${TIMES[@]}"; echo "total $((SECONDS - T0))s  exit $rc_"
 }
 trap cleanup EXIT
@@ -44,10 +44,10 @@ ok
 step acl
 pw() { kubectl get secret kubeheal-redis -n "$KH" -o jsonpath="{.data.$1-password}" | base64 -d; }
 for u in health security fusion dashboard; do
-  out="$(kubectl exec -n "$KH" deploy/redis -- redis-cli --user "$u" --pass "$(pw $u)" --no-auth-warning ping 2>&1)"
+  out="$(kubectl exec -n "$KH" $(kh_redis_target) -- redis-cli --user "$u" --pass "$(pw $u)" --no-auth-warning ping 2>&1)"
   [[ $out == PONG ]] || fail "user $u cannot authenticate: $out"
 done
-[[ $(kubectl exec -n "$KH" deploy/redis -- redis-cli --user dashboard --pass wrong --no-auth-warning ping 2>&1) != PONG ]] || fail "wrong password accepted"
+[[ $(kubectl exec -n "$KH" $(kh_redis_target) -- redis-cli --user dashboard --pass wrong --no-auth-warning ping 2>&1) != PONG ]] || fail "wrong password accepted"
 # user | OK or NO | command (ACL DRYRUN: nothing is executed)
 while IFS='|' read -r u want cmd; do
   [[ -z $u ]] && continue

@@ -7,6 +7,7 @@
 # Cleans up the kubeheal-bench namespace and its circuit breakers on exit.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT"
+source deploy/scripts/lib/redis.sh
 NS=kubeheal-bench; KH=kubeheal; DURATION=300; RUNS=5; OUT="training/data/collected/bench-$(date +%s).json"
 while [ $# -gt 0 ]; do case $1 in
   --duration) DURATION=$2; shift 2;; --runs) RUNS=$2; shift 2;; --out) OUT=$2; shift 2;;
@@ -15,7 +16,7 @@ command -v kubectl >/dev/null || { echo "need kubectl"; exit 1; }
 mkdir -p "$(dirname "$OUT")"; TMP=$(mktemp -d)
 
 reset_cb() {  # per-workload circuit breakers would trip after MAX_KILLS_PER_HOUR
-  kubectl -n $KH exec deploy/redis -- sh -c \
+  kubectl -n $KH exec $(kh_redis_target) -- sh -c \
     "redis-cli --scan --pattern 'kubeheal:cb:*kubeheal-bench*' | xargs -r redis-cli DEL >/dev/null" || true
 }
 cleanup() { kubectl delete ns $NS --ignore-not-found --wait=false >/dev/null 2>&1 || true; reset_cb; rm -rf "$TMP"; }
@@ -87,8 +88,8 @@ YAML
     sleep 0.5
   done
   kubectl delete pod chaos-$i -n $NS --ignore-not-found --wait=false >/dev/null
-  kubectl -n $KH exec deploy/redis -- redis-cli XREVRANGE kubeheal.actions + - COUNT 200 > "$TMP/actions-$i.txt" || true
-  kubectl -n $KH exec deploy/redis -- redis-cli XREVRANGE kubeheal.security.events + - COUNT 300 > "$TMP/sec-$i.txt" || true
+  kubectl -n $KH exec $(kh_redis_target) -- redis-cli XREVRANGE kubeheal.actions + - COUNT 200 > "$TMP/actions-$i.txt" || true
+  kubectl -n $KH exec $(kh_redis_target) -- redis-cli XREVRANGE kubeheal.security.events + - COUNT 300 > "$TMP/sec-$i.txt" || true
   echo "chaos-$i ${OPMS:-none}" >> "$TMP/kills.txt"
 done
 

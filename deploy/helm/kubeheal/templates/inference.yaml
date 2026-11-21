@@ -34,7 +34,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: inference
-          image: {{ .Values.images.inference }}
+          image: {{ include "kubeheal.image" (list . .Values.images.inference) }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           ports: [{containerPort: 8000, name: http}]
           env:

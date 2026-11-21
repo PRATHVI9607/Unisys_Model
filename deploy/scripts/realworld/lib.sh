@@ -10,6 +10,7 @@ set -uo pipefail
 RW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$RW_DIR/../../.." && pwd)"
 source "$ROOT/deploy/scripts/lib/guard.sh"
+source "$ROOT/deploy/scripts/lib/redis.sh"
 KH=kubeheal; RW_PREFIX=khe-rw-; RW_DRY=0; RW_UNDO=(); RW_FAILS=0; RW_T0=$SECONDS; RW_T0_MS=$(date +%s%3N); RW_NAME="${RW_NAME:-rw}"
 
 say() { echo "[$(date +%H:%M:%S)] $*" >&2; }
@@ -39,7 +40,7 @@ rw_mkns() {   # only khe-rw-* namespaces are ever created or deleted by these sc
   [[ $1 == ${RW_PREFIX}* ]] || die "refusing namespace '$1' (must start with $RW_PREFIX)"
   kubectl create ns "$1" >/dev/null 2>&1; kubectl label ns "$1" kubeheal.io/namespace-tier=prod --overwrite >/dev/null
 }
-rc() { kubectl exec -i -n "$KH" deploy/redis -- redis-cli --raw "$@" 2>&1; }   # admin user via the pod's REDISCLI_AUTH
+rc() { kubectl exec -i -n "$KH" $(kh_redis_target) -- redis-cli --raw "$@" 2>&1; }   # admin user via the pod's REDISCLI_AUTH
 rwpy() { RW_DRY=$RW_DRY KH_CTX=$KH_CTX python3 "$RW_DIR/rwlib.py" "$@"; }
 
 rw_delete_namespaces() {

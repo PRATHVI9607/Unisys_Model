@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import statistics as st
 import subprocess
@@ -83,9 +84,16 @@ def mkns(ns: str) -> None:
     k("label", "ns", ns, "kubeheal.io/namespace-tier=prod", "--overwrite")
 
 
+def redis_target() -> list[str]:
+    """Where redis-cli runs: the primary under Redis HA, deploy/redis otherwise (deploy/scripts/lib/redis.sh)."""
+    ctx = KUBECTL[-1] if len(KUBECTL) > 1 else ""
+    r = subprocess.run([str(ROOT / "deploy/scripts/lib/redis.sh")], env={**os.environ, "KH_CTX": ctx}, capture_output=True, text=True)
+    return r.stdout.split() or ["deploy/redis"]
+
+
 def rc(*a: str) -> str:
     """redis-cli in the Redis pod (admin user via its REDISCLI_AUTH). redis-cli exits 0 on error replies."""
-    out = k("-n", KH, "exec", "deploy/redis", "--", "redis-cli", *a)
+    out = k("-n", KH, "exec", *redis_target(), "--", "redis-cli", *a)
     if REDIS_ERR.match(out):
         raise KubectlError(f"redis-cli {' '.join(a[:3])}: {out.strip()[:200]}")
     return out
@@ -589,8 +597,9 @@ def section_d() -> None:
     # D3 redis restart: AOF on a PVC, so consumer groups and baselines must survive without any agent restart
     g0 = groups()
     b0 = rc("EXISTS", "kubeheal:baseline:demo:victim-app").strip()
-    k("-n", KH, "rollout", "restart", "deploy/redis")
-    wait_rollout("deploy", KH, "redis")
+    redis_kind = "sts" if k("-n", KH, "get", "sts", "redis", "-o", "name", check=False).strip() else "deploy"
+    k("-n", KH, "rollout", "restart", f"{redis_kind}/redis")
+    wait_rollout(redis_kind, KH, "redis")
     time.sleep(45)
     g1 = groups()
     t0 = now_ms()

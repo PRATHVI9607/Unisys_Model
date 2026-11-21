@@ -14,6 +14,7 @@ resources:
   - fusion-agent-deployment.yaml
   - dashboard-deployment.yaml
   - prometheus-config.yaml   # ServiceMonitor + PodMonitor; needs the Prometheus Operator CRDs
+  - alerts/kubeheal-rules.yaml   # PrometheusRule
 
 # Grafana dashboard for kube-prometheus-stack's sidecar (grafana_dashboard label; deploy/k8s/helm/monitoring-values.yaml
 # enables Grafana). Lands in namespace monitoring like the ServiceMonitor; the name carries no hash.

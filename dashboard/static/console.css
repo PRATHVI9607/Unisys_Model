@@ -165,8 +165,8 @@ button.primary { background: var(--primary); color: var(--on-primary); border-co
 button.danger { background: var(--neg); color: #fff; border-color: transparent; }
 :root[data-theme="dark"] button.danger { color: #1a0a0b; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) button.danger { color: #1a0a0b; } }
-button.quiet { background: none; border: 0; padding: 0; height: 28px; color: var(--text-2); text-align: left; }
-button.quiet:hover { color: var(--text); }
+button.quiet, a.quiet { background: none; border: 0; padding: 0; height: 28px; color: var(--text-2); text-align: left; text-decoration: none; }
+button.quiet:hover, a.quiet:hover { color: var(--text); }
 button:disabled { opacity: .5; cursor: not-allowed; }
 input, select, textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; height: 32px; width: 100%; }
 textarea { height: auto; padding: 8px 10px; resize: vertical; margin-top: 4px; }

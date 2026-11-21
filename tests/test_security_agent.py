@@ -941,3 +941,148 @@ async def test_embedded_score_is_timed(redis):
     n = sa.SCORE_SECONDS._sum.get()
     await a.score([{"a": 1.0}])
     assert sa.SCORE_SECONDS._sum.get() > n
+
+
+# ── low-latency paths: hot rename trigger, file watch, lite kube client ────────────────────────────
+@pytest.mark.parametrize("path,new,hot", [
+    ("/d/a.txt", "/d/a.txt.locked", True), ("/d/a", "/d/a.enc", True),
+    ("/d/x.log", "/d/x.log.1", False), ("/d/x.log", "/d/x.log.12", False),    # rotation
+    ("/d/a.txt", "/d/b.txt", False), ("/d/a.txt", "/d/a.txt", False), ("", "/d/a.locked", False),
+    ("/d/a.txt", "/d/a.txt.", False), ("/d/a.tmp", "/d/a", False)])
+def test_suffix_added(path, new, hot):
+    assert sa._suffix_added(path, new) is hot
+
+
+async def test_suffix_rename_scores_the_pod_at_once_not_at_burst_or_timer(redis, monkeypatch):
+    monkeypatch.setattr(sa, "POD_MIN_INTERVAL_S", 0.5)
+    a = make_agent(redis)
+    calls = stub_predict(monkeypatch, "benign", 0.1)
+    a.ingest(parse_line(falco_line()))
+    await a.evaluate_all(burst_only=True)
+    assert not calls                                                           # one event: below the burst threshold
+    rename = {"fs.path.source": "/data/a.txt", "fs.path.target": "/data/a.txt.locked"}
+    w = a.windows[("shop", "web-7d9f8b6c5-x2x7q")]
+    w.scored_at = time.monotonic() - 1.0
+    w.due_at = time.monotonic() + 0.4                                          # inside the normal 0.5 s interval
+    a.ingest(parse_line(falco_line("renameat2", None, **rename)))
+    assert a.wake.is_set()
+    await a.evaluate_all(burst_only=True)
+    assert len(calls) == 1 and calls[0][1]["n_events"] == 2.0 and not w.hot
+    a.ingest(parse_line(falco_line("renameat2", None, **rename)))              # again at once: held to HOT_INTERVAL_S
+    assert await a.evaluate_all(burst_only=True) is not None and len(calls) == 1
+
+
+async def test_hot_trigger_keeps_the_failure_backoff(redis, monkeypatch):
+    a = make_agent(redis)
+    stub_predict(monkeypatch, "benign", 0.1)
+    a.ingest(parse_line(falco_line()))
+    w = a.windows[("shop", "web-7d9f8b6c5-x2x7q")]
+    w.fails, w.due_at = 3, time.monotonic() + 30
+    a.ingest(parse_line(falco_line("renameat2", None, **{"fs.path.source": "/d/a", "fs.path.target": "/d/a.locked"})))
+    assert w.due_at > time.monotonic() + 20
+
+
+async def test_suspicious_pod_is_rescored_at_the_hot_interval(redis, monkeypatch):
+    monkeypatch.setattr(sa, "POD_MIN_INTERVAL_S", 5.0)
+    a = make_agent(redis)
+    stub_predict(monkeypatch, "suspicious", 0.6)
+    a.ingest(parse_line(falco_line()))
+    await a.evaluate_all()
+    w = a.windows[("shop", "web-7d9f8b6c5-x2x7q")]
+    assert w.suspicious and w.due_at - w.scored_at == pytest.approx(sa.HOT_INTERVAL_S)
+
+
+async def test_owner_is_resolved_beside_scoring_for_a_hot_pod(redis, monkeypatch):
+    a = make_agent(redis)
+    stub_predict(monkeypatch, "ransomware", 0.95)
+    order = []
+    real_features = a.features
+
+    async def features(key, w):
+        order.append("features")
+        return await real_features(key, w)
+    monkeypatch.setattr(a, "features", features)
+    real = a.owners.resolve
+
+    async def resolve(ns, pod):
+        order.append("owner")
+        return await real(ns, pod)
+    monkeypatch.setattr(a.owners, "resolve", resolve)
+    a.ingest(parse_line(falco_line("renameat2", None, **{"fs.path.source": "/d/a", "fs.path.target": "/d/a.locked"})))
+    await a.evaluate_all()
+    assert order[0] == "owner"                                                 # started before the features were read
+
+
+def test_watch_dir_wakes_on_a_write(tmp_path):
+    import select
+    fd = sa.watch_dir(str(tmp_path / "events.jsonl"))
+    assert fd is not None
+    try:
+        assert not select.select([fd], [], [], 0)[0]
+        (tmp_path / "events.jsonl").write_bytes(b"x\n")
+        assert select.select([fd], [], [], 1.0)[0]
+    finally:
+        os.close(fd)
+    assert sa.watch_dir(str(tmp_path / "missing" / "events.jsonl")) is None
+
+
+async def test_tail_loop_wakes_on_the_write_not_the_poll(redis, tmp_path, monkeypatch):
+    monkeypatch.setattr(sa, "IDLE_POLL_S", 30.0)                               # only the file watch can wake it in time
+    p = tmp_path / "events.jsonl"
+    p.write_text("")
+    a = make_agent(redis)
+    task = asyncio.create_task(a.tail_loop(FalcoTail(str(p))))
+    await asyncio.sleep(0.2)
+    with open(p, "a") as f:   # noqa: ASYNC230
+        f.write(falco_line() + "\n")
+    for _ in range(100):
+        if ("shop", "web-7d9f8b6c5-x2x7q") in a.windows:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    assert ("shop", "web-7d9f8b6c5-x2x7q") in a.windows
+
+
+async def test_kube_lite_reads_owner_references(tmp_path):
+    from aiohttp import web
+    seen = {}
+
+    async def pod(req):
+        seen["auth"] = req.headers["Authorization"]
+        return web.json_response({"metadata": {"ownerReferences": [{"kind": "ReplicaSet", "name": "web-7d9f", "controller": True}]}})
+
+    async def missing(req):
+        return web.json_response({"kind": "Status"}, status=404)
+    app = web.Application()
+    app.router.add_get("/api/v1/namespaces/shop/pods/web-1", pod)
+    app.router.add_get("/apis/apps/v1/namespaces/shop/replicasets/gone", missing)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    (tmp_path / "token").write_text("tok\n")
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        kube = object.__new__(sa.KubeLite)                                     # no cluster: skip the https/CA setup
+        kube.session, kube.sa_dir, kube.ssl = session, str(tmp_path), None
+        kube.base = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+        ref = (await kube.read_namespaced_pod("web-1", "shop")).metadata.owner_references[0]
+        assert (ref.kind, ref.name, ref.controller) == ("ReplicaSet", "web-7d9f", True) and seen["auth"] == "Bearer tok"
+        with pytest.raises(aiohttp.ClientResponseError) as e:
+            await kube.read_namespaced_replica_set("gone", "shop")
+        assert e.value.status == 404
+        assert await sa.OwnerResolver(kube, kube).resolve("shop", "nope") == "nope"   # a failed lookup: the pod name
+    await runner.cleanup()
+
+
+async def test_hot_pod_ends_the_pause_between_rounds(redis, monkeypatch):
+    monkeypatch.setattr(sa, "MIN_TICK_S", 30.0)                                # only a hot event can end this pause
+    monkeypatch.setattr(sa, "EVAL_INTERVAL_S", 0.05)
+    a = make_agent(redis)
+    calls = stub_predict(monkeypatch, "benign", 0.1)
+    task = asyncio.create_task(a.eval_loop())
+    await asyncio.sleep(0.2)                                                   # first round done, now in the long pause
+    a.ingest(parse_line(falco_line("renameat2", None, **{"fs.path.source": "/d/a", "fs.path.target": "/d/a.locked"})))
+    await asyncio.sleep(0.2)
+    task.cancel()
+    assert len(calls) == 1

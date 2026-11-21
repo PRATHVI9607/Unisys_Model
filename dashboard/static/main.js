@@ -1,4 +1,4 @@
-import { authed, onAuth, signOut } from './auth.js';
+import { authed, loadMe, onAuth, signOut, sso } from './auth.js';
 import { live, start, subscribe } from './live.js';
 import { api, esc, icon, pretty, session, target } from './util.js';
 
@@ -33,7 +33,9 @@ function drawNav(page) {
 }
 
 function drawWho() {
-    $('who').innerHTML = authed()
+    $('who').innerHTML = sso.on
+        ? `<span>${esc(sso.user)} <span class="muted">${sso.admin ? 'admin' : 'viewer'}</span></span><a class="quiet" href="/oauth2/sign_out">Sign out</a>`
+        : authed()
         ? `<span>${esc(session.actor || 'admin')}</span><button type="button" class="quiet" id="signout">Sign out</button>`
         : '<span class="muted">Read-only</span>';
     $('signout')?.addEventListener('click', signOut);
@@ -94,6 +96,7 @@ subscribe(arrived => {
 onAuth(() => { drawWho(); });
 
 drawWho();
+loadMe();
 start();
 refreshMode();
 setInterval(refreshMode, 3000);   // fusion rewrites the effective mode every few seconds

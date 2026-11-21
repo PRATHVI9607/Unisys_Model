@@ -1,0 +1,13 @@
+# oauth2-proxy alpha config: what the legacy flags cannot express. The proxy (not the browser) sets every identity header
+# and the shared secret: a client-supplied copy of these headers is dropped (preserveRequestValue defaults to false).
+upstreamConfig:
+  upstreams:
+    - id: dashboard
+      path: /
+      uri: http://127.0.0.1:8080
+      passHostHeader: false   # the dashboard sees Host 127.0.0.1, so DASHBOARD_ALLOWED_HOSTS needs no public host name
+injectRequestHeaders:
+  - {name: X-Auth-Request-Email, values: [{claim: email}]}
+  - {name: X-Auth-Request-User, values: [{claim: user}]}
+  - {name: X-Auth-Request-Groups, values: [{claim: groups}]}
+  - {name: X-Kubeheal-Proxy, values: [{fromEnv: KUBEHEAL_PROXY_SECRET}]}

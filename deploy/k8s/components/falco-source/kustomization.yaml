@@ -14,6 +14,8 @@ patches:
           spec:
             containers:
               - {name: sensor, $patch: delete}
+              - name: agent
+                env: [{name: EVENT_SOURCE, value: falco}]
             volumes:
               - name: events
                 emptyDir: null

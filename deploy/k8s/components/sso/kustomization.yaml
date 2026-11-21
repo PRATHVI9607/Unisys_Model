@@ -1,0 +1,93 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# OIDC single sign-on for the console (docs/operations.md "Single sign-on"): an oauth2-proxy sidecar in the dashboard pod.
+# Sidecar, not a separate Deployment: the dashboard then listens on 127.0.0.1 only, so the one thing that can reach it
+# is the proxy in the same pod, and the identity headers it trusts cannot be forged by another pod. The shared secret
+# KUBEHEAL_PROXY_SECRET (header X-Kubeheal-Proxy) closes the one gap left (kubectl port-forward to the pod port).
+# Provide: Secret kubeheal-sso {client-id, client-secret, cookie-secret, proxy-secret} (GitHub OAuth App; create it with the kubectl command in docs/operations.md) and edit the ConfigMap literals below
+# (an overlay with `behavior: merge` is the clean way). Without the Secret the pod stays in CreateContainerConfigError: closed.
+configMapGenerator:
+  - name: kubeheal-sso
+    namespace: kubeheal
+    behavior: create
+    literals:
+      # Default: GitHub login (free, nothing to host). Anyone who may sign in is a viewer: collaborators of the repo below
+      # (add OAUTH2_PROXY_GITHUB_USERS=login1,login2 for more; a private repo also needs scope "user:email repo").
+      # Admins are the logins in admin-users. Other IdPs: docs/operations.md (oidc keys, admin-groups).
+      - OAUTH2_PROXY_PROVIDER=github
+      - OAUTH2_PROXY_GITHUB_REPO=PRATHVI9607/Unisys_Model
+      - OAUTH2_PROXY_SCOPE=user:email
+      - OAUTH2_PROXY_REDIRECT_URL=http://localhost:4180/oauth2/callback
+      - OAUTH2_PROXY_EMAIL_DOMAINS=*
+      - OAUTH2_PROXY_COOKIE_SECURE=false
+      - OAUTH2_PROXY_HTTP_ADDRESS=0.0.0.0:4180
+      - OAUTH2_PROXY_ALPHA_CONFIG=/etc/oauth2-proxy/alpha.yaml
+      - admin-users=PRATHVI9607
+      - admin-groups=
+      - actor-claim=user
+  - name: kubeheal-sso-proxy
+    namespace: kubeheal
+    files: [alpha.yaml=oauth2-proxy-alpha.yaml]
+generatorOptions:
+  disableNameSuffixHash: true
+
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: kubeheal-dashboard, namespace: kubeheal}
+      spec:
+        template:
+          spec:
+            volumes:
+              - name: sso-proxy
+                configMap: {name: kubeheal-sso-proxy}
+            containers:
+              - name: dashboard
+                args: ["uvicorn", "dashboard.fastapi_app:app", "--host", "127.0.0.1", "--port", "8080"]
+                env:
+                  - {name: KUBEHEAL_AUTH_MODE, value: proxy}
+                  - {name: KUBEHEAL_ADMIN_USERS, valueFrom: {configMapKeyRef: {name: kubeheal-sso, key: admin-users}}}
+                  - {name: KUBEHEAL_ACTOR_CLAIM, valueFrom: {configMapKeyRef: {name: kubeheal-sso, key: actor-claim}}}
+                  - {name: KUBEHEAL_ADMIN_GROUPS, valueFrom: {configMapKeyRef: {name: kubeheal-sso, key: admin-groups}}}
+                  - {name: KUBEHEAL_PROXY_SECRET, valueFrom: {secretKeyRef: {name: kubeheal-sso, key: proxy-secret}}}
+                # The kubelet cannot reach a loopback listener: probe from inside the container.
+                livenessProbe:
+                  $patch: replace
+                  exec: {command: [python, -c, "import urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8080/healthz', headers={'Host': 'localhost'}), timeout=3)"]}
+                  periodSeconds: 10
+                  timeoutSeconds: 5
+                  failureThreshold: 6
+                readinessProbe:
+                  $patch: replace
+                  exec: {command: [python, -c, "import urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8080/readyz', headers={'Host': 'localhost'}), timeout=3)"]}
+                  periodSeconds: 5
+                  timeoutSeconds: 3
+              - name: oauth2-proxy
+                image: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1@sha256:f6a4aa83a27e316114bf79664302b1ffb2cc8ce697fb479273af4feb3fb16fe3
+                imagePullPolicy: IfNotPresent
+                ports: [{containerPort: 4180, name: http}]
+                envFrom: [{configMapRef: {name: kubeheal-sso}}]
+                env:
+                  - {name: OAUTH2_PROXY_CLIENT_ID, valueFrom: {secretKeyRef: {name: kubeheal-sso, key: client-id}}}
+                  - {name: OAUTH2_PROXY_CLIENT_SECRET, valueFrom: {secretKeyRef: {name: kubeheal-sso, key: client-secret}}}
+                  - {name: OAUTH2_PROXY_COOKIE_SECRET, valueFrom: {secretKeyRef: {name: kubeheal-sso, key: cookie-secret}}}
+                  - {name: KUBEHEAL_PROXY_SECRET, valueFrom: {secretKeyRef: {name: kubeheal-sso, key: proxy-secret}}}
+                volumeMounts: [{name: sso-proxy, mountPath: /etc/oauth2-proxy, readOnly: true}]
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities: {drop: ["ALL"]}
+                resources:
+                  requests: {cpu: 10m, memory: 32Mi}
+                  limits: {cpu: 200m, memory: 96Mi}
+                livenessProbe: {httpGet: {path: /ping, port: 4180}, periodSeconds: 10}
+                readinessProbe: {httpGet: {path: /ready, port: 4180}, periodSeconds: 5}
+  # Clients now reach the proxy port; the dashboard port is loopback only.
+  - target: {kind: Service, name: kubeheal-dashboard}
+    patch: |-
+      - {op: replace, path: /spec/ports/0/targetPort, value: 4180}
+  - target: {kind: NetworkPolicy, name: kubeheal-dashboard-clients}
+    patch: |-
+      - {op: replace, path: /spec/ingress/0/ports/0/port, value: 4180}

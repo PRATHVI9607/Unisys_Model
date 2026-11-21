@@ -1,7 +1,7 @@
 {{- if .Values.ingress.enabled }}
 {{- if not .Values.dashboard.enabled }}{{ fail "ingress.enabled needs dashboard.enabled" }}{{ end }}
 {{- if not (and .Values.ingress.host .Values.ingress.tlsSecretName) }}{{ fail "ingress.enabled needs ingress.host and ingress.tlsSecretName: the dashboard is never exposed without TLS" }}{{ end }}
-# The dashboard has no login of its own besides the admin token: put it behind your ingress controller's auth too.
+# The dashboard has no login of its own besides the admin token: enable sso (OIDC proxy sidecar) or use your ingress controller's auth.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -26,5 +26,5 @@ spec:
             backend:
               service:
                 name: kubeheal-dashboard
-                port: {number: 8080}
+                port: {number: {{ if .Values.sso.enabled }}4180{{ else }}8080{{ end }}}
 {{- end }}

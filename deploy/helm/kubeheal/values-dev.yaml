@@ -1,0 +1,7 @@
+# Dev / demo / lab == `kubectl apply -k deploy/k8s`: images built locally (deploy/scripts/install.sh), never pulled.
+#   helm upgrade --install kubeheal deploy/helm/kubeheal -n kubeheal -f deploy/helm/kubeheal/values-dev.yaml
+images:                      # built locally by install.sh, never pulled
+  inference: kubeheal.invalid/inference:v5
+  agents: kubeheal.invalid/agents:v5
+  dashboard: kubeheal.invalid/dashboard:v5
+  sensor: kubeheal.invalid/sensor:v5

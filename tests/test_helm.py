@@ -22,7 +22,7 @@ def load(out: str) -> dict:
 
 
 def helm(*args: str) -> dict:
-    r = subprocess.run(["helm", "template", "kubeheal", str(CHART), "-n", "kubeheal", *args], capture_output=True, text=True, timeout=120)
+    r = subprocess.run(["helm", "template", "kubeheal", str(CHART), "-n", "kubeheal", "-f", str(CHART / "values-dev.yaml"), *args], capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr
     return load(r.stdout)
 
@@ -52,10 +52,44 @@ def test_falco_matches_component():
         same(helm("--set", "eventSource=falco"), kustomize(Path(d)))
 
 
+SSO = ["--set", "sso.enabled=true", "--set", "sso.githubRepo=PRATHVI9607/Unisys_Model", "--set", "sso.adminUsers={PRATHVI9607}"]
+
+
+def test_sso_matches_component():
+    with tempfile.TemporaryDirectory(dir=ROOT / "deploy/k8s/overlays", prefix=".tmp.") as d:
+        (Path(d) / "kustomization.yaml").write_text("resources: [../../base]\ncomponents: [../../components/sso]\n")
+        same(helm(*SSO), kustomize(Path(d)))
+
+
+def test_sso_dashboard_is_loopback_behind_the_proxy():
+    out = helm(*SSO)
+    spec = out[("Deployment", "kubeheal", "kubeheal-dashboard")]["spec"]["template"]["spec"]
+    dash = next(c for c in spec["containers"] if c["name"] == "dashboard")
+    assert dash["args"][dash["args"].index("--host") + 1] == "127.0.0.1"
+    assert {"name": "KUBEHEAL_AUTH_MODE", "value": "proxy"} in dash["env"]
+    assert out[("Service", "kubeheal", "kubeheal-dashboard")]["spec"]["ports"][0]["targetPort"] == 4180
+    assert ("Secret", "kubeheal", "kubeheal-sso") not in out and ("ConfigMap", "kubeheal", "kubeheal-sso") in out   # the Secret is yours
+
+
+def test_sso_refuses_incomplete_config():
+    for extra in (["--set", "sso.githubRepo="], ["--set", "sso.adminUsers="]):
+        r = subprocess.run(["helm", "template", "k", str(CHART), *SSO, *extra], capture_output=True, text=True)
+        assert r.returncode != 0 and "sso" in r.stderr
+
+
 def test_k3d_values_are_dev_without_the_namespace():
     dev = helm()
     del dev[("Namespace", "", "kubeheal")]
     same(helm("-f", str(CHART / "values-k3d.yaml")), dev)
+
+
+def test_release_defaults_pull_ghcr_at_the_chart_app_version():
+    r = subprocess.run(["helm", "template", "kubeheal", str(CHART), "-n", "kubeheal"], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    version = yaml.safe_load((CHART / "Chart.yaml").read_text())["appVersion"]
+    images = {c["image"] for d in load(r.stdout).values() if d["kind"] in ("Deployment", "DaemonSet")
+              for c in d["spec"]["template"]["spec"]["containers"] if "kubeheal" in c["image"]}
+    assert images and all(i.startswith("ghcr.io/prathvi9607/kubeheal-") and i.endswith(f":{version}") for i in images), images
 
 
 def test_modes_and_images_come_from_values():
