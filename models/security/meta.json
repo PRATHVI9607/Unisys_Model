@@ -6,8 +6,8 @@
     0.95,
     0.85
   ],
-  "conformal_q": 3.8713730374784205e-06,
-  "created_at": "2026-11-07T16:51:06+00:00",
+  "conformal_q": 0.1867815940515518,
+  "created_at": "2026-11-21T09:57:18+00:00",
   "data": {
     "class_source": {
       "benign": [
@@ -18,15 +18,16 @@
         "synthetic"
       ],
       "ransomware": [
-        "lab"
+        "lab",
+        "synthetic_hard_positive"
       ],
       "suspicious": [
         "synthetic"
       ]
     },
-    "groups": 1954,
-    "rows": 49964,
-    "sha256": "c6fa12d83fb29fa979207330c3071d77d031167583e36ca0a29507bd2b5c5e29",
+    "groups": 3653,
+    "rows": 143712,
+    "sha256": "6283595b774f2728751c29632b96ddeae897a8aa17013d575b7b53c86c17ad20",
     "source": {
       "lab": "training/data/collected/security.jsonl",
       "synthetic": "training/synth_security.py n_scenarios=3000 seed=7 (suspicious, exfiltration only)"
@@ -36,20 +37,25 @@
       "suspicious",
       "exfiltration"
     ],
-    "synthetic_fraction": 0.0672,
+    "synthetic_fraction": 0.0276,
     "synthetic_fraction_by_class": {
-      "benign": 0.0456,
+      "benign": 0.0219,
       "exfiltration": 1.0,
-      "ransomware": 0.0,
+      "ransomware": 0.0096,
       "suspicious": 1.0
     },
     "synthetic_hard_negatives": [
       "archive_burst",
       "atomic_rename",
+      "backup_repo",
       "dpkg_install",
       "git_npm",
       "logrotate_gz",
-      "logrotate_start"
+      "logrotate_start",
+      "package_tree"
+    ],
+    "synthetic_hard_positives": [
+      "ransomware_trickle"
     ]
   },
   "features": [
@@ -82,6 +88,9 @@
     "n_entropy_samples",
     "write_bytes_per_s",
     "net_out_bytes_per_s",
+    "frac_write_from_read",
+    "frac_read_destroyed",
+    "n_files_transformed",
     "recent_frac_write",
     "recent_frac_rename",
     "recent_frac_unlink",
@@ -92,7 +101,9 @@
     "recent_ext_added_frac",
     "recent_entropy_mean",
     "recent_entropy_high_frac",
-    "recent_events_per_s"
+    "recent_events_per_s",
+    "recent_frac_write_from_read",
+    "recent_frac_read_destroyed"
   ],
   "labels": [
     "benign",
@@ -101,192 +112,535 @@
     "exfiltration"
   ],
   "metrics": {
-    "best_iteration": 2000,
+    "best_iteration": 22,
+    "compact": {
+      "candidates": [
+        {
+          "best_iteration": 22,
+          "bytes": 123701,
+          "explain_ms_b1": 0.1721,
+          "explain_ms_b64": 0.0742,
+          "fails": [],
+          "gates_pass": true,
+          "macro_f1": 0.9973,
+          "params": {
+            "learning_rate": 0.05,
+            "min_data_in_leaf": 20,
+            "num_leaves": 15
+          },
+          "predict_explain_ms": 0.217,
+          "predict_ms_b1": 0.0449,
+          "predict_ms_b64": 0.0022,
+          "trees": 88
+        },
+        {
+          "best_iteration": 46,
+          "bytes": 249213,
+          "explain_ms_b1": 0.2239,
+          "explain_ms_b64": 0.1243,
+          "fails": [],
+          "gates_pass": true,
+          "macro_f1": 0.9989,
+          "params": {
+            "learning_rate": 0.1,
+            "min_data_in_leaf": 20,
+            "num_leaves": 15
+          },
+          "predict_explain_ms": 0.2692,
+          "predict_ms_b1": 0.0453,
+          "predict_ms_b64": 0.0034,
+          "trees": 184
+        },
+        {
+          "best_iteration": 28,
+          "bytes": 162518,
+          "explain_ms_b1": 0.1998,
+          "explain_ms_b64": 0.0925,
+          "fails": [],
+          "gates_pass": true,
+          "macro_f1": 0.997,
+          "params": {
+            "learning_rate": 0.05,
+            "min_data_in_leaf": 50,
+            "num_leaves": 15
+          },
+          "predict_explain_ms": 0.245,
+          "predict_ms_b1": 0.0452,
+          "predict_ms_b64": 0.0025,
+          "trees": 112
+        },
+        {
+          "best_iteration": 56,
+          "bytes": 299001,
+          "explain_ms_b1": 0.2762,
+          "explain_ms_b64": 0.1504,
+          "fails": [],
+          "gates_pass": true,
+          "macro_f1": 0.9989,
+          "params": {
+            "learning_rate": 0.1,
+            "min_data_in_leaf": 50,
+            "num_leaves": 15
+          },
+          "predict_explain_ms": 0.3322,
+          "predict_ms_b1": 0.056,
+          "predict_ms_b64": 0.0042,
+          "trees": 224
+        },
+        {
+          "best_iteration": 64,
+          "bytes": 461752,
+          "explain_ms_b1": 0.716,
+          "explain_ms_b64": 0.5338,
+          "fails": [],
+          "gates_pass": true,
+          "macro_f1": 0.9989,
+          "params": {
+            "learning_rate": 0.05,
+            "min_data_in_leaf": 20,
+            "num_leaves": 31
+          },
+          "predict_explain_ms": 0.7656,
+          "predict_ms_b1": 0.0496,
+          "predict_ms_b64": 0.0051,
+          "trees": 256
+        },
+        {
+          "best_iteration": 33,
+          "bytes": 234727,
+          "explain_ms_b1": 0.357,
+          "explain_ms_b64": 0.2604,
+          "fails": [],
+          "gates_pass": true,
+          "macro_f1": 0.999,
+          "params": {
+            "learning_rate": 0.1,
+            "min_data_in_leaf": 20,
+            "num_leaves": 31
+          },
+          "predict_explain_ms": 0.4063,
+          "predict_ms_b1": 0.0493,
+          "predict_ms_b64": 0.0032,
+          "trees": 132
+        },
+        {
+          "best_iteration": 24,
+          "bytes": 164502,
+          "explain_ms_b1": 0.2634,
+          "explain_ms_b64": 0.1497,
+          "fails": [],
+          "gates_pass": true,
+          "macro_f1": 0.9983,
+          "params": {
+            "learning_rate": 0.05,
+            "min_data_in_leaf": 50,
+            "num_leaves": 31
+          },
+          "predict_explain_ms": 0.3137,
+          "predict_ms_b1": 0.0503,
+          "predict_ms_b64": 0.0054,
+          "trees": 96
+        },
+        {
+          "best_iteration": 43,
+          "bytes": 287418,
+          "explain_ms_b1": 0.6495,
+          "explain_ms_b64": 0.2652,
+          "fails": [],
+          "gates_pass": true,
+          "macro_f1": 0.999,
+          "params": {
+            "learning_rate": 0.1,
+            "min_data_in_leaf": 50,
+            "num_leaves": 31
+          },
+          "predict_explain_ms": 0.705,
+          "predict_ms_b1": 0.0555,
+          "predict_ms_b64": 0.0039,
+          "trees": 172
+        },
+        {
+          "best_iteration": 64,
+          "bytes": 469458,
+          "explain_ms_b1": 0.6946,
+          "explain_ms_b64": 0.5451,
+          "fails": [],
+          "gates_pass": true,
+          "macro_f1": 0.9989,
+          "params": {
+            "learning_rate": 0.05,
+            "min_data_in_leaf": 20,
+            "num_leaves": 63
+          },
+          "predict_explain_ms": 0.7438,
+          "predict_ms_b1": 0.0492,
+          "predict_ms_b64": 0.0053,
+          "trees": 256
+        },
+        {
+          "best_iteration": 33,
+          "bytes": 237645,
+          "explain_ms_b1": 0.3604,
+          "explain_ms_b64": 0.2633,
+          "fails": [],
+          "gates_pass": true,
+          "macro_f1": 0.9989,
+          "params": {
+            "learning_rate": 0.1,
+            "min_data_in_leaf": 20,
+            "num_leaves": 63
+          },
+          "predict_explain_ms": 0.4076,
+          "predict_ms_b1": 0.0472,
+          "predict_ms_b64": 0.003,
+          "trees": 132
+        },
+        {
+          "best_iteration": 24,
+          "bytes": 164707,
+          "explain_ms_b1": 0.2877,
+          "explain_ms_b64": 0.1546,
+          "fails": [],
+          "gates_pass": true,
+          "macro_f1": 0.9983,
+          "params": {
+            "learning_rate": 0.05,
+            "min_data_in_leaf": 50,
+            "num_leaves": 63
+          },
+          "predict_explain_ms": 0.3329,
+          "predict_ms_b1": 0.0452,
+          "predict_ms_b64": 0.0028,
+          "trees": 96
+        },
+        {
+          "best_iteration": 43,
+          "bytes": 287215,
+          "explain_ms_b1": 0.3902,
+          "explain_ms_b64": 0.2613,
+          "fails": [],
+          "gates_pass": true,
+          "macro_f1": 0.999,
+          "params": {
+            "learning_rate": 0.1,
+            "min_data_in_leaf": 50,
+            "num_leaves": 63
+          },
+          "predict_explain_ms": 0.4362,
+          "predict_ms_b1": 0.046,
+          "predict_ms_b64": 0.0038,
+          "trees": 172
+        }
+      ],
+      "chosen": 0,
+      "rule": "lowest batch-1 predict+explain latency among candidates passing every gate; tie (0.01 ms) -> higher cv5 macro-F1"
+    },
     "conformal": {
       "alpha": 0.1,
       "calibrated_on": "5-fold grouped out-of-fold probabilities, non-test groups, real serving rows",
-      "q": 4e-06
+      "q": 0.186782
     },
     "cv5_grouped": {
+      "accuracy": 0.9998,
+      "confusion_matrix": [
+        [
+          107815,
+          1,
+          6,
+          7
+        ],
+        [
+          0,
+          539,
+          0,
+          0
+        ],
+        [
+          9,
+          0,
+          20426,
+          0
+        ],
+        [
+          0,
+          1,
+          0,
+          469
+        ]
+      ],
+      "coverage": 0.9004,
+      "false_kill_rate": 0.0001,
+      "macro_f1": 0.9973,
+      "mean_set_size": 0.9004,
+      "n": 129273,
+      "per_class": {
+        "benign": {
+          "f1": 0.9999,
+          "precision": 0.9999,
+          "recall": 0.9999,
+          "support": 107829
+        },
+        "exfiltration": {
+          "f1": 0.9915,
+          "precision": 0.9853,
+          "recall": 0.9979,
+          "support": 470
+        },
+        "ransomware": {
+          "f1": 0.9996,
+          "precision": 0.9997,
+          "recall": 0.9996,
+          "support": 20435
+        },
+        "suspicious": {
+          "f1": 0.9981,
+          "precision": 0.9963,
+          "recall": 1.0,
+          "support": 539
+        }
+      },
+      "weighted_f1": 0.9998
+    },
+    "cv5_grouped_lab": {
       "accuracy": 0.9999,
       "confusion_matrix": [
         [
-          41059,
-          0,
-          0,
-          0
-        ],
-        [
-          0,
-          689,
-          0,
+          105457,
+          1,
+          6,
           1
         ],
         [
-          3,
           0,
-          3222,
+          0,
+          0,
+          0
+        ],
+        [
+          5,
+          0,
+          20225,
           0
         ],
         [
           0,
           0,
           0,
-          478
+          0
         ]
       ],
-      "coverage": 0.9998,
-      "macro_f1": 0.9994,
-      "mean_set_size": 0.9998,
-      "n": 45452,
+      "coverage": 0.9126,
+      "false_kill_rate": 0.0001,
+      "macro_f1": 0.4999,
+      "mean_set_size": 0.9127,
+      "n": 125695,
       "per_class": {
         "benign": {
-          "f1": 1.0,
-          "precision": 0.9999,
-          "recall": 1.0,
-          "support": 41059
+          "f1": 0.9999,
+          "precision": 1.0,
+          "recall": 0.9999,
+          "support": 105465
         },
         "exfiltration": {
-          "f1": 0.999,
-          "precision": 0.9979,
-          "recall": 1.0,
-          "support": 478
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "support": 0
         },
         "ransomware": {
-          "f1": 0.9995,
-          "precision": 1.0,
-          "recall": 0.9991,
-          "support": 3225
+          "f1": 0.9997,
+          "precision": 0.9997,
+          "recall": 0.9998,
+          "support": 20230
         },
         "suspicious": {
-          "f1": 0.9993,
-          "precision": 1.0,
-          "recall": 0.9986,
-          "support": 690
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "support": 0
         }
       },
       "weighted_f1": 0.9999
     },
+    "gate": {
+      "baseline": "security-5.0.0-c6fa12d8",
+      "cv5_grouped.macro_f1": {
+        "baseline": 0.9994,
+        "op": ">=",
+        "threshold": 0.8,
+        "value": 0.9973
+      },
+      "cv5_grouped_lab.false_kill_rate": {
+        "baseline": null,
+        "op": "<=",
+        "threshold": 0.01,
+        "value": 0.0001
+      },
+      "cv5_grouped_lab.per_class.ransomware.recall": {
+        "baseline": null,
+        "op": ">=",
+        "threshold": 0.95,
+        "value": 0.9998
+      },
+      "heldout_family.pooled.per_class.ransomware.recall": {
+        "baseline": 0.9867,
+        "op": ">=",
+        "threshold": 0.9,
+        "value": 0.9997
+      }
+    },
     "heldout_family": {
-      "note": "each lab family held out in turn (model never saw it); pooled = all held-out predictions",
+      "note": "each lab family held out in turn (no row involving it trains, combined/revert included); tested on rows involving only that family; pooled = all held-out predictions",
       "per_family": {
         "archive_extract": {
           "accuracy": 1.0,
           "labels": {
-            "benign": 8176
+            "benign": 5682
           },
           "macro_f1_present": 1.0,
-          "n": 8176
+          "n": 5682
         },
         "atomic_config_writes": {
           "accuracy": 1.0,
           "labels": {
-            "benign": 8196
+            "benign": 8150
           },
           "macro_f1_present": 1.0,
-          "n": 8196
+          "n": 8150
         },
         "backup_upload": {
-          "accuracy": 1.0,
+          "accuracy": 0.9254,
           "labels": {
-            "benign": 2287
+            "benign": 3352
           },
-          "macro_f1_present": 1.0,
-          "n": 2287
+          "macro_f1_present": 0.9613,
+          "n": 3352
         },
         "detection_test:inplace": {
-          "accuracy": 0.9981,
+          "accuracy": 0.9992,
           "labels": {
-            "benign": 54,
-            "ransomware": 475
+            "benign": 215,
+            "ransomware": 3644
           },
-          "macro_f1_present": 0.9995,
-          "n": 529
+          "macro_f1_present": 0.9963,
+          "n": 3859
         },
         "detection_test:inplace_partial": {
-          "accuracy": 0.9331,
+          "accuracy": 0.999,
           "labels": {
-            "benign": 102,
-            "ransomware": 511
+            "benign": 258,
+            "ransomware": 3616
           },
-          "macro_f1_present": 0.8954,
-          "n": 613
+          "macro_f1_present": 0.9959,
+          "n": 3874
         },
         "detection_test:rename": {
-          "accuracy": 1.0,
+          "accuracy": 0.999,
           "labels": {
-            "benign": 163,
-            "ransomware": 797
+            "benign": 410,
+            "ransomware": 5763
           },
-          "macro_f1_present": 1.0,
-          "n": 960
+          "macro_f1_present": 0.9961,
+          "n": 6173
         },
         "detection_test:rename_partial": {
-          "accuracy": 0.9979,
+          "accuracy": 0.9992,
           "labels": {
-            "benign": 266,
-            "ransomware": 1675
+            "benign": 588,
+            "ransomware": 9153
           },
-          "macro_f1_present": 0.9957,
-          "n": 1941
+          "macro_f1_present": 0.9964,
+          "n": 9741
+        },
+        "git_repo": {
+          "accuracy": 1.0,
+          "labels": {
+            "benign": 13420
+          },
+          "macro_f1_present": 1.0,
+          "n": 13420
         },
         "large_copy": {
           "accuracy": 1.0,
           "labels": {
-            "benign": 1025
+            "benign": 1628
           },
           "macro_f1_present": 1.0,
-          "n": 1025
+          "n": 1628
         },
         "log_rotation": {
           "accuracy": 1.0,
           "labels": {
-            "benign": 12317
+            "benign": 12352
           },
           "macro_f1_present": 1.0,
-          "n": 12317
+          "n": 12352
+        },
+        "npm_install": {
+          "accuracy": 0.9909,
+          "labels": {
+            "benign": 19797
+          },
+          "macro_f1_present": 0.9954,
+          "n": 19797
+        },
+        "pip_install": {
+          "accuracy": 1.0,
+          "labels": {
+            "benign": 13555
+          },
+          "macro_f1_present": 1.0,
+          "n": 13555
         },
         "python_compile": {
           "accuracy": 1.0,
           "labels": {
-            "benign": 6532
+            "benign": 8905
           },
           "macro_f1_present": 1.0,
-          "n": 6532
+          "n": 8905
         },
         "redis_snapshots": {
-          "accuracy": 0.9688,
+          "accuracy": 1.0,
           "labels": {
-            "benign": 1475
+            "benign": 2266
           },
-          "macro_f1_present": 0.9842,
-          "n": 1475
+          "macro_f1_present": 1.0,
+          "n": 2266
+        },
+        "restic_backup": {
+          "accuracy": 0.9992,
+          "labels": {
+            "benign": 20510
+          },
+          "macro_f1_present": 0.9996,
+          "n": 20510
         },
         "sqlite_writes": {
-          "accuracy": 0.5522,
+          "accuracy": 0.9994,
           "labels": {
-            "benign": 67
+            "benign": 1737
           },
-          "macro_f1_present": 0.7115,
-          "n": 67
+          "macro_f1_present": 0.9997,
+          "n": 1737
         },
         "tar_gzip_backup": {
-          "accuracy": 0.9972,
+          "accuracy": 0.9637,
           "labels": {
-            "benign": 2488
+            "benign": 4742
           },
-          "macro_f1_present": 0.9986,
-          "n": 2488
+          "macro_f1_present": 0.9815,
+          "n": 4742
         }
       },
       "pooled": {
-        "accuracy": 0.9972,
+        "accuracy": 0.9954,
         "confusion_matrix": [
           [
-            43065,
-            75,
-            7,
-            1
+            116933,
+            22,
+            419,
+            193
           ],
           [
             0,
@@ -295,10 +649,10 @@
             0
           ],
           [
-            45,
+            7,
             0,
-            3412,
-            1
+            22169,
+            0
           ],
           [
             0,
@@ -307,14 +661,15 @@
             0
           ]
         ],
-        "macro_f1": 0.4977,
-        "n": 46606,
+        "false_kill_rate": 0.0036,
+        "macro_f1": 0.4969,
+        "n": 139743,
         "per_class": {
           "benign": {
-            "f1": 0.9985,
-            "precision": 0.999,
-            "recall": 0.9981,
-            "support": 43148
+            "f1": 0.9973,
+            "precision": 0.9999,
+            "recall": 0.9946,
+            "support": 117567
           },
           "exfiltration": {
             "f1": 0.0,
@@ -323,10 +678,10 @@
             "support": 0
           },
           "ransomware": {
-            "f1": 0.9923,
-            "precision": 0.998,
-            "recall": 0.9867,
-            "support": 3458
+            "f1": 0.9905,
+            "precision": 0.9815,
+            "recall": 0.9997,
+            "support": 22176
           },
           "suspicious": {
             "f1": 0.0,
@@ -335,89 +690,90 @@
             "support": 0
           }
         },
-        "weighted_f1": 0.9981
+        "weighted_f1": 0.9962
       }
     },
     "latency_ms": {
       "note": "single-row bundle.predict incl. TreeSHAP, num_threads=1",
-      "p50": 13.031,
-      "p99": 15.69
+      "p50": 0.394,
+      "p99": 0.681
     },
     "split": {
       "test": {
-        "groups": 196,
-        "rows": 4512
+        "groups": 365,
+        "rows": 14439
       },
       "train": {
-        "groups": 1563,
-        "rows": 41713
+        "groups": 2922,
+        "rows": 114749
       },
       "val": {
-        "groups": 195,
-        "rows": 3739
+        "groups": 366,
+        "rows": 14524
       }
     },
     "test": {
       "accuracy": 1.0,
       "confusion_matrix": [
         [
-          4151,
+          12369,
           0,
           0,
           0
         ],
         [
           0,
-          67,
+          56,
           0,
           0
         ],
         [
           0,
           0,
-          233,
+          1957,
           0
         ],
         [
           0,
           0,
           0,
-          61
+          57
         ]
       ],
-      "coverage": 0.9993,
+      "coverage": 0.931,
+      "false_kill_rate": 0.0,
       "macro_f1": 1.0,
-      "mean_set_size": 0.9993,
-      "n": 4512,
+      "mean_set_size": 0.931,
+      "n": 14439,
       "per_class": {
         "benign": {
           "f1": 1.0,
           "precision": 1.0,
           "recall": 1.0,
-          "support": 4151
+          "support": 12369
         },
         "exfiltration": {
           "f1": 1.0,
           "precision": 1.0,
           "recall": 1.0,
-          "support": 61
+          "support": 57
         },
         "ransomware": {
           "f1": 1.0,
           "precision": 1.0,
           "recall": 1.0,
-          "support": 233
+          "support": 1957
         },
         "suspicious": {
           "f1": 1.0,
           "precision": 1.0,
           "recall": 1.0,
-          "support": 67
+          "support": 56
         }
       },
       "weighted_f1": 1.0
     }
   },
   "task": "security",
-  "version": "security-5.0.0-c6fa12d8"
+  "version": "security-5.0.0-6283595b"
 }
