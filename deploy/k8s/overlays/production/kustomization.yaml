@@ -21,7 +21,7 @@ resources:
   - inference-hpa-pdb.yaml
 
 patches:
-  # No dashboard in production: its Deployment, Service and ServiceAccount are dropped.
+  # No dashboard in production: its Deployment, Service, ServiceAccount and NetworkPolicy are dropped.
   - patch: |-
       $patch: delete
       apiVersion: apps/v1
@@ -37,6 +37,11 @@ patches:
       apiVersion: v1
       kind: ServiceAccount
       metadata: {name: kubeheal-dashboard, namespace: kubeheal}
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata: {name: kubeheal-dashboard-clients, namespace: kubeheal}
   # No `replicas`: the HPA (minReplicas 2) owns the count, so a re-apply never fights it. A strategic
   # merge cannot drop a field the base sets, hence the JSON patch.
   - target: {group: apps, version: v1, kind: Deployment, name: kubeheal-inference}

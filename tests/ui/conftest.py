@@ -1,5 +1,5 @@
 """Browser tests for the console. They start the real FastAPI app on a free port against fake Redis seeded with
-realistic data, so they need Chromium (`uv run playwright install chromium`) and are skipped cleanly without it."""
+realistic data, so they need Chromium (`uv run playwright install chromium`) and fail loudly without it."""
 
 import socket
 import threading
@@ -26,17 +26,23 @@ def _chromium_available() -> bool:
         return False
 
 
+CHROMIUM = _chromium_available()   # at import: sync_playwright() refuses to start inside a running event loop
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "ui: browser test (needs Chromium)")
 
 
-def pytest_collection_modifyitems(items):
-    if _chromium_available():
-        return
-    skip = pytest.mark.skip(reason="Chromium not installed: run `uv run playwright install chromium`")
-    for item in items:
-        if "tests/ui" in item.nodeid.replace("\\", "/"):
-            item.add_marker(skip)
+@pytest.fixture(autouse=True)
+def require_chromium():
+    if not CHROMIUM:
+        pytest.fail("Chromium not installed: run `uv run playwright install chromium` (CI does this)", pytrace=False)
+
+
+def assert_pngs(paths):
+    assert paths
+    for p in paths:
+        assert Path(p).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n", p
 
 
 @pytest.fixture

@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -199,6 +200,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="KubeHeal Dashboard", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)   # also applies to /ws
 app.include_router(admin_router)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    # Drop the echoed input: a rejected Infinity/NaN would make the default 422 body itself unserialisable (500).
+    return JSONResponse(status_code=422, content={"detail": [{k: e[k] for k in ("type", "loc", "msg") if k in e} for e in exc.errors()]})
 
 
 @app.middleware("http")

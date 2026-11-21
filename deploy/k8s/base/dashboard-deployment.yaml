@@ -57,3 +57,19 @@ spec:
             httpGet: {path: /readyz, port: 8080, httpHeaders: [{name: Host, value: localhost}]}
             periodSeconds: 5
             timeoutSeconds: 3
+---
+# The dashboard's admin API accepts only pods in the kubeheal namespace. It emits no metrics, so monitoring is not admitted.
+# kubectl port-forward is not subject to this policy: the kubelet/CRI opens the connection inside the pod's network namespace,
+# and enforcing CNIs do not filter host-originated traffic, so the documented access path keeps working.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubeheal-dashboard-clients
+  namespace: kubeheal
+spec:
+  podSelector: {matchLabels: {app: kubeheal-dashboard}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kubeheal}}
+      ports: [{port: 8080}]

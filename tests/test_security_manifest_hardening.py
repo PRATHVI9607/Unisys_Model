@@ -1,11 +1,10 @@
 """Static safety checks over every render of the deployment: kustomize (dev, production) and Helm (dev, production, k3d).
 
-No cluster needed, only kubectl/helm binaries (skipped when absent). Justified exceptions are listed once, below,
+No cluster needed, only kubectl/helm binaries (the tests fail without them: CI has both). Justified exceptions are listed once, below,
 and documented in docs/testing.md; anything not listed must be locked down.
 """
 
 import re
-import shutil
 import subprocess
 from functools import cache
 from pathlib import Path
@@ -15,8 +14,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 CHART = ROOT / "deploy/helm/kubeheal"
-pytestmark = pytest.mark.skipif(not (shutil.which("helm") and shutil.which("kubectl")), reason="helm/kubectl not on PATH")
-
 RENDERS = {
     "kustomize-dev": ["kubectl", "kustomize", str(ROOT / "deploy/k8s")],
     "kustomize-production": ["kubectl", "kustomize", str(ROOT / "deploy/k8s/overlays/production")],
@@ -31,7 +28,7 @@ CAP_ADD = {"kubeheal-security-agent": {"agent": {"SYS_PTRACE", "DAC_READ_SEARCH"
                                        "sensor": {"BPF", "PERFMON"}}}                 # load + attach the eBPF programs
 ROOT_OK = {"kubeheal-security-agent"}     # needs uid 0 for ptrace / setns into pod mount namespaces
 HOST_PID_OK = {"kubeheal-security-agent"}  # maps eBPF pids to /host/proc/<pid>
-NO_LIVENESS = {("kubeheal-security-agent", "sensor"), ("kubeheal-redis-secret", "create")}   # sensor: see the xfail; Job: runs to completion
+NO_LIVENESS = {("kubeheal-redis-secret", "create")}   # Job: runs to completion
 NEEDS_READINESS = {"kubeheal-inference", "kubeheal-dashboard", "redis"}   # fronted by a Service that routes traffic to them
 HOST_RW_OK = {"host-cgroup"}   # containment writes cgroup.freeze of the attacked pod (the cgroup tree is mounted rw)
 API_CLIENTS = {"kubeheal-health-agent", "kubeheal-security-agent", "kubeheal-fusion-agent", "kubeheal-redis-secret"}   # the rest need no API token
@@ -47,6 +44,11 @@ def render(name: str) -> tuple[dict, ...]:
 @pytest.fixture(params=sorted(RENDERS))
 def objs(request):
     return list(render(request.param))
+
+
+def renders_where(pred):
+    """Render names for which `pred(objs)` holds, so a check is parametrized only where it applies."""
+    return [n for n in sorted(RENDERS) if pred(list(render(n)))]
 
 
 def pods(objs):
@@ -118,8 +120,6 @@ def test_liveness_and_readiness_probes(objs):
             assert c.get("readinessProbe"), f"{name}/{c['name']} has no readinessProbe"
 
 
-@pytest.mark.xfail(strict=True, reason="FINDING deploy/k8s/base/security-agent-daemonset.yaml: the sensor container has no liveness probe, "
-                   "so a hung (not crashed) eBPF sensor is never restarted and detection on that node silently stops")
 def test_sensor_has_a_liveness_probe():
     for r in RENDERS:
         for _, _, c in containers(list(render(r))):
@@ -185,13 +185,10 @@ def test_redis_and_inference_are_behind_ingress_policies(objs):
         assert admitted <= allowed, f"{target} admits unexpected clients: {admitted - allowed}"
 
 
-def test_dashboard_has_an_ingress_policy(objs, request):
+@pytest.mark.parametrize("name", renders_where(lambda o: "kubeheal-dashboard" in {n for n, _, _ in pods(o)}))
+def test_dashboard_has_an_ingress_policy(name):
+    objs = list(render(name))
     by_name = {n: lab for n, _, lab in pods(objs)}
-    if "kubeheal-dashboard" not in by_name:
-        pytest.skip("dashboard not deployed in this render")
-    request.applymarker(pytest.mark.xfail(strict=True, reason=(
-        "FINDING: no NetworkPolicy selects the dashboard pods, so any pod in the cluster can reach the admin API on :8080 "
-        "(bearer token + Host allow-list remain). Add one admitting only the ingress controller / monitoring.")))
     assert policies_for(objs, by_name["kubeheal-dashboard"])
 
 
@@ -272,10 +269,14 @@ def test_pod_security_level_per_workload(objs):
     assert {n: lv for n, lv in levels.items() if lv != "restricted"} == {"kubeheal-security-agent": "privileged"}, levels
 
 
-def test_namespace_pss_labels_admit_what_we_deploy(objs):
-    ns = next((d for d in objs if d["kind"] == "Namespace" and d["metadata"]["name"] == "kubeheal"), None)
-    if ns is None:
-        pytest.skip("namespace is created outside the chart in this render")
+def _kubeheal_ns(objs):
+    return next((d for d in objs if d["kind"] == "Namespace" and d["metadata"]["name"] == "kubeheal"), None)
+
+
+@pytest.mark.parametrize("name", renders_where(lambda o: _kubeheal_ns(o) is not None))
+def test_namespace_pss_labels_admit_what_we_deploy(name):
+    objs = list(render(name))
+    ns = _kubeheal_ns(objs)
     lab = ns["metadata"].get("labels", {})
     needed = min(LEVELS.index(pss_level(s)) for _, s, _ in pods(objs))   # the most privileged workload decides the namespace level
     for mode in ("enforce", "audit", "warn"):

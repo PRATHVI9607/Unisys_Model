@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections import Counter
 from typing import Any
 
 import numpy as np
@@ -56,9 +57,13 @@ def _camel(key: str) -> str:
 def _clean(value: Any, camel_keys: bool = True) -> Any:
     if isinstance(value, dict):
         out = {}
+        camel = {k: _camel(k) if camel_keys else k for k in value}
+        seen = Counter(camel.values())
         for k, v in value.items():
-            key = _camel(k) if camel_keys else k
+            key = camel[k]
             v = _clean(v, key not in _USER_KEYED)
+            if seen[key] > 1 and k != key:   # a_b vs aB: only the already-camel key keeps the name; the rest stay raw, so order cannot matter
+                key = k
             if v is not None and v != {} and v != []:
                 out[key] = v
         return out

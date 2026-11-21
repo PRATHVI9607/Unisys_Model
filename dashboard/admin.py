@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -38,6 +39,8 @@ from kubeheal.contracts import (
 )
 
 log = logging.getLogger("kubeheal.dashboard")
+_STREAM_ID = re.compile(r"\d{1,20}-\d{1,20}")   # a ledger cursor: XREVRANGE rejects anything else
+
 router = APIRouter()
 Reason = Annotated[str, Field(max_length=500)]
 AdminDep = Annotated[Admin, Depends(require_admin)]
@@ -217,6 +220,8 @@ async def ledger(request: Request, limit: int = Query(50, ge=1, le=200), cursor:
     r = _redis(request)
     if kind and kind not in LEDGER_KINDS:
         raise HTTPException(422, f"kind must be one of {LEDGER_KINDS}")
+    if cursor and not _STREAM_ID.fullmatch(cursor):
+        raise HTTPException(400, "cursor must be a stream id (<ms>-<seq>)")
     want = {k: v for k, v in (("namespace", namespace), ("kind", kind), ("actor", actor)) if v}
     out: list[dict] = []
     upper, scanned, more = f"({cursor}" if cursor else "+", 0, False

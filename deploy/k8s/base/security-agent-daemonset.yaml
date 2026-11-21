@@ -99,6 +99,18 @@ spec:
           resources:
             requests: {cpu: 50m, memory: 32Mi}
             limits: {cpu: "1", memory: 128Mi}
+          # Wedged (not crashed) sensor: it rewrites the stats file every 5 s, so a file older than 30 s means a hung main loop.
+          # debian-slim has sh/stat/date. startupProbe covers the first write after the BPF programs load.
+          startupProbe:
+            exec: &statsfresh
+              command: [sh, -c, 'test $(( $(date +%s) - $(stat -c %Y "$SENSOR_STATS_PATH") )) -lt 30']
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            exec: *statsfresh
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           volumeMounts:
             - {name: events, mountPath: /var/run/kubeheal}
             - {name: host-cgroup, mountPath: /sys/fs/cgroup, readOnly: true}   # kubepods tree: pod uid + container id

@@ -41,7 +41,7 @@ change. Stream entries are flat `str → str` maps: nested values are compact JS
 | `kubeheal.ledger` | fusion, dashboard admin API → dashboard | Append-only audit entry `{ts_ms, kind (action\|approval_pending\|approval\|rejection\|mode), actor, namespace, workload, pod, decision, outcome, mode, action_event_id, health_event_id, security_event_id, approval_id, detail}`. Every XADD is capped `MAXLEN ~ LEDGER_MAXLEN` (100000; Redis is noeviction); fusion's housekeeping task also runs `XTRIM MINID ~ now - 90 d` every 5 min (MAXLEN and MINID cannot share one XADD). |
 | `kubeheal.security.capture` | security-agent (only when `KUBEHEAL_CAPTURE=1`) → `training/collect/security_lab.py` | `SecurityEvent` for **every** scored window, whatever its risk |
 
-`kubeheal.contain` entries also carry `sig` (HMAC-SHA256 hex of `pod_uid|namespace|pod|event_id|ts_ms`, `agents.common.contain_sign` / `contain_verify`) when `CONTAIN_HMAC_KEY` is set. Every other XADD uses `MAXLEN ~ 10000` (`STREAM_MAXLEN`).
+`kubeheal.contain` entries also carry `sig` (HMAC-SHA256 hex of the JSON array `[pod_uid, namespace, pod, event_id, ts_ms]` (plus `action` when present), `agents.common.contain_sign` / `contain_verify`; verify accepts only this format, so fusion and the security agent must be deployed together) when `CONTAIN_HMAC_KEY` is set. Every other XADD uses `MAXLEN ~ 10000` (`STREAM_MAXLEN`).
 
 ### Redis keys
 

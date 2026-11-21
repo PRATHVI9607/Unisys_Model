@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 
 _SUFFIX = {
@@ -21,7 +22,8 @@ def _parse(q: object) -> float | None:
     m = _QUANTITY.match(str(q).strip())
     if not m or m.group(2) not in _SUFFIX:
         return None
-    return float(m.group(1)) * _SUFFIX[m.group(2)]
+    v = float(m.group(1)) * _SUFFIX[m.group(2)]
+    return v if math.isfinite(v) else None
 
 
 def parse_cpu(q: object) -> float | None:

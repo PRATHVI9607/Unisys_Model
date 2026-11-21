@@ -56,7 +56,7 @@ def test_parse_line_arbitrary_json_is_none_unless_falco_shaped(v):
         assert isinstance(v, dict) and isinstance(v.get("output_fields"), dict)
 
 
-# ascii-digit-only pids / flags / times here; the unicode-digit and inf cases have their own xfail tests below
+# ascii-digit-only pids / flags / times here; the unicode-digit and inf cases have their own tests below
 ascii_safe = st.text(alphabet=st.characters(codec="ascii", exclude_characters="\x00"), max_size=20)
 safe_scalar = st.none() | st.booleans() | st.integers(0, 2**40) | ascii_safe
 
@@ -75,11 +75,11 @@ def test_parse_line_falco_shaped_never_raises(obj):
         line = json.dumps(obj)
     except ValueError:
         return
-    # json_val strings may hold unicode digits: only the "raises" half is asserted here (see xfails)
+    # json_val strings may hold unicode digits: only the "raises" half is asserted here
     try:
         parse_line(line)
     except (ValueError, OverflowError):
-        pytest.skip("known: unicode digit / inf crash, see the xfail tests")
+        pytest.skip("known: unicode digit / inf crash")
 
 
 def good(**over):
@@ -98,14 +98,10 @@ def test_parse_line_drops_host_and_typeless_events():
     assert parse_line(good(**{"evt.type": ""})) is None
 
 
-@pytest.mark.xfail(strict=True, raises=ValueError, reason="BUG agents/security_agent/falco.py parse_line: str.isdigit() is true for "
-                   "'²' but int('²') raises ValueError -> a string proc.pid of a non-ASCII digit crashes the parser")
 def test_parse_line_unicode_digit_pid_does_not_raise():
     assert parse_line(good(**{"proc.pid": "²"}))["pid"] is None
 
 
-@pytest.mark.xfail(strict=True, raises=ValueError, reason="BUG kubeheal/features/security.py open_syscall: flags.isdigit() true for '²', "
-                   "int('²') raises ValueError (also >4300 ASCII digits)")
 @pytest.mark.parametrize("flags", ["²", "9" * 5000])
 def test_open_syscall_odd_digit_flags_do_not_raise(flags):
     assert open_syscall("openat", flags) in ("open_r", "open_w")
@@ -149,8 +145,6 @@ def test_quantity_never_raises_and_is_finite(q):
         assert v is None or math.isfinite(v)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG kubeheal/features/quantity.py _parse: '1e999' parses to inf (no finiteness check); "
-                   "an inf limit would flow into ratio features and the inference API rejects inf with 422")
 def test_quantity_huge_exponent_is_not_infinite():
     assert parse_cpu("1e999") is None or math.isfinite(parse_cpu("1e999"))
 

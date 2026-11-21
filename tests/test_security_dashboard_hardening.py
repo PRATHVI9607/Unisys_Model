@@ -37,6 +37,33 @@ def env(monkeypatch):
         yield sync, client
 
 
+def raw_post(c, path, headers: dict[str, bytes], body=b'{"mode": "observe"}'):
+    """POST straight into the ASGI app with hand-built header bytes (CRLF, non-latin1, huge): clients refuse to send these."""
+    sent = []
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST", "scheme": "http", "path": path,
+             "raw_path": path.encode(), "query_string": b"", "root_path": "", "server": ("localhost", 80), "client": ("127.0.0.1", 1),
+             "headers": [(b"host", b"localhost"), (b"content-type", b"application/json"), (b"content-length", str(len(body)).encode()),
+                         *((k.lower().encode(), v) for k, v in headers.items())]}
+
+    async def go():
+        fed = False
+
+        async def receive():
+            nonlocal fed
+            if fed:
+                return {"type": "http.disconnect"}
+            fed = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(m):
+            sent.append(m)
+
+        await fastapi_app.app(scope, receive, send)
+
+    c.portal.call(go)   # the app's event loop: the lifespan-created Redis client belongs to it
+    return next(m["status"] for m in sent if m["type"] == "http.response.start")
+
+
 def ok4xx(r):
     assert r.status_code < 500, (r.status_code, r.text[:200])
     return r
@@ -67,8 +94,6 @@ def test_malformed_json_bodies(env, body):
     assert sync.get(KEY_MODE) in (None, "observe")   # duplicate-key body: last key wins ("bogus" is rejected) -> never a bad mode
 
 
-@pytest.mark.xfail(strict=True, reason="BUG dashboard/fastapi_app.py: no RequestValidationError handler. A JSON body with NaN/Infinity "
-                   "makes FastAPI's default 422 body unserialisable -> HTTP 500 (kubeheal/inference/app.py already has the fix)")
 @pytest.mark.parametrize("body", [b'{"mode":NaN}', b'{"mode":"observe","reason":NaN}', b'{"mode":"observe","reason":Infinity}'])
 def test_nan_in_body_is_422_not_500(env, body):
     _, c = env
@@ -115,12 +140,9 @@ def test_unicode_reason_is_stored_verbatim_and_safely(env):
 @pytest.mark.parametrize("actor", ["evil\r\nX-Injected: 1", "a\nb", "x" * 10_000, "<b>x</b>", "'; DROP", "\t\t", "María", ""])
 def test_actor_header_is_sanitised(env, actor):
     sync, c = env
-    try:
-        r = c.post("/api/mode", json={"mode": "observe"}, headers={**AUTH, "X-Actor": actor})
-    except (UnicodeError, ValueError):
-        pytest.skip("client refuses to send this header")   # the client, not the server, rejected it
-    ok4xx(r)
-    if r.status_code == 200:
+    status = raw_post(c, "/api/mode", {"Authorization": AUTH["Authorization"].encode(), "X-Actor": actor.encode()})
+    assert status < 500, status
+    if status == 200:
         entry = sync.xrevrange(STREAM_LEDGER, count=1)[0][1]
         name = entry["actor"]
         assert len(name) <= 6 + 40 and all(ch.isalnum() or ch in "._@ -:" for ch in name) and not {"\r", "\n", "<", "'"} & set(name)
@@ -181,11 +203,8 @@ def test_replay_with_other_actor_header_still_conflicts(env):
 ])
 def test_bad_credentials(env, hdr, code):
     sync, c = env
-    try:
-        r = c.post("/api/mode", json={"mode": "enforce"}, headers=hdr)
-    except (UnicodeError, ValueError):
-        pytest.skip("client cannot send this header")
-    assert r.status_code == code and sync.get(KEY_MODE) is None
+    status = raw_post(c, "/api/mode", {k: v.encode() for k, v in hdr.items()}, b'{"mode": "enforce"}')
+    assert status == code and sync.get(KEY_MODE) is None
 
 
 def test_failed_auth_is_rate_limited_then_valid_token_still_locked_out(env):
@@ -238,8 +257,6 @@ def test_ledger_and_events_query_fuzz(env, q):
     ok4xx(c.get("/api/events", params={"kind": "action", **q}))
 
 
-@pytest.mark.xfail(strict=True, reason="BUG dashboard/admin.py ledger(): a malformed `cursor` makes XREVRANGE fail with a Redis ResponseError, "
-                   "which is mapped to 503 'redis unavailable' instead of a 4xx for the caller's bad input (misleads alerting too)")
 @pytest.mark.parametrize("cursor", ["garbage", "(", "-", "1-", "9" * 400])
 def test_ledger_bad_cursor_is_a_4xx(env, cursor):
     _, c = env

@@ -17,7 +17,7 @@ from kubeheal.contracts import (
     now_ms,
 )
 from tests.dashboard_seed import HUMAN_PENDING
-from tests.ui.conftest import TOKEN
+from tests.ui.conftest import TOKEN, assert_pngs
 
 pytestmark = pytest.mark.ui
 
@@ -283,9 +283,8 @@ def test_reason_text_and_caret_survive_live_updates(app_page, redis_sync):
     expect(box).to_have_value("abc Xdef")
 
 
-@pytest.mark.skipif(not os.environ.get("KUBEHEAL_SHOTS"), reason="set KUBEHEAL_SHOTS=<dir> to write screenshots")
-def test_screenshots(app_page):
-    page, out = app_page, Path(os.environ["KUBEHEAL_SHOTS"])
+def test_screenshots(app_page, tmp_path):
+    page, out = app_page, Path(os.environ.get("KUBEHEAL_SHOTS") or tmp_path)
     out.mkdir(parents=True, exist_ok=True)
     page.set_viewport_size({"width": 1280, "height": 800})
     expect(page.locator("#actions tr")).to_have_count(7)
@@ -305,3 +304,4 @@ def test_screenshots(app_page):
         page.wait_for_timeout(400)
         page.screenshot(path=str(out / f"v2-{theme}-overview-400.png"))
         page.set_viewport_size({"width": 1280, "height": 800})
+    assert_pngs(sorted(out.glob("v2-*.png")))

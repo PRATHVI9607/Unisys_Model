@@ -68,7 +68,7 @@ def parse_line(line: str | bytes) -> dict | None:
         return None
     pid = f.get("proc.pid")
     if type(pid) is not int:                           # Falco emits an int; tolerate a numeric string
-        pid = int(pid) if isinstance(pid, str) and pid.isdigit() else None
+        pid = int(pid) if isinstance(pid, str) and pid.isascii() and pid.isdigit() else None
     return {
         "namespace": ns,
         "pod": pod,

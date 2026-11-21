@@ -177,3 +177,12 @@ def test_init_container_posture_and_runasuser_precedence():
 
 def test_restarts_delta_ignores_pod_replacement_resets():
     assert metric_features({"restarts_total": [5, 5, 0, 2]})["restarts_delta"] == 2.0
+
+
+def test_spec_hash_unchanged_for_existing_baselines():
+    """Hashes computed before the key-collision fix: baselines already in Redis must keep matching."""
+    import yaml
+    with open("deploy/demo/victim-app.yaml") as f:
+        dep = next(d for d in yaml.safe_load_all(f) if d and d["kind"] == "Deployment")
+    assert spec_hash(SPEC) == "6244310c11161dfff5edadbdb727105f750909aa499f688fb3ffe2d87f01adaf"
+    assert spec_hash(dep["spec"]) == "ac9905907cf3b6de1ee4bfb34b8a703c6b29e0dfe4a181d2a2d74ad07ad6471c"

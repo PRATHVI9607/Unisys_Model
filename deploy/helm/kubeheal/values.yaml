@@ -30,6 +30,7 @@ ingress:                     # dashboard only; off by default. TLS is required w
   className: ""
   host: ""
   tlsSecretName: ""
+  controllerNamespace: ingress-nginx   # admitted by the dashboard NetworkPolicy
   annotations: {}
 
 redis:

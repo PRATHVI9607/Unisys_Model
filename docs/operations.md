@@ -95,6 +95,7 @@ silently ignored). Check before you rely on it: from a pod outside the allow-lis
 - `redis-agents-only`: only pods labelled `app` in {health, security, fusion agents, dashboard} reach Redis :6379.
 - `kubeheal-inference-clients`: only the health and security agents, the dashboard (Models page), plus namespace `monitoring` (the
   ServiceMonitor scrape), reach inference :8000. If Prometheus runs in another namespace, edit the policy.
+- `kubeheal-dashboard-clients`: only pods in namespace `kubeheal` (and, in Helm with `ingress.enabled`, `ingress.controllerNamespace`) reach the dashboard :8080.
 - `kubectl port-forward` is not subject to NetworkPolicy, so the scripts below keep working.
 
 ### Redis credentials

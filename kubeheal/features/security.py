@@ -45,7 +45,7 @@ def open_syscall(syscall: str, flags: str | None) -> str:
     if syscall == "creat":
         return "open_w"
     flags = (flags or "").strip()
-    if flags.isdigit():
+    if flags.isascii() and flags.isdigit() and len(flags) < 4000:   # int() raises on >4300 digits
         n = int(flags)
         # Falco numbers are PPM-encoded (RDONLY=1, WRONLY=2, RDWR=3, CREAT=4, APPEND=8, TRUNC=256), not Linux values
         return "open_w" if n & (2 | 4 | 8 | 256) else "open_r"

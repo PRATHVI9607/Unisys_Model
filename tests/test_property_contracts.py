@@ -2,7 +2,6 @@
 
 import json
 
-import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -80,8 +79,6 @@ def test_contain_verify_non_ascii_signature_and_surrogates():
     assert contain_verify("k", {}) is False
 
 
-@pytest.mark.xfail(strict=True, reason="BUG agents/common.py contain_sign: fields are joined with '|' without escaping, so "
-                   "(namespace='a|b', pod='c') and (namespace='a', pod='b|c') sign identically. Not reachable with DNS-label names")
 def test_contain_sign_is_unambiguous_for_pipes():
     base = {"pod_uid": "u", "event_id": "e", "ts_ms": "1"}
     assert contain_sign("k", {**base, "namespace": "a|b", "pod": "c"}) != contain_sign("k", {**base, "namespace": "a", "pod": "b|c"})

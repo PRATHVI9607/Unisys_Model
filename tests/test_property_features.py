@@ -105,7 +105,7 @@ def test_recent_features_cover_only_the_tail(evs, ent):
 
 
 # ── canonical spec / hash / diff ─────────────────────────────────────────────────────────────────
-# camelCase keys only: that is what the API returns. Snake_case keys can collide after camel-casing (see the xfail).
+# camelCase keys only: that is what the API returns. Snake_case keys can collide after camel-casing.
 KEY = st.from_regex(r"[a-z][a-zA-Z0-9]{0,6}", fullmatch=True)
 LEAF = st.text(max_size=8) | st.integers(2, 10**6)
 EMPTY = st.sampled_from([None, {}, []])
@@ -170,8 +170,6 @@ def test_spec_hash_accepts_deployment_wrapper_and_spec_alike():
     assert spec_hash(inner) == spec_hash({"spec": inner})
 
 
-@pytest.mark.xfail(strict=True, reason="BUG kubeheal/features/health.py _clean: keys 'a_b' and 'aB' both camel-case to 'aB'; the later "
-                   "one wins, so canonical_spec/spec_hash depend on dict key order (only for snake+camel collisions, not real API output)")
 def test_spec_hash_stable_when_snake_and_camel_keys_collide():
     a = {"template": {"x_y": 1, "xY": 2}}
     b = {"template": {"xY": 2, "x_y": 1}}
